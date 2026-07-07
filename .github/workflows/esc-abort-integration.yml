@@ -1,0 +1,34 @@
+name: Esc Abort Integration
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  esc-abort-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run esc abort focused regressions
+        run: |
+          cd packages/agent
+          node node_modules/vitest/dist/cli.js --run test/agent.test.ts
+          cd ../coding-agent
+          node node_modules/vitest/dist/cli.js --run test/agent-session-concurrent.test.ts test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts

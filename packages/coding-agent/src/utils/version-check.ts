@@ -1,8 +1,10 @@
 import { compare, valid } from "semver";
-import { getPiUserAgent } from "./pi-user-agent.ts";
+import { spawnProcessSync } from "./child-process.ts";
 
-const LATEST_VERSION_URL = "https://pi.dev/api/latest-version";
-const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
+export const PACKAGE_SCOPE = "@xz-dev";
+export const PACKAGE_NAME = `${PACKAGE_SCOPE}/pi-coding-agent`;
+export const PACKAGE_REGISTRY = "https://npm.pkg.github.com";
+export const PACKAGE_PAGE_URL = "https://github.com/xz-dev/pi/pkgs/npm/pi-coding-agent";
 
 export interface LatestPiRelease {
 	version: string;
@@ -28,35 +30,28 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 }
 
 export async function getLatestPiRelease(
-	currentVersion: string,
-	options: { timeoutMs?: number } = {},
+	_currentVersion: string,
+	_options: { timeoutMs?: number } = {},
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
 
-	const response = await fetch(LATEST_VERSION_URL, {
-		headers: {
-			"User-Agent": getPiUserAgent(currentVersion),
-			accept: "application/json",
-		},
-		signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_VERSION_CHECK_TIMEOUT_MS),
+	const result = spawnProcessSync("npm", ["view", PACKAGE_NAME, "version", `--registry=${PACKAGE_REGISTRY}`], {
+		encoding: "utf-8",
+		stdio: ["ignore", "pipe", "pipe"],
 	});
-	if (!response.ok) return undefined;
-
-	const data = (await response.json()) as {
-		packageName?: unknown;
-		version?: unknown;
-		note?: unknown;
-	};
-	if (typeof data.version !== "string" || !data.version.trim()) {
-		return undefined;
+	if (result.status !== 0) {
+		const reason = result.error?.message || result.stderr.trim() || `exit code ${result.status ?? "unknown"}`;
+		throw new Error(
+			`Could not read ${PACKAGE_NAME} latest version from ${PACKAGE_PAGE_URL}: ${reason}. ` +
+				`Run npm login --scope=${PACKAGE_SCOPE} --auth-type=legacy --registry=${PACKAGE_REGISTRY}.`,
+		);
 	}
-	const packageName =
-		typeof data.packageName === "string" && data.packageName.trim() ? data.packageName.trim() : undefined;
-	const note = typeof data.note === "string" && data.note.trim() ? data.note.trim() : undefined;
+
+	const version = result.stdout.trim();
+	if (!version) return undefined;
 	return {
-		version: data.version.trim(),
-		packageName,
-		...(note ? { note } : {}),
+		version,
+		packageName: PACKAGE_NAME,
 	};
 }
 

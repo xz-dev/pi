@@ -1,0 +1,65 @@
+name: Publish GitHub Packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-github-packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: '@xz-dev'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Build packages
+        run: npm run build
+
+      - name: Check
+        run: npm run check
+
+      - name: Test
+        run: ./test.sh
+
+      - name: Prepare GitHub Packages tarballs
+        run: node scripts/prepare-github-packages.mjs --out /tmp/pi-github-packages
+
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          while IFS= read -r tarball; do
+            [ -n "$tarball" ] || continue
+            npm publish "$tarball" --registry=https://npm.pkg.github.com --access public
+          done < /tmp/pi-github-packages/publish-order.txt
+
+      - name: Upload tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-packages-tarballs
+          path: /tmp/pi-github-packages/tarballs/*.tgz

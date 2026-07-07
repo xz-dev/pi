@@ -9,6 +9,7 @@ import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import { main } from "../src/main.ts";
 import { ConfigSelectorComponent } from "../src/modes/interactive/components/config-selector.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
+import { PACKAGE_NAME as UPDATE_PACKAGE_NAME } from "../src/utils/version-check.ts";
 
 describe("package commands", () => {
 	let tempDir: string;
@@ -25,6 +26,19 @@ describe("package commands", () => {
 	function getNewerPatchVersion(): string {
 		const [major = "0", minor = "0", patch = "0"] = VERSION.split(".");
 		return `${major}.${minor}.${Number.parseInt(patch, 10) + 1}`;
+	}
+
+	function prependFakeNpmView(version: string): void {
+		const fakeBinDir = join(tempDir, `fake-npm-view-${Math.random().toString(36).slice(2)}`);
+		const fakeNpmPath = join(fakeBinDir, process.platform === "win32" ? "npm.cmd" : "npm");
+		mkdirSync(fakeBinDir, { recursive: true });
+		const script =
+			process.platform === "win32"
+				? `@echo off\r\nif "%1"=="view" if "%2"=="${UPDATE_PACKAGE_NAME}" if "%3"=="version" (echo ${version} & exit /b 0)\r\nexit /b 23\r\n`
+				: `#!/bin/sh\nif [ "$1" = "view" ] && [ "$2" = "${UPDATE_PACKAGE_NAME}" ] && [ "$3" = "version" ]; then\n\tprintf '%s\\n' '${version.replaceAll("'", "'\\''")}'\n\texit 0\nfi\nexit 23\n`;
+		writeFileSync(fakeNpmPath, script);
+		chmodSync(fakeNpmPath, 0o755);
+		process.env.PATH = `${fakeBinDir}${process.env.PATH ? `${delimiter}${process.env.PATH}` : ""}`;
 	}
 
 	async function runPackageCommandDirectly(args: string[]): Promise<void> {
@@ -461,8 +475,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
-		const fetchMock = vi.fn(async () => Response.json({ version: VERSION }));
-		vi.stubGlobal("fetch", fetchMock);
+		prependFakeNpmView(VERSION);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -472,11 +485,10 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 
 			expect(process.exitCode).toBeUndefined();
 			expect(errorSpy).not.toHaveBeenCalled();
-			expect(fetchMock).toHaveBeenCalledOnce();
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
 			expect(recordedArgs).toContain(globalPrefix);
-			expect(recordedArgs).toContain(`${PACKAGE_NAME}@${VERSION}`);
+			expect(recordedArgs).toContain(`${UPDATE_PACKAGE_NAME}@${VERSION}`);
 			expect(recordedArgs).not.toContain(PACKAGE_NAME);
 			expect(recordedArgs).not.toContain(projectPrefix);
 			expect(stdout).toContain(`Updated pi from ${VERSION} to ${VERSION}`);
@@ -486,7 +498,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 		}
 	});
 
-	it("uses the current package name when the update check omits packageName", async () => {
+	it("uses the fork package name from GitHub Packages during self-update", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "pi-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
@@ -509,8 +521,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			configurable: true,
 		});
 		const targetVersion = getNewerPatchVersion();
-		const fetchMock = vi.fn(async () => Response.json({ version: targetVersion }));
-		vi.stubGlobal("fetch", fetchMock);
+		prependFakeNpmView(targetVersion);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -520,10 +531,9 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 
 			expect(process.exitCode).toBeUndefined();
 			expect(errorSpy).not.toHaveBeenCalled();
-			expect(fetchMock).toHaveBeenCalledOnce();
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
-			expect(recordedArgs).toContain(`${PACKAGE_NAME}@${targetVersion}`);
+			expect(recordedArgs).toContain(`${UPDATE_PACKAGE_NAME}@${targetVersion}`);
 			expect(recordedArgs).not.toContain(PACKAGE_NAME);
 			expect(stdout).toContain(`Updated pi from ${VERSION} to ${targetVersion}`);
 		} finally {
@@ -532,7 +542,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 		}
 	});
 
-	it("installs the active package name from the update check during self-update", async () => {
+	it("installs the fork package name during self-update", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "pi-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
@@ -558,11 +568,7 @@ else {
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
-		const activePackageName = PACKAGE_NAME === "@new-scope/pi" ? "@newer-scope/pi" : "@new-scope/pi";
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json({ packageName: activePackageName, version: "0.73.0" })),
-		);
+		prependFakeNpmView("0.73.0");
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -575,7 +581,7 @@ else {
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
 			expect(recordedCalls).toEqual([
 				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-				expect.arrayContaining(["install", "-g", `${activePackageName}@0.73.0`]),
+				expect.arrayContaining(["install", "-g", `${UPDATE_PACKAGE_NAME}@0.73.0`]),
 			]);
 		} finally {
 			logSpy.mockRestore();
@@ -603,10 +609,7 @@ else {
 			value: join(tempDir, "pnpm", "bin", "node"),
 			configurable: true,
 		});
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json({ version: getNewerPatchVersion() })),
-		);
+		prependFakeNpmView(getNewerPatchVersion());
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -655,11 +658,7 @@ if(args.includes("install")) process.exit(23);
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
-		const activePackageName = PACKAGE_NAME === "@new-scope/pi" ? "@newer-scope/pi" : "@new-scope/pi";
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json({ packageName: activePackageName, version: "0.73.0" })),
-		);
+		prependFakeNpmView("0.73.0");
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -675,7 +674,7 @@ if(args.includes("install")) process.exit(23);
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
 			expect(recordedCalls).toEqual([
 				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-				expect.arrayContaining(["install", "-g", `${activePackageName}@0.73.0`]),
+				expect.arrayContaining(["install", "-g", `${UPDATE_PACKAGE_NAME}@0.73.0`]),
 			]);
 		} finally {
 			logSpy.mockRestore();
