@@ -1,7 +1,14 @@
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { Agent, type AgentEvent, type AgentTool, type AgentToolUpdateCallback } from "../src/index.ts";
+import {
+	Agent,
+	type AgentContext,
+	type AgentEvent,
+	type AgentTool,
+	type AgentToolUpdateCallback,
+	agentLoop,
+} from "../src/index.ts";
 
 // Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -263,6 +270,124 @@ describe("Agent", () => {
 		await promptPromise;
 
 		expect(receivedSignal?.aborted).toBe(true);
+	});
+
+	it("should abort a stuck lifecycle listener and clear streaming state", async () => {
+		const agent = new Agent();
+		let listenerStarted = false;
+
+		agent.subscribe((event) => {
+			if (event.type === "agent_start") {
+				listenerStarted = true;
+				return new Promise(() => {});
+			}
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(listenerStarted).toBe(true);
+		expect(agent.state.isStreaming).toBe(true);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("should abort a stuck context transform before the provider request", async () => {
+		let providerCalled = false;
+		const agent = new Agent({
+			transformContext: () => new Promise(() => {}),
+			streamFn: () => {
+				providerCalled = true;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(agent.state.isStreaming).toBe(true);
+		expect(providerCalled).toBe(false);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(agent.state.isStreaming).toBe(false);
+		expect(providerCalled).toBe(false);
+	});
+
+	it("should abort while waiting for the provider stream to be created", async () => {
+		const agent = new Agent({
+			streamFn: () => new Promise(() => {}),
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(agent.state.isStreaming).toBe(true);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("should abort while waiting for an already-created provider stream event", async () => {
+		let streamCreated = false;
+		const agent = new Agent({
+			streamFn: () => {
+				streamCreated = true;
+				return new MockAssistantStream();
+			},
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(streamCreated).toBe(true);
+		expect(agent.state.isStreaming).toBe(true);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("should abort a direct agentLoop stream while waiting for a stuck provider stream event", async () => {
+		const controller = new AbortController();
+		const events: AgentEvent[] = [];
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [],
+		};
+		const stream = agentLoop(
+			[{ role: "user", content: "hello", timestamp: Date.now() }],
+			context,
+			{
+				model: getModel("openai", "gpt-4o-mini")!,
+				convertToLlm: () => [{ role: "user", content: "hello", timestamp: Date.now() }],
+			},
+			controller.signal,
+			() => new MockAssistantStream(),
+		);
+
+		void (async () => {
+			for await (const event of stream) {
+				events.push(event);
+			}
+		})();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		controller.abort();
+		await expect(stream.result()).resolves.toEqual([]);
+		expect(events.some((event) => event.type === "agent_start")).toBe(true);
 	});
 
 	it("should ignore tool updates after the tool execution settles", async () => {
