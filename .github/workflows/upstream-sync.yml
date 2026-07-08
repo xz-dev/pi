@@ -32,9 +32,18 @@ jobs:
           git fetch upstream main
           git rebase upstream/main
 
+      - name: Require sync workflow token
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          test -n "${PUSH_TOKEN}" || {
+            echo "::error::SYNC_WORKFLOW_TOKEN is required because GITHUB_TOKEN pushes do not trigger downstream workflows"
+            exit 1
+          }
+
       - name: Push rebased main
         env:
-          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN || github.token }}
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
         run: |
           git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force-with-lease origin HEAD:main
