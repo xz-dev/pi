@@ -47,10 +47,16 @@ function waitFor(session: string, predicate: (output: string) => boolean, label:
 describe("Esc abort stuck extension integration", () => {
 	const sessions: string[] = [];
 	const tempDirs: string[] = [];
+	const processMarkers: string[] = [];
 
 	afterEach(() => {
 		for (const session of sessions.splice(0)) {
 			run("tmux", ["kill-session", "-t", session]);
+		}
+		for (const marker of processMarkers.splice(0)) {
+			run("pkill", ["-TERM", "-f", marker]);
+			sleep(100);
+			run("pkill", ["-KILL", "-f", marker]);
 		}
 		for (const tempDir of tempDirs.splice(0)) {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -136,5 +142,45 @@ export default function testProvider(pi: ExtensionAPI): void {
 		mustRun("tmux", ["send-keys", "-t", session, "Escape"]);
 		const treeOutput = waitFor(session, (output) => output.includes("Session Tree"), "session tree after abort");
 		expect(treeOutput).toContain("assistant: (aborted)");
+	}, 30_000);
+
+	it("cancels an actual bash sleep inf command with Esc", () => {
+		const tmuxAvailable = run("tmux", ["-V"]);
+		if (tmuxAvailable.status !== 0) {
+			throw new Error("tmux is required for this integration regression test");
+		}
+
+		const session = `pi-esc-bash-${process.pid}-${Date.now()}`;
+		const marker = `PI_ESC_BASH_SLEEP_${process.pid}_${Date.now()}`;
+		sessions.push(session);
+		processMarkers.push(marker);
+
+		const command = [
+			"./pi-test.sh",
+			"--no-env",
+			"--no-extensions",
+			"--no-skills",
+			"--no-prompt-templates",
+			"--no-context-files",
+			"--no-themes",
+			"--no-session",
+			"--offline",
+			"--no-approve",
+		].join(" ");
+
+		mustRun("tmux", ["new-session", "-d", "-s", session, "-x", "100", "-y", "32", command], { cwd: repoRoot });
+		waitFor(session, (output) => output.includes("to run bash") || output.includes("bash"), "interactive startup");
+		mustRun("tmux", ["send-keys", "-t", session, `!printf '${marker} started\\n'; sleep inf`, "Enter"]);
+		waitFor(session, (output) => output.includes(`${marker} started`), "sleep inf bash output");
+		mustRun("tmux", ["send-keys", "-t", session, "Escape"]);
+		const cancelledOutput = waitFor(session, (output) => output.includes("(cancelled)"), "bash cancellation");
+
+		expect(cancelledOutput).toContain("$ printf");
+		expect(cancelledOutput).toContain("sleep inf");
+		expect(cancelledOutput).toContain(`${marker} started`);
+		expect(cancelledOutput).not.toContain("Running...");
+
+		const leaked = run("pgrep", ["-f", marker]);
+		expect(leaked.status).not.toBe(0);
 	}, 30_000);
 });
