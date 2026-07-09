@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  rebase-main-on-upstream:
+  sync-main-with-squash-branches:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork main
@@ -24,13 +24,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Rebase main on upstream
+      - name: Rebuild main from upstream and squash branches
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream https://github.com/earendil-works/pi.git
           git fetch upstream main
-          git rebase upstream/main
+          git fetch origin ci patch/esc-abort
+          git reset --hard upstream/main
+
+          git merge --squash origin/ci
+          git commit -m "merge ci branch"
+
+          git merge --squash origin/patch/esc-abort
+          git commit -m "merge patch/esc-abort branch"
 
       - name: Require sync workflow token
         env:
@@ -41,7 +48,7 @@ jobs:
             exit 1
           }
 
-      - name: Push rebased main
+      - name: Push rebuilt main
         env:
           PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
         run: |
