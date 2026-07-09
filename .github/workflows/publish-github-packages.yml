@@ -19,10 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           registry-url: https://npm.pkg.github.com
@@ -59,7 +59,7 @@ jobs:
           done < /tmp/pi-github-packages/publish-order.txt
 
       - name: Upload tarballs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: github-packages-tarballs
           path: /tmp/pi-github-packages/tarballs/*.tgz
