@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { type ChangelogEntry, normalizeChangelogLinks } from "../src/utils/changelog.ts";
+import { type ChangelogEntry, getNewEntries, normalizeChangelogLinks } from "../src/utils/changelog.ts";
 
 const entry: ChangelogEntry = {
 	major: 0,
@@ -7,6 +7,17 @@ const entry: ChangelogEntry = {
 	patch: 0,
 	content: "",
 };
+
+describe("getNewEntries", () => {
+	test("treats fork prerelease versions as their semver changelog baseline", () => {
+		const entries: ChangelogEntry[] = [
+			{ major: 0, minor: 80, patch: 6, content: "0.80.6" },
+			{ major: 0, minor: 80, patch: 5, content: "0.80.5" },
+		];
+
+		expect(getNewEntries(entries, "0.80.6-xz.29.1.g4dea8cc9")).toEqual([]);
+	});
+});
 
 describe("normalizeChangelogLinks", () => {
 	test("rewrites package-relative changelog links to tag-pinned GitHub source links", () => {
