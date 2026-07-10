@@ -84,6 +84,10 @@ function preparePackage(pkg, version, workDir) {
 
 	packageJson.name = pkg.publishName;
 	packageJson.version = version;
+	packageJson.piConfig = {
+		...packageJson.piConfig,
+		changelogVersion: packageJson.piConfig?.changelogVersion ?? baseVersion,
+	};
 	packageJson.repository = {
 		type: "git",
 		url: "git+https://github.com/xz-dev/pi.git",
