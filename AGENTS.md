@@ -15,6 +15,14 @@ Branch placement rules:
 - When reviewing or resolving conflicts, preserve the correct development history of each downstream branch. A patch branch should include the upstream/mainline commits it was developed on before its downstream patch commits, not just the patch commits cherry-picked onto an older base.
 - Before saying a downstream change is complete, verify both the persistent branch and the rebuilt `main` contain the intended result.
 
+Operational checklist for downstream sync work:
+
+- Create downstream code patch branches from the latest `upstream/main`, not from the rebuilt downstream `main`, unless preserving an existing downstream patch branch history.
+- Keep workflow/packaging changes on `ci`; keep runtime behavior changes on a named patch branch. When a fix spans both, split it across branches instead of mixing branch responsibilities.
+- When adding a new patch branch, update `.github/workflows/upstream-sync.yml` on `ci` to fetch and squash-merge the branch, push both `ci` and the patch branch to `origin`, then trigger the sync workflow from the updated `ci` ref if an immediate remote `main` rebuild is needed.
+- After the sync workflow succeeds, fetch `origin/main` and force-sync the local `main` to it before reporting final status. Do not trust a locally rebuilt `main` as the final remote state.
+- For fork package versions, remember that SemVer prerelease versions such as `0.80.6-xz.29.1.g<sha>` are valid. Do not remove release assets such as `CHANGELOG.md` to hide downstream packaging symptoms. Preserve the real fork package version and add explicit package metadata or parser handling when a stable upstream changelog baseline is needed.
+
 ## Conversational Style
 
 - Keep answers short and concise
