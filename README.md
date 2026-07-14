@@ -39,3 +39,12 @@ npm config set @xz-dev:registry https://npm.pkg.github.com
 npm install -g @xz-dev/pi-coding-agent
 pi --version
 ```
+
+> [!NOTE]
+> npm 12 disables remote tarball dependencies by default. This distribution uses GitHub Packages tarball URLs for its workspace packages, so installation or `pi update` may fail with `EALLOWREMOTE` and `Fetching packages of type "remote" have been disabled`. Enable them for your user configuration, then retry:
+>
+> ```bash
+> npm config set allow-remote=all --location=user
+> pi update
+> pi update --extensions
+> ```
