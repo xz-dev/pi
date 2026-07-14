@@ -9,7 +9,7 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import type { Skill } from "../src/core/skills.ts";
+import { formatSkillsForPrompt, type Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
 describe("DefaultResourceLoader", () => {
@@ -37,6 +37,94 @@ describe("DefaultResourceLoader", () => {
 			expect(loader.getSkills().skills).toEqual([]);
 			expect(loader.getPrompts().prompts).toEqual([]);
 			expect(loader.getThemes().themes).toEqual([]);
+		});
+
+		it("keeps package-overridden skills available while excluding them from the model prompt", async () => {
+			const packageA = join(tempDir, "package-a");
+			const packageB = join(tempDir, "package-b");
+			for (const [packageDir, skills] of [
+				[packageA, ["manual-only", "default-visible"]],
+				[packageB, ["package-b-skill"]],
+			] as const) {
+				for (const skillName of skills) {
+					const skillDir = join(packageDir, "skills", skillName);
+					mkdirSync(skillDir, { recursive: true });
+					writeFileSync(
+						join(skillDir, "SKILL.md"),
+						`---\nname: ${skillName}\ndescription: ${skillName} description\n${skillName === "default-visible" ? "disable-model-invocation: true\n" : ""}---\n${skillName} instructions`,
+					);
+				}
+			}
+
+			const settingsManager = SettingsManager.create(cwd, agentDir);
+			settingsManager.setPackages([
+				{
+					source: packageA,
+					skillOverrides: {
+						"manual-only": { disableModelInvocation: true },
+						"default-visible": { disableModelInvocation: false },
+						"package-b-skill": { disableModelInvocation: true },
+						unknown: { disableModelInvocation: true },
+					},
+				},
+				packageB,
+			] as Parameters<typeof settingsManager.setPackages>[0]);
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const { skills } = loader.getSkills();
+			expect(skills.map((skill) => skill.name)).toEqual(
+				expect.arrayContaining(["manual-only", "default-visible", "package-b-skill"]),
+			);
+			expect(skills.find((skill) => skill.name === "manual-only")?.disableModelInvocation).toBe(true);
+			expect(skills.find((skill) => skill.name === "default-visible")?.disableModelInvocation).toBe(false);
+			expect(skills.find((skill) => skill.name === "package-b-skill")?.disableModelInvocation).toBe(false);
+
+			const prompt = formatSkillsForPrompt(skills);
+			expect(prompt).not.toContain("manual-only");
+			expect(prompt).toContain("default-visible");
+			expect(prompt).toContain("package-b-skill");
+		});
+
+		it("merges project autoload-disabled skill overrides into the globally loaded package", async () => {
+			const packageDir = join(tempDir, "shared-package");
+			for (const skillName of ["project-overridden", "globally-hidden"]) {
+				const skillDir = join(packageDir, "skills", skillName);
+				mkdirSync(skillDir, { recursive: true });
+				writeFileSync(
+					join(skillDir, "SKILL.md"),
+					`---\nname: ${skillName}\ndescription: ${skillName} description\n---\n${skillName} instructions`,
+				);
+			}
+
+			const settingsManager = SettingsManager.create(cwd, agentDir);
+			settingsManager.setPackages([
+				{
+					source: packageDir,
+					skillOverrides: {
+						"project-overridden": { disableModelInvocation: true },
+						"globally-hidden": { disableModelInvocation: true },
+					},
+				},
+			]);
+			settingsManager.setProjectPackages([
+				{
+					source: packageDir,
+					autoload: false,
+					skillOverrides: { "project-overridden": { disableModelInvocation: false } },
+				},
+			]);
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			const { skills } = loader.getSkills();
+			expect(skills.find((skill) => skill.name === "project-overridden")?.disableModelInvocation).toBe(false);
+			expect(skills.find((skill) => skill.name === "globally-hidden")?.disableModelInvocation).toBe(true);
+			const prompt = formatSkillsForPrompt(skills);
+			expect(prompt).toContain("project-overridden");
+			expect(prompt).not.toContain("globally-hidden");
 		});
 
 		it("should discover skills from agentDir", async () => {

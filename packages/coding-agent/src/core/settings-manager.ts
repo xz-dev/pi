@@ -63,6 +63,12 @@ export type DefaultProjectTrust = "ask" | "always" | "never";
 
 export type TransportSetting = Transport;
 
+export interface SkillOverride {
+	disableModelInvocation?: boolean;
+}
+
+export type SkillOverrides = Record<string, SkillOverride>;
+
 /**
  * Package source for npm/git packages.
  * - String form: load all resources from the package
@@ -76,6 +82,7 @@ export type PackageSource =
 			autoload?: boolean;
 			extensions?: string[];
 			skills?: string[];
+			skillOverrides?: SkillOverrides;
 			prompts?: string[];
 			themes?: string[];
 	  };
