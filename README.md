@@ -21,9 +21,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): fix Esc abort paths that could leave Pi stuck when awaited lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch never settled.
   - Fix commit: [`4146c1e1`](https://github.com/xz-dev/pi/commit/4146c1e18d281ea291d40779bebf211a5fd2da7e) `fix(agent): make abort clear stuck runs`
   - Test commit: [`8e3bc693`](https://github.com/xz-dev/pi/commit/8e3bc693172b0eb12142b3cfbbdd9d13167fb6cc) `fix(agent): cover stuck stream abort`
-- Fix visible tab characters reaching the terminal and expanding at physical tab stops, which could auto-wrap overlay rows and corrupt TUI row alignment.
-  - Patch branch: [`patch/tui-tab-terminal-normalization`](https://github.com/xz-dev/pi/tree/patch/tui-tab-terminal-normalization)
-  - Fix commit: [`d8711364`](https://github.com/xz-dev/pi/commit/d87113640d3442fd37c6da3182cdbc8290763faf) `fix(tui): normalize tabs for terminal output`
 
 ## Installation
 
@@ -54,7 +51,7 @@ pi --version
 
 This fork automatically rebases `main` on `https://github.com/earendil-works/pi.git` daily:
 
-- 01:00 Asia/Shanghai
-- 13:00 Asia/Shanghai
+- 01:28 Asia/Shanghai
+- 13:28 Asia/Shanghai
 
 If the rebase conflicts, the sync workflow fails and leaves `main` unchanged.
