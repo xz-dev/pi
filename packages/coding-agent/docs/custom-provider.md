@@ -204,7 +204,7 @@ The `api` field determines which streaming implementation is used:
 | `google-vertex` | Google Vertex AI API |
 | `bedrock-converse-stream` | Amazon Bedrock Converse API |
 
-Most OpenAI-compatible providers work with `openai-completions`. Use model-level `thinkingLevelMap` for model-specific thinking levels, and `compat` for provider quirks:
+Most OpenAI-compatible providers work with `openai-completions`. Use model-level `thinkingLevelMap` for model-specific thinking levels, and `compat` for provider quirks. The `xhigh` and `max` levels are opt-in, require non-null map entries, and may be separated by unsupported holes:
 
 ```typescript
 models: [{
@@ -216,7 +216,8 @@ models: [{
     low: null,
     medium: null,
     high: "default",
-    xhigh: "max"
+    xhigh: null,
+    max: "max"
   },
   compat: {
     supportsDeveloperRole: false,   // use "system" instead of "developer"
@@ -251,6 +252,8 @@ pi.registerProvider("custom-api", {
   models: [...]
 });
 ```
+
+The key is resolved for each request. An explicit request `Authorization` header takes precedence over the generated value.
 
 ## OAuth Support
 
@@ -311,15 +314,6 @@ pi.registerProvider("corporate-ai", {
 
     getApiKey(credentials: OAuthCredentials): string {
       return credentials.access;
-    },
-
-    // Optional: modify models based on user's subscription
-    modifyModels(models, credentials) {
-      const region = decodeRegionFromToken(credentials.access);
-      return models.map(m => ({
-        ...m,
-        baseUrl: `https://${region}.ai.corp.com/v1`
-      }));
     }
   }
 });
@@ -329,7 +323,7 @@ After registration, users can authenticate via `/login corporate-ai`.
 
 ### OAuthLoginCallbacks
 
-The `callbacks` object provides three ways to authenticate:
+The `callbacks` object provides UI-neutral interactions for the provider-owned flow:
 
 ```typescript
 interface OAuthLoginCallbacks {
@@ -343,6 +337,9 @@ interface OAuthLoginCallbacks {
     intervalSeconds?: number;
     expiresInSeconds?: number;
   }): void;
+
+  // Show transient progress
+  onProgress?(message: string): void;
 
   // Prompt user for input (for manual token entry)
   onPrompt(params: { message: string }): Promise<string>;
@@ -659,7 +656,6 @@ interface ProviderConfig {
     login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
     refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
     getApiKey(credentials: OAuthCredentials): string;
-    modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
   };
 }
 ```
@@ -684,7 +680,7 @@ interface ProviderModelConfig {
   reasoning: boolean;
 
   /** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
-  thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh", string | null>>;
+  thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
 
   /** Supported input types. */
   input: ("text" | "image")[];
@@ -721,6 +717,8 @@ interface ProviderModelConfig {
     thinkingFormat?: "openai" | "openrouter" | "deepseek" | "together" | "zai" | "qwen" | "chat-template" | "qwen-chat-template" | "string-thinking" | "ant-ling";
     chatTemplateKwargs?: Record<string, string | number | boolean | null | { "$var": "thinking.enabled" | "thinking.effort"; omitWhenOff?: boolean }>;
     cacheControlFormat?: "anthropic";
+    sessionAffinityFormat?: "openai" | "openai-nosession" | "openrouter";
+    sendSessionAffinityHeaders?: boolean;
 
     // anthropic-messages
     supportsEagerToolInputStreaming?: boolean;

@@ -25,6 +25,7 @@ import type {
 	OAuthCredentials,
 	OAuthLoginCallbacks,
 	ProviderHeaders,
+	RefreshModelsContext,
 	SimpleStreamOptions,
 	TextContent,
 	ToolResultMessage,
@@ -370,7 +371,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Reload extensions, skills, prompts, and themes. */
+	/** Reload extensions, skills, prompts, themes, and context files. */
 	reload(): Promise<void>;
 }
 
@@ -705,6 +706,11 @@ export interface AgentEndEvent {
 	messages: AgentMessage[];
 }
 
+/** Fired after an agent run has fully settled and no automatic retry, compaction, or queued continuation will run. */
+export interface AgentSettledEvent {
+	type: "agent_settled";
+}
+
 /** Fired at the start of each turn */
 export interface TurnStartEvent {
 	type: "turn_start";
@@ -1021,6 +1027,7 @@ export type ExtensionEvent =
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
+	| AgentSettledEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -1188,6 +1195,7 @@ export interface ExtensionAPI {
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
+	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
@@ -1413,17 +1421,24 @@ export interface ProviderConfig {
 	authHeader?: boolean;
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
+	/**
+	 * Refresh this provider's model list. The returned list replaces extension-provided models.
+	 * Use context.store explicitly when the catalog should persist across sessions.
+	 */
+	refreshModels?(context: RefreshModelsContext): Promise<ProviderModelConfig[]>;
 	/** OAuth provider for /login support. The `id` is set automatically from the provider name. */
 	oauth?: {
 		/** Display name for the provider in login UI. */
 		name: string;
+		/** @deprecated Retained for source compatibility; canonical auth flows ignore it. */
+		usesCallbackServer?: boolean;
 		/** Run the login flow, return credentials to persist. */
 		login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
 		/** Refresh expired credentials, return updated credentials to persist. */
 		refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
 		/** Convert credentials to API key string for the provider. */
 		getApiKey(credentials: OAuthCredentials): string;
-		/** Optional: modify models for this provider (e.g., update baseUrl based on credentials). */
+		/** Legacy synchronous credential-dependent model projection. */
 		modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
 	};
 }
@@ -1444,8 +1459,8 @@ export interface ProviderModelConfig {
 	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 	/** Supported input types. */
 	input: ("text" | "image")[];
-	/** Cost per token (for tracking, can be 0). */
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	/** Per-million-token cost rates and optional request-wide input pricing tiers. */
+	cost: Model<Api>["cost"];
 	/** Maximum context window size in tokens. */
 	contextWindow: number;
 	/** Maximum output tokens. */

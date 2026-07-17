@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.80.10] - 2026-07-16
+
+## [0.80.9] - 2026-07-16
+
+## [0.80.8] - 2026-07-16
+
+### Fixed
+
+- Fixed terminal output to normalize tab characters consistently ([#6697](https://github.com/earendil-works/pi-mono/pull/6697) by [@xz-dev](https://github.com/xz-dev)).
+
+## [0.80.7] - 2026-07-14
+
+### Fixed
+
+- Fixed legacy terminal decoding for Alt+symbol key combinations such as `Alt+,` and `Alt+.` ([#6523](https://github.com/earendil-works/pi-mono/pull/6523) by [@ribelo](https://github.com/ribelo)).
+
+## [0.80.6] - 2026-07-09
+
+## [0.80.5] - 2026-07-09
+
+## [0.80.4] - 2026-07-09
+
+### Fixed
+
+- Fixed editor paste marker accounting when paste markers are deleted or terminal state is cleared, preventing stale paste state after marker removal ([#6397](https://github.com/earendil-works/pi/pull/6397) by [@affanali2k3](https://github.com/affanali2k3)).
+
 ## [0.80.3] - 2026-06-30
 
 ### Added
