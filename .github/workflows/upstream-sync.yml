@@ -30,7 +30,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream https://github.com/earendil-works/pi.git
           git fetch upstream main
-          git fetch origin ci patch/esc-abort patch/changelog-prerelease patch/skill-overrides
+          git fetch origin ci patch/esc-abort patch/tui-synchronized-cursor patch/changelog-prerelease patch/skill-overrides
           git reset --hard upstream/main
 
           git merge --squash origin/ci
@@ -38,6 +38,10 @@ jobs:
 
           git merge --squash origin/patch/esc-abort
           git commit -m "merge patch/esc-abort branch"
+
+          git merge --squash origin/patch/tui-synchronized-cursor
+          git commit -m "merge patch/tui-synchronized-cursor branch"
+
 
           git merge --squash origin/patch/changelog-prerelease
           git commit -m "merge patch/changelog-prerelease branch"

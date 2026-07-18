@@ -21,6 +21,9 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): fix Esc abort paths that could leave Pi stuck when awaited lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch never settled.
   - Fix commit: [`4146c1e1`](https://github.com/xz-dev/pi/commit/4146c1e18d281ea291d40779bebf211a5fd2da7e) `fix(agent): make abort clear stuck runs`
   - Test commit: [`8e3bc693`](https://github.com/xz-dev/pi/commit/8e3bc693172b0eb12142b3cfbbdd9d13167fb6cc) `fix(agent): cover stuck stream abort`
+- Keep TUI hardware cursor positioning and visibility inside DECSET 2026 synchronized-output frames, preventing the cursor from briefly appearing on a spinner or other render endpoint before returning to the input editor over slow terminals or SSH connections.
+  - Patch branch: [`patch/tui-synchronized-cursor`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor)
+  - Fix commit: [`3d9b88b3`](https://github.com/xz-dev/pi/commit/3d9b88b367a3fb80e52219e7c1aa3aad913bd602) `fix(tui): synchronize hardware cursor updates`
 
 ## Installation
 
