@@ -261,7 +261,6 @@ const KIMI_K3_COST = {
 // Kimi Coding is subscription-backed, so models.dev reports zero cost. Use the
 // equivalent Moonshot API rates to estimate the value of subscription usage.
 const KIMI_CODING_IMPLIED_COSTS: Record<string, Model<Api>["cost"]> = {
-	k2p7: { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
 	k3: KIMI_K3_COST,
 	"kimi-for-coding": { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
 	"kimi-for-coding-highspeed": { input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 },
@@ -1674,7 +1673,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
-			const kimiAliases = new Set(["k2p5", "k2p6"]);
+			const kimiAliases = new Set(["k2p5", "k2p6", "k2p7"]);
 
 			for (const [modelId, model] of Object.entries(kimiModels)) {
 				const m = model as ModelsDevModel;
