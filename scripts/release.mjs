@@ -176,6 +176,10 @@ console.log("Running checks...");
 run("npm run check");
 console.log();
 
+console.log("Building packages for tests...");
+run("npm run build:offline");
+console.log();
+
 console.log("Running tests...");
 run("./test.sh");
 console.log();
