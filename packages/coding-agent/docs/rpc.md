@@ -313,6 +313,26 @@ Response:
 }
 ```
 
+#### get_available_thinking_levels
+
+List the thinking levels supported by the current model. Returns `["off"]` for a model without reasoning support.
+
+```json
+{"type": "get_available_thinking_levels"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_available_thinking_levels",
+  "success": true,
+  "data": {
+    "levels": ["off", "minimal", "low", "medium", "high"]
+  }
+}
+```
+
 ### Queue Modes
 
 #### set_steering_mode
@@ -375,12 +395,20 @@ Response:
     "firstKeptEntryId": "abc123",
     "tokensBefore": 150000,
     "estimatedTokensAfter": 32000,
+    "usage": {
+      "input": 32000,
+      "output": 1200,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "totalTokens": 33200,
+      "cost": {"input": 0.01, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.03}
+    },
     "details": {}
   }
 }
 ```
 
-`estimatedTokensAfter` is a heuristic estimate over the rebuilt message context immediately after compaction, not a provider-exact token count.
+`estimatedTokensAfter` is a heuristic estimate over the rebuilt message context immediately after compaction, not a provider-exact token count. `usage` reports the LLM call or calls that generated the summary and may be omitted by custom compaction handlers.
 
 #### set_auto_compaction
 
@@ -537,7 +565,7 @@ Response:
 }
 ```
 
-`tokens` contains assistant usage totals for the current session state. `contextUsage` contains the actual current context-window estimate used for compaction and footer display.
+`tokens` and `cost` include assistant messages, usage reported by tools, and compaction/branch-summary generation across the full session. `contextUsage` contains the actual current context-window estimate used for compaction and footer display.
 
 `contextUsage` is omitted when no model or context window is available. `contextUsage.tokens` and `contextUsage.percent` are `null` immediately after compaction until a fresh post-compaction assistant response provides valid usage data.
 
@@ -996,6 +1024,14 @@ The `reason` field is `"manual"`, `"threshold"`, or `"overflow"`.
     "firstKeptEntryId": "abc123",
     "tokensBefore": 150000,
     "estimatedTokensAfter": 32000,
+    "usage": {
+      "input": 32000,
+      "output": 1200,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "totalTokens": 33200,
+      "cost": {"input": 0.01, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.03}
+    },
     "details": {}
   },
   "aborted": false,
@@ -1348,10 +1384,20 @@ Stop reasons: `"stop"`, `"length"`, `"toolUse"`, `"error"`, `"aborted"`
   "toolCallId": "call_123",
   "toolName": "bash",
   "content": [{"type": "text", "text": "total 48\ndrwxr-xr-x ..."}],
+  "usage": {
+    "input": 100,
+    "output": 50,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 150,
+    "cost": {"input": 0.0003, "output": 0.00075, "cacheRead": 0, "cacheWrite": 0, "total": 0.00105}
+  },
   "isError": false,
   "timestamp": 1733234567890
 }
 ```
+
+`usage` is optional and reports nested LLM work performed by the tool. When present, it contributes to session token and cost totals.
 
 ### BashExecutionMessage
 
