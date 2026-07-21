@@ -132,7 +132,11 @@ const tarballs = [];
 for (const pkg of packages) {
 	const packageDir = preparePackage(pkg, version, workDir);
 	const output = run("npm", ["pack", "--json", "--pack-destination", tarballDir], { capture: true, cwd: packageDir });
-	const packed = JSON.parse(output)[0];
+	const packResult = JSON.parse(output);
+	const packed = Array.isArray(packResult) ? packResult[0] : packResult[pkg.publishName];
+	if (!packed?.filename) {
+		throw new Error(`npm pack returned no result for ${pkg.publishName}`);
+	}
 	tarballs.push(join(tarballDir, packed.filename));
 }
 
