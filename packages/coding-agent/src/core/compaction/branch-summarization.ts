@@ -6,7 +6,8 @@
  */
 
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
-import type { Model, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
+import { contentText } from "@earendil-works/pi-ai";
+import type { Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
 	convertToLlm,
@@ -32,6 +33,7 @@ import {
 
 export interface BranchSummaryResult {
 	summary?: string;
+	usage?: Usage;
 	readFiles?: string[];
 	modifiedFiles?: string[];
 	aborted?: boolean;
@@ -351,10 +353,7 @@ export async function generateBranchSummary(
 		return { error: response.errorMessage || "Summarization failed" };
 	}
 
-	let summary = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
+	let summary = contentText(response.content);
 
 	// Prepend preamble to provide context about the branch summary
 	summary = BRANCH_SUMMARY_PREAMBLE + summary;
@@ -365,6 +364,7 @@ export async function generateBranchSummary(
 
 	return {
 		summary: summary || "No summary generated",
+		usage: response.usage,
 		readFiles,
 		modifiedFiles,
 	};

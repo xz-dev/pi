@@ -165,16 +165,12 @@ export const OPENCODE_MODELS = values as {
 		id: "gpt-5.6-terra";
 		provider: "opencode";
 	};
-	"grok-4.5": Model<"openai-completions"> & {
+	"grok-4.5": Model<"openai-responses"> & {
 		id: "grok-4.5";
 		provider: "opencode";
 	};
 	"grok-build-0.1": Model<"openai-completions"> & {
 		id: "grok-build-0.1";
-		provider: "opencode";
-	};
-	"hy3-free": Model<"openai-completions"> & {
-		id: "hy3-free";
 		provider: "opencode";
 	};
 	"kimi-k2.5": Model<"openai-completions"> & {
