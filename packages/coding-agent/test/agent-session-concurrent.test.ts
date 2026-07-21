@@ -179,7 +179,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				systemPrompt: "Test",
 				tools: [],
 			},
-			streamFn: () => {
+			streamFunction: () => {
 				providerCalled = true;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {

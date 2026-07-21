@@ -279,7 +279,7 @@ describe("Agent", () => {
 	});
 
 	it("should abort a stuck lifecycle listener and clear streaming state", async () => {
-		const agent = new Agent();
+		const agent = new Agent({ streamFunction: unusedStreamFunction });
 		let listenerStarted = false;
 
 		agent.subscribe((event) => {
@@ -305,7 +305,7 @@ describe("Agent", () => {
 		let providerCalled = false;
 		const agent = new Agent({
 			transformContext: () => new Promise(() => {}),
-			streamFn: () => {
+			streamFunction: () => {
 				providerCalled = true;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -330,7 +330,7 @@ describe("Agent", () => {
 
 	it("should abort while waiting for the provider stream to be created", async () => {
 		const agent = new Agent({
-			streamFn: () => new Promise(() => {}),
+			streamFunction: () => new Promise(() => {}),
 		});
 
 		const promptPromise = agent.prompt("hello");
@@ -347,7 +347,7 @@ describe("Agent", () => {
 	it("should abort while waiting for an already-created provider stream event", async () => {
 		let streamCreated = false;
 		const agent = new Agent({
-			streamFn: () => {
+			streamFunction: () => {
 				streamCreated = true;
 				return new MockAssistantStream();
 			},
