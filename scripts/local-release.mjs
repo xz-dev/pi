@@ -218,13 +218,13 @@ if (!options.skipCheck) {
 	run("npm", ["run", "check"], { cwd: repoRoot });
 }
 
-if (!options.skipTest) {
-	run("./test.sh", [], { cwd: repoRoot });
-}
-
 for (const pkg of packages) {
 	run("npm", ["run", "clean"], { cwd: pkg.directory });
 	run("npm", ["run", pkg.directory === "packages/ai" ? "build:offline" : "build"], { cwd: pkg.directory });
+}
+
+if (!options.skipTest) {
+	run("./test.sh", [], { cwd: repoRoot });
 }
 
 const tarballs = new Map();
