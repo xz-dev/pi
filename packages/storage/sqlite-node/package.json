@@ -1,7 +1,7 @@
 {
-	"name": "@earendil-works/pi-orchestrator",
+	"name": "@earendil-works/pi-storage-sqlite-node",
 	"version": "0.80.10",
-	"description": "experimental orchestrator package for pi",
+	"description": "Node sqlite storage backend for @earendil-works/pi-agent-core sessions",
 	"type": "module",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -17,29 +17,22 @@
 		"CHANGELOG.md"
 	],
 	"scripts": {
-		"clean": "shx rm -rf dist",
-		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
-		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js",
+		"clean": "node -e \"import('node:fs/promises').then(fs=>fs.rm('dist',{recursive:true,force:true}))\"",
+		"build": "tsgo -p tsconfig.build.json && node ./scripts/prepare-dist.mjs copy-sqlite-migrations",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
-	"keywords": [
-		"pi",
-		"orchestrator"
-	],
 	"author": "Earendil Works",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/earendil-works/pi.git",
-		"directory": "packages/orchestrator"
+		"directory": "packages/storage/sqlite-node"
 	},
 	"engines": {
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "^0.80.10"
-	},
-	"devDependencies": {
-		"shx": "0.4.0"
+		"@earendil-works/pi-ai": "^0.80.10",
+		"@earendil-works/pi-agent-core": "^0.80.10"
 	}
 }
