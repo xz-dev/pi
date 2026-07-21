@@ -21,12 +21,13 @@ function model(id: string): Model<"openai-completions"> {
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote catalog provider", () => {
-	it("parses keyed catalogs, sends version headers, and observes the refresh TTL", async () => {
-		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response(JSON.stringify({ dynamic: model("dynamic") }), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			}),
+	it("parses keyed catalogs, sends version headers, observes the refresh TTL, and supports forced refreshes", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			async () =>
+				new Response(JSON.stringify({ dynamic: model("dynamic") }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
 		);
 		const provider = withRemoteCatalog(
 			createProvider({
@@ -62,10 +63,20 @@ describe("remote catalog provider", () => {
 			},
 			allowNetwork: true,
 		});
+		await provider.refreshModels?.({
+			credential: { type: "api_key" },
+			store: {
+				read: () => store.read(provider.id),
+				write: (entry) => store.write(provider.id, entry),
+				delete: () => store.delete(provider.id),
+			},
+			allowNetwork: true,
+			force: true,
+		});
 
 		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static", "dynamic"]);
 		expect((await store.read(provider.id))?.models.map((entry) => entry.id)).toEqual(["dynamic"]);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
 		expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
 			"User-Agent": expect.stringContaining(`pi/${VERSION}`),
 		});

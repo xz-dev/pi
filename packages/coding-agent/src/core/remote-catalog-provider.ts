@@ -44,6 +44,7 @@ export function withRemoteCatalog(provider: Provider, catalogBaseUrl: string = D
 					if (stored) dynamicModels = stored.models.filter((model) => model.provider === provider.id);
 					if (!context.allowNetwork || context.signal?.aborted) return;
 					if (
+						!context.force &&
 						stored?.checkedAt !== undefined &&
 						Date.now() - stored.checkedAt < REMOTE_CATALOG_REFRESH_INTERVAL_MS
 					) {
