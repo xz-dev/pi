@@ -33,7 +33,20 @@ jobs:
           git fetch origin ci patch/tmp-patchs patch/esc-abort patch/tui-synchronized-cursor patch/changelog-prerelease patch/skill-overrides
           git reset --hard upstream/main
 
-          git merge --squash origin/ci
+          if ! git merge --squash origin/ci; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != README.md ]]; then
+              printf '::error::Unexpected ci squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+          fi
+          git restore --source=origin/ci --staged --worktree -- README.md
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after replacing README.md'
+            exit 1
+          fi
           git commit -m "merge ci branch"
 
           git merge --squash origin/patch/tmp-patchs
