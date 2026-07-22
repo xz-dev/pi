@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.81.1] - 2026-07-21
+
+### Added
+
+- Added `retryAssistantCall()` for bounded retries of transient assistant failures with lifecycle callbacks and abort handling ([#6901](https://github.com/earendil-works/pi/pull/6901) by [@davidbrai](https://github.com/davidbrai)).
+
+### Fixed
+
+- Fixed Kimi K3 models from Moonshot AI and Moonshot AI China to use the OpenAI thinking format and expose reasoning effort support.
+
+## [0.81.0] - 2026-07-21
+
 ### Added
 
 - Added Qwen Token Plan and Qwen Token Plan China as built-in providers with regional endpoints, API-key authentication, and generated model catalogs ([#6858](https://github.com/earendil-works/pi/pull/6858) by [@QuintinShaw](https://github.com/QuintinShaw)).

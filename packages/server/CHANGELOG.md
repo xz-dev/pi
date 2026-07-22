@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.81.1] - 2026-07-21
+
+## [0.81.0] - 2026-07-21
+
 ### Changed
 
 - Renamed the orchestrator workspace package and internal server references to server ([#6898](https://github.com/earendil-works/pi/pull/6898) by [@cristinaponcela](https://github.com/cristinaponcela)).

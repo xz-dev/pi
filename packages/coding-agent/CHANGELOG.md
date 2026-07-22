@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.81.1] - 2026-07-21
+
+### New Features
+
+- **Verifiable release source archives** — GitHub releases now include deterministic, checksummed source archives with instructions for rebuilding standalone binaries. See [Building standalone binaries from release source](../../README.md#building-standalone-binaries-from-release-source).
+- **Resilient compaction and branch summaries** — Transient provider failures now follow the configured retry policy, with retry lifecycle events available to interactive, JSON, RPC, and SDK consumers. See [Compaction & Branch Summarization](docs/compaction.md) and [RPC retry events](docs/rpc.md#summarization_retry_scheduled--summarization_retry_attempt_start--summarization_retry_finished).
+
+### Added
+
+- Added deterministic, checksummed source archives to GitHub releases with documented standalone binary rebuild instructions ([#6913](https://github.com/earendil-works/pi/pull/6913) by [@christianklotz](https://github.com/christianklotz)).
+
+### Fixed
+
+- Fixed compaction and branch summarization to retry transient provider failures using the configured retry policy, with retry lifecycle events exposed to interactive, JSON, RPC, and SDK consumers ([#6901](https://github.com/earendil-works/pi/pull/6901) by [@davidbrai](https://github.com/davidbrai)).
+- Fixed interactive startup waiting for background model catalog refresh while computing the footer provider count.
+- Restored the default stream fallback for extensions using the pre-0.81 agent-core API ([#6915](https://github.com/earendil-works/pi/issues/6915)).
+- Fixed inherited Kimi K3 models from Moonshot AI and Moonshot AI China to use the OpenAI thinking format and expose reasoning effort support.
+
+## [0.81.0] - 2026-07-21
+
 ### New Features
 
 - **Local llama.cpp model management** — Connect to a llama.cpp router, search and download Hugging Face models, and explicitly load or unload models with live progress. See [llama.cpp](docs/llama-cpp.md).

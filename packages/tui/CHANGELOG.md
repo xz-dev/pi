@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.81.1] - 2026-07-21
+
+## [0.81.0] - 2026-07-21
+
 ### Fixed
 
 - Fixed terminal shutdown to clear the editor's inverted software cursor before restoring the hardware cursor, avoiding a duplicate cursor artifact ([#6790](https://github.com/earendil-works/pi/pull/6790) by [@dam9000](https://github.com/dam9000)).

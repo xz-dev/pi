@@ -11,6 +11,7 @@ import {
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
 import { abortable, callAbortable, throwIfAborted } from "./abort.ts";
+import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -38,7 +39,7 @@ export function agentLoop(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
-	streamFunction: StreamFn,
+	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
 
@@ -50,7 +51,7 @@ export function agentLoop(
 			stream.push(event);
 		},
 		signal,
-		streamFunction,
+		streamFn,
 	).then(
 		(messages) => {
 			stream.end(messages);
@@ -79,7 +80,7 @@ export function agentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
-	streamFunction: StreamFn,
+	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -98,7 +99,7 @@ export function agentLoopContinue(
 			stream.push(event);
 		},
 		signal,
-		streamFunction,
+		streamFn,
 	).then(
 		(messages) => {
 			stream.end(messages);
@@ -121,7 +122,7 @@ export async function runAgentLoop(
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
 	signal: AbortSignal | undefined,
-	streamFunction: StreamFn,
+	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
 	const newMessages: AgentMessage[] = [...prompts];
 	const currentContext: AgentContext = {
@@ -136,7 +137,7 @@ export async function runAgentLoop(
 		await emitAbortable(emit, { type: "message_end", message: prompt }, signal);
 	}
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFunction);
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
 	return newMessages;
 }
 
@@ -145,7 +146,7 @@ export async function runAgentLoopContinue(
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
 	signal: AbortSignal | undefined,
-	streamFunction: StreamFn,
+	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -161,7 +162,7 @@ export async function runAgentLoopContinue(
 	await emitAbortable(emit, { type: "agent_start" }, signal);
 	await emitAbortable(emit, { type: "turn_start" }, signal);
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFunction);
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
 	return newMessages;
 }
 
