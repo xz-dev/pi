@@ -2,12 +2,22 @@ import type {
 	ImageContent,
 	Model,
 	Models,
+	RetryPolicy,
 	SimpleStreamOptions,
 	TextContent,
 	Transport,
 	Usage,
 } from "@earendil-works/pi-ai";
-import type { AgentEvent, AgentMessage, AgentTool, QueueMode, ThinkingLevel } from "../index.ts";
+import type { Static, TSchema } from "typebox";
+import type {
+	AgentEvent,
+	AgentMessage,
+	AgentTool,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	QueueMode,
+	ThinkingLevel,
+} from "../index.ts";
 import type { Session } from "./session/session.ts";
 
 /** Result of a fallible operation. Expected failures are returned as `ok: false` instead of thrown. */
@@ -84,6 +94,27 @@ export interface AgentHarnessResources<
 	/** Skills available to the model and explicit skill invocation. */
 	skills?: TSkill[];
 }
+
+/** Tool definition executed by an {@link AgentHarness} with an application-defined context. */
+export type AgentHarnessTool<
+	TContext extends object | undefined,
+	TParameters extends TSchema = TSchema,
+	TDetails = unknown,
+> = Omit<AgentTool<TParameters, TDetails>, "execute"> & {
+	/** Execute the tool call with the context resolved for the current turn snapshot. */
+	execute(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal: AbortSignal | undefined,
+		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
+		context: TContext,
+	): Promise<AgentToolResult<TDetails>>;
+};
+
+/** Static tool context or zero-argument provider resolved for each turn snapshot. */
+export type AgentHarnessToolContextSource<TContext extends object | undefined> =
+	| TContext
+	| (() => TContext | Promise<TContext>);
 
 /** Curated provider request options owned by the harness and snapshotted per turn. */
 export interface AgentHarnessStreamOptions {
@@ -313,8 +344,10 @@ export interface FileSystem {
 export interface ShellExecOptions {
 	/** Working directory for the command. Relative paths are resolved against {@link ExecutionEnv.cwd}. Defaults to {@link ExecutionEnv.cwd}. */
 	cwd?: string;
-	/** Additional environment variables for the command. Values override the environment defaults. Defaults to no overrides. */
+	/** Environment variables for the command. Values override inherited defaults when `inheritEnv` is true. */
 	env?: Record<string, string>;
+	/** Whether to inherit the execution environment's default variables. Defaults to true. */
+	inheritEnv?: boolean;
 	/** Timeout in seconds. Implementations should return a timeout error when the command exceeds this duration. Defaults to no timeout. */
 	timeout?: number;
 	/** Abort signal used to terminate the command. Defaults to no abort signal. */
@@ -629,6 +662,25 @@ export interface SessionTreeEvent {
 	fromHook?: boolean;
 }
 
+export interface RetryScheduledEvent {
+	type: "retry_scheduled";
+	operation: "compaction" | "branch_summary";
+	attempt: number;
+	maxAttempts: number;
+	delayMs: number;
+	errorMessage: string;
+}
+
+export interface RetryAttemptStartEvent {
+	type: "retry_attempt_start";
+	operation: "compaction" | "branch_summary";
+}
+
+export interface RetryFinishedEvent {
+	type: "retry_finished";
+	operation: "compaction" | "branch_summary";
+}
+
 export interface ModelUpdateEvent {
 	type: "model_update";
 	model: Model<any>;
@@ -679,6 +731,9 @@ export type AgentHarnessOwnEvent<
 	| SessionCompactEvent
 	| SessionBeforeTreeEvent
 	| SessionTreeEvent
+	| RetryScheduledEvent
+	| RetryAttemptStartEvent
+	| RetryFinishedEvent
 	| ModelUpdateEvent
 	| ThinkingLevelUpdateEvent
 	| ResourcesUpdateEvent<TSkill, TPromptTemplate>
@@ -748,6 +803,9 @@ export type AgentHarnessEventResultMap = {
 	session_compact: undefined;
 	session_before_tree: SessionBeforeTreeResult | undefined;
 	session_tree: undefined;
+	retry_scheduled: undefined;
+	retry_attempt_start: undefined;
+	retry_finished: undefined;
 	model_update: undefined;
 	thinking_level_update: undefined;
 	resources_update: undefined;
@@ -835,12 +893,27 @@ export interface BranchSummaryResult {
 	modifiedFiles: string[];
 }
 
-export interface AgentHarnessOptions<
+export type AgentHarnessSystemPrompt<
+	TContext extends object | undefined = undefined,
 	TSkill extends Skill = Skill,
 	TPromptTemplate extends PromptTemplate = PromptTemplate,
-	TTool extends AgentTool = AgentTool,
+	TTool extends AgentHarnessTool<TContext> = AgentHarnessTool<TContext>,
+> =
+	| string
+	| ((context: {
+			session: Session;
+			model: Model<any>;
+			thinkingLevel: ThinkingLevel;
+			activeTools: TTool[];
+			resources: AgentHarnessResources<TSkill, TPromptTemplate>;
+	  }) => string | Promise<string>);
+
+interface AgentHarnessOptionsBase<
+	TContext extends object | undefined,
+	TSkill extends Skill,
+	TPromptTemplate extends PromptTemplate,
+	TTool extends AgentHarnessTool<TContext>,
 > {
-	env: ExecutionEnv;
 	session: Session;
 	/**
 	 * Provider collection used for all model requests (turn streaming,
@@ -854,23 +927,32 @@ export interface AgentHarnessOptions<
 	 * Applications own loading/reloading resources and should call `setResources()` with new values.
 	 */
 	resources?: AgentHarnessResources<TSkill, TPromptTemplate>;
-	systemPrompt?:
-		| string
-		| ((context: {
-				env: ExecutionEnv;
-				session: Session;
-				model: Model<any>;
-				thinkingLevel: ThinkingLevel;
-				activeTools: TTool[];
-				resources: AgentHarnessResources<TSkill, TPromptTemplate>;
-		  }) => string | Promise<string>);
+	systemPrompt?: AgentHarnessSystemPrompt<TContext, TSkill, TPromptTemplate, TTool>;
 	/** Curated stream/provider request options. Snapshotted at turn start. */
 	streamOptions?: AgentHarnessStreamOptions;
+	/** Optional retry policy for generated compaction and branch-summary requests. */
+	retry?: RetryPolicy;
 	model: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	activeToolNames?: string[];
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 }
+
+export type AgentHarnessOptions<
+	TContext extends object | undefined = undefined,
+	TSkill extends Skill = Skill,
+	TPromptTemplate extends PromptTemplate = PromptTemplate,
+	TTool extends AgentHarnessTool<TContext> = AgentHarnessTool<TContext>,
+> = AgentHarnessOptionsBase<TContext, TSkill, TPromptTemplate, TTool> &
+	([TContext] extends [undefined]
+		? {
+				/** Context-free harnesses do not need a tool context. */
+				toolContext?: undefined;
+			}
+		: {
+				/** Static context or zero-argument context provider resolved for each turn snapshot. */
+				toolContext: AgentHarnessToolContextSource<TContext>;
+			});
 
 export type { AgentHarness } from "./agent-harness.ts";
