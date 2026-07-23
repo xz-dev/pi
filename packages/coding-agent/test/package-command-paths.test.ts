@@ -646,10 +646,7 @@ else {
 			value: join(tempDir, "pnpm", "bin", "node"),
 			configurable: true,
 		});
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json({ version: getNewerPatchVersion() })),
-		);
+		prependFakeNpmView(getNewerPatchVersion());
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
