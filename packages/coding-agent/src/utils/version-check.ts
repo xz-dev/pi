@@ -1,5 +1,6 @@
 import { compare, valid } from "semver";
 import { spawnProcess } from "./child-process.ts";
+import { killProcessTree } from "./shell.ts";
 
 export const PACKAGE_SCOPE = "@xz-dev";
 export const PACKAGE_NAME = `${PACKAGE_SCOPE}/pi-coding-agent`;
@@ -34,6 +35,7 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 function readLatestPackageVersion(timeoutMs: number): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const child = spawnProcess("npm", ["view", PACKAGE_NAME, "version", `--registry=${PACKAGE_REGISTRY}`], {
+			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
@@ -47,7 +49,9 @@ function readLatestPackageVersion(timeoutMs: number): Promise<string> {
 			callback();
 		};
 		const timeout = setTimeout(() => {
-			child.kill();
+			if (child.pid) killProcessTree(child.pid);
+			child.stdout.destroy();
+			child.stderr.destroy();
 			finish(() => reject(new Error(`npm view timed out after ${timeoutMs}ms`)));
 		}, timeoutMs);
 		child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
