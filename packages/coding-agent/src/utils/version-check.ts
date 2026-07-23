@@ -1,10 +1,12 @@
 import { compare, valid } from "semver";
-import { spawnProcessSync } from "./child-process.ts";
+import { spawnProcess } from "./child-process.ts";
 
 export const PACKAGE_SCOPE = "@xz-dev";
 export const PACKAGE_NAME = `${PACKAGE_SCOPE}/pi-coding-agent`;
 export const PACKAGE_REGISTRY = "https://npm.pkg.github.com";
 export const PACKAGE_PAGE_URL = "https://github.com/xz-dev/pi/pkgs/npm/pi-coding-agent";
+
+const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
 export interface LatestPiRelease {
 	version: string;
@@ -29,25 +31,58 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 	return candidateVersion.trim() !== currentVersion.trim();
 }
 
+function readLatestPackageVersion(timeoutMs: number): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const child = spawnProcess("npm", ["view", PACKAGE_NAME, "version", `--registry=${PACKAGE_REGISTRY}`], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const stdout: Buffer[] = [];
+		const stderr: Buffer[] = [];
+		let settled = false;
+		const finish = (callback: () => void): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			callback();
+		};
+		const timeout = setTimeout(() => {
+			child.kill();
+			finish(() => reject(new Error(`npm view timed out after ${timeoutMs}ms`)));
+		}, timeoutMs);
+		child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+		child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+		child.on("error", (error) => finish(() => reject(error)));
+		child.on("close", (code) => {
+			finish(() => {
+				if (code === 0) {
+					resolve(Buffer.concat(stdout).toString("utf8").trim());
+					return;
+				}
+				const reason = Buffer.concat(stderr).toString("utf8").trim() || `exit code ${code ?? "unknown"}`;
+				reject(new Error(reason));
+			});
+		});
+	});
+}
+
 export async function getLatestPiRelease(
 	_currentVersion: string,
-	_options: { timeoutMs?: number } = {},
+	options: { timeoutMs?: number } = {},
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_OFFLINE) return undefined;
 
-	const result = spawnProcessSync("npm", ["view", PACKAGE_NAME, "version", `--registry=${PACKAGE_REGISTRY}`], {
-		encoding: "utf-8",
-		stdio: ["ignore", "pipe", "pipe"],
-	});
-	if (result.status !== 0) {
-		const reason = result.error?.message || result.stderr.trim() || `exit code ${result.status ?? "unknown"}`;
+	let version: string;
+	try {
+		version = await readLatestPackageVersion(options.timeoutMs ?? DEFAULT_VERSION_CHECK_TIMEOUT_MS);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
 		throw new Error(
 			`Could not read ${PACKAGE_NAME} latest version from ${PACKAGE_PAGE_URL}: ${reason}. ` +
 				`Run npm login --scope=${PACKAGE_SCOPE} --auth-type=legacy --registry=${PACKAGE_REGISTRY}.`,
+			{ cause: error },
 		);
 	}
-
-	const version = result.stdout.trim();
 	if (!version) return undefined;
 	return {
 		version,

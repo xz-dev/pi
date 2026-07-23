@@ -17,15 +17,17 @@ const originalOffline = process.env.PI_OFFLINE;
 const originalPath = process.env.PATH;
 const tempDirs: string[] = [];
 
-function prependFakeNpmView(version: string): string {
+function prependFakeNpmView(version: string, options: { delaySeconds?: number } = {}): string {
 	const fakeBinDir = mkdtempSync(join(tmpdir(), "pi-version-check-"));
 	tempDirs.push(fakeBinDir);
 	const recordPath = join(fakeBinDir, "npm-view-args.json");
 	const fakeNpmPath = join(fakeBinDir, process.platform === "win32" ? "npm.cmd" : "npm");
+	const escapedWindowsRecordPath = recordPath.replaceAll("%", "%%").replaceAll('"', '""');
+	const delaySeconds = options.delaySeconds ?? 0;
 	const script =
 		process.platform === "win32"
-			? `@echo off\r\necho %* > ${recordPath}\r\nif "%1"=="view" if "%2"=="${PACKAGE_NAME}" if "%3"=="version" (echo ${version} & exit /b 0)\r\nexit /b 23\r\n`
-			: `#!/bin/sh\nprintf '%s\\n' "$*" > '${recordPath.replaceAll("'", "'\\''")}'\nif [ "$1" = "view" ] && [ "$2" = "${PACKAGE_NAME}" ] && [ "$3" = "version" ]; then\n\tprintf '%s\\n' '${version.replaceAll("'", "'\\''")}'\n\t${version ? "exit 0" : "exit 23"}\nfi\nexit 23\n`;
+			? `@echo off\r\necho %* > "${escapedWindowsRecordPath}"\r\nif ${delaySeconds} GTR 0 %SystemRoot%\\System32\\ping.exe -n ${delaySeconds + 1} 127.0.0.1 > nul\r\nif "%1"=="view" if "%2"=="${PACKAGE_NAME}" if "%3"=="version" (echo ${version} & exit /b 0)\r\nexit /b 23\r\n`
+			: `#!/bin/sh\nprintf '%s\\n' "$*" > '${recordPath.replaceAll("'", "'\\''")}'\n${delaySeconds > 0 ? `sleep ${delaySeconds}\n` : ""}if [ "$1" = "view" ] && [ "$2" = "${PACKAGE_NAME}" ] && [ "$3" = "version" ]; then\n\tprintf '%s\\n' '${version.replaceAll("'", "'\\''")}'\n\t${version ? "exit 0" : "exit 23"}\nfi\nexit 23\n`;
 	writeFileSync(fakeNpmPath, script);
 	chmodSync(fakeNpmPath, 0o755);
 	process.env.PATH = `${fakeBinDir}${originalPath ? `${delimiter}${originalPath}` : ""}`;
@@ -120,5 +122,13 @@ describe("version checks", () => {
 		await expect(getLatestPiRelease("1.2.3")).rejects.toThrow(
 			new RegExp(`${PACKAGE_NAME}.*npm login.*${PACKAGE_REGISTRY}`),
 		);
+	});
+
+	it("times out a stalled GitHub Packages lookup", async () => {
+		prependFakeNpmView("1.2.4", { delaySeconds: 2 });
+
+		const startedAt = Date.now();
+		await expect(getLatestPiRelease("1.2.3", { timeoutMs: 50 })).rejects.toThrow(/timed out/i);
+		expect(Date.now() - startedAt).toBeLessThan(1500);
 	});
 });
