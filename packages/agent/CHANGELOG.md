@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [0.82.0] - 2026-07-24
+
+### Breaking Changes
+
+- Replaced `AgentHarness`'s `ExecutionEnv` dependency and context-free `AgentTool` inputs with application-defined `toolContext` values and context-aware `AgentHarnessTool` definitions.
+
+### Added
+
+- Added context-aware `read`, `write`, `edit`, and `bash` harness tools backed by `ExecutionEnv`, including async bash execution preparation.
+
+### Changed
+
+- Aligned harness tool path handling, edit serialization, shell output capture, explicit non-inherited environments, and cross-platform process cleanup with coding-agent behavior.
+
+### Fixed
+
+- Fixed compaction and branch-summary requests to use fresh routing session IDs with prompt caching disabled where supported ([#6618](https://github.com/earendil-works/pi/pull/6618) by [@tmustier](https://github.com/tmustier)).
+
+## [0.81.1] - 2026-07-21
+
+### Added
+
+- Added retry policy support and lifecycle events for compaction and branch-summary operations in `AgentHarness` ([#6901](https://github.com/earendil-works/pi/pull/6901) by [@davidbrai](https://github.com/davidbrai)).
+
+### Fixed
+
+- Restored the `Agent` `streamFn` option and host-configurable fallback for omitted agent-loop stream functions without reintroducing a `pi-ai/compat` dependency ([#6915](https://github.com/earendil-works/pi/issues/6915)).
+
+## [0.81.0] - 2026-07-21
+
 ### Breaking Changes
 
 - Changed `SessionStorage` to use `getPathToRootOrCompaction()`, require session name and statistics methods, support cursor-based entry reads, and store retained compaction tails as self-contained checkpoints ([#6594](https://github.com/earendil-works/pi/pull/6594) by [@cristinaponcela](https://github.com/cristinaponcela)).
