@@ -12,7 +12,7 @@ import {
 	setCapabilities,
 	setCellDimensions,
 } from "../src/terminal-image.ts";
-import { type Component, TUI } from "../src/tui.ts";
+import { type Component, CURSOR_MARKER, TUI } from "../src/tui.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class TestComponent implements Component {
@@ -23,10 +23,46 @@ class TestComponent implements Component {
 	invalidate(): void {}
 }
 
+interface SynchronizedReleaseState {
+	row: number;
+	column: number;
+	cursorVisible: boolean;
+}
+
 class LoggingVirtualTerminal extends VirtualTerminal {
 	private writes: string[] = [];
+	private synchronizedReleaseStates: SynchronizedReleaseState[] = [];
+	private cursorVisible = true;
+	private synchronizedOutput = false;
+	private failNextWrite = false;
+
+	constructor(columns = 80, rows = 24) {
+		super(columns, rows);
+		const xterm = (this as unknown as { xterm: XtermTerminalType }).xterm;
+		xterm.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+			if (params.includes(25)) this.cursorVisible = true;
+			if (params.includes(2026)) this.synchronizedOutput = true;
+			return false;
+		});
+		xterm.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
+			if (params.includes(25)) this.cursorVisible = false;
+			if (params.includes(2026) && this.synchronizedOutput) {
+				this.synchronizedOutput = false;
+				this.synchronizedReleaseStates.push({
+					row: xterm.buffer.active.cursorY,
+					column: xterm.buffer.active.cursorX,
+					cursorVisible: this.cursorVisible,
+				});
+			}
+			return false;
+		});
+	}
 
 	override write(data: string): void {
+		if (this.failNextWrite) {
+			this.failNextWrite = false;
+			throw new Error("injected terminal write failure");
+		}
 		this.writes.push(data);
 		super.write(data);
 	}
@@ -37,6 +73,18 @@ class LoggingVirtualTerminal extends VirtualTerminal {
 
 	clearWrites(): void {
 		this.writes = [];
+	}
+
+	injectWriteFailure(): void {
+		this.failNextWrite = true;
+	}
+
+	getSynchronizedReleaseStates(): readonly SynchronizedReleaseState[] {
+		return this.synchronizedReleaseStates;
+	}
+
+	clearSynchronizedReleaseStates(): void {
+		this.synchronizedReleaseStates = [];
 	}
 }
 
@@ -503,6 +551,140 @@ describe("TUI content shrinkage", () => {
 		assert.strictEqual(viewport[0]?.trim(), "", "Line 0 should be cleared");
 		assert.strictEqual(viewport[1]?.trim(), "", "Line 1 should be cleared");
 
+		tui.stop();
+	});
+});
+
+describe("TUI synchronized cursor rendering", () => {
+	it("releases a full render with the hardware cursor at the marker", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal, true);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["Header", `Input: ab${CURSOR_MARKER}cd`];
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(terminal.getSynchronizedReleaseStates().at(-1), {
+			row: 1,
+			column: 9,
+			cursorVisible: true,
+		});
+		tui.stop();
+	});
+
+	it("releases an earlier-line differential update with the cursor at the unchanged marker", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal, true);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["Working |", `Input: ab${CURSOR_MARKER}cd`];
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearSynchronizedReleaseStates();
+
+		component.lines = ["Working /", `Input: ab${CURSOR_MARKER}cd`];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(terminal.getSynchronizedReleaseStates(), [{ row: 1, column: 9, cursorVisible: true }]);
+		tui.stop();
+	});
+
+	it("releases deleted-line cleanup with the cursor at the unchanged marker", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal, true);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["Header", `Input: ab${CURSOR_MARKER}cd`, "Stale"];
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearSynchronizedReleaseStates();
+
+		component.lines = ["Header", `Input: ab${CURSOR_MARKER}cd`];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(terminal.getSynchronizedReleaseStates(), [{ row: 1, column: 9, cursorVisible: true }]);
+		tui.stop();
+	});
+
+	it("synchronizes a cursor-only marker move", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal, true);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = [`Input: a${CURSOR_MARKER}b`];
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearSynchronizedReleaseStates();
+
+		component.lines = [`Input: ab${CURSOR_MARKER}`];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(terminal.getSynchronizedReleaseStates(), [{ row: 0, column: 9, cursorVisible: true }]);
+		tui.stop();
+	});
+
+	it("keeps the hardware cursor hidden when cursor display is disabled", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal, false);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = [`Input: ${CURSOR_MARKER}`];
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.strictEqual(terminal.getSynchronizedReleaseStates().at(-1)?.cursorVisible, false);
+		tui.stop();
+	});
+
+	it("keeps render accounting unchanged when a synchronized frame write fails", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 2);
+		const tui = new TUI(terminal, true);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["0", "1", "2"];
+		tui.start();
+		await terminal.waitForRender();
+		const redrawsBeforeFailure = tui.fullRedraws;
+
+		component.lines = [`0${CURSOR_MARKER}`];
+		const renderNow = () => (tui as unknown as { doRender(): void }).doRender();
+		terminal.injectWriteFailure();
+		assert.throws(renderNow, /injected terminal write failure/);
+		assert.strictEqual(tui.fullRedraws, redrawsBeforeFailure);
+
+		renderNow();
+		await terminal.flush();
+		assert.strictEqual(tui.fullRedraws, redrawsBeforeFailure + 1);
+		assert.deepStrictEqual(terminal.getViewport(), ["0", ""]);
+		tui.stop();
+	});
+
+	it("synchronizes hiding the hardware cursor when the marker disappears", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal, true);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = [`Input: ${CURSOR_MARKER}`];
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearSynchronizedReleaseStates();
+
+		component.lines = ["Input: "];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(terminal.getSynchronizedReleaseStates(), [{ row: 0, column: 7, cursorVisible: false }]);
 		tui.stop();
 	});
 });

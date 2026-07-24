@@ -307,7 +307,6 @@ export class TUI extends Container {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private cursorRow = 0; // Logical cursor row (end of rendered content)
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
 	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1"; // Clear empty rows when content shrinks (default: off)
@@ -718,7 +717,6 @@ export class TUI extends Container {
 			this.previousLines = [];
 			this.previousWidth = -1; // -1 triggers widthChanged, forcing a full clear
 			this.previousHeight = -1; // -1 triggers heightChanged, forcing a full clear
-			this.cursorRow = 0;
 			this.hardwareCursorRow = 0;
 			this.maxLinesRendered = 0;
 			this.previousViewportTop = 0;
@@ -1255,6 +1253,27 @@ export class TUI extends Container {
 		return null;
 	}
 
+	private buildHardwareCursorUpdate(
+		cursorPos: { row: number; col: number } | null,
+		contentLineCount: number,
+		hardwareCursorRow: number,
+		viewportTop: number,
+	): { sequence: string; hardwareCursorRow: number } {
+		let sequence = "";
+		let nextHardwareCursorRow = hardwareCursorRow;
+		if (cursorPos && contentLineCount > 0) {
+			const targetRow = Math.max(0, Math.min(cursorPos.row, contentLineCount - 1));
+			const rowDiff = targetRow - viewportTop - (hardwareCursorRow - viewportTop);
+			if (rowDiff > 0) sequence += `\x1b[${rowDiff}B`;
+			else if (rowDiff < 0) sequence += `\x1b[${-rowDiff}A`;
+			sequence += `\r\x1b[${Math.max(0, cursorPos.col) + 1}G`;
+			nextHardwareCursorRow = targetRow;
+		}
+
+		sequence += cursorPos && contentLineCount > 0 && this.showHardwareCursor ? "\x1b[?25h" : "\x1b[?25l";
+		return { sequence, hardwareCursorRow: nextHardwareCursorRow };
+	}
+
 	private doRender(): void {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
@@ -1286,7 +1305,6 @@ export class TUI extends Container {
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
-			this.fullRedrawCount += 1;
 			let buffer = "\x1b[?2026h"; // Begin synchronized output
 			if (clear) {
 				buffer += this.deleteKittyImages(this.previousKittyImageIds);
@@ -1309,19 +1327,23 @@ export class TUI extends Container {
 				}
 				buffer += line;
 			}
+			const nextCursorRow = Math.max(0, newLines.length - 1);
+			const nextMaxLinesRendered = clear ? newLines.length : Math.max(this.maxLinesRendered, newLines.length);
+			const bufferLength = Math.max(height, newLines.length);
+			const nextPreviousViewportTop = Math.max(0, bufferLength - height);
+			const cursorUpdate = this.buildHardwareCursorUpdate(
+				cursorPos,
+				newLines.length,
+				nextCursorRow,
+				nextPreviousViewportTop,
+			);
+			buffer += cursorUpdate.sequence;
 			buffer += "\x1b[?2026l"; // End synchronized output
 			this.terminal.write(buffer);
-			this.cursorRow = Math.max(0, newLines.length - 1);
-			this.hardwareCursorRow = this.cursorRow;
-			// Reset max lines when clearing, otherwise track growth
-			if (clear) {
-				this.maxLinesRendered = newLines.length;
-			} else {
-				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
-			}
-			const bufferLength = Math.max(height, newLines.length);
-			this.previousViewportTop = Math.max(0, bufferLength - height);
-			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.fullRedrawCount += 1;
+			this.hardwareCursorRow = cursorUpdate.hardwareCursorRow;
+			this.maxLinesRendered = nextMaxLinesRendered;
+			this.previousViewportTop = nextPreviousViewportTop;
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
@@ -1400,7 +1422,14 @@ export class TUI extends Container {
 
 		// No changes - but still need to update hardware cursor position if it moved
 		if (firstChanged === -1) {
-			this.positionHardwareCursor(cursorPos, newLines.length);
+			const cursorUpdate = this.buildHardwareCursorUpdate(
+				cursorPos,
+				newLines.length,
+				hardwareCursorRow,
+				prevViewportTop,
+			);
+			this.terminal.write(`\x1b[?2026h${cursorUpdate.sequence}\x1b[?2026l`);
+			this.hardwareCursorRow = cursorUpdate.hardwareCursorRow;
 			this.previousViewportTop = prevViewportTop;
 			this.previousHeight = height;
 			return;
@@ -1441,12 +1470,12 @@ export class TUI extends Container {
 				if (moveBack > 0) {
 					buffer += `\x1b[${moveBack}A`;
 				}
+				const cursorUpdate = this.buildHardwareCursorUpdate(cursorPos, newLines.length, targetRow, prevViewportTop);
+				buffer += cursorUpdate.sequence;
 				buffer += "\x1b[?2026l";
 				this.terminal.write(buffer);
-				this.cursorRow = targetRow;
-				this.hardwareCursorRow = targetRow;
+				this.hardwareCursorRow = cursorUpdate.hardwareCursorRow;
 			}
-			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
@@ -1572,6 +1601,16 @@ export class TUI extends Container {
 			buffer += `\x1b[${extraLines}A`;
 		}
 
+		const nextCursorRow = Math.max(0, newLines.length - 1);
+		const nextMaxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
+		const nextPreviousViewportTop = Math.max(prevViewportTop, finalCursorRow - height + 1);
+		const cursorUpdate = this.buildHardwareCursorUpdate(
+			cursorPos,
+			newLines.length,
+			finalCursorRow,
+			nextPreviousViewportTop,
+		);
+		buffer += cursorUpdate.sequence;
 		buffer += "\x1b[?2026l"; // End synchronized output
 
 		if (process.env.PI_TUI_DEBUG === "1") {
@@ -1581,7 +1620,7 @@ export class TUI extends Container {
 			const debugData = [
 				`firstChanged: ${firstChanged}`,
 				`viewportTop: ${viewportTop}`,
-				`cursorRow: ${this.cursorRow}`,
+				`cursorRow: ${nextCursorRow}`,
 				`height: ${height}`,
 				`lineDiff: ${lineDiff}`,
 				`hardwareCursorRow: ${hardwareCursorRow}`,
@@ -1606,60 +1645,15 @@ export class TUI extends Container {
 		// Write entire buffer at once
 		this.terminal.write(buffer);
 
-		// Track cursor position for next render
-		// cursorRow tracks end of content (for viewport calculation)
-		// hardwareCursorRow tracks actual terminal cursor position (for movement)
-		this.cursorRow = Math.max(0, newLines.length - 1);
-		this.hardwareCursorRow = finalCursorRow;
-		// Track terminal's working area (grows but doesn't shrink unless cleared)
-		this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
-		this.previousViewportTop = Math.max(prevViewportTop, finalCursorRow - height + 1);
-
-		// Position hardware cursor for IME
-		this.positionHardwareCursor(cursorPos, newLines.length);
+		// Commit render accounting only after the terminal accepted the complete frame.
+		this.hardwareCursorRow = cursorUpdate.hardwareCursorRow;
+		this.maxLinesRendered = nextMaxLinesRendered;
+		this.previousViewportTop = nextPreviousViewportTop;
 
 		this.previousLines = newLines;
 		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 		this.previousWidth = width;
 		this.previousHeight = height;
-	}
-
-	/**
-	 * Position the hardware cursor for IME candidate window.
-	 * @param cursorPos The cursor position extracted from rendered output, or null
-	 * @param totalLines Total number of rendered lines
-	 */
-	private positionHardwareCursor(cursorPos: { row: number; col: number } | null, totalLines: number): void {
-		if (!cursorPos || totalLines <= 0) {
-			this.terminal.hideCursor();
-			return;
-		}
-
-		// Clamp cursor position to valid range
-		const targetRow = Math.max(0, Math.min(cursorPos.row, totalLines - 1));
-		const targetCol = Math.max(0, cursorPos.col);
-
-		// Move cursor from current position to target
-		const rowDelta = targetRow - this.hardwareCursorRow;
-		let buffer = "";
-		if (rowDelta > 0) {
-			buffer += `\x1b[${rowDelta}B`; // Move down
-		} else if (rowDelta < 0) {
-			buffer += `\x1b[${-rowDelta}A`; // Move up
-		}
-		// Move to absolute column (1-indexed)
-		buffer += `\x1b[${targetCol + 1}G`;
-
-		if (buffer) {
-			this.terminal.write(buffer);
-		}
-
-		this.hardwareCursorRow = targetRow;
-		if (this.showHardwareCursor) {
-			this.terminal.showCursor();
-		} else {
-			this.terminal.hideCursor();
-		}
 	}
 
 	/**
