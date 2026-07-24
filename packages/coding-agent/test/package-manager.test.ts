@@ -1691,12 +1691,29 @@ Content`,
 		it("should resolve autoload-disabled project package entries as deltas over global packages", async () => {
 			const pkgDir = join(agentDir, "npm", "node_modules", "pi-tools");
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
+			mkdirSync(join(pkgDir, "skills", "alpha"), { recursive: true });
+			mkdirSync(join(pkgDir, "skills", "beta"), { recursive: true });
 			writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "pi-tools", version: "1.0.0" }));
 			writeFileSync(join(pkgDir, "extensions", "foo.ts"), "export default function() {}");
 			writeFileSync(join(pkgDir, "extensions", "bar.ts"), "export default function() {}");
-			settingsManager.setPackages(["npm:pi-tools"]);
+			writeFileSync(join(pkgDir, "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: Alpha\n---\n");
+			writeFileSync(join(pkgDir, "skills", "beta", "SKILL.md"), "---\nname: beta\ndescription: Beta\n---\n");
+			settingsManager.setPackages([
+				{
+					source: "npm:pi-tools",
+					skillOverrides: {
+						alpha: { disableModelInvocation: true },
+						beta: { disableModelInvocation: true },
+					},
+				},
+			]);
 			settingsManager.setProjectPackages([
-				{ source: "npm:pi-tools", autoload: false, extensions: ["-extensions/foo.ts"] },
+				{
+					source: "npm:pi-tools",
+					autoload: false,
+					extensions: ["-extensions/foo.ts"],
+					skillOverrides: { alpha: { disableModelInvocation: false } },
+				},
 			]);
 			const runCommandSpy = vi
 				.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
@@ -1709,9 +1726,17 @@ Content`,
 					{ enabled: resource.enabled, scope: resource.metadata.scope },
 				]),
 			);
+			const skillOverrides = Object.assign(
+				{},
+				...result.skills.map((resource) => resource.metadata.skillOverrides ?? {}),
+			);
 			expect(runCommandSpy).not.toHaveBeenCalled();
 			expect(states[join(pkgDir, "extensions", "foo.ts")]).toEqual({ enabled: false, scope: "project" });
 			expect(states[join(pkgDir, "extensions", "bar.ts")]).toEqual({ enabled: true, scope: "user" });
+			expect(skillOverrides).toEqual({
+				alpha: { disableModelInvocation: false },
+				beta: { disableModelInvocation: true },
+			});
 		});
 
 		it("should resolve autoload-disabled package entries as positive-only without a global package", async () => {
@@ -1728,7 +1753,7 @@ Content`,
 			const result = await packageManager.resolve();
 
 			expect(result.extensions.map((resource) => resource.path)).toEqual([join(pkgDir, "extensions", "foo.ts")]);
-			expect(result.skills).toEqual([]);
+			expect(result.skills.some((resource) => resource.path.startsWith(join(pkgDir, "skills")))).toBe(false);
 		});
 	});
 

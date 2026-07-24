@@ -625,13 +625,18 @@ export class DefaultResourceLoader implements ResourceLoader {
 			});
 		}
 		const resolvedSkills = this.skillsOverride ? this.skillsOverride(skillsResult) : skillsResult;
-		this.skills = resolvedSkills.skills.map((skill) => ({
-			...skill,
-			sourceInfo:
+		this.skills = resolvedSkills.skills.map((skill) => {
+			const sourceInfo =
 				this.findSourceInfoForPath(skill.filePath, this.extensionSkillSourceInfos, metadataByPath) ??
 				skill.sourceInfo ??
-				this.getDefaultSourceInfoForPath(skill.filePath),
-		}));
+				this.getDefaultSourceInfoForPath(skill.filePath);
+			const override = this.findMetadataForPath(skill.filePath, metadataByPath)?.skillOverrides?.[skill.name];
+			return {
+				...skill,
+				sourceInfo,
+				disableModelInvocation: override?.disableModelInvocation ?? skill.disableModelInvocation,
+			};
+		});
 		this.skillDiagnostics = resolvedSkills.diagnostics;
 	}
 
@@ -693,6 +698,33 @@ export class DefaultResourceLoader implements ResourceLoader {
 				tool.sourceInfo = extension.sourceInfo;
 			}
 		}
+	}
+
+	private findMetadataForPath(
+		resourcePath: string,
+		metadataByPath?: Map<string, PathMetadata>,
+	): PathMetadata | undefined {
+		if (!metadataByPath || !resourcePath || resourcePath.startsWith("<")) {
+			return undefined;
+		}
+
+		const normalizedResourcePath = resolve(resourcePath);
+		const exact = metadataByPath.get(normalizedResourcePath) ?? metadataByPath.get(resourcePath);
+		if (exact) {
+			return exact;
+		}
+
+		for (const [sourcePath, metadata] of metadataByPath.entries()) {
+			const normalizedSourcePath = resolve(sourcePath);
+			if (
+				normalizedResourcePath === normalizedSourcePath ||
+				normalizedResourcePath.startsWith(`${normalizedSourcePath}${sep}`)
+			) {
+				return metadata;
+			}
+		}
+
+		return undefined;
 	}
 
 	private findSourceInfoForPath(
