@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed hardware cursor drift and redundant terminal output during synchronized rendering, including lifecycle, resize, visibility, and failed-write recovery paths.
+
 ## [0.82.0] - 2026-07-24
 
 ### Fixed
