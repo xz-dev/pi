@@ -108,6 +108,44 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
+function abortError(signal?: AbortSignal): Error {
+	return new Error(
+		signal?.reason instanceof Error ? signal.reason.message : String(signal?.reason ?? "Agent run aborted"),
+	);
+}
+
+async function abortable<T>(promise: Promise<T> | T, signal?: AbortSignal): Promise<T> {
+	if (!signal) return await promise;
+	if (signal.aborted) throw abortError(signal);
+
+	return await new Promise<T>((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const onAbort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(abortError(signal));
+		};
+
+		signal.addEventListener("abort", onAbort, { once: true });
+		Promise.resolve(promise).then(
+			(value) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve(value);
+			},
+			(error) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(error);
+			},
+		);
+	});
+}
+
 // ============================================================================
 // Skill Block Parsing
 // ============================================================================
@@ -615,8 +653,19 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		// Emit to extensions first. If the active run has already been aborted,
+		// do not let an extension lifecycle hook keep the agent in Working...
+		// forever; still continue with session/UI bookkeeping below.
+		const signal = this.agent.signal;
+		if (!signal?.aborted) {
+			try {
+				await abortable(this._emitExtensionEvent(event), signal);
+			} catch (error) {
+				if (!signal?.aborted) {
+					throw error;
+				}
+			}
+		}
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);

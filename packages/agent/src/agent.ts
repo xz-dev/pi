@@ -7,6 +7,7 @@ import type {
 	ThinkingBudgets,
 	Transport,
 } from "@earendil-works/pi-ai";
+import { callAbortable } from "./abort.ts";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
@@ -571,7 +572,11 @@ export class Agent {
 			throw new Error("Agent listener invoked outside active run");
 		}
 		for (const listener of this.listeners) {
-			await listener(event, signal);
+			if (signal.aborted) {
+				void Promise.resolve(listener(event, signal)).catch(() => {});
+				continue;
+			}
+			await callAbortable(() => listener(event, signal), signal);
 		}
 	}
 }
