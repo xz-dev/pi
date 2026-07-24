@@ -13,8 +13,9 @@ import type {
 	FauxProviderRegistration,
 	FauxResponseStep,
 	Model,
+	OpenAIResponsesProviderState,
 } from "@earendil-works/pi-ai/compat";
-import { registerFauxProvider, streamSimple } from "@earendil-works/pi-ai/compat";
+import { getOpenAIResponsesCheckpointIdentity, registerFauxProvider, streamSimple } from "@earendil-works/pi-ai/compat";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
@@ -149,6 +150,34 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			tools: [],
 		},
 		convertToLlm,
+		resolveRequestContext: (requestModel, messages) => {
+			if (requestModel.api !== "openai-responses") return { messages };
+			const identity = getOpenAIResponsesCheckpointIdentity(requestModel as Model<"openai-responses">);
+			if (!identity) return { messages };
+			const portable = sessionManager.buildSessionContext();
+			const projected = sessionManager.buildSessionContext({ providerCheckpoint: { identity } });
+			if (!projected.providerCheckpoint) return { messages };
+			let frontier = -1;
+			let searchFrom = 0;
+			for (const persistedMessage of portable.messages) {
+				const match = messages.findIndex(
+					(message, index) =>
+						index >= searchFrom &&
+						(message === persistedMessage ||
+							(message.role === persistedMessage.role &&
+								message.timestamp === persistedMessage.timestamp &&
+								JSON.stringify(message) === JSON.stringify(persistedMessage))),
+				);
+				if (match < 0) return { messages };
+				frontier = match;
+				searchFrom = match + 1;
+			}
+			const providerState: OpenAIResponsesProviderState = {
+				type: "openai_responses_provider_state",
+				checkpoint: projected.providerCheckpoint,
+			};
+			return { messages: [...projected.messages, ...messages.slice(frontier + 1)], providerState };
+		},
 		onPayload: async (payload) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner?.hasHandlers("before_provider_request")) {

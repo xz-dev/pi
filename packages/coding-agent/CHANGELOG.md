@@ -16,6 +16,7 @@
 
 ### Added
 
+- Added explicitly configured OpenAI Responses native compaction with durable provider checkpoints, portable fallback context, and correct manual, threshold, and overflow continuation behavior ([#6492](https://github.com/earendil-works/pi/issues/6492)).
 - Added inherited `Tool.constrainedSampling` with strict JSON Schema (`prefer`/`require`) and OpenAI Lark/regex grammar variants across OpenAI, Anthropic, Amazon Bedrock, Google Gemini, and Mistral. See [Constrained Sampling for Tools](../ai/README.md#constrained-sampling-for-tools).
 - Added inherited `supportsGrammarTools` and `supportsStrictTools` compatibility flags, expanded `supportsStrictMode` coverage, and generated model capability metadata to gate constrained sampling.
 - Added inherited Kimi Code subscription OAuth login for the Kimi For Coding provider, including device authorization and automatic token refresh ([#6935](https://github.com/earendil-works/pi/pull/6935) by [@zaycruz](https://github.com/zaycruz)).

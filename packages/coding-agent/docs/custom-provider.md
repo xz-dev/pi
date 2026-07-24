@@ -224,7 +224,7 @@ The `api` field determines which streaming implementation is used:
 |-----|---------|
 | `anthropic-messages` | Anthropic Claude API and compatibles |
 | `openai-completions` | OpenAI Chat Completions API and compatibles |
-| `openai-responses` | OpenAI Responses API |
+| `openai-responses` | OpenAI Responses API. Stable native compaction is a separate explicit model compatibility opt-in; custom/proxy endpoints are not assumed compatible. |
 | `azure-openai-responses` | Azure OpenAI Responses API |
 | `openai-codex-responses` | OpenAI Codex Responses API |
 | `mistral-conversations` | Mistral SDK Conversations/Chat streaming |

@@ -1,6 +1,7 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type Context,
 	EventStream,
 	type Message,
 	type Model,
@@ -216,6 +217,78 @@ describe("agentLoop with AgentMessage", () => {
 		// The notification should have been filtered out in convertToLlm
 		expect(convertedMessages.length).toBe(1); // Only user message
 		expect(convertedMessages[0].role).toBe("user");
+	});
+
+	it("resolves provider state exactly once for a terminating request and its queued follow-up", async () => {
+		const checkpointMessage = createUserMessage("checkpoint suffix");
+		const pendingPrompt = createUserMessage("pending prompt");
+		const hookMessage = createUserMessage("context hook");
+		const followUpMessage = createUserMessage("pending follow-up");
+		const contexts: Context[] = [];
+		let projectionCalls = 0;
+		let transformCalls = 0;
+		let followUpPolls = 0;
+		const providerState = { kind: "test-provider-state", opaque: { value: "secret-state" } };
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [createUserMessage("portable history")],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			resolveRequestContext: (_model, messages) => {
+				projectionCalls++;
+				return {
+					messages: [checkpointMessage, ...messages.slice(1)],
+					providerState,
+				};
+			},
+			transformContext: async (messages) => {
+				transformCalls++;
+				return [...messages, hookMessage];
+			},
+			convertToLlm: identityConverter,
+			getFollowUpMessages: async () => {
+				followUpPolls++;
+				return followUpPolls === 1 ? [followUpMessage] : [];
+			},
+		};
+
+		let calls = 0;
+		const stream = agentLoop([pendingPrompt], context, config, undefined, (_model, llmContext) => {
+			contexts.push(structuredClone(llmContext));
+			calls++;
+			const response = new MockAssistantStream();
+			queueMicrotask(() => {
+				response.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: calls === 1 ? "first done" : "follow-up done" }]),
+				});
+			});
+			return response;
+		});
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(projectionCalls).toBe(2);
+		expect(transformCalls).toBe(2);
+		expect(contexts).toHaveLength(2);
+		expect(contexts[0]?.providerState).toEqual(providerState);
+		expect(contexts[0]?.messages).toEqual([checkpointMessage, pendingPrompt, hookMessage]);
+		expect(contexts[1]?.messages.filter((message) => message.role === "user")).toEqual([
+			checkpointMessage,
+			pendingPrompt,
+			followUpMessage,
+			hookMessage,
+		]);
+		expect(
+			contexts[1]?.messages.filter(
+				(message) => message.role === "user" && message.content === followUpMessage.content,
+			),
+		).toHaveLength(1);
+		expect(JSON.stringify(contexts.flatMap((request) => request.messages))).not.toContain("secret-state");
 	});
 
 	it("should apply transformContext before convertToLlm", async () => {

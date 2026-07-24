@@ -1,6 +1,13 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
+import type { OpenAIResponsesProviderState } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	getOpenAIResponsesCheckpointIdentity,
+	type Message,
+	type Model,
+	streamSimple,
+} from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
@@ -129,6 +136,51 @@ export {
 
 function getDefaultAgentDir(): string {
 	return getAgentDir();
+}
+
+function agentMessagesHaveSameStableIdentity(left: AgentMessage, right: AgentMessage): boolean {
+	if (left === right) return true;
+	if (left.role !== right.role || left.timestamp !== right.timestamp) return false;
+	return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/**
+ * Replace the persisted portable history with its provider checkpoint projection while
+ * retaining messages that have reached the live agent loop but not SessionManager yet.
+ *
+ * Session persistence callbacks run after Agent has appended each message to its state,
+ * so the persisted portable projection must be an ordered prefix/subsequence of current
+ * loop messages. Object identity is preferred; stable role/timestamp/full-structure
+ * equality supports restored/cloned history without collapsing distinct same-text turns.
+ */
+export interface ProviderCheckpointProjectionMerge {
+	messages: AgentMessage[];
+	applied: boolean;
+}
+
+export function mergePortableCheckpointProjection(
+	persistedPortableMessages: AgentMessage[],
+	checkpointProjection: AgentMessage[],
+	currentLoopMessages: AgentMessage[],
+): ProviderCheckpointProjectionMerge {
+	let frontier = -1;
+	let searchFrom = 0;
+	for (const persistedMessage of persistedPortableMessages) {
+		let match = -1;
+		for (let i = searchFrom; i < currentLoopMessages.length; i++) {
+			if (agentMessagesHaveSameStableIdentity(persistedMessage, currentLoopMessages[i])) {
+				match = i;
+				break;
+			}
+		}
+		if (match < 0) return { messages: currentLoopMessages, applied: false };
+		frontier = match;
+		searchFrom = match + 1;
+	}
+	return {
+		messages: [...checkpointProjection, ...currentLoopMessages.slice(frontier + 1)],
+		applied: true,
+	};
 }
 
 /**
@@ -299,6 +351,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: [],
 		},
 		convertToLlm: convertToLlmWithBlockImages,
+		resolveRequestContext: (requestModel, messages) => {
+			if (requestModel.api !== "openai-responses") return { messages };
+			const identity = getOpenAIResponsesCheckpointIdentity(requestModel as Model<"openai-responses">);
+			if (!identity) return { messages };
+			const portable = sessionManager.buildSessionContext();
+			const projected = sessionManager.buildSessionContext({ providerCheckpoint: { identity } });
+			if (!projected.providerCheckpoint) return { messages };
+			const merged = mergePortableCheckpointProjection(portable.messages, projected.messages, messages);
+			const providerState: OpenAIResponsesProviderState | undefined = merged.applied
+				? { type: "openai_responses_provider_state", checkpoint: projected.providerCheckpoint }
+				: undefined;
+			return { messages: merged.messages, providerState };
+		},
 		streamFn: async (model, context, options) => {
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();

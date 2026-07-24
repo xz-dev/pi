@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added explicit stable OpenAI Responses native compaction transport with provider-scoped checkpoint identities ([#6492](https://github.com/earendil-works/pi/issues/6492)).
 - Added `ANTHROPIC_AUTH_TOKEN` bearer authentication for Anthropic-compatible gateways ([#5871](https://github.com/earendil-works/pi/issues/5871))
 
 ### Changed

@@ -220,6 +220,7 @@ export {
 	type PromptTemplate,
 } from "./core/sdk.ts";
 export {
+	type AppendProviderCheckpointOptions,
 	type BranchSummaryEntry,
 	buildContextEntries,
 	buildSessionContext,
@@ -232,6 +233,10 @@ export {
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	type NewSessionOptions,
+	type ProviderCheckpoint,
+	type ProviderCheckpointAppendState,
+	type ProviderCheckpointEntry,
+	type ProviderCheckpointProjectionOptions,
 	parseSessionEntries,
 	type SessionContext,
 	type SessionEntry,

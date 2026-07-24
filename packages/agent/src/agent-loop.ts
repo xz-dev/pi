@@ -285,8 +285,15 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 ): Promise<AssistantMessage> {
+	// Resolve the model-aware projection at the actual request boundary, after
+	// pending prompt/steering/follow-up messages have entered the loop context.
+	const resolved = config.resolveRequestContext?.(config.model, context.messages) ?? {
+		messages: context.messages,
+		providerState: context.providerState,
+	};
+
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
-	let messages = context.messages;
+	let messages = resolved.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
@@ -299,6 +306,7 @@ async function streamAssistantResponse(
 		systemPrompt: context.systemPrompt,
 		messages: llmMessages,
 		tools: context.tools,
+		providerState: resolved.providerState,
 	};
 
 	// Resolve API key (important for expiring tokens)

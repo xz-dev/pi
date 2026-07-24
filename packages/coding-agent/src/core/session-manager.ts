@@ -1,5 +1,14 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { type ImageContent, type Message, type TextContent, type Usage, uuidv7 } from "@earendil-works/pi-ai";
+import {
+	type ImageContent,
+	type Message,
+	OPENAI_RESPONSES_COMPACTION_ADAPTER,
+	type OpenAIResponsesCheckpoint,
+	type OpenAIResponsesCheckpointIdentity,
+	type TextContent,
+	type Usage,
+	uuidv7,
+} from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -79,6 +88,40 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	fromHook?: boolean;
 }
 
+export interface ProviderCheckpoint extends OpenAIResponsesCheckpoint {
+	frontierEntryId: string;
+	/** Prior checkpoint entry/window consumed by the provider, if this checkpoint supersedes one. */
+	predecessorEntryId?: string;
+	/** Monotonic provider-checkpoint window within this session branch. */
+	windowGeneration?: number;
+	/** Optional non-opaque operational metadata. */
+	metadata?: Record<string, unknown>;
+}
+
+export interface ProviderCheckpointEntry extends SessionEntryBase {
+	type: "provider_checkpoint";
+	checkpoint: ProviderCheckpoint;
+}
+
+export interface ProviderCheckpointAppendState {
+	sessionId: string;
+	generation: number;
+	version: number;
+	branch: string | null;
+	identity: OpenAIResponsesCheckpointIdentity;
+}
+
+export interface AppendProviderCheckpointOptions {
+	expected?: ProviderCheckpointAppendState;
+	currentIdentity?: OpenAIResponsesCheckpointIdentity;
+}
+
+export interface ProviderCheckpointProjectionOptions {
+	providerCheckpoint?: {
+		identity: OpenAIResponsesCheckpointIdentity;
+	};
+}
+
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
 	type: "branch_summary";
 	fromId: string;
@@ -146,6 +189,7 @@ export type SessionEntry =
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
 	| CompactionEntry
+	| ProviderCheckpointEntry
 	| BranchSummaryEntry
 	| CustomEntry
 	| CustomMessageEntry
@@ -169,6 +213,7 @@ export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
+	providerCheckpoint?: ProviderCheckpoint;
 }
 
 export interface SessionInfo {
@@ -203,6 +248,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getSessionName"
+	| "captureProviderCheckpointAppendState"
 >;
 
 function createSessionId(): string {
@@ -322,6 +368,91 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+function cloneProviderCheckpoint(checkpoint: ProviderCheckpoint): ProviderCheckpoint {
+	return structuredClone(checkpoint);
+}
+
+function providerCheckpointIdentitiesMatch(
+	left: OpenAIResponsesCheckpointIdentity,
+	right: OpenAIResponsesCheckpointIdentity,
+): boolean {
+	return (
+		left.adapter === right.adapter &&
+		left.realm === right.realm &&
+		left.provider === right.provider &&
+		left.endpoint === right.endpoint &&
+		left.modelFamily === right.modelFamily
+	);
+}
+
+function isProviderCheckpointIdentity(value: unknown): value is OpenAIResponsesCheckpointIdentity {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const identity = value as Partial<Record<keyof OpenAIResponsesCheckpointIdentity, unknown>>;
+	return (
+		identity.adapter === OPENAI_RESPONSES_COMPACTION_ADAPTER &&
+		typeof identity.realm === "string" &&
+		identity.realm.trim().length > 0 &&
+		typeof identity.provider === "string" &&
+		identity.provider.trim().length > 0 &&
+		typeof identity.endpoint === "string" &&
+		identity.endpoint.trim().length > 0 &&
+		typeof identity.modelFamily === "string" &&
+		identity.modelFamily.trim().length > 0
+	);
+}
+
+function validateProviderCheckpointIdentity(identity: OpenAIResponsesCheckpointIdentity): void {
+	if (
+		identity.adapter !== OPENAI_RESPONSES_COMPACTION_ADAPTER ||
+		identity.realm.trim().length === 0 ||
+		identity.provider.trim().length === 0 ||
+		identity.endpoint.trim().length === 0 ||
+		identity.modelFamily.trim().length === 0
+	) {
+		throw new Error("Provider checkpoint requires a complete immutable compatibility identity");
+	}
+}
+
+function isValidLoadedProviderCheckpoint(
+	value: unknown,
+	latestCompatible: ProviderCheckpointEntry | null,
+	pathIndex: Map<string, number>,
+): value is ProviderCheckpointEntry {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const entry = value as Partial<ProviderCheckpointEntry>;
+	if (entry.type !== "provider_checkpoint" || typeof entry.id !== "string") return false;
+	const checkpoint = entry.checkpoint;
+	if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) return false;
+	if (
+		checkpoint.type !== "provider_checkpoint" ||
+		checkpoint.version !== 1 ||
+		!isProviderCheckpointIdentity(checkpoint.identity) ||
+		typeof checkpoint.frontierEntryId !== "string"
+	) {
+		return false;
+	}
+
+	const checkpointIndex = pathIndex.get(entry.id);
+	const frontierIndex = pathIndex.get(checkpoint.frontierEntryId);
+	if (
+		checkpointIndex === undefined ||
+		frontierIndex === undefined ||
+		frontierIndex !== checkpointIndex - 1 ||
+		entry.parentId !== checkpoint.frontierEntryId
+	) {
+		return false;
+	}
+
+	if (!Number.isSafeInteger(checkpoint.windowGeneration) || checkpoint.windowGeneration! < 1) return false;
+	if (!latestCompatible) {
+		return checkpoint.predecessorEntryId === undefined && checkpoint.windowGeneration === 1;
+	}
+	return (
+		checkpoint.predecessorEntryId === latestCompatible.id &&
+		checkpoint.windowGeneration === latestCompatible.checkpoint.windowGeneration! + 1
+	);
+}
+
 function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntry>): Map<string, SessionEntry> {
 	if (byId) return byId;
 	const index = new Map<string, SessionEntry>();
@@ -419,30 +550,53 @@ export function buildContextEntries(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	options?: ProviderCheckpointProjectionOptions,
 ): SessionEntry[] {
 	const path = buildSessionPath(entries, leafId, byId);
+	const pathIndex = new Map(path.map((entry, index) => [entry.id, index]));
 	let compaction: CompactionEntry | null = null;
+	let providerCheckpoint: ProviderCheckpointEntry | null = null;
 
 	for (const entry of path) {
 		if (entry.type === "compaction") {
 			compaction = entry;
+		} else if (
+			entry.type === "provider_checkpoint" &&
+			options?.providerCheckpoint &&
+			isValidLoadedProviderCheckpoint(entry, providerCheckpoint, pathIndex) &&
+			providerCheckpointIdentitiesMatch(entry.checkpoint.identity, options.providerCheckpoint.identity)
+		) {
+			providerCheckpoint = entry;
 		}
 	}
 
-	if (!compaction) {
+	const effectiveCompaction =
+		compaction && providerCheckpoint
+			? path.findIndex((entry) => entry.id === compaction.id) >
+				path.findIndex((entry) => entry.id === providerCheckpoint.id)
+				? compaction
+				: null
+			: compaction;
+	if (!effectiveCompaction && !providerCheckpoint) {
 		return path;
 	}
 
-	const compactionIdx = path.findIndex((entry) => entry.id === compaction.id);
+	if (providerCheckpoint && !effectiveCompaction) {
+		const checkpointIdx = path.findIndex((entry) => entry.id === providerCheckpoint.id);
+		if (checkpointIdx < 0) return path;
+		return [providerCheckpoint, ...path.slice(checkpointIdx + 1)];
+	}
+
+	const compactionIdx = path.findIndex((entry) => entry.id === effectiveCompaction!.id);
 	if (compactionIdx < 0) {
 		return path;
 	}
 
-	const contextEntries: SessionEntry[] = [compaction];
+	const contextEntries: SessionEntry[] = [effectiveCompaction!];
 	let foundFirstKept = false;
 	for (let i = 0; i < compactionIdx; i++) {
 		const entry = path[i];
-		if (entry.id === compaction.firstKeptEntryId) {
+		if (entry.id === effectiveCompaction!.firstKeptEntryId) {
 			foundFirstKept = true;
 		}
 		if (foundFirstKept) {
@@ -462,11 +616,24 @@ export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	options?: ProviderCheckpointProjectionOptions,
 ): SessionContext {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const messages = buildContextEntries(entries, leafId, byId).flatMap(sessionEntryToContextMessages);
-	return { messages, thinkingLevel, model };
+	const contextEntries = buildContextEntries(entries, leafId, byId, options);
+	const messages = contextEntries.flatMap(sessionEntryToContextMessages);
+	const checkpointEntry = contextEntries.find(
+		(entry): entry is ProviderCheckpointEntry =>
+			entry.type === "provider_checkpoint" &&
+			contextEntries[0] === entry &&
+			options?.providerCheckpoint !== undefined,
+	);
+	return {
+		messages,
+		thinkingLevel,
+		model,
+		...(checkpointEntry ? { providerCheckpoint: cloneProviderCheckpoint(checkpointEntry.checkpoint) } : {}),
+	};
 }
 
 /**
@@ -864,6 +1031,8 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private generation = 0;
+	private version = 0;
 
 	private constructor(
 		cwd: string,
@@ -889,6 +1058,7 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string): void {
+		this.generation++;
 		this._setSessionFile(sessionFile);
 	}
 
@@ -928,6 +1098,7 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		this.generation++;
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -946,6 +1117,7 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
+		this.version = 0;
 		this.flushed = false;
 
 		if (this.persist) {
@@ -960,10 +1132,12 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
+		this.version = 0;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
+			this.version++;
 			if (entry.type === "label") {
 				if (entry.label) {
 					this.labelsById.set(entry.targetId, entry.label);
@@ -1045,6 +1219,7 @@ export class SessionManager {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
+		this.version++;
 		this._persist(entry);
 	}
 
@@ -1113,6 +1288,100 @@ export class SessionManager {
 			details,
 			usage,
 			fromHook,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Capture the append-only session state a provider compaction attempt must still match when it commits. */
+	captureProviderCheckpointAppendState(identity: OpenAIResponsesCheckpointIdentity): ProviderCheckpointAppendState {
+		return {
+			sessionId: this.sessionId,
+			generation: this.generation,
+			version: this.version,
+			branch: this.leafId,
+			identity: structuredClone(identity),
+		};
+	}
+
+	/**
+	 * Append a provider-owned native compaction checkpoint atomically.
+	 * When expected state is provided, a reload/session replacement, intervening append,
+	 * branch move, or compatibility change rejects the whole append.
+	 */
+	appendProviderCheckpoint(checkpoint: ProviderCheckpoint, options: AppendProviderCheckpointOptions = {}): string {
+		validateProviderCheckpointIdentity(checkpoint.identity);
+		const expected = options.expected;
+		if (expected) {
+			validateProviderCheckpointIdentity(expected.identity);
+			if (expected.sessionId !== this.sessionId) {
+				throw new Error("Provider checkpoint session changed before append");
+			}
+			if (expected.generation !== this.generation) {
+				throw new Error("Provider checkpoint generation changed before append");
+			}
+			if (expected.version !== this.version) {
+				throw new Error("Provider checkpoint version changed before append");
+			}
+			if (expected.branch !== this.leafId) {
+				throw new Error("Provider checkpoint branch changed before append");
+			}
+			if (!providerCheckpointIdentitiesMatch(expected.identity, checkpoint.identity)) {
+				throw new Error("Provider checkpoint result identity changed before append");
+			}
+		}
+		if (options.currentIdentity) {
+			validateProviderCheckpointIdentity(options.currentIdentity);
+			if (!providerCheckpointIdentitiesMatch(options.currentIdentity, checkpoint.identity)) {
+				throw new Error("Provider checkpoint current identity is incompatible before append");
+			}
+		}
+		if (checkpoint.type !== "provider_checkpoint" || checkpoint.version !== 1) {
+			throw new Error("Unsupported provider checkpoint version or adapter");
+		}
+		if (!this.byId.has(checkpoint.frontierEntryId)) {
+			throw new Error(`Provider checkpoint frontier ${checkpoint.frontierEntryId} not found`);
+		}
+		if (checkpoint.frontierEntryId !== this.leafId) {
+			throw new Error("Provider checkpoint frontier must match the current branch boundary");
+		}
+
+		const branch = this.getBranch(checkpoint.frontierEntryId);
+		const compatibleCheckpoints = branch.filter(
+			(entry): entry is ProviderCheckpointEntry =>
+				entry.type === "provider_checkpoint" &&
+				providerCheckpointIdentitiesMatch(entry.checkpoint.identity, checkpoint.identity),
+		);
+		const predecessor = checkpoint.predecessorEntryId ? this.byId.get(checkpoint.predecessorEntryId) : undefined;
+		if (checkpoint.predecessorEntryId && predecessor?.type !== "provider_checkpoint") {
+			throw new Error("Provider checkpoint predecessor is not a checkpoint entry");
+		}
+		if (
+			predecessor?.type === "provider_checkpoint" &&
+			!providerCheckpointIdentitiesMatch(predecessor.checkpoint.identity, checkpoint.identity)
+		) {
+			throw new Error("Provider checkpoint predecessor identity is incompatible");
+		}
+		const latestCompatible = compatibleCheckpoints.at(-1);
+		if (checkpoint.predecessorEntryId && latestCompatible?.id !== checkpoint.predecessorEntryId) {
+			throw new Error("Provider checkpoint predecessor must be an ancestral latest compatible checkpoint");
+		}
+		if (!checkpoint.predecessorEntryId && latestCompatible) {
+			throw new Error("Provider checkpoint predecessor is required for a repeated checkpoint");
+		}
+		const expectedWindowGeneration = latestCompatible ? (latestCompatible.checkpoint.windowGeneration ?? 1) + 1 : 1;
+		if (checkpoint.windowGeneration !== expectedWindowGeneration) {
+			throw new Error(
+				`Provider checkpoint window generation must be ${expectedWindowGeneration}, received ${String(checkpoint.windowGeneration)}`,
+			);
+		}
+
+		const entry: ProviderCheckpointEntry = {
+			type: "provider_checkpoint",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			checkpoint: cloneProviderCheckpoint(checkpoint),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1273,16 +1542,16 @@ export class SessionManager {
 	 * Build the active, compaction-aware entry list for context/rendering.
 	 * Uses tree traversal from current leaf.
 	 */
-	buildContextEntries(): SessionEntry[] {
-		return buildContextEntries(this.getEntries(), this.leafId, this.byId);
+	buildContextEntries(options?: ProviderCheckpointProjectionOptions): SessionEntry[] {
+		return buildContextEntries(this.getEntries(), this.leafId, this.byId, options);
 	}
 
 	/**
 	 * Build the session context (what gets sent to the LLM).
 	 * Uses tree traversal from current leaf.
 	 */
-	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
+	buildSessionContext(options?: ProviderCheckpointProjectionOptions): SessionContext {
+		return buildSessionContext(this.getEntries(), this.leafId, this.byId, options);
 	}
 
 	/**

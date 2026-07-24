@@ -102,7 +102,32 @@ function convertToolResultOutput<TApi extends Api>(
 	return output;
 }
 
-export interface OpenAIResponsesStreamOptions {
+export interface OpenAIResponsesUsageLike {
+	input_tokens?: number;
+	input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+	output_tokens?: number;
+	output_tokens_details?: { reasoning_tokens?: number };
+	total_tokens?: number;
+}
+
+export function mapOpenAIResponsesUsage<TApi extends Api>(model: Model<TApi>, usage: OpenAIResponsesUsageLike): Usage {
+	const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
+	const cacheWriteTokens = usage.input_tokens_details?.cache_write_tokens ?? 0;
+	const mapped: Usage = {
+		// OpenAI includes cached and cache-write tokens in input_tokens, so subtract both.
+		input: Math.max(0, (usage.input_tokens ?? 0) - cachedTokens - cacheWriteTokens),
+		output: usage.output_tokens ?? 0,
+		cacheRead: cachedTokens,
+		cacheWrite: cacheWriteTokens,
+		reasoning: usage.output_tokens_details?.reasoning_tokens ?? 0,
+		totalTokens: usage.total_tokens ?? 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, mapped);
+	return mapped;
+}
+
+interface OpenAIResponsesStreamOptions {
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	resolveServiceTier?: (
@@ -533,23 +558,10 @@ export async function processResponsesStream<TApi extends Api>(
 			output.responseId = response.id;
 		}
 		if (response?.usage) {
-			const inputDetails = response.usage.input_tokens_details as
-				| { cached_tokens?: number; cache_write_tokens?: number }
-				| undefined;
-			const cachedTokens = inputDetails?.cached_tokens || 0;
-			const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
-			output.usage = {
-				// OpenAI includes cached and cache-write tokens in input_tokens, so subtract both.
-				input: Math.max(0, (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens),
-				output: response.usage.output_tokens || 0,
-				cacheRead: cachedTokens,
-				cacheWrite: cacheWriteTokens,
-				reasoning: response.usage.output_tokens_details?.reasoning_tokens || 0,
-				totalTokens: response.usage.total_tokens || 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			};
+			output.usage = mapOpenAIResponsesUsage(model, response.usage);
+		} else {
+			calculateCost(model, output.usage);
 		}
-		calculateCost(model, output.usage);
 		if (options?.applyServiceTierPricing) {
 			const serviceTier = options.resolveServiceTier
 				? options.resolveServiceTier(response?.service_tier, options.serviceTier)

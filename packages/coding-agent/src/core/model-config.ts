@@ -108,6 +108,13 @@ const OpenAICompletionsCompatSchema = Type.Object({
 });
 
 const OpenAIResponsesCompatSchema = Type.Object({
+	responsesCompaction: Type.Optional(
+		Type.Object({
+			adapter: Type.Literal("openai-responses-compact-v1"),
+			realm: Type.String({ minLength: 1 }),
+			modelFamily: Type.String({ minLength: 1 }),
+		}),
+	),
 	supportsDeveloperRole: Type.Optional(Type.Boolean()),
 	sessionAffinityFormat: Type.Optional(
 		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
