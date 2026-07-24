@@ -6,13 +6,16 @@ import { join, resolve } from "node:path";
 import { type TestContext, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-// This opt-in test covers the real Linux PTY/tmux parser and ProcessTerminal lifecycle only.
+// This opt-in test covers the real Linux PTY/tmux parser, attached-client output, and ProcessTerminal lifecycle.
 // It intentionally does not simulate paced relays, SSH, network backpressure, or transport latency.
 const ENABLED = process.platform === "linux" && process.env.PI_TUI_TMUX_E2E === "1";
 const POLL_TIMEOUT_MS = 4_000;
 const POLL_INTERVAL_MS = 50;
 const STABLE_SAMPLES = 3;
 const TYPED_TEXT = "cursor target text";
+const LOADER_INTERVAL_MS = 80;
+const ATTACHED_OBSERVATION_MS = 1_200;
+const MINIMUM_EFFICIENT_SYNC_VERSION = [3, 8] as const;
 const FIXTURE_PATH = fileURLToPath(new URL("./fixtures/synchronized-cursor-tmux-fixture.ts", import.meta.url));
 
 type CommandResult = {
@@ -28,6 +31,23 @@ type PaneState = {
 	dead: boolean;
 	pane: string;
 };
+
+type AttachedClientMetrics = {
+	bytes: number;
+	cursorHides: number;
+	cursorShows: number;
+	lineErases: number;
+};
+
+function attachedClientMetrics(output: Buffer): AttachedClientMetrics {
+	const text = output.toString("latin1");
+	return {
+		bytes: output.byteLength,
+		cursorHides: text.match(/\x1b\[\?25l/g)?.length ?? 0,
+		cursorShows: text.match(/\x1b\[\?25h/g)?.length ?? 0,
+		lineErases: text.match(/\x1b\[[0-9;]*K/g)?.length ?? 0,
+	};
+}
 
 function run(command: string, args: string[], timeoutMs = POLL_TIMEOUT_MS): Promise<CommandResult> {
 	return new Promise((resolveCommand, reject) => {
@@ -72,12 +92,22 @@ async function poll<T>(description: string, inspect: () => Promise<T>, matches: 
 	throw new Error(`timed out waiting for ${description}; last value: ${JSON.stringify(lastValue)}`);
 }
 
-async function hasTmux(): Promise<boolean> {
+async function tmuxVersion(): Promise<{ display: string; supportsEfficientSynchronizedUpdates: boolean } | undefined> {
 	try {
-		await run("tmux", ["-V"]);
-		return true;
+		const { stdout } = await run("tmux", ["-V"]);
+		const display = stdout.trim();
+		const match = display.match(/(?:next-)?(\d+)\.(\d+)/);
+		if (!match) return { display, supportsEfficientSynchronizedUpdates: false };
+		const major = Number(match[1]);
+		const minor = Number(match[2]);
+		const [minimumMajor, minimumMinor] = MINIMUM_EFFICIENT_SYNC_VERSION;
+		return {
+			display,
+			supportsEfficientSynchronizedUpdates:
+				major > minimumMajor || (major === minimumMajor && minor >= minimumMinor),
+		};
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
@@ -94,7 +124,8 @@ async function main(context: TestContext): Promise<void> {
 		context.skip("requires Linux and PI_TUI_TMUX_E2E=1");
 		return;
 	}
-	if (!(await hasTmux())) {
+	const version = await tmuxVersion();
+	if (!version) {
 		context.skip("tmux is not available");
 		return;
 	}
@@ -103,6 +134,9 @@ async function main(context: TestContext): Promise<void> {
 	const socketPath = resolve(tempDir, "tmux.sock");
 	const checkpointPath = resolve(tempDir, "checkpoints.txt");
 	const target = "cursor-e2e:0.0";
+	const attachedOutput: Buffer[] = [];
+	let attachedOutputBytes = 0;
+	let attachedClient: ReturnType<typeof spawn> | undefined;
 	const tmuxArgs = (args: string[]): string[] => ["-S", socketPath, "-f", "/dev/null", ...args];
 	const tmux = (args: string[], timeoutMs?: number): Promise<CommandResult> => run("tmux", tmuxArgs(args), timeoutMs);
 	const paneState = async (): Promise<PaneState> => {
@@ -154,6 +188,28 @@ async function main(context: TestContext): Promise<void> {
 			(lines) => lines.includes("ready"),
 		);
 		await tmux(["set-option", "-t", "cursor-e2e", "remain-on-exit", "on"]);
+		await tmux(["set-option", "-as", "terminal-features", ",tmux-256color:sync"]);
+
+		const attachCommand = `exec tmux -S ${socketPath} -f /dev/null attach-session -t cursor-e2e`;
+		attachedClient = spawn("script", ["-qefc", attachCommand, "/dev/null"], {
+			stdio: ["pipe", "pipe", "pipe"],
+			env: { ...process.env, TERM: "tmux-256color" },
+		});
+		const attachedClientError = new Promise<never>((_, reject) => attachedClient?.once("error", reject));
+		attachedClient.stdout?.on("data", (chunk: Buffer) => {
+			attachedOutput.push(chunk);
+			attachedOutputBytes += chunk.byteLength;
+		});
+		void attachedClientError.catch(() => undefined);
+		await Promise.race([
+			poll(
+				"real tmux client attached over a PTY",
+				async () =>
+					Number((await tmux(["display-message", "-p", "-t", target, "#{session_attached}"])).stdout.trim()),
+				(attached) => attached === 1,
+			),
+			attachedClientError,
+		]);
 
 		await tmux(["send-keys", "-t", target, "-l", TYPED_TEXT]);
 		await poll(
@@ -169,6 +225,29 @@ async function main(context: TestContext): Promise<void> {
 		assert.match(edited.pane, /STATUS_BUSY/);
 		assert.equal(edited.cursorY, 3, "hardware cursor should target the editor line");
 		assert.notEqual(edited.cursorY, 1, "spinner/status line must not be the hardware cursor target");
+
+		const observationStart = attachedOutputBytes;
+		const startedAt = Date.now();
+		await new Promise<void>((resolveObservation) => setTimeout(resolveObservation, ATTACHED_OBSERVATION_MS));
+		const elapsedMs = Date.now() - startedAt;
+		const observation = Buffer.concat(attachedOutput).subarray(observationStart);
+		const metrics = attachedClientMetrics(observation);
+		assert.ok(metrics.bytes > 0, "attached tmux client must receive loader updates");
+		if (version.supportsEfficientSynchronizedUpdates) {
+			const byteBudget = (Math.ceil(elapsedMs / LOADER_INTERVAL_MS) + 2) * 256;
+			assert.ok(
+				metrics.bytes <= byteBudget,
+				`static editor loader updates repainted an excessive attached-client area: ${JSON.stringify({ tmux: version.display, elapsedMs, byteBudget, ...metrics })}`,
+			);
+			assert.ok(
+				metrics.cursorHides <= 2 && metrics.cursorShows <= 2,
+				`static editor loader updates repeatedly toggled the attached-client cursor: ${JSON.stringify({ tmux: version.display, elapsedMs, ...metrics })}`,
+			);
+		} else {
+			context.diagnostic(
+				`Skipping synchronized-update output budgets on ${version.display}; tmux 3.8 contains the required redraw fixes`,
+			);
+		}
 
 		await tmux(["resize-window", "-t", "cursor-e2e:0", "-x", "16", "-y", "12"]);
 		const smaller = await stablePane(
@@ -203,7 +282,14 @@ async function main(context: TestContext): Promise<void> {
 		await poll("fixture pane exit", paneState, (state) => state.dead);
 	} finally {
 		await tmux(["kill-server"]).catch(() => undefined);
-		await rm(tempDir, { recursive: true, force: true });
+		if (attachedClient && attachedClient.exitCode === null && attachedClient.signalCode === null) {
+			attachedClient.kill("SIGKILL");
+			await Promise.race([
+				new Promise<void>((resolveExit) => attachedClient?.once("close", () => resolveExit())),
+				new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, 1_000)),
+			]);
+		}
+		await rm(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
 	}
 }
 
