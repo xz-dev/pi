@@ -1,0 +1,82 @@
+name: 'Upstream Sync'
+
+on:
+  schedule:
+    - cron: '28 5,17 * * *'
+    # scheduled at 13:28 and 01:28 Asia/Shanghai (UTC+8)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync-main-with-squash-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebuild main from upstream and squash branches
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/earendil-works/pi.git
+          git fetch upstream main
+          git fetch origin ci patch/tmp-patchs patch/esc-abort patch/tui-synchronized-cursor patch/changelog-prerelease patch/skill-overrides
+          git reset --hard upstream/main
+
+          if ! git merge --squash origin/ci; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != README.md ]]; then
+              printf '::error::Unexpected ci squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+          fi
+          git restore --source=origin/ci --staged --worktree -- README.md
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after replacing README.md'
+            exit 1
+          fi
+          git commit -m "merge ci branch"
+
+          git merge --squash origin/patch/tmp-patchs
+          git commit -m "merge patch/tmp-patchs branch"
+
+          git merge --squash origin/patch/esc-abort
+          git commit -m "merge patch/esc-abort branch"
+
+          git merge --squash origin/patch/tui-synchronized-cursor
+          git commit -m "merge patch/tui-synchronized-cursor branch"
+
+
+          git merge --squash origin/patch/changelog-prerelease
+          git commit -m "merge patch/changelog-prerelease branch"
+
+          git merge --squash origin/patch/skill-overrides
+          git commit -m "merge patch/skill-overrides branch"
+
+      - name: Require sync workflow token
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          test -n "${PUSH_TOKEN}" || {
+            echo "::error::SYNC_WORKFLOW_TOKEN is required because GITHUB_TOKEN pushes do not trigger downstream workflows"
+            exit 1
+          }
+
+      - name: Push rebuilt main
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease origin HEAD:main
