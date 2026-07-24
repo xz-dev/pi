@@ -25,6 +25,12 @@ interface KittyImageHeader {
 	rows: number;
 }
 
+interface EmittedCursorState {
+	row: number | undefined;
+	col: number | undefined;
+	visible: boolean;
+}
+
 function parseKittyImageHeader(line: string): KittyImageHeader | undefined {
 	const sequenceStart = line.indexOf(KITTY_SEQUENCE_PREFIX);
 	if (sequenceStart === -1) return undefined;
@@ -307,7 +313,11 @@ export class TUI extends Container {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
+	private hardwareCursorRow = 0; // Accounted terminal cursor row (may differ due to IME positioning)
+	private emittedCursorRow: number | undefined;
+	private emittedCursorCol: number | undefined;
+	private emittedCursorVisible: boolean | undefined;
+	private forceFullRedraw = false;
 	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
 	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1"; // Clear empty rows when content shrinks (default: off)
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
@@ -345,9 +355,6 @@ export class TUI extends Container {
 	setShowHardwareCursor(enabled: boolean): void {
 		if (this.showHardwareCursor === enabled) return;
 		this.showHardwareCursor = enabled;
-		if (!enabled) {
-			this.terminal.hideCursor();
-		}
 		this.requestRender();
 	}
 
@@ -505,6 +512,7 @@ export class TUI extends Container {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
+		this.invalidateEmittedCursorState();
 		this.requestRender();
 
 		// Return handle for controlling this overlay
@@ -520,7 +528,10 @@ export class TUI extends Container {
 						const topVisible = this.getTopmostVisibleOverlay();
 						this.setFocus(topVisible?.component ?? entry.preFocus);
 					}
-					if (this.overlayStack.length === 0) this.terminal.hideCursor();
+					if (this.overlayStack.length === 0) {
+						this.terminal.hideCursor();
+						this.invalidateEmittedCursorState();
+					}
 					this.requestRender();
 				}
 			},
@@ -598,7 +609,10 @@ export class TUI extends Container {
 			const topVisible = this.getTopmostVisibleOverlay();
 			this.setFocus(topVisible?.component ?? overlay.preFocus);
 		}
-		if (this.overlayStack.length === 0) this.terminal.hideCursor();
+		if (this.overlayStack.length === 0) {
+			this.terminal.hideCursor();
+			this.invalidateEmittedCursorState();
+		}
 		this.requestRender();
 	}
 
@@ -634,17 +648,24 @@ export class TUI extends Container {
 	}
 
 	start(): void {
+		const restarting = this.stopped;
 		this.stopped = false;
+		if (restarting) this.forceFullRedraw = true;
 		this.terminal.start(
 			(data) => this.handleInput(data),
 			() => this.requestRender(),
 		);
 		this.terminal.hideCursor();
+		this.invalidateEmittedCursorState();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031h");
 		}
 		this.queryCellSize();
-		this.requestRender();
+		if (this.renderRequested) {
+			process.nextTick(() => this.scheduleRender());
+		} else {
+			this.requestRender();
+		}
 	}
 
 	addInputListener(listener: InputListener): () => void {
@@ -709,6 +730,8 @@ export class TUI extends Container {
 		}
 
 		this.terminal.showCursor();
+		this.invalidateEmittedCursorState();
+		this.forceFullRedraw = true;
 		this.terminal.stop();
 	}
 
@@ -1253,25 +1276,69 @@ export class TUI extends Container {
 		return null;
 	}
 
+	private invalidateEmittedCursorState(): void {
+		this.emittedCursorRow = undefined;
+		this.emittedCursorCol = undefined;
+		this.emittedCursorVisible = undefined;
+	}
+
+	private accountEmittedCursorState(state: EmittedCursorState): void {
+		this.emittedCursorRow = state.row;
+		this.emittedCursorCol = state.col;
+		this.emittedCursorVisible = state.visible;
+	}
+
+	private markRenderWriteFailed(): void {
+		this.invalidateEmittedCursorState();
+		this.forceFullRedraw = true;
+		try {
+			this.terminal.write("\x1b[?2026l");
+		} catch {
+			// Preserve the original frame write error. The next render still performs a full redraw.
+		}
+	}
+
 	private buildHardwareCursorUpdate(
 		cursorPos: { row: number; col: number } | null,
 		contentLineCount: number,
 		hardwareCursorRow: number,
 		viewportTop: number,
-	): { sequence: string; hardwareCursorRow: number } {
+		producerMovedCursor: boolean,
+	): { sequence: string; hardwareCursorRow: number; emittedState: EmittedCursorState } {
 		let sequence = "";
 		let nextHardwareCursorRow = hardwareCursorRow;
-		if (cursorPos && contentLineCount > 0) {
-			const targetRow = Math.max(0, Math.min(cursorPos.row, contentLineCount - 1));
-			const rowDiff = targetRow - viewportTop - (hardwareCursorRow - viewportTop);
-			if (rowDiff > 0) sequence += `\x1b[${rowDiff}B`;
-			else if (rowDiff < 0) sequence += `\x1b[${-rowDiff}A`;
-			sequence += `\r\x1b[${Math.max(0, cursorPos.col) + 1}G`;
+		const hasCursor = cursorPos !== null && contentLineCount > 0;
+		const targetRow = hasCursor ? Math.max(0, Math.min(cursorPos.row, contentLineCount - 1)) : undefined;
+		const targetCol = hasCursor ? Math.max(0, cursorPos.col) : undefined;
+		const targetVisible = hasCursor && this.showHardwareCursor;
+		const emittedPositionUnknown = this.emittedCursorRow === undefined || this.emittedCursorCol === undefined;
+		const desiredPositionChanged = this.emittedCursorRow !== targetRow || this.emittedCursorCol !== targetCol;
+
+		if (
+			targetRow !== undefined &&
+			targetCol !== undefined &&
+			(producerMovedCursor || emittedPositionUnknown || desiredPositionChanged)
+		) {
+			if (emittedPositionUnknown && !producerMovedCursor) {
+				const targetScreenRow = Math.max(0, targetRow - viewportTop);
+				sequence += `\x1b[${targetScreenRow + 1};${targetCol + 1}H`;
+			} else {
+				const rowDiff = targetRow - viewportTop - (hardwareCursorRow - viewportTop);
+				if (rowDiff > 0) sequence += `\x1b[${rowDiff}B`;
+				else if (rowDiff < 0) sequence += `\x1b[${-rowDiff}A`;
+				sequence += `\r\x1b[${targetCol + 1}G`;
+			}
 			nextHardwareCursorRow = targetRow;
 		}
 
-		sequence += cursorPos && contentLineCount > 0 && this.showHardwareCursor ? "\x1b[?25h" : "\x1b[?25l";
-		return { sequence, hardwareCursorRow: nextHardwareCursorRow };
+		if (this.emittedCursorVisible === undefined || this.emittedCursorVisible !== targetVisible) {
+			sequence += targetVisible ? "\x1b[?25h" : "\x1b[?25l";
+		}
+		return {
+			sequence,
+			hardwareCursorRow: nextHardwareCursorRow,
+			emittedState: { row: targetRow, col: targetCol, visible: targetVisible },
+		};
 	}
 
 	private doRender(): void {
@@ -1280,6 +1347,9 @@ export class TUI extends Container {
 		const height = this.terminal.rows;
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
 		const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;
+		if (heightChanged && isTermuxSession()) {
+			this.invalidateEmittedCursorState();
+		}
 		const previousBufferLength = this.previousHeight > 0 ? this.previousViewportTop + this.previousHeight : height;
 		let prevViewportTop = heightChanged ? Math.max(0, previousBufferLength - height) : this.previousViewportTop;
 		let viewportTop = prevViewportTop;
@@ -1336,10 +1406,18 @@ export class TUI extends Container {
 				newLines.length,
 				nextCursorRow,
 				nextPreviousViewportTop,
+				true,
 			);
 			buffer += cursorUpdate.sequence;
 			buffer += "\x1b[?2026l"; // End synchronized output
-			this.terminal.write(buffer);
+			try {
+				this.terminal.write(buffer);
+			} catch (error) {
+				this.markRenderWriteFailed();
+				throw error;
+			}
+			this.accountEmittedCursorState(cursorUpdate.emittedState);
+			this.forceFullRedraw = false;
 			this.fullRedrawCount += 1;
 			this.hardwareCursorRow = cursorUpdate.hardwareCursorRow;
 			this.maxLinesRendered = nextMaxLinesRendered;
@@ -1349,6 +1427,11 @@ export class TUI extends Container {
 			this.previousWidth = width;
 			this.previousHeight = height;
 		};
+
+		if (this.forceFullRedraw) {
+			fullRender(true);
+			return;
+		}
 
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
 		const logRedraw = (reason: string): void => {
@@ -1420,15 +1503,23 @@ export class TUI extends Container {
 		}
 		const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;
 
-		// No changes - but still need to update hardware cursor position if it moved
+		// No content changes may still need a desired cursor state update.
 		if (firstChanged === -1) {
 			const cursorUpdate = this.buildHardwareCursorUpdate(
 				cursorPos,
 				newLines.length,
 				hardwareCursorRow,
 				prevViewportTop,
+				false,
 			);
-			this.terminal.write(`\x1b[?2026h${cursorUpdate.sequence}\x1b[?2026l`);
+			if (cursorUpdate.sequence.length === 0) return;
+			try {
+				this.terminal.write(`\x1b[?2026h${cursorUpdate.sequence}\x1b[?2026l`);
+			} catch (error) {
+				this.markRenderWriteFailed();
+				throw error;
+			}
+			this.accountEmittedCursorState(cursorUpdate.emittedState);
 			this.hardwareCursorRow = cursorUpdate.hardwareCursorRow;
 			this.previousViewportTop = prevViewportTop;
 			this.previousHeight = height;
@@ -1470,10 +1561,22 @@ export class TUI extends Container {
 				if (moveBack > 0) {
 					buffer += `\x1b[${moveBack}A`;
 				}
-				const cursorUpdate = this.buildHardwareCursorUpdate(cursorPos, newLines.length, targetRow, prevViewportTop);
+				const cursorUpdate = this.buildHardwareCursorUpdate(
+					cursorPos,
+					newLines.length,
+					targetRow,
+					prevViewportTop,
+					true,
+				);
 				buffer += cursorUpdate.sequence;
 				buffer += "\x1b[?2026l";
-				this.terminal.write(buffer);
+				try {
+					this.terminal.write(buffer);
+				} catch (error) {
+					this.markRenderWriteFailed();
+					throw error;
+				}
+				this.accountEmittedCursorState(cursorUpdate.emittedState);
 				this.hardwareCursorRow = cursorUpdate.hardwareCursorRow;
 			}
 			this.previousLines = newLines;
@@ -1609,6 +1712,7 @@ export class TUI extends Container {
 			newLines.length,
 			finalCursorRow,
 			nextPreviousViewportTop,
+			true,
 		);
 		buffer += cursorUpdate.sequence;
 		buffer += "\x1b[?2026l"; // End synchronized output
@@ -1643,9 +1747,15 @@ export class TUI extends Container {
 		}
 
 		// Write entire buffer at once
-		this.terminal.write(buffer);
+		try {
+			this.terminal.write(buffer);
+		} catch (error) {
+			this.markRenderWriteFailed();
+			throw error;
+		}
 
 		// Commit render accounting only after the terminal accepted the complete frame.
+		this.accountEmittedCursorState(cursorUpdate.emittedState);
 		this.hardwareCursorRow = cursorUpdate.hardwareCursorRow;
 		this.maxLinesRendered = nextMaxLinesRendered;
 		this.previousViewportTop = nextPreviousViewportTop;

@@ -13,6 +13,7 @@ import {
 	setCellDimensions,
 } from "../src/terminal-image.ts";
 import { type Component, CURSOR_MARKER, TUI } from "../src/tui.ts";
+import { LoggingVirtualTerminal } from "./recording-terminal.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class TestComponent implements Component {
@@ -21,71 +22,6 @@ class TestComponent implements Component {
 		return this.lines;
 	}
 	invalidate(): void {}
-}
-
-interface SynchronizedReleaseState {
-	row: number;
-	column: number;
-	cursorVisible: boolean;
-}
-
-class LoggingVirtualTerminal extends VirtualTerminal {
-	private writes: string[] = [];
-	private synchronizedReleaseStates: SynchronizedReleaseState[] = [];
-	private cursorVisible = true;
-	private synchronizedOutput = false;
-	private failNextWrite = false;
-
-	constructor(columns = 80, rows = 24) {
-		super(columns, rows);
-		const xterm = (this as unknown as { xterm: XtermTerminalType }).xterm;
-		xterm.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
-			if (params.includes(25)) this.cursorVisible = true;
-			if (params.includes(2026)) this.synchronizedOutput = true;
-			return false;
-		});
-		xterm.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
-			if (params.includes(25)) this.cursorVisible = false;
-			if (params.includes(2026) && this.synchronizedOutput) {
-				this.synchronizedOutput = false;
-				this.synchronizedReleaseStates.push({
-					row: xterm.buffer.active.cursorY,
-					column: xterm.buffer.active.cursorX,
-					cursorVisible: this.cursorVisible,
-				});
-			}
-			return false;
-		});
-	}
-
-	override write(data: string): void {
-		if (this.failNextWrite) {
-			this.failNextWrite = false;
-			throw new Error("injected terminal write failure");
-		}
-		this.writes.push(data);
-		super.write(data);
-	}
-
-	getWrites(): string {
-		return this.writes.join("");
-	}
-
-	clearWrites(): void {
-		this.writes = [];
-	}
-
-	injectWriteFailure(): void {
-		this.failNextWrite = true;
-	}
-
-	getSynchronizedReleaseStates(): readonly SynchronizedReleaseState[] {
-		return this.synchronizedReleaseStates;
-	}
-
-	clearSynchronizedReleaseStates(): void {
-		this.synchronizedReleaseStates = [];
-	}
 }
 
 async function withEnv<T>(updates: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
