@@ -199,10 +199,25 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				compat.supportsOpenAIGrammarTools,
 			);
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
-			let params = buildParams(model, context, options, compat, grammarToolInputProperties);
+			const providerState = getOpenAIResponsesProviderState(context.providerState);
+			const publicContext = providerState
+				? { ...context, providerState: undefined, systemPrompt: undefined }
+				: context;
+			let params = buildParams(model, publicContext, options, compat, grammarToolInputProperties);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
-				params = nextParams as ResponseCreateParamsStreaming;
+				assertResponseCreateParamsStreaming(nextParams);
+				params = nextParams;
+			}
+			assertResponseCreateParamsStreaming(params);
+			if (providerState) {
+				params = {
+					...params,
+					input: [
+						...responsesCompactionAdapter.renderCheckpoint(model, providerState.checkpoint),
+						...params.input,
+					],
+				};
 			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
@@ -446,6 +461,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonNegativeFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+type ResponseCreateParamsStreamingWithInput = ResponseCreateParamsStreaming & { input: ResponseInput };
+
+function assertResponseCreateParamsStreaming(value: unknown): asserts value is ResponseCreateParamsStreamingWithInput {
+	if (!isRecord(value) || value.stream !== true || typeof value.model !== "string" || !Array.isArray(value.input)) {
+		throw new Error("Invalid before_provider_request result for an OpenAI Responses streaming request");
+	}
 }
 
 function validateUsageObject(value: unknown): value is CompactedResponse["usage"] {
