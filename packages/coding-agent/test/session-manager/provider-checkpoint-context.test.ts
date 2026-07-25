@@ -7,10 +7,10 @@ import type { OpenAIResponsesCheckpointIdentity } from "@earendil-works/pi-ai/ap
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	buildSessionContext,
+	type InternalSessionEntry,
 	type ProviderCheckpoint,
 	type ProviderCheckpointEntry,
 	type SessionContext,
-	type SessionEntry,
 	SessionManager,
 	type SessionMessageEntry,
 } from "../../src/core/session-manager.ts";
@@ -30,9 +30,9 @@ interface ProviderSessionContext extends SessionContext {
 }
 
 type BuildProviderSessionContext = (
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
+	byId?: Map<string, InternalSessionEntry>,
 	options?: ProviderProjectionOptions,
 ) => ProviderSessionContext;
 
@@ -149,8 +149,8 @@ function checkpointValue(
 	};
 }
 
-function asSessionEntries(entries: Array<SessionEntry | ProviderCheckpointEntry>): SessionEntry[] {
-	return entries as SessionEntry[];
+function asSessionEntries(entries: Array<InternalSessionEntry | ProviderCheckpointEntry>): InternalSessionEntry[] {
+	return entries as InternalSessionEntry[];
 }
 
 function corruptCheckpoint(
@@ -165,7 +165,7 @@ function corruptCheckpoint(
 }
 
 function project(
-	entries: Array<SessionEntry | ProviderCheckpointEntry>,
+	entries: Array<InternalSessionEntry | ProviderCheckpointEntry>,
 	identity = identityA,
 	leafId?: string | null,
 ): ProviderSessionContext {
@@ -183,7 +183,7 @@ function messageText(message: AgentMessage): string {
 		.join("\n");
 }
 
-function fixtureWithCheckpoint(): Array<SessionEntry | ProviderCheckpointEntry> {
+function fixtureWithCheckpoint(): Array<InternalSessionEntry | ProviderCheckpointEntry> {
 	return [
 		user("u1", null, "original user one"),
 		assistant("a1", "u1", "original assistant one"),
@@ -345,7 +345,7 @@ describe("provider checkpoint session projection", () => {
 	});
 
 	it("uses checkpoint ancestry for forks before and after the frontier", () => {
-		const entries: Array<SessionEntry | ProviderCheckpointEntry> = [
+		const entries: Array<InternalSessionEntry | ProviderCheckpointEntry> = [
 			...fixtureWithCheckpoint(),
 			user("parent-later", "a2", "parent-only later work"),
 			user("fork-before", "a1", "fork before checkpoint"),
@@ -372,7 +372,7 @@ describe("provider checkpoint session projection", () => {
 			predecessorEntryId: "cp1",
 			windowGeneration: 2,
 		});
-		const entries: Array<SessionEntry | ProviderCheckpointEntry> = [
+		const entries: Array<InternalSessionEntry | ProviderCheckpointEntry> = [
 			user("u1", null, "original user one"),
 			assistant("a1", "u1", "original assistant one"),
 			checkpointEntry("cp1", "a1", first),
@@ -389,6 +389,52 @@ describe("provider checkpoint session projection", () => {
 	});
 
 	it.each([
+		[
+			"empty payload id",
+			(entry: ProviderCheckpointEntry) =>
+				corruptCheckpoint(entry, (checkpoint) => {
+					const payload = checkpoint.payload as Record<string, unknown>;
+					payload.id = "";
+				}),
+		],
+		[
+			"negative payload usage",
+			(entry: ProviderCheckpointEntry) =>
+				corruptCheckpoint(entry, (checkpoint) => {
+					const payload = checkpoint.payload as { usage: Record<string, unknown> };
+					payload.usage.input_tokens = -1;
+				}),
+		],
+		[
+			"empty payload output",
+			(entry: ProviderCheckpointEntry) =>
+				corruptCheckpoint(entry, (checkpoint) => {
+					const payload = checkpoint.payload as Record<string, unknown>;
+					payload.output = [];
+				}),
+		],
+		[
+			"primitive payload output item",
+			(entry: ProviderCheckpointEntry) =>
+				corruptCheckpoint(entry, (checkpoint) => {
+					const payload = checkpoint.payload as Record<string, unknown>;
+					payload.output = ["private-primitive"];
+				}),
+		],
+		[
+			"negative public usage",
+			(entry: ProviderCheckpointEntry) =>
+				corruptCheckpoint(entry, (checkpoint) => {
+					checkpoint.usage = {
+						input: -1,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+				}),
+		],
 		[
 			"version",
 			(entry: ProviderCheckpointEntry) =>
@@ -427,7 +473,7 @@ describe("provider checkpoint session projection", () => {
 	])("skips a malformed loaded checkpoint %s and preserves portable history", (_kind, makeMalformed) => {
 		const valid = checkpointEntry("cp1", "a1", checkpointValue("cmp_1", "a1"));
 		const malformed = makeMalformed(valid);
-		const entries: Array<SessionEntry | ProviderCheckpointEntry> = [
+		const entries: Array<InternalSessionEntry | ProviderCheckpointEntry> = [
 			user("u1", null, "original user one"),
 			assistant("a1", "u1", "original assistant one"),
 			malformed,
@@ -458,7 +504,7 @@ describe("provider checkpoint session projection", () => {
 			timestamp: "2026-07-24T00:00:02.000Z",
 			checkpoint: malformedCheckpoint,
 		} as unknown as ProviderCheckpointEntry;
-		const entries: Array<SessionEntry | ProviderCheckpointEntry> = [
+		const entries: Array<InternalSessionEntry | ProviderCheckpointEntry> = [
 			user("u1", null, "original user one"),
 			assistant("a1", "u1", "original assistant one"),
 			malformed,
@@ -474,7 +520,7 @@ describe("provider checkpoint session projection", () => {
 		]);
 	});
 
-	it("rejects a loaded boundary checkpoint with a stale non-immediate frontier while preserving its projection", () => {
+	it("rejects a loaded boundary checkpoint with a stale non-immediate frontier and emits no boundary context", () => {
 		const boundary = {
 			type: "compaction_boundary",
 			id: "b1",
@@ -501,7 +547,7 @@ describe("provider checkpoint session projection", () => {
 			assistant("a2", "u2", "intervening assistant"),
 			boundary,
 			user("u3", "b1", "after stale boundary"),
-		] as unknown as SessionEntry[];
+		] as unknown as InternalSessionEntry[];
 
 		const context = project(entries);
 		expect(context.providerCheckpoint).toBeUndefined();
@@ -510,10 +556,9 @@ describe("provider checkpoint session projection", () => {
 			"original assistant",
 			"intervening user",
 			"intervening assistant",
-			"",
 			"after stale boundary",
 		]);
-		expect(context.messages[4]).toMatchObject({ role: "compactionSummary", summary: "portable stale projection" });
+		expect(context.messages.some((message) => message.role === "compactionSummary")).toBe(false);
 	});
 
 	it("does not replay a later valid checkpoint whose predecessor chain contains an invalid loaded checkpoint", () => {
@@ -525,7 +570,7 @@ describe("provider checkpoint session projection", () => {
 			"a2",
 			checkpointValue("cmp_2", "a2", { predecessorEntryId: "cp1", windowGeneration: 2 }),
 		);
-		const entries: Array<SessionEntry | ProviderCheckpointEntry> = [
+		const entries: Array<InternalSessionEntry | ProviderCheckpointEntry> = [
 			user("u1", null, "original user one"),
 			assistant("a1", "u1", "original assistant one"),
 			first,
@@ -550,7 +595,7 @@ describe("provider checkpoint session projection", () => {
 		const first = checkpointValue("cmp_1", "a1");
 		const second = checkpointValue("cmp_2", "a2", { predecessorEntryId: "cp1", windowGeneration: 2 });
 		const staleDependent = checkpointValue("cmp_3", "a3", { predecessorEntryId: "cp1", windowGeneration: 3 });
-		const entries: Array<SessionEntry | ProviderCheckpointEntry> = [
+		const entries: Array<InternalSessionEntry | ProviderCheckpointEntry> = [
 			user("u1", null, "original user one"),
 			assistant("a1", "u1", "original assistant one"),
 			checkpointEntry("cp1", "a1", first),
@@ -601,7 +646,7 @@ describe("provider checkpoint session projection", () => {
 			predecessorEntryId: "cp1",
 			windowGeneration: 2,
 		});
-		const entries: Array<SessionEntry | ProviderCheckpointEntry> = [
+		const entries: Array<InternalSessionEntry | ProviderCheckpointEntry> = [
 			user("u1", null, "original user one"),
 			assistant("a1", "u1", "original assistant one"),
 			checkpointEntry("cp1", "a1", first),
@@ -655,7 +700,7 @@ describe("provider checkpoint session projection", () => {
 	});
 
 	it("preserves post-frontier message order and a closed tool call/result pair", () => {
-		const entries: Array<SessionEntry | ProviderCheckpointEntry> = [
+		const entries: Array<InternalSessionEntry | ProviderCheckpointEntry> = [
 			user("u1", null, "original user one"),
 			assistant("a1", "u1", "original assistant one"),
 			checkpointEntry("cp1", "a1", checkpointValue("cmp_1", "a1")),

@@ -21,7 +21,7 @@ import {
 	type SessionCompactEvent,
 	type SessionEvent,
 } from "../src/core/extensions/index.ts";
-import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
+import { type InternalSessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createCodingTools } from "../src/index.ts";
@@ -72,7 +72,7 @@ async function createAggregationRunner(factories: Array<(pi: ExtensionAPI) => vo
 
 type RawSessionBeforeCompactEvent = Omit<SessionBeforeCompactEvent, "preparation" | "branchEntries"> & {
 	preparation: CompactionPreparation;
-	branchEntries: SessionEntry[];
+	branchEntries: InternalSessionEntry[];
 };
 
 const beforeCompactEvent: RawSessionBeforeCompactEvent = {

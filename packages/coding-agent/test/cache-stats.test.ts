@@ -6,7 +6,7 @@ import {
 	detectCacheMiss,
 	type ModelPriceSource,
 } from "../src/core/cache-stats.ts";
-import type { SessionEntry } from "../src/core/session-manager.ts";
+import type { InternalSessionEntry } from "../src/core/session-manager.ts";
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 
@@ -42,8 +42,8 @@ function assistant(options: {
 	} as AssistantMessage;
 }
 
-function entry(message: AssistantMessage): SessionEntry {
-	return { type: "message", id: "x", parentId: null, timestamp: "", message } as SessionEntry;
+function entry(message: AssistantMessage): InternalSessionEntry {
+	return { type: "message", id: "x", parentId: null, timestamp: "", message } as InternalSessionEntry;
 }
 
 // Turn 1: fresh 100k cache write at $3.75/M
@@ -73,7 +73,7 @@ describe("computeCacheWaste", () => {
 	});
 
 	it("skips the turn after a compaction reset", () => {
-		const reset = { type: "compaction", id: "c", parentId: null, timestamp: "" } as SessionEntry;
+		const reset = { type: "compaction", id: "c", parentId: null, timestamp: "" } as InternalSessionEntry;
 		const afterReset = assistant({ cacheWrite: 20_000, cost: { cacheWrite: 0.075 } });
 		const totals = computeCacheWaste([entry(turn1), reset, entry(afterReset)], models);
 		expect(totals.missedTokens).toBe(0);

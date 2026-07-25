@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { Usage } from "@earendil-works/pi-ai";
-import { OPENAI_RESPONSES_COMPACTION_ADAPTER } from "@earendil-works/pi-ai";
+import { OPENAI_RESPONSES_COMPACTION_ADAPTER, type Usage } from "@earendil-works/pi-ai";
+import { isValidOpenAIResponsesCheckpointPayload } from "@earendil-works/pi-ai/api/openai-responses";
 import type {
 	CompactionEntry,
 	ProviderCheckpoint,
@@ -120,14 +120,16 @@ function isUsage(value: unknown): value is Usage {
 	)
 		return false;
 	for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) {
-		if (!Number.isFinite(value[key])) return false;
+		if (!Number.isFinite(value[key]) || (value[key] as number) < 0) return false;
 	}
 	for (const key of ["cacheWrite1h", "reasoning"] as const) {
-		if (value[key] !== undefined && !Number.isFinite(value[key])) return false;
+		if (value[key] !== undefined && (!Number.isFinite(value[key]) || (value[key] as number) < 0)) return false;
 	}
 	const cost = value.cost;
 	if (!isRecord(cost) || !hasOnlyKeys(cost, ["input", "output", "cacheRead", "cacheWrite", "total"])) return false;
-	return ["input", "output", "cacheRead", "cacheWrite", "total"].every((key) => Number.isFinite(cost[key]));
+	return ["input", "output", "cacheRead", "cacheWrite", "total"].every(
+		(key) => Number.isFinite(cost[key]) && (cost[key] as number) >= 0,
+	);
 }
 
 function isProjection(value: unknown): value is PortableCompactionProjection {
@@ -201,18 +203,15 @@ function isCheckpoint(value: unknown): value is ProviderCheckpoint {
 		value.type === "provider_checkpoint" &&
 		value.version === 1 &&
 		typeof value.frontierEntryId === "string" &&
-		value.frontierEntryId.length > 0 &&
+		value.frontierEntryId.trim().length > 0 &&
 		(value.predecessorEntryId === undefined ||
-			(typeof value.predecessorEntryId === "string" && value.predecessorEntryId.length > 0)) &&
+			(typeof value.predecessorEntryId === "string" && value.predecessorEntryId.trim().length > 0)) &&
 		Number.isSafeInteger(value.windowGeneration) &&
 		(value.windowGeneration as number) >= 1 &&
 		(value.metadata === undefined || (isRecord(value.metadata) && isJsonValue(value.metadata))) &&
 		(value.usage === undefined || isUsage(value.usage)) &&
-		typeof payload.id === "string" &&
-		Number.isFinite(payload.created_at) &&
-		payload.object === "response.compaction" &&
-		Array.isArray(payload.output) &&
-		isJsonValue(payload.output)
+		isValidOpenAIResponsesCheckpointPayload(payload) &&
+		isJsonValue(payload)
 	);
 }
 

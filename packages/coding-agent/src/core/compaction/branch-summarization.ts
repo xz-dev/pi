@@ -15,7 +15,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
+import type { InternalSessionEntry, ReadonlySessionManager } from "../session-manager.ts";
 import { completeSummarization, estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
@@ -59,7 +59,7 @@ export interface BranchPreparation {
 
 export interface CollectEntriesResult {
 	/** Entries to summarize, in chronological order */
-	entries: SessionEntry[];
+	entries: InternalSessionEntry[];
 	/** Common ancestor between old and new position, if any */
 	commonAncestorId: string | null;
 }
@@ -129,7 +129,7 @@ export function collectEntriesForBranchSummary(
 	}
 
 	// Collect entries from old leaf back to common ancestor
-	const entries: SessionEntry[] = [];
+	const entries: InternalSessionEntry[] = [];
 	let current: string | null = oldLeafId;
 
 	while (current && current !== commonAncestorId) {
@@ -153,7 +153,7 @@ export function collectEntriesForBranchSummary(
  * Extract AgentMessage from a session entry.
  * Similar to getMessageFromEntry in compaction.ts but also handles compaction entries.
  */
-function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
+function getMessageFromEntry(entry: InternalSessionEntry): AgentMessage | undefined {
 	switch (entry.type) {
 		case "message":
 			// Skip tool results - context is in assistant's tool call
@@ -192,7 +192,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
  * @param entries - Entries in chronological order
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
  */
-export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: number = 0): BranchPreparation {
+export function prepareBranchEntries(entries: InternalSessionEntry[], tokenBudget: number = 0): BranchPreparation {
 	const messages: AgentMessage[] = [];
 	const fileOps = createFileOps();
 	let totalTokens = 0;
@@ -291,7 +291,7 @@ Keep each section concise. Preserve exact file paths, function names, and error 
  * @param options - Generation options
  */
 export async function generateBranchSummary(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
 	const {

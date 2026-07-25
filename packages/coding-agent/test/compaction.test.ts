@@ -20,10 +20,10 @@ import {
 	type CompactionBoundaryDraft,
 	type CompactionEntry,
 	type CustomMessageEntry,
+	type InternalSessionEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	parseSessionEntries,
-	type SessionEntry,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "../src/core/session-manager.ts";
@@ -32,12 +32,12 @@ import {
 // Test fixtures
 // ============================================================================
 
-function loadLargeSessionEntries(): SessionEntry[] {
+function loadLargeSessionEntries(): InternalSessionEntry[] {
 	const sessionPath = join(__dirname, "fixtures/large-session.jsonl");
 	const content = readFileSync(sessionPath, "utf-8");
 	const entries = parseSessionEntries(content);
 	migrateSessionEntries(entries); // Add id/parentId for v1 fixtures
-	return entries.filter((e): e is SessionEntry => e.type !== "session");
+	return entries.filter((e): e is InternalSessionEntry => e.type !== "session");
 }
 
 function createMockUsage(input: number, output: number, cacheRead = 0, cacheWrite = 0): Usage {
@@ -205,7 +205,7 @@ describe("Token calculation", () => {
 
 describe("getLastAssistantUsage", () => {
 	it("should find the last non-aborted assistant message usage", () => {
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			createMessageEntry(createUserMessage("Hello")),
 			createMessageEntry(createAssistantMessage("Hi", createMockUsage(100, 50))),
 			createMessageEntry(createUserMessage("How are you?")),
@@ -223,7 +223,7 @@ describe("getLastAssistantUsage", () => {
 			stopReason: "aborted",
 		};
 
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			createMessageEntry(createUserMessage("Hello")),
 			createMessageEntry(createAssistantMessage("Hi", createMockUsage(100, 50))),
 			createMessageEntry(createUserMessage("How are you?")),
@@ -236,7 +236,7 @@ describe("getLastAssistantUsage", () => {
 	});
 
 	it("should skip all-zero assistant usage", () => {
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			createMessageEntry(createUserMessage("Hello")),
 			createMessageEntry(createAssistantMessage("Hi", createMockUsage(100, 50))),
 			createMessageEntry(createUserMessage("continue")),
@@ -249,7 +249,7 @@ describe("getLastAssistantUsage", () => {
 	});
 
 	it("should return undefined if no assistant messages", () => {
-		const entries: SessionEntry[] = [createMessageEntry(createUserMessage("Hello"))];
+		const entries: InternalSessionEntry[] = [createMessageEntry(createUserMessage("Hello"))];
 		expect(getLastAssistantUsage(entries)).toBeUndefined();
 	});
 });
@@ -298,7 +298,7 @@ describe("shouldCompact", () => {
 describe("findCutPoint", () => {
 	it("should find cut point based on actual token differences", () => {
 		// Create entries with cumulative token counts
-		const entries: SessionEntry[] = [];
+		const entries: InternalSessionEntry[] = [];
 		for (let i = 0; i < 10; i++) {
 			entries.push(createMessageEntry(createUserMessage(`User ${i}`)));
 			entries.push(
@@ -317,13 +317,13 @@ describe("findCutPoint", () => {
 	});
 
 	it("should return startIndex if no valid cut points in range", () => {
-		const entries: SessionEntry[] = [createMessageEntry(createAssistantMessage("a"))];
+		const entries: InternalSessionEntry[] = [createMessageEntry(createAssistantMessage("a"))];
 		const result = findCutPoint(entries, 0, entries.length, 1000);
 		expect(result.firstKeptEntryIndex).toBe(0);
 	});
 
 	it("should keep everything if all messages fit within budget", () => {
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			createMessageEntry(createUserMessage("1")),
 			createMessageEntry(createAssistantMessage("a", createMockUsage(0, 50, 500, 0))),
 			createMessageEntry(createUserMessage("2")),
@@ -336,7 +336,7 @@ describe("findCutPoint", () => {
 
 	it("should indicate split turn when cutting at assistant message", () => {
 		// Create a scenario where we cut at an assistant message mid-turn
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			createMessageEntry(createUserMessage("Turn 1")),
 			createMessageEntry(createAssistantMessage("A1", createMockUsage(0, 100, 1000, 0))),
 			createMessageEntry(createUserMessage("Turn 2")), // index 2
@@ -357,7 +357,7 @@ describe("findCutPoint", () => {
 	});
 
 	it("should budget context-visible custom message entries", () => {
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			createMessageEntry(createUserMessage("hi")),
 			createMessageEntry(createAssistantMessage("hello")),
 			createCustomMessageEntry("x".repeat(4000)),
@@ -378,7 +378,7 @@ describe("findCutPoint", () => {
 
 describe("buildSessionContext", () => {
 	it("should load all messages when no compaction", () => {
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			createMessageEntry(createUserMessage("1")),
 			createMessageEntry(createAssistantMessage("a")),
 			createMessageEntry(createUserMessage("2")),
@@ -401,7 +401,7 @@ describe("buildSessionContext", () => {
 		const u3 = createMessageEntry(createUserMessage("3"));
 		const a3 = createMessageEntry(createAssistantMessage("c"));
 
-		const entries: SessionEntry[] = [u1, a1, u2, a2, compaction, u3, a3];
+		const entries: InternalSessionEntry[] = [u1, a1, u2, a2, compaction, u3, a3];
 
 		const loaded = buildSessionContext(entries);
 		// summary + kept (u2, a2) + after (u3, a3) = 5
@@ -425,7 +425,7 @@ describe("buildSessionContext", () => {
 		const u4 = createMessageEntry(createUserMessage("4"));
 		const d = createMessageEntry(createAssistantMessage("d"));
 
-		const entries: SessionEntry[] = [u1, a1, compact1, u2, b, u3, c, compact2, u4, d];
+		const entries: InternalSessionEntry[] = [u1, a1, compact1, u2, b, u3, c, compact2, u4, d];
 
 		const loaded = buildSessionContext(entries);
 		// summary + kept from u3 (u3, c) + after (u4, d) = 5
@@ -440,7 +440,7 @@ describe("buildSessionContext", () => {
 		const u2 = createMessageEntry(createUserMessage("2"));
 		const b = createMessageEntry(createAssistantMessage("b"));
 
-		const entries: SessionEntry[] = [u1, a1, compact1, u2, b];
+		const entries: InternalSessionEntry[] = [u1, a1, compact1, u2, b];
 
 		const loaded = buildSessionContext(entries);
 		// summary + all messages (u1, a1, u2, b) = 5
@@ -448,7 +448,7 @@ describe("buildSessionContext", () => {
 	});
 
 	it("should track model and thinking level changes", () => {
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			createMessageEntry(createUserMessage("1")),
 			createModelChangeEntry("openai", "gpt-4"),
 			createMessageEntry(createAssistantMessage("a")),
@@ -480,12 +480,12 @@ describe("prepareCompaction with previous compaction", () => {
 		expect(preparation).toBeUndefined();
 	});
 
-	it("uses a generic text boundary summary and frontier for repeated compaction", () => {
+	it("uses a generic text boundary summary, frontier, and only active portable projections for repeated compaction", () => {
 		const u1 = createMessageEntry(createUserMessage("old history ".repeat(30)));
 		const a1 = createMessageEntry(createAssistantMessage("old answer ".repeat(30)));
 		const u2 = createMessageEntry(createUserMessage("kept history ".repeat(30)));
 		const a2 = createMessageEntry(createAssistantMessage("kept answer ".repeat(30)));
-		const boundary: SessionEntry = {
+		const boundary: InternalSessionEntry = {
 			type: "compaction_boundary",
 			id: "boundary",
 			parentId: a2.id,
@@ -499,7 +499,14 @@ describe("prepareCompaction with previous compaction", () => {
 					firstKeptEntryId: u2.id,
 					fromExtension: false,
 				},
-				projections: [],
+				projections: [
+					{
+						type: "portable_compaction_projection",
+						version: 1,
+						customType: "test.active-projection",
+						summary: "active projection metadata",
+					},
+				],
 			} satisfies CompactionBoundaryDraft,
 		};
 		const u3 = { ...createMessageEntry(createUserMessage("new history ".repeat(30))), parentId: boundary.id };
@@ -512,6 +519,10 @@ describe("prepareCompaction with previous compaction", () => {
 		const summarizedText = extractText(preparation!.messagesToSummarize);
 		expect(summarizedText).toContain("kept history");
 		expect(summarizedText).not.toContain("old history");
+		expect(summarizedText).not.toContain("active projection metadata");
+		expect(extractText(buildSessionContext([u1, a1, u2, a2, boundary, u3, a3]).messages)).toContain(
+			"active projection metadata",
+		);
 	});
 
 	it("should re-summarize previously kept messages when the recent window moves past them", () => {

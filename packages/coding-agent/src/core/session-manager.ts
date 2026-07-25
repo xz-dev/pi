@@ -9,6 +9,7 @@ import {
 	type Usage,
 	uuidv7,
 } from "@earendil-works/pi-ai";
+import { isValidOpenAIResponsesCheckpointPayload } from "@earendil-works/pi-ai/api/openai-responses";
 import { randomUUID } from "crypto";
 import {
 	closeSync,
@@ -285,8 +286,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	display: boolean;
 }
 
-/** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
-export type SessionEntry =
+/** Stored session entry used only by core persistence and context reconstruction. */
+export type InternalSessionEntry =
 	| SessionMessageEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
@@ -306,21 +307,28 @@ export interface PublicSessionMessageEntry extends Omit<SessionMessageEntry, "me
 /** Records that a model transition occurred without exposing provider or model identity. */
 export type PublicModelChangeEntry = Omit<ModelChangeEntry, "provider" | "modelId">;
 
-export type PublicSessionEntry =
-	| Exclude<
-			SessionEntry,
-			SessionMessageEntry | ModelChangeEntry | ProviderCheckpointEntry | StoredCompactionBoundaryEntry
-	  >
+/** Public provider-neutral session entry. Private stored checkpoint structures are deliberately absent. */
+export type SessionEntry =
+	| ThinkingLevelChangeEntry
+	| CompactionEntry
+	| BranchSummaryEntry
+	| CustomEntry
+	| CustomMessageEntry
+	| LabelEntry
+	| SessionInfoEntry
 	| PublicSessionMessageEntry
 	| PublicModelChangeEntry
 	| CompactionBoundaryEntry;
 
+/** @deprecated SessionEntry is already the public provider-neutral entry union. */
+export type PublicSessionEntry = SessionEntry;
+
 /** Raw file entry (includes header) */
-export type FileEntry = SessionHeader | SessionEntry;
+export type FileEntry = SessionHeader | InternalSessionEntry;
 
 /** Tree node for getTree() - defensive copy of session structure */
 export interface SessionTreeNode {
-	entry: SessionEntry;
+	entry: InternalSessionEntry;
 	children: SessionTreeNode[];
 	/** Resolved label for this entry, if any */
 	label?: string;
@@ -369,8 +377,10 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionName"
 >;
 
-export function toPublicSessionEntry(entry: SessionEntry): PublicSessionEntry | undefined {
-	if (entry.type === "provider_checkpoint") return toCompactionBoundary(entry);
+export function toPublicSessionEntry(entry: InternalSessionEntry): PublicSessionEntry | undefined {
+	if (entry.type === "provider_checkpoint") {
+		return isValidProviderCheckpointValue(entry.checkpoint) ? toCompactionBoundary(entry) : undefined;
+	}
 	if (entry.type === "compaction_boundary") {
 		const boundary = decodeStoredCompactionBoundaryEntry(entry);
 		return boundary ? toCompactionBoundary(boundary) : undefined;
@@ -385,9 +395,68 @@ export function toPublicSessionEntry(entry: SessionEntry): PublicSessionEntry | 
 	return structuredClone(entry);
 }
 
-export interface PublicSessionTreeNode extends Omit<SessionTreeNode, "entry" | "children"> {
+export interface PublicSessionTreeNode {
 	entry: PublicSessionEntry;
 	children: PublicSessionTreeNode[];
+	label?: string;
+	labelTimestamp?: string;
+}
+
+export interface PublicSessionProjection {
+	entries: PublicSessionEntry[];
+	leafId: string | null;
+}
+
+/** Sanitize stored entries and reconnect visible descendants to the nearest visible ancestor. */
+export function projectPublicSessionEntries(
+	entries: readonly InternalSessionEntry[],
+	leafId: string | null,
+): PublicSessionProjection {
+	const storedById = new Map(entries.map((entry) => [entry.id, entry]));
+	const visibleById = new Map<string, PublicSessionEntry>();
+	const nearestVisibleParent = (parentId: string | null): string | null => {
+		const seen = new Set<string>();
+		let currentId = parentId;
+		while (currentId && !seen.has(currentId)) {
+			seen.add(currentId);
+			if (visibleById.has(currentId)) return currentId;
+			currentId = storedById.get(currentId)?.parentId ?? null;
+		}
+		return null;
+	};
+	for (const stored of entries) {
+		const isReduction = stored.type === "provider_checkpoint" || stored.type === "compaction_boundary";
+		if (isReduction) {
+			const path = buildSessionPath([...entries], stored.id);
+			if (getLatestReductionEntry(path)?.id !== stored.id) continue;
+		}
+		const entry = toPublicSessionEntry(stored);
+		if (!entry) continue;
+		const projected: PublicSessionEntry = { ...entry, parentId: nearestVisibleParent(stored.parentId) };
+		visibleById.set(projected.id, projected);
+	}
+	return {
+		entries: [...visibleById.values()],
+		leafId: nearestVisibleParent(leafId) ?? (leafId && visibleById.has(leafId) ? leafId : null),
+	};
+}
+
+export function buildPublicSessionTree(
+	projection: PublicSessionProjection,
+	getLabel?: (id: string) => string | undefined,
+): PublicSessionTreeNode[] {
+	const nodes = new Map<string, PublicSessionTreeNode>();
+	const roots: PublicSessionTreeNode[] = [];
+	for (const entry of projection.entries) {
+		nodes.set(entry.id, { entry, children: [], label: getLabel?.(entry.id) });
+	}
+	for (const entry of projection.entries) {
+		const node = nodes.get(entry.id)!;
+		const parent = entry.parentId ? nodes.get(entry.parentId) : undefined;
+		if (parent) parent.children.push(node);
+		else roots.push(node);
+	}
+	return roots;
 }
 
 export type ExtensionSessionManagerView = Omit<
@@ -403,33 +472,34 @@ export type ExtensionSessionManagerView = Omit<
 };
 
 export function createExtensionSessionManagerView(manager: SessionManager): ExtensionSessionManagerView {
-	const sanitizeEntries = (entries: SessionEntry[]): PublicSessionEntry[] =>
-		entries.map(toPublicSessionEntry).filter((entry): entry is PublicSessionEntry => entry !== undefined);
-	const sanitizeTree = (nodes: SessionTreeNode[]): ReturnType<ExtensionSessionManagerView["getTree"]> =>
-		nodes.flatMap((node) => {
-			const entry = toPublicSessionEntry(node.entry);
-			return entry ? [{ ...node, entry, children: sanitizeTree(node.children) }] : sanitizeTree(node.children);
-		});
+	const project = (entries: InternalSessionEntry[], leafId: string | null) =>
+		projectPublicSessionEntries(entries, leafId);
 	return {
 		getCwd: () => manager.getCwd(),
 		getSessionDir: () => manager.getSessionDir(),
 		getSessionId: () => manager.getSessionId(),
 		getSessionFile: () => manager.getSessionFile(),
-		getLeafId: () => manager.getLeafId(),
+		getLeafId: () => project(manager.getEntries(), manager.getLeafId()).leafId,
 		getLeafEntry: () => {
-			const entry = manager.getLeafEntry();
-			return entry ? toPublicSessionEntry(entry) : undefined;
+			const projection = project(manager.getEntries(), manager.getLeafId());
+			return projection.entries.find((entry) => entry.id === projection.leafId);
 		},
-		getEntry: (id) => {
-			const entry = manager.getEntry(id);
-			return entry ? toPublicSessionEntry(entry) : undefined;
-		},
+		getEntry: (id) => project(manager.getEntries(), manager.getLeafId()).entries.find((entry) => entry.id === id),
 		getLabel: (id) => manager.getLabel(id),
-		getBranch: (fromId) => sanitizeEntries(manager.getBranch(fromId)),
-		buildContextEntries: () => sanitizeEntries(manager.buildContextEntries()),
+		getBranch: (fromId) => {
+			const branch = manager.getBranch(fromId);
+			return project(branch, branch.at(-1)?.id ?? null).entries;
+		},
+		buildContextEntries: () => {
+			const entries = manager.buildContextEntries();
+			return project(entries, entries.at(-1)?.id ?? null).entries;
+		},
 		getHeader: () => structuredClone(manager.getHeader()),
-		getEntries: () => sanitizeEntries(manager.getEntries()),
-		getTree: () => sanitizeTree(manager.getTree()),
+		getEntries: () => project(manager.getEntries(), manager.getLeafId()).entries,
+		getTree: () => {
+			const projection = project(manager.getEntries(), manager.getLeafId());
+			return buildPublicSessionTree(projection, (id) => manager.getLabel(id));
+		},
 		getSessionName: () => manager.getSessionName(),
 	};
 }
@@ -542,7 +612,7 @@ export function parseSessionEntries(content: string): FileEntry[] {
 	return entries;
 }
 
-export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
+export function getLatestCompactionEntry(entries: InternalSessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (entries[i].type === "compaction") return entries[i] as CompactionEntry;
 	}
@@ -550,11 +620,11 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 }
 
 /** Return the latest structurally valid ancestral reduction of any persisted format. */
-export function getLatestReductionEntry(entries: SessionEntry[]): SessionEntry | null {
+export function getLatestReductionEntry(entries: InternalSessionEntry[]): InternalSessionEntry | null {
 	const path = buildSessionPath(entries);
 	const pathIndex = new Map(path.map((entry, index) => [entry.id, index]));
 	let latestCheckpoint: CheckpointReductionEntry | null = null;
-	let latestReduction: SessionEntry | null = null;
+	let latestReduction: InternalSessionEntry | null = null;
 	for (const rawEntry of path) {
 		if (rawEntry.type === "compaction") {
 			latestReduction = rawEntry;
@@ -570,7 +640,12 @@ export function getLatestReductionEntry(entries: SessionEntry[]): SessionEntry |
 			if (entry.boundary.primary.kind === "text") {
 				const boundaryIndex = pathIndex.get(entry.id);
 				const keptIndex = pathIndex.get(entry.boundary.primary.firstKeptEntryId);
-				if (boundaryIndex !== undefined && keptIndex !== undefined && keptIndex < boundaryIndex) {
+				if (
+					boundaryIndex !== undefined &&
+					keptIndex !== undefined &&
+					keptIndex < boundaryIndex &&
+					entry.parentId === path[boundaryIndex - 1]?.id
+				) {
 					latestReduction = entry;
 					latestCheckpoint = null;
 				}
@@ -585,6 +660,37 @@ export function getLatestReductionEntry(entries: SessionEntry[]): SessionEntry |
 
 function cloneProviderCheckpoint(checkpoint: ProviderCheckpoint): ProviderCheckpoint {
 	return structuredClone(checkpoint);
+}
+
+function isNonNegativeFinite(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isValidProviderCheckpointValue(value: unknown): value is ProviderCheckpoint {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const checkpoint = value as Partial<ProviderCheckpoint>;
+	return (
+		checkpoint.type === "provider_checkpoint" &&
+		checkpoint.version === 1 &&
+		isProviderCheckpointIdentity(checkpoint.identity) &&
+		typeof checkpoint.frontierEntryId === "string" &&
+		checkpoint.frontierEntryId.trim().length > 0 &&
+		(checkpoint.predecessorEntryId === undefined ||
+			(typeof checkpoint.predecessorEntryId === "string" && checkpoint.predecessorEntryId.trim().length > 0)) &&
+		Number.isSafeInteger(checkpoint.windowGeneration) &&
+		checkpoint.windowGeneration! >= 1 &&
+		(checkpoint.metadata === undefined ||
+			(typeof checkpoint.metadata === "object" &&
+				checkpoint.metadata !== null &&
+				!Array.isArray(checkpoint.metadata))) &&
+		(checkpoint.usage === undefined ||
+			(isNonNegativeFinite(checkpoint.usage.input) &&
+				isNonNegativeFinite(checkpoint.usage.output) &&
+				isNonNegativeFinite(checkpoint.usage.cacheRead) &&
+				isNonNegativeFinite(checkpoint.usage.cacheWrite) &&
+				isNonNegativeFinite(checkpoint.usage.totalTokens))) &&
+		isValidOpenAIResponsesCheckpointPayload(checkpoint.payload)
+	);
 }
 
 function assertJsonValue(value: unknown, path = "value"): void {
@@ -687,15 +793,7 @@ function isValidLoadedProviderCheckpoint(
 	const entry = value as Partial<ProviderCheckpointEntry>;
 	if (entry.type !== "provider_checkpoint" || typeof entry.id !== "string") return false;
 	const checkpoint = entry.checkpoint;
-	if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) return false;
-	if (
-		checkpoint.type !== "provider_checkpoint" ||
-		checkpoint.version !== 1 ||
-		!isProviderCheckpointIdentity(checkpoint.identity) ||
-		typeof checkpoint.frontierEntryId !== "string"
-	) {
-		return false;
-	}
+	if (!isValidProviderCheckpointValue(checkpoint)) return false;
 
 	const checkpointIndex = pathIndex.get(entry.id);
 	const frontierIndex = pathIndex.get(checkpoint.frontierEntryId);
@@ -727,14 +825,7 @@ function isValidLoadedBoundaryCheckpoint(
 	const primary = entry.boundary.primary;
 	if (primary.kind !== "checkpoint") return false;
 	const checkpoint = primary.checkpoint;
-	if (
-		checkpoint.type !== "provider_checkpoint" ||
-		checkpoint.version !== 1 ||
-		!isProviderCheckpointIdentity(checkpoint.identity) ||
-		typeof checkpoint.frontierEntryId !== "string"
-	) {
-		return false;
-	}
+	if (!isValidProviderCheckpointValue(checkpoint)) return false;
 	const boundaryIndex = pathIndex.get(entry.id);
 	const frontierIndex = pathIndex.get(checkpoint.frontierEntryId);
 	if (
@@ -755,9 +846,12 @@ function isValidLoadedBoundaryCheckpoint(
 	);
 }
 
-function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntry>): Map<string, SessionEntry> {
+function buildEntryIndex(
+	entries: InternalSessionEntry[],
+	byId?: Map<string, InternalSessionEntry>,
+): Map<string, InternalSessionEntry> {
 	if (byId) return byId;
-	const index = new Map<string, SessionEntry>();
+	const index = new Map<string, InternalSessionEntry>();
 	for (const entry of entries) {
 		index.set(entry.id, entry);
 	}
@@ -765,12 +859,12 @@ function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntr
 }
 
 function buildSessionPath(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
-): SessionEntry[] {
+	byId?: Map<string, InternalSessionEntry>,
+): InternalSessionEntry[] {
 	const index = buildEntryIndex(entries, byId);
-	let leaf: SessionEntry | undefined;
+	let leaf: InternalSessionEntry | undefined;
 	if (leafId === null) {
 		return [];
 	}
@@ -782,8 +876,8 @@ function buildSessionPath(
 		return [];
 	}
 
-	const path: SessionEntry[] = [];
-	let current: SessionEntry | undefined = leaf;
+	const path: InternalSessionEntry[] = [];
+	let current: InternalSessionEntry | undefined = leaf;
 	while (current) {
 		path.push(current);
 		current = current.parentId ? index.get(current.parentId) : undefined;
@@ -792,7 +886,7 @@ function buildSessionPath(
 	return path;
 }
 
-function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "thinkingLevel" | "model"> {
+function getSessionContextSettings(path: InternalSessionEntry[]): Pick<SessionContext, "thinkingLevel" | "model"> {
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
 
@@ -813,7 +907,7 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
  * Project one selected session entry into LLM/runtime messages.
  * Plain custom entries are display/state entries and do not participate in context.
  */
-export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage[] {
+export function sessionEntryToContextMessages(entry: InternalSessionEntry): AgentMessage[] {
 	if (entry.type === "message") {
 		const message = entry.message;
 		// Session files are parsed without validation; old versions, forks, or
@@ -869,15 +963,16 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
  * compaction entry. Older summarized entries are omitted.
  */
 export function buildContextEntries(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
+	byId?: Map<string, InternalSessionEntry>,
 	options?: ProviderCheckpointProjectionOptions,
-): SessionEntry[] {
+): InternalSessionEntry[] {
 	const path = buildSessionPath(entries, leafId, byId);
 	const pathIndex = new Map(path.map((entry, index) => [entry.id, index]));
 	let latestCheckpoint: CheckpointReductionEntry | null = null;
 	let latestReduction: CompactionEntry | ProviderCheckpointEntry | StoredCompactionBoundaryEntry | null = null;
+	const validBoundaries = new Set<string>();
 
 	for (const rawEntry of path) {
 		if (rawEntry.type === "compaction") {
@@ -898,19 +993,27 @@ export function buildContextEntries(
 			if (entry.boundary.primary.kind === "text") {
 				const boundaryIndex = pathIndex.get(entry.id);
 				const keptIndex = pathIndex.get(entry.boundary.primary.firstKeptEntryId);
-				if (boundaryIndex !== undefined && keptIndex !== undefined && keptIndex < boundaryIndex) {
+				if (
+					boundaryIndex !== undefined &&
+					keptIndex !== undefined &&
+					keptIndex < boundaryIndex &&
+					entry.parentId === path[boundaryIndex - 1]?.id
+				) {
+					validBoundaries.add(entry.id);
 					latestReduction = entry;
 					latestCheckpoint = null;
 				}
 			} else if (isValidLoadedBoundaryCheckpoint(entry, latestCheckpoint, pathIndex)) {
+				validBoundaries.add(entry.id);
 				latestCheckpoint = entry;
 				latestReduction = entry;
 			}
 		}
 	}
-	if (!latestReduction) return path;
+	const normalizedPath = path.filter((entry) => entry.type !== "compaction_boundary" || validBoundaries.has(entry.id));
+	if (!latestReduction) return normalizedPath;
 	const reductionIndex = pathIndex.get(latestReduction.id);
-	if (reductionIndex === undefined) return path;
+	if (reductionIndex === undefined) return normalizedPath;
 
 	if (latestReduction.type === "compaction") {
 		const keptIndex = pathIndex.get(latestReduction.firstKeptEntryId);
@@ -950,9 +1053,9 @@ export function buildContextEntries(
  * Handles compaction and branch summaries along the path.
  */
 export function buildSessionContext(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
+	byId?: Map<string, InternalSessionEntry>,
 	options?: ProviderCheckpointProjectionOptions,
 ): SessionContext {
 	const path = buildSessionPath(entries, leafId, byId);
@@ -1376,7 +1479,7 @@ export class SessionManager {
 	private persist: boolean;
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
-	private byId: Map<string, SessionEntry> = new Map();
+	private byId: Map<string, InternalSessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
@@ -1536,7 +1639,7 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	_persist(entry: SessionEntry): void {
+	_persist(entry: InternalSessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
@@ -1553,7 +1656,7 @@ export class SessionManager {
 		}
 	}
 
-	private _appendEntry(entry: SessionEntry): void {
+	private _appendEntry(entry: InternalSessionEntry): void {
 		if (this.persist && this.sessionFile && this.flushed) {
 			this._persist(entry);
 			this.fileEntries.push(entry);
@@ -1682,6 +1785,7 @@ export class SessionManager {
 			}
 		} else {
 			const checkpoint = draft.primary.checkpoint;
+			if (!isValidProviderCheckpointValue(checkpoint)) throw new Error("Invalid provider checkpoint payload");
 			validateProviderCheckpointIdentity(checkpoint.identity);
 			if (options.currentCheckpointIdentity) {
 				validateProviderCheckpointIdentity(options.currentCheckpointIdentity);
@@ -1767,6 +1871,7 @@ export class SessionManager {
 	 * branch move, or compatibility change rejects the whole append.
 	 */
 	appendProviderCheckpoint(checkpoint: ProviderCheckpoint, options: AppendProviderCheckpointOptions = {}): string {
+		if (!isValidProviderCheckpointValue(checkpoint)) throw new Error("Invalid provider checkpoint payload");
 		validateProviderCheckpointIdentity(checkpoint.identity);
 		const expected = options.expected;
 		if (expected) {
@@ -1922,19 +2027,19 @@ export class SessionManager {
 		return this.leafId;
 	}
 
-	getLeafEntry(): SessionEntry | undefined {
+	getLeafEntry(): InternalSessionEntry | undefined {
 		return this.leafId ? this.byId.get(this.leafId) : undefined;
 	}
 
-	getEntry(id: string): SessionEntry | undefined {
+	getEntry(id: string): InternalSessionEntry | undefined {
 		return this.byId.get(id);
 	}
 
 	/**
 	 * Get all direct children of an entry.
 	 */
-	getChildren(parentId: string): SessionEntry[] {
-		const children: SessionEntry[] = [];
+	getChildren(parentId: string): InternalSessionEntry[] {
+		const children: InternalSessionEntry[] = [];
 		for (const entry of this.byId.values()) {
 			if (entry.parentId === parentId) {
 				children.push(entry);
@@ -1983,8 +2088,8 @@ export class SessionManager {
 	 * Includes all entry types (messages, compaction, model changes, etc.).
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
-	getBranch(fromId?: string): SessionEntry[] {
-		const path: SessionEntry[] = [];
+	getBranch(fromId?: string): InternalSessionEntry[] {
+		const path: InternalSessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
 		let current = startId ? this.byId.get(startId) : undefined;
 		while (current) {
@@ -1999,7 +2104,7 @@ export class SessionManager {
 	 * Build the active, compaction-aware entry list for context/rendering.
 	 * Uses tree traversal from current leaf.
 	 */
-	buildContextEntries(options?: ProviderCheckpointProjectionOptions): SessionEntry[] {
+	buildContextEntries(options?: ProviderCheckpointProjectionOptions): InternalSessionEntry[] {
 		return buildContextEntries(this.getEntries(), this.leafId, this.byId, options);
 	}
 
@@ -2024,8 +2129,8 @@ export class SessionManager {
 	 * The session is append-only: use appendXXX() to add entries, branch() to
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
-	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+	getEntries(): InternalSessionEntry[] {
+		return this.fileEntries.filter((e): e is InternalSessionEntry => e.type !== "session");
 	}
 
 	/**
@@ -2145,7 +2250,7 @@ export class SessionManager {
 		// Filter out LabelEntry from path - we'll recreate them from the resolved map.
 		// Because labels are real tree entries, later entries can be children of labels;
 		// removing labels requires re-chaining the retained path to avoid orphaned subtrees.
-		const pathWithoutLabels: SessionEntry[] = [];
+		const pathWithoutLabels: InternalSessionEntry[] = [];
 		let pathParentId: string | null = null;
 		for (const entry of path) {
 			if (entry.type === "label") continue;

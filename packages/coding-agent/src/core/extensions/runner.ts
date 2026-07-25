@@ -14,9 +14,9 @@ import type { ModelRegistry } from "../model-registry.ts";
 import {
 	createExtensionSessionManagerView,
 	type ExtensionSessionManagerView,
-	type SessionEntry,
+	type InternalSessionEntry,
+	projectPublicSessionEntries,
 	type SessionManager,
-	toPublicSessionEntry,
 } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type {
@@ -830,14 +830,15 @@ export class ExtensionRunner {
 	async emitSessionBeforeCompact(
 		event: Omit<SessionBeforeCompactEvent, "preparation" | "branchEntries"> & {
 			preparation: CompactionPreparation;
-			branchEntries: SessionEntry[];
+			branchEntries: InternalSessionEntry[];
 		},
 	): Promise<SessionBeforeCompactAggregate> {
 		const ctx = this.createContext();
 		const publicEvent: SessionBeforeCompactEvent = {
 			...event,
 			preparation: toPublicCompactionPreparation(event.preparation),
-			branchEntries: event.branchEntries.map(toPublicSessionEntry).filter((entry) => entry !== undefined),
+			branchEntries: projectPublicSessionEntries(event.branchEntries, event.branchEntries.at(-1)?.id ?? null)
+				.entries,
 		};
 		let replacement: LegacyCompactionResult | undefined;
 		const projections: PortableCompactionProjection[] = [];

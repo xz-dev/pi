@@ -1,6 +1,6 @@
 import type { OpenAIResponsesCheckpointIdentity, Usage } from "@earendil-works/pi-ai";
 import type { ExtensionRunner } from "../extensions/runner.ts";
-import type { ProviderCheckpoint, SessionEntry, SessionManager } from "../session-manager.ts";
+import type { InternalSessionEntry, ProviderCheckpoint, SessionManager } from "../session-manager.ts";
 import {
 	type CompactionBoundary,
 	type CompactionBoundaryDraft,
@@ -19,7 +19,7 @@ export interface CompactionExecutionContext {
 	willRetry: boolean;
 	customInstructions?: string;
 	preparation: CompactionPreparation;
-	branchEntries: SessionEntry[];
+	branchEntries: InternalSessionEntry[];
 	signal: AbortSignal;
 }
 

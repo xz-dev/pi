@@ -15,9 +15,9 @@ import {
 	type CompactionBoundaryDraft,
 	type CompactionEntry,
 	createExtensionSessionManagerView,
+	type InternalSessionEntry,
 	type ProviderCheckpoint,
 	type ProviderCheckpointEntry,
-	type SessionEntry,
 	SessionManager,
 	type SessionMessageEntry,
 } from "../../src/core/session-manager.ts";
@@ -162,7 +162,7 @@ function legacyCheckpoint(id: string, parentId: string): ProviderCheckpointEntry
 }
 
 function textMessages(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	options?: { providerCheckpoint: { identity: typeof identity } },
 ): string[] {
 	return buildSessionContext(entries, entries.at(-1)?.id, undefined, options).messages.map((message) => {
@@ -253,7 +253,7 @@ describe("generic compaction boundaries", () => {
 
 	it("uses the last ancestral reduction row across text and checkpoint kinds", () => {
 		const checkpointBoundary = storedCheckpoint("b-checkpoint", "m3");
-		const textThenCheckpoint: SessionEntry[] = [
+		const textThenCheckpoint: InternalSessionEntry[] = [
 			user("m1", null, "old"),
 			user("m2", "m1", "kept"),
 			storedText("b-text", "m2", "m2"),
@@ -261,7 +261,7 @@ describe("generic compaction boundaries", () => {
 			checkpointBoundary,
 			user("m4", "b-checkpoint", "after checkpoint"),
 		];
-		const checkpointThenText: SessionEntry[] = [
+		const checkpointThenText: InternalSessionEntry[] = [
 			user("m1", null, "old"),
 			legacyCheckpoint("cp1", "m1"),
 			user("m2", "cp1", "kept"),
@@ -289,7 +289,7 @@ describe("generic compaction boundaries", () => {
 			...identity,
 			realm: "other-private-realm",
 		};
-		const entries: SessionEntry[] = [
+		const entries: InternalSessionEntry[] = [
 			user("m1", null, "one"),
 			user("m2", "m1", "two"),
 			malformed,
@@ -386,9 +386,33 @@ describe("generic compaction boundaries", () => {
 		}
 	});
 
-	it("resets a checkpoint chain after a superseding text boundary", () => {
-		const manager = SessionManager.inMemory();
-		const firstFrontier = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+	it("omits ancestry-invalid text boundaries and their projections from active context", () => {
+		const invalid = storedText("bad", "m2", "missing-kept");
+		const entries: InternalSessionEntry[] = [
+			user("m1", null, "old portable history"),
+			user("m2", "m1", "new portable history"),
+			invalid,
+			user("m3", "bad", "after invalid boundary"),
+		];
+
+		expect(textMessages(entries)).toEqual(["old portable history", "new portable history", "after invalid boundary"]);
+	});
+
+	it("persists checkpoint-text-checkpoint reset across reopen, navigation, and fork", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-boundary-reset-chain-"));
+		tempPaths.push(dir);
+		const manager = SessionManager.create(dir, dir);
+		manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const firstFrontier = manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "first answer" }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5",
+			usage: primaryUsage,
+			stopReason: "stop",
+			timestamp: 2,
+		});
 		const firstExpected = manager.captureCompactionBoundaryAppendState();
 		const firstCheckpointId = manager.appendCompactionBoundary(
 			{
@@ -425,6 +449,25 @@ describe("generic compaction boundaries", () => {
 			throw new Error("checkpoint missing");
 		expect(next.boundary.primary.checkpoint).toMatchObject({ windowGeneration: 1, predecessorEntryId: undefined });
 		expect(firstCheckpointId).not.toBe(nextId);
+
+		const file = manager.getSessionFile()!;
+		const reopened = SessionManager.open(file, dir);
+		const active = reopened.buildSessionContext({ providerCheckpoint: { identity } });
+		expect(active.providerCheckpoint).toEqual(next.boundary.primary.checkpoint);
+		expect(active.messages).toEqual([]);
+		reopened.branch(firstCheckpointId);
+		const oldFork = reopened.appendMessage({ role: "user", content: "fork from old checkpoint", timestamp: 4 });
+		expect(reopened.buildSessionContext({ providerCheckpoint: { identity } }).providerCheckpoint).toEqual(
+			checkpoint(firstFrontier),
+		);
+		reopened.branch(nextId);
+		const newFork = reopened.appendMessage({ role: "user", content: "fork from new checkpoint", timestamp: 5 });
+		const newContext = reopened.buildSessionContext({ providerCheckpoint: { identity } });
+		expect(newContext.providerCheckpoint).toEqual(next.boundary.primary.checkpoint);
+		expect(textMessages(reopened.getBranch(newFork), { providerCheckpoint: { identity } })).toEqual([
+			"fork from new checkpoint",
+		]);
+		expect(oldFork).not.toBe(newFork);
 	});
 
 	it("rejects text boundaries whose first kept entry is not an earlier active ancestor", () => {

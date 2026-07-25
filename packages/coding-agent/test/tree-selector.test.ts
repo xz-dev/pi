@@ -3,8 +3,8 @@ import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type {
+	InternalSessionEntry,
 	ModelChangeEntry,
-	SessionEntry,
 	SessionMessageEntry,
 	SessionTreeNode,
 } from "../src/core/session-manager.ts";
@@ -98,7 +98,7 @@ function modelChange(id: string, parentId: string | null): ModelChangeEntry {
 }
 
 // Helper to build a tree from entries using parentId relationships
-function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
+function buildTree(entries: Array<InternalSessionEntry>): SessionTreeNode[] {
 	if (entries.length === 0) return [];
 
 	const nodes: SessionTreeNode[] = entries.map((entry) => ({
@@ -418,7 +418,7 @@ describe("TreeSelectorComponent", () => {
 		// Foldable nodes: user-1 (root), user-3a (segment start), user-3b (segment start)
 
 		function buildBranchingTree() {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				userMessage("user-1", null, "first message"),
 				assistantMessage("asst-1", "user-1", "response 1"),
 				userMessage("user-2", "asst-1", "second message"),
@@ -568,7 +568,7 @@ describe("TreeSelectorComponent", () => {
 		});
 
 		test("fold and navigate with multiple roots", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				userMessage("user-1", null, "first root"),
 				assistantMessage("asst-1", "user-1", "response 1"),
 				userMessage("user-2", null, "second root"),
@@ -610,7 +610,7 @@ describe("TreeSelectorComponent", () => {
 
 		test("folding root hides descendants even when intermediate nodes are filtered out", () => {
 			// user-1 → toolCallOnly-1 (filtered out) → user-2 → asst-2
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				userMessage("user-1", null, "hello"),
 				toolCallOnlyAssistant("tool-asst-1", "user-1"),
 				userMessage("user-2", "tool-asst-1", "follow up"),

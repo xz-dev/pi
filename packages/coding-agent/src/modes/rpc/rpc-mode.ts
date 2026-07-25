@@ -26,7 +26,7 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import { toPublicAgentMessage } from "../../core/public-message.ts";
-import { type PublicSessionTreeNode, toPublicSessionEntry } from "../../core/session-manager.ts";
+import { buildPublicSessionTree, projectPublicSessionEntries } from "../../core/session-manager.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -619,10 +619,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "get_entries": {
 				const sessionManager = session.sessionManager;
-				let entries = sessionManager
-					.getEntries()
-					.map(toPublicSessionEntry)
-					.filter((entry) => entry !== undefined);
+				const projection = projectPublicSessionEntries(sessionManager.getEntries(), sessionManager.getLeafId());
+				let entries = projection.entries;
 				if (command.since !== undefined) {
 					const sinceIndex = entries.findIndex((e) => e.id === command.since);
 					if (sinceIndex === -1) {
@@ -630,21 +628,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					}
 					entries = entries.slice(sinceIndex + 1);
 				}
-				return success(id, "get_entries", { entries, leafId: sessionManager.getLeafId() });
+				return success(id, "get_entries", { entries, leafId: projection.leafId });
 			}
 
 			case "get_tree": {
 				const sessionManager = session.sessionManager;
-				const sanitizeTree = (nodes: ReturnType<typeof sessionManager.getTree>): PublicSessionTreeNode[] =>
-					nodes.flatMap((node) => {
-						const entry = toPublicSessionEntry(node.entry);
-						return entry
-							? [{ ...node, entry, children: sanitizeTree(node.children) }]
-							: sanitizeTree(node.children);
-					});
+				const projection = projectPublicSessionEntries(sessionManager.getEntries(), sessionManager.getLeafId());
 				return success(id, "get_tree", {
-					tree: sanitizeTree(sessionManager.getTree()),
-					leafId: sessionManager.getLeafId(),
+					tree: buildPublicSessionTree(projection, (entryId) => sessionManager.getLabel(entryId)),
+					leafId: projection.leafId,
 				});
 			}
 

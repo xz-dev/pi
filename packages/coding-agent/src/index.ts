@@ -248,6 +248,7 @@ export {
 	type CustomMessageEntry,
 	type FileEntry,
 	getLatestCompactionEntry,
+	type InternalSessionEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	type NewSessionOptions,

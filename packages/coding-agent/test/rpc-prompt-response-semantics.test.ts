@@ -263,6 +263,41 @@ describe("RPC prompt response semantics", () => {
 		},
 	);
 
+	it.each(["get_entries", "get_tree"] as const)(
+		"preserves visible topology when %s omits an invalid private boundary leaf",
+		async (command) => {
+			const { runtimeHost, cleanup } = await createRuntimeHost({ withAuth: true, responseDelayMs: 0 });
+			const manager = runtimeHost.session.sessionManager;
+			const rootId = manager.appendMessage({ role: "user", content: "visible root", timestamp: 1 });
+			const internals = manager as unknown as { fileEntries: unknown[]; _buildIndex(): void };
+			internals.fileEntries.push({
+				type: "compaction_boundary",
+				id: "invalid-rpc-boundary",
+				parentId: rootId,
+				timestamp: new Date().toISOString(),
+				boundary: { version: 2, private: "private-rpc-boundary" },
+			});
+			internals._buildIndex();
+			void runRpcMode(runtimeHost);
+			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+			try {
+				Reflect.apply(rpcIo.lineHandler!, undefined, [JSON.stringify({ id: command, type: command })]);
+				await vi.waitFor(() => {
+					const output = parseOutputLines(rpcIo.outputLines).find(
+						(record) => record.id === command && record.command === command,
+					);
+					expect(output).toBeDefined();
+					const serialized = JSON.stringify(output);
+					expect(serialized).not.toContain("private-rpc-boundary");
+					expect(serialized).toContain(rootId);
+					expect(serialized).toContain(`"leafId":"${rootId}"`);
+				});
+			} finally {
+				await cleanup();
+			}
+		},
+	);
+
 	it("sanitizes and detaches get_messages while preserving visible message behavior", async () => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;

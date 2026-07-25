@@ -85,7 +85,11 @@ import {
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from "../../core/session-manager.ts";
+import {
+	type InternalSessionEntry,
+	SessionManager,
+	sessionEntryToContextMessages,
+} from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -194,9 +198,9 @@ type CompactionQueuedMessage = {
 	mode: "steer" | "followUp";
 };
 
-type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" }>;
+type RenderSessionItem = AgentMessage | Extract<InternalSessionEntry, { type: "custom" }>;
 
-function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
+function isCustomSessionEntry(item: RenderSessionItem): item is Extract<InternalSessionEntry, { type: "custom" }> {
 	return "type" in item && item.type === "custom";
 }
 
@@ -3203,7 +3207,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
+	private addCustomEntryToChat(entry: Extract<InternalSessionEntry, { type: "custom" }>): void {
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
 			return;
@@ -3421,7 +3425,7 @@ export class InteractiveMode {
 	 * @param options.populateHistory Add user messages to editor history
 	 */
 	private renderSessionEntries(
-		entries: SessionEntry[],
+		entries: InternalSessionEntry[],
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		const items = entries.flatMap((entry): RenderSessionItem[] => {
