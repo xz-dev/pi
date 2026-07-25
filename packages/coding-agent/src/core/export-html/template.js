@@ -346,6 +346,7 @@
             parts.push(typeof entry.content === 'string' ? entry.content : extractContent(entry.content));
             break;
           case 'compaction':
+          case 'compaction_boundary':
             parts.push('compaction');
             break;
           case 'branch_summary':
@@ -684,6 +685,8 @@
           }
           case 'compaction':
             return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
+          case 'compaction_boundary':
+            return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.boundary.tokensBefore/1000)}k tokens]</span>`;
           case 'branch_summary': {
             const summary = truncate(normalize(entry.summary || ''));
             return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
@@ -1299,6 +1302,21 @@
           </div>`;
         }
 
+        if (entry.type === 'compaction_boundary') {
+          const boundary = entry.boundary;
+          if (boundary.kind === 'text' && boundary.text) {
+            return `<div class="compaction" id="${entryDomId}" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
+              <div class="compaction-label">[compaction]</div>
+              <div class="compaction-collapsed">Compacted from ${boundary.tokensBefore.toLocaleString()} tokens</div>
+              <div class="compaction-content"><strong>Compacted from ${boundary.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(boundary.text.summary)}</div>
+            </div>`;
+          }
+          return `<div class="compaction" id="${entryDomId}">
+            <div class="compaction-label">[compaction]</div>
+            <div class="compaction-collapsed">Context compacted from ${boundary.tokensBefore.toLocaleString()} tokens</div>
+          </div>`;
+        }
+
         if (entry.type === 'branch_summary') {
           return `<div class="branch-summary" id="${entryDomId}">${tsHtml}
             <div class="branch-summary-header">Branch Summary</div>
@@ -1349,7 +1367,7 @@
               toolCalls += msg.content.filter(c => c.type === 'toolCall').length;
             }
             if (msg.role === 'toolResult') toolResults++;
-          } else if (entry.type === 'compaction') {
+          } else if (entry.type === 'compaction' || entry.type === 'compaction_boundary') {
             compactions++;
           } else if (entry.type === 'branch_summary') {
             branchSummaries++;
