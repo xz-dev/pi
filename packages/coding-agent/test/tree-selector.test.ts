@@ -273,6 +273,112 @@ describe("TreeSelectorComponent", () => {
 		});
 	});
 
+	describe("generic compaction boundaries", () => {
+		test("renders and searches sanitized text boundary summaries and projections", () => {
+			const boundary = {
+				type: "compaction_boundary",
+				id: "boundary",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				boundary: {
+					version: 1,
+					tokensBefore: 100,
+					primary: {
+						kind: "text",
+						summary: "public primary summary",
+						firstKeptEntryId: "kept",
+						fromExtension: false,
+					},
+					projections: [
+						{
+							type: "portable_compaction_projection",
+							version: 1,
+							customType: "test",
+							summary: "portable projection summary",
+							details: { private: "details sentinel" },
+						},
+					],
+				},
+			} as InternalSessionEntry;
+			const selector = new TreeSelectorComponent(
+				buildTree([boundary]),
+				"boundary",
+				24,
+				() => {},
+				() => {},
+			);
+
+			const rendered = stripVTControlCharacters(selector.getTreeList().render(200).join("\n"));
+			expect(rendered).toContain("public primary summary");
+			expect(rendered).toContain("portable projection summary");
+			expect(rendered).not.toContain("details sentinel");
+			for (const char of "portable") selector.handleInput(char);
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("boundary");
+		});
+
+		test("renders a neutral checkpoint boundary with projections but no private checkpoint", () => {
+			const boundary = {
+				type: "compaction_boundary",
+				id: "boundary",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				boundary: {
+					version: 1,
+					tokensBefore: 100,
+					primary: {
+						kind: "checkpoint",
+						checkpoint: {
+							type: "provider_checkpoint",
+							version: 1,
+							identity: {
+								adapter: "openai-responses-compact-v1",
+								realm: "private realm",
+								provider: "openai",
+								endpoint: "https://private.invalid/v1",
+								modelFamily: "gpt-5",
+							},
+							frontierEntryId: "kept",
+							windowGeneration: 1,
+							payload: {
+								id: "private response",
+								created_at: 1,
+								object: "response.compaction",
+								output: [{ type: "compaction", id: "private id", encrypted_content: "private payload" }],
+								usage: {
+									input_tokens: 1,
+									input_tokens_details: { cached_tokens: 0 },
+									output_tokens: 1,
+									output_tokens_details: { reasoning_tokens: 0 },
+									total_tokens: 2,
+								},
+							},
+						},
+					},
+					projections: [
+						{
+							type: "portable_compaction_projection",
+							version: 1,
+							customType: "test",
+							summary: "portable checkpoint projection",
+						},
+					],
+				},
+			} as InternalSessionEntry;
+			const selector = new TreeSelectorComponent(
+				buildTree([boundary]),
+				"boundary",
+				24,
+				() => {},
+				() => {},
+			);
+
+			const rendered = stripVTControlCharacters(selector.getTreeList().render(200).join("\n"));
+			expect(rendered).toContain("checkpoint compaction");
+			expect(rendered).toContain("portable checkpoint projection");
+			expect(rendered).not.toContain("private");
+		});
+	});
+
 	describe("copy", () => {
 		test("copies the full selected message with ctrl+x", () => {
 			const message = `${"long message ".repeat(30)}\nsecond line`;

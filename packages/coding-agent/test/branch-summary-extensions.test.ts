@@ -1,8 +1,75 @@
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
+import { prepareBranchEntries } from "../src/core/compaction/branch-summarization.ts";
 import type { TreePreparation } from "../src/core/extensions/index.ts";
+import type { InternalSessionEntry } from "../src/core/session-manager.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { assistantMsg, userMsg } from "./utilities.ts";
+
+describe("Branch summary generic boundaries", () => {
+	it.each([
+		["text", ["primary summary", "portable projection"]],
+		["checkpoint", ["portable projection"]],
+	] as const)("includes active %s boundary summaries without private state", (kind, expected) => {
+		const boundary = {
+			type: "compaction_boundary",
+			id: "boundary",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			boundary: {
+				version: 1,
+				tokensBefore: 100,
+				primary:
+					kind === "text"
+						? { kind, summary: "primary summary", firstKeptEntryId: "kept", fromExtension: false }
+						: {
+								kind,
+								checkpoint: {
+									type: "provider_checkpoint",
+									version: 1,
+									identity: {
+										adapter: "openai-responses-compact-v1",
+										realm: "private realm",
+										provider: "openai",
+										endpoint: "https://private.invalid/v1",
+										modelFamily: "gpt-5",
+									},
+									frontierEntryId: "kept",
+									windowGeneration: 1,
+									payload: {
+										id: "private response",
+										created_at: 1,
+										object: "response.compaction",
+										output: [{ type: "compaction", id: "private id", encrypted_content: "private payload" }],
+										usage: {
+											input_tokens: 1,
+											input_tokens_details: { cached_tokens: 0 },
+											output_tokens: 1,
+											output_tokens_details: { reasoning_tokens: 0 },
+											total_tokens: 2,
+										},
+									},
+								},
+							},
+				projections: [
+					{
+						type: "portable_compaction_projection",
+						version: 1,
+						customType: "test",
+						summary: "portable projection",
+					},
+				],
+			},
+		} as InternalSessionEntry;
+
+		const preparation = prepareBranchEntries([boundary]);
+		const serialized = JSON.stringify(preparation.messages);
+		for (const summary of expected) expect(serialized).toContain(summary);
+		if (kind === "checkpoint") expect(serialized).not.toContain("primary summary");
+		expect(serialized.match(/portable projection/g)).toHaveLength(1);
+		expect(serialized).not.toContain("private");
+	});
+});
 
 describe("Branch summary extensions", () => {
 	const harnesses: Harness[] = [];

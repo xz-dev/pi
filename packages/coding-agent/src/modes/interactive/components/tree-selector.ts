@@ -12,6 +12,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { getPublicCompactionBoundaryContent } from "../../../core/compaction/boundary.ts";
 import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -588,8 +589,13 @@ class TreeList implements Component {
 				break;
 			}
 			case "compaction":
-				parts.push("compaction");
+				parts.push("compaction", entry.summary);
 				break;
+			case "compaction_boundary": {
+				const content = getPublicCompactionBoundaryContent(entry);
+				if (content) parts.push("compaction", content.kind, ...content.summaries);
+				break;
+			}
 			case "branch_summary":
 				parts.push("branch summary", entry.summary);
 				break;
@@ -821,7 +827,19 @@ class TreeList implements Component {
 			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
-				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
+				result = `${theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`)} ${normalize(entry.summary)}`;
+				break;
+			}
+			case "compaction_boundary": {
+				const content = getPublicCompactionBoundaryContent(entry);
+				if (!content) {
+					result = theme.fg("dim", "[invalid compaction boundary]");
+					break;
+				}
+				const label = content.kind === "checkpoint" ? "checkpoint compaction" : "compaction";
+				const summaries = content.summaries.map(normalize).join(" • ");
+				result = theme.fg("borderAccent", `[${label}: ${Math.round(content.tokensBefore / 1000)}k tokens]`);
+				if (summaries) result += ` ${summaries}`;
 				break;
 			}
 			case "branch_summary":
@@ -913,6 +931,9 @@ class TreeList implements Component {
 				break;
 			case "compaction":
 				text = entry.summary;
+				break;
+			case "compaction_boundary":
+				text = getPublicCompactionBoundaryContent(entry)?.summaries.join("\n");
 				break;
 			case "branch_summary":
 				text = entry.summary;

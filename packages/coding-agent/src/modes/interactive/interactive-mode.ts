@@ -60,6 +60,7 @@ import {
 	computeCacheWaste,
 	detectCacheMiss,
 } from "../../core/cache-stats.ts";
+import { isStoredCompactionBoundaryEntry } from "../../core/compaction/boundary.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -3476,7 +3477,11 @@ export class InteractiveMode {
 
 		// Show compaction info if session was compacted
 		const allEntries = this.sessionManager.getEntries();
-		const compactionCount = allEntries.filter((e) => e.type === "compaction").length;
+		const compactionCount = allEntries.filter(
+			(entry) =>
+				entry.type === "compaction" ||
+				(entry.type === "compaction_boundary" && isStoredCompactionBoundaryEntry(entry)),
+		).length;
 		if (compactionCount > 0) {
 			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
 			this.showStatus(`Session compacted ${times}`);

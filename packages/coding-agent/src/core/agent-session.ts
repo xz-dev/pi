@@ -59,7 +59,7 @@ import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { mergeCheckpointProjectionWithLiveSuffix } from "./checkpoint-projection.ts";
-import { decodeStoredCompactionBoundaryEntry } from "./compaction/boundary.ts";
+import { combinedBoundaryUsage, decodeStoredCompactionBoundaryEntry } from "./compaction/boundary.ts";
 import {
 	type CheckpointPrimaryDraft,
 	type CompactionOutcome,
@@ -3151,12 +3151,8 @@ export class AgentSession {
 				const checkpoint = decodeProviderCheckpointEntry(entry)?.checkpoint;
 				if (checkpoint?.usage) addUsageToTotals(usageTotals, checkpoint.usage);
 			} else if (entry.type === "compaction_boundary") {
-				const boundary = decodeStoredCompactionBoundaryEntry(entry);
-				if (!boundary) continue;
-				if (boundary.boundary.primary.usage) addUsageToTotals(usageTotals, boundary.boundary.primary.usage);
-				for (const projection of boundary.boundary.projections) {
-					if (projection.usage) addUsageToTotals(usageTotals, projection.usage);
-				}
+				const usage = combinedBoundaryUsage(entry);
+				if (usage) addUsageToTotals(usageTotals, usage);
 			}
 			if (entry.type !== "message") continue;
 			totalMessages++;

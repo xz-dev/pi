@@ -62,6 +62,12 @@ export interface CompactionBoundaryEntry extends SessionEntryBase {
 	boundary: CompactionBoundary;
 }
 
+export interface PublicCompactionBoundaryContent {
+	kind: "text" | "checkpoint";
+	tokensBefore: number;
+	summaries: string[];
+}
+
 interface CompactionOutcomeBase {
 	boundaryEntryId: string;
 	tokensBefore: number;
@@ -284,10 +290,27 @@ function addUsage(left: Usage | undefined, right: Usage | undefined): Usage | un
 	};
 }
 
-function combinedBoundaryUsage(entry: StoredCompactionBoundaryEntry): Usage | undefined {
-	let usage = entry.boundary.primary.usage;
-	for (const projection of entry.boundary.projections) usage = addUsage(usage, projection.usage);
+export function combinedBoundaryUsage(entry: unknown): Usage | undefined {
+	const decoded = decodeStoredCompactionBoundaryEntry(entry);
+	if (!decoded) return undefined;
+	let usage = decoded.boundary.primary.usage;
+	for (const projection of decoded.boundary.projections) usage = addUsage(usage, projection.usage);
 	return usage;
+}
+
+/** Provider-neutral content safe for public navigation and display surfaces. */
+export function getPublicCompactionBoundaryContent(entry: unknown): PublicCompactionBoundaryContent | undefined {
+	const decoded = decodeStoredCompactionBoundaryEntry(entry);
+	if (!decoded) return undefined;
+	const primary = decoded.boundary.primary;
+	return {
+		kind: primary.kind,
+		tokensBefore: decoded.boundary.tokensBefore,
+		summaries: [
+			...(primary.kind === "text" ? [primary.summary] : []),
+			...decoded.boundary.projections.map((projection) => projection.summary),
+		],
+	};
 }
 
 export function toCompactionBoundary(

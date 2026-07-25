@@ -14,6 +14,14 @@ type AssistantUsage = {
 	cost: { total: number };
 };
 
+function completeUsage(usage: AssistantUsage) {
+	return {
+		...usage,
+		totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: usage.cost.total },
+	};
+}
+
 function createSession(options: {
 	sessionName: string;
 	modelId?: string;
@@ -24,6 +32,7 @@ function createSession(options: {
 	branchUsage?: AssistantUsage;
 	compactionUsage?: AssistantUsage;
 	toolUsage?: AssistantUsage;
+	boundaryUsage?: { primary: AssistantUsage; projection: AssistantUsage };
 }): AgentSession {
 	const usage = options.usage;
 	const entries: Array<Record<string, unknown>> = [];
@@ -49,6 +58,35 @@ function createSession(options: {
 		entries.push({
 			type: "compaction",
 			usage: options.compactionUsage,
+		});
+	}
+
+	if (options.boundaryUsage !== undefined) {
+		entries.push({
+			type: "compaction_boundary",
+			id: "boundary",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			boundary: {
+				version: 1,
+				tokensBefore: 100,
+				primary: {
+					kind: "text",
+					summary: "summary",
+					firstKeptEntryId: "kept",
+					fromExtension: false,
+					usage: completeUsage(options.boundaryUsage.primary),
+				},
+				projections: [
+					{
+						type: "portable_compaction_projection",
+						version: 1,
+						customType: "test",
+						summary: "projection",
+						usage: completeUsage(options.boundaryUsage.projection),
+					},
+				],
+			},
 		});
 	}
 
@@ -186,6 +224,24 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const statsLine = stripAnsi(footer.render(120)[1]);
+		expect(statsLine).toContain("$1.250");
+	});
+
+	it("includes generic boundary primary and projection usage exactly once", () => {
+		const session = createSession({
+			sessionName: "",
+			boundaryUsage: {
+				primary: { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, cost: { total: 1 } },
+				projection: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: { total: 0.25 } },
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const statsLine = stripAnsi(footer.render(120)[1]);
+		expect(statsLine).toContain("↑11");
+		expect(statsLine).toContain("↓22");
+		expect(statsLine).toContain("R33");
+		expect(statsLine).toContain("W44");
 		expect(statsLine).toContain("$1.250");
 	});
 
