@@ -10,7 +10,7 @@ import type { ImageContent, Model } from "@earendil-works/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionOutcome } from "../../core/compaction/index.ts";
-import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+import type { PublicSessionEntry, PublicSessionTreeNode } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
 // ============================================================================
@@ -197,14 +197,14 @@ export type RpcResponse =
 			type: "response";
 			command: "get_entries";
 			success: true;
-			data: { entries: SessionEntry[]; leafId: string | null };
+			data: { entries: PublicSessionEntry[]; leafId: string | null };
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "get_tree";
 			success: true;
-			data: { tree: SessionTreeNode[]; leafId: string | null };
+			data: { tree: PublicSessionTreeNode[]; leafId: string | null };
 	  }
 	| {
 			id?: string;

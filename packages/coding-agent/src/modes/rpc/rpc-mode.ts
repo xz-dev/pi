@@ -25,7 +25,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
-import { toPublicSessionEntry } from "../../core/session-manager.ts";
+import { type PublicSessionTreeNode, toPublicSessionEntry } from "../../core/session-manager.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -631,12 +631,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "get_tree": {
 				const sessionManager = session.sessionManager;
-				const sanitizeTree = (
-					nodes: ReturnType<typeof sessionManager.getTree>,
-				): ReturnType<typeof sessionManager.getTree> =>
+				const sanitizeTree = (nodes: ReturnType<typeof sessionManager.getTree>): PublicSessionTreeNode[] =>
 					nodes.map((node) => ({
 						...node,
-						entry: toPublicSessionEntry(node.entry) as typeof node.entry,
+						entry: toPublicSessionEntry(node.entry),
 						children: sanitizeTree(node.children),
 					}));
 				return success(id, "get_tree", {

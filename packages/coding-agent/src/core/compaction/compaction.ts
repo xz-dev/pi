@@ -17,6 +17,7 @@ import type {
 } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
+import { toPublicMessage } from "../public-message.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -727,9 +728,7 @@ export interface PublicCompactionPreparation
 }
 
 function toProviderNeutralCompactionMessage(message: Message): ProviderNeutralCompactionMessage {
-	if (message.role !== "assistant") return structuredClone(message);
-	const { api: _, provider: __, model: ___, ...providerNeutral } = structuredClone(message);
-	return providerNeutral;
+	return toPublicMessage(message);
 }
 
 export function toPublicCompactionPreparation(preparation: CompactionPreparation): PublicCompactionPreparation {

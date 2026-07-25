@@ -11,15 +11,18 @@ import {
 } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
-	appendFileSync,
 	closeSync,
 	createReadStream,
 	existsSync,
+	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
@@ -43,8 +46,83 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import { type PublicAgentMessage, toPublicAgentMessage } from "./public-message.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
+
+/** @internal Narrow instance-scoped seam for deterministic persistence fault injection. */
+export interface SessionPersistenceOperations {
+	open(path: string, flags: string): number;
+	write(fd: number, data: string): void;
+	fsync(fd: number): void;
+	close(fd: number): void;
+	rename(source: string, target: string): void;
+	link(source: string, target: string): void;
+	unlink(path: string): void;
+}
+
+const defaultSessionPersistenceOperations: SessionPersistenceOperations = {
+	open: openSync,
+	write: writeFileSync,
+	fsync: fsyncSync,
+	close: closeSync,
+	rename: renameSync,
+	link: linkSync,
+	unlink: unlinkSync,
+};
+
+function writeSessionFileAtomically(
+	sessionFile: string,
+	entries: readonly FileEntry[],
+	requireNewFile: boolean,
+	operations: SessionPersistenceOperations,
+): void {
+	const temporaryPath = `${sessionFile}.tmp-${randomUUID()}`;
+	let fd: number | undefined;
+	let ownsTemporaryFile = false;
+	try {
+		fd = operations.open(temporaryPath, "wx");
+		ownsTemporaryFile = true;
+		for (const entry of entries) operations.write(fd, `${JSON.stringify(entry)}\n`);
+		operations.fsync(fd);
+		operations.close(fd);
+		fd = undefined;
+		if (requireNewFile) {
+			operations.link(temporaryPath, sessionFile);
+			try {
+				operations.unlink(temporaryPath);
+				ownsTemporaryFile = false;
+			} catch {
+				// The target is already committed. Retry cleanup without rolling memory back from durable disk state.
+				try {
+					operations.unlink(temporaryPath);
+					ownsTemporaryFile = false;
+				} catch {
+					// A leftover private temporary file is safer than reporting a failed commit that actually succeeded.
+				}
+			}
+		} else {
+			operations.rename(temporaryPath, sessionFile);
+			ownsTemporaryFile = false;
+		}
+	} catch (error) {
+		if (fd !== undefined) {
+			try {
+				operations.close(fd);
+			} catch {
+				// Preserve the original persistence failure.
+			}
+		}
+		if (ownsTemporaryFile) {
+			try {
+				operations.unlink(temporaryPath);
+			} catch {
+				// Preserve the original persistence failure.
+			}
+		}
+		throw error;
+	}
+}
 
 export interface SessionHeader {
 	type: "session";
@@ -219,8 +297,13 @@ export type SessionEntry =
 	| LabelEntry
 	| SessionInfoEntry;
 
+export interface PublicSessionMessageEntry extends Omit<SessionMessageEntry, "message"> {
+	message: PublicAgentMessage;
+}
+
 export type PublicSessionEntry =
-	| Exclude<SessionEntry, ProviderCheckpointEntry | StoredCompactionBoundaryEntry>
+	| Exclude<SessionEntry, SessionMessageEntry | ProviderCheckpointEntry | StoredCompactionBoundaryEntry>
+	| PublicSessionMessageEntry
 	| CompactionBoundaryEntry;
 
 /** Raw file entry (includes header) */
@@ -283,7 +366,15 @@ export function toPublicSessionEntry(entry: SessionEntry): PublicSessionEntry {
 	if (entry.type === "provider_checkpoint" || entry.type === "compaction_boundary") {
 		return toCompactionBoundary(entry);
 	}
+	if (entry.type === "message") {
+		return { ...structuredClone(entry), message: toPublicAgentMessage(entry.message) };
+	}
 	return structuredClone(entry);
+}
+
+export interface PublicSessionTreeNode extends Omit<SessionTreeNode, "entry" | "children"> {
+	entry: PublicSessionEntry;
+	children: PublicSessionTreeNode[];
 }
 
 export type ExtensionSessionManagerView = Omit<
@@ -295,12 +386,7 @@ export type ExtensionSessionManagerView = Omit<
 	getBranch(fromId?: string): PublicSessionEntry[];
 	buildContextEntries(): PublicSessionEntry[];
 	getEntries(): PublicSessionEntry[];
-	getTree(): Array<
-		Omit<SessionTreeNode, "entry" | "children"> & {
-			entry: PublicSessionEntry;
-			children: ReturnType<ExtensionSessionManagerView["getTree"]>;
-		}
-	>;
+	getTree(): PublicSessionTreeNode[];
 };
 
 export function createExtensionSessionManagerView(manager: SessionManager): ExtensionSessionManagerView {
@@ -1257,6 +1343,7 @@ export class SessionManager {
 	private leafId: string | null = null;
 	private generation = 0;
 	private version = 0;
+	private readonly persistenceOperations: SessionPersistenceOperations;
 
 	private constructor(
 		cwd: string,
@@ -1265,7 +1352,9 @@ export class SessionManager {
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
 		preloadedFileEntries?: FileEntry[],
+		persistenceOperations: SessionPersistenceOperations = defaultSessionPersistenceOperations,
 	) {
+		this.persistenceOperations = persistenceOperations;
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
@@ -1374,16 +1463,14 @@ export class SessionManager {
 		}
 	}
 
+	private _writeFileAtomically(entries: readonly FileEntry[], requireNewFile: boolean): void {
+		if (!this.sessionFile) return;
+		writeSessionFileAtomically(this.sessionFile, entries, requireNewFile, this.persistenceOperations);
+	}
+
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
-		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
-			}
-		} finally {
-			closeSync(fd);
-		}
+		this._writeFileAtomically(this.fileEntries, false);
 	}
 
 	isPersisted(): boolean {
@@ -1415,27 +1502,15 @@ export class SessionManager {
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
-			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-			} else {
-				// Mark as not flushed so when assistant arrives, all entries get written
-				this.flushed = false;
-			}
+			if (this.flushed) this._writeFileAtomically([...this.fileEntries, entry], false);
 			return;
 		}
 
 		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
-				}
-			} finally {
-				closeSync(fd);
-			}
+			this._writeFileAtomically(this.fileEntries, true);
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			this._writeFileAtomically([...this.fileEntries, entry], false);
 		}
 	}
 
@@ -2112,9 +2187,14 @@ export class SessionManager {
 	 * @param cwd Working directory (stored in session header)
 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
 	 */
-	static create(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		options?: NewSessionOptions,
+		persistenceOperations?: SessionPersistenceOperations,
+	): SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		return new SessionManager(cwd, dir, undefined, true, options);
+		return new SessionManager(cwd, dir, undefined, true, options, undefined, persistenceOperations);
 	}
 
 	/**
@@ -2213,14 +2293,12 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-
-		// Copy all non-header entries from source
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
-			}
-		}
+		writeSessionFileAtomically(
+			newSessionFile,
+			[newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")],
+			true,
+			defaultSessionPersistenceOperations,
+		);
 
 		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 	}
