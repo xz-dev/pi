@@ -28,7 +28,11 @@ export { readStoredCredential } from "./core/auth-storage.ts";
 export {
 	type BranchPreparation,
 	type BranchSummaryResult,
+	type CheckpointCompactionOutcome,
 	type CollectEntriesResult,
+	type CompactionBoundary,
+	type CompactionBoundaryEntry,
+	type CompactionOutcome,
 	type CompactionResult,
 	type CutPointResult,
 	calculateContextTokens,
@@ -44,9 +48,15 @@ export {
 	generateSummary,
 	generateSummaryWithUsage,
 	getLastAssistantUsage,
+	type LegacyCompactionResult,
+	type PortableCompactionProjection,
 	prepareBranchEntries,
+	readCompactionBoundaries,
+	type StoredCompactionBoundaryEntry,
 	serializeConversation,
 	shouldCompact,
+	type TextCompactionOutcome,
+	toCompactionBoundary,
 } from "./core/compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
@@ -220,10 +230,13 @@ export {
 	type PromptTemplate,
 } from "./core/sdk.ts";
 export {
+	type AppendCompactionBoundaryOptions,
 	type AppendProviderCheckpointOptions,
 	type BranchSummaryEntry,
 	buildContextEntries,
 	buildSessionContext,
+	type CompactionBoundaryAppendState,
+	type CompactionBoundaryDraft,
 	type CompactionEntry,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,

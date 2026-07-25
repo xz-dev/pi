@@ -29,6 +29,12 @@ import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
+	type CompactionBoundaryDraft,
+	isStoredCompactionBoundaryEntry,
+	type PortableCompactionProjection,
+	type StoredCompactionBoundaryEntry,
+} from "./compaction/boundary.ts";
+import {
 	type BashExecutionMessage,
 	type CustomMessage,
 	createBranchSummaryMessage,
@@ -116,6 +122,20 @@ export interface AppendProviderCheckpointOptions {
 	currentIdentity?: OpenAIResponsesCheckpointIdentity;
 }
 
+export interface CompactionBoundaryAppendState {
+	sessionId: string;
+	generation: number;
+	version: number;
+	branch: string | null;
+}
+
+export interface AppendCompactionBoundaryOptions {
+	expected: CompactionBoundaryAppendState;
+	currentCheckpointIdentity?: OpenAIResponsesCheckpointIdentity;
+}
+
+export type { CompactionBoundaryDraft } from "./compaction/boundary.ts";
+
 export interface ProviderCheckpointProjectionOptions {
 	providerCheckpoint?: {
 		identity: OpenAIResponsesCheckpointIdentity;
@@ -190,6 +210,7 @@ export type SessionEntry =
 	| ModelChangeEntry
 	| CompactionEntry
 	| ProviderCheckpointEntry
+	| StoredCompactionBoundaryEntry
 	| BranchSummaryEntry
 	| CustomEntry
 	| CustomMessageEntry
@@ -249,6 +270,7 @@ export type ReadonlySessionManager = Pick<
 	| "getTree"
 	| "getSessionName"
 	| "captureProviderCheckpointAppendState"
+	| "captureCompactionBoundaryAppendState"
 >;
 
 function createSessionId(): string {
@@ -372,6 +394,49 @@ function cloneProviderCheckpoint(checkpoint: ProviderCheckpoint): ProviderCheckp
 	return structuredClone(checkpoint);
 }
 
+function assertJsonValue(value: unknown, path = "value"): void {
+	if (value === undefined || value === null || typeof value === "string" || typeof value === "boolean") return;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new Error(`${path} must contain only finite numbers`);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (let i = 0; i < value.length; i++) assertJsonValue(value[i], `${path}[${i}]`);
+		return;
+	}
+	if (typeof value !== "object") throw new Error(`${path} must be JSON serializable`);
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) throw new Error(`${path} must be JSON serializable`);
+	for (const [key, child] of Object.entries(value)) assertJsonValue(child, `${path}.${key}`);
+}
+
+function validatePortableProjection(projection: PortableCompactionProjection): void {
+	if (
+		projection.type !== "portable_compaction_projection" ||
+		projection.version !== 1 ||
+		projection.customType.trim().length === 0 ||
+		projection.summary.trim().length === 0
+	) {
+		throw new Error("Invalid portable compaction projection");
+	}
+	assertJsonValue(projection, "projection");
+}
+
+function validateCompactionBoundaryDraft(draft: CompactionBoundaryDraft): void {
+	if (draft.version !== 1 || !Number.isFinite(draft.tokensBefore) || draft.tokensBefore < 0) {
+		throw new Error("Invalid compaction boundary version or token count");
+	}
+	for (const projection of draft.projections) validatePortableProjection(projection);
+	if (draft.primary.kind === "text") {
+		if (draft.primary.summary.length === 0 || draft.primary.firstKeptEntryId.length === 0) {
+			throw new Error("Text compaction boundary requires a summary and first kept entry");
+		}
+		assertJsonValue(draft.primary, "primary");
+	} else {
+		assertJsonValue(draft.primary, "primary");
+	}
+}
+
 function providerCheckpointIdentitiesMatch(
 	left: OpenAIResponsesCheckpointIdentity,
 	right: OpenAIResponsesCheckpointIdentity,
@@ -413,9 +478,16 @@ function validateProviderCheckpointIdentity(identity: OpenAIResponsesCheckpointI
 	}
 }
 
+type CheckpointReductionEntry = ProviderCheckpointEntry | StoredCompactionBoundaryEntry;
+
+function getStoredCheckpoint(entry: CheckpointReductionEntry): ProviderCheckpoint | undefined {
+	if (entry.type === "provider_checkpoint") return entry.checkpoint;
+	return entry.boundary.primary.kind === "checkpoint" ? entry.boundary.primary.checkpoint : undefined;
+}
+
 function isValidLoadedProviderCheckpoint(
 	value: unknown,
-	latestCompatible: ProviderCheckpointEntry | null,
+	latestCompatible: CheckpointReductionEntry | null,
 	pathIndex: Map<string, number>,
 ): value is ProviderCheckpointEntry {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -447,9 +519,46 @@ function isValidLoadedProviderCheckpoint(
 	if (!latestCompatible) {
 		return checkpoint.predecessorEntryId === undefined && checkpoint.windowGeneration === 1;
 	}
+	const latestCheckpoint = getStoredCheckpoint(latestCompatible);
 	return (
 		checkpoint.predecessorEntryId === latestCompatible.id &&
-		checkpoint.windowGeneration === latestCompatible.checkpoint.windowGeneration! + 1
+		checkpoint.windowGeneration === latestCheckpoint!.windowGeneration! + 1
+	);
+}
+
+function isValidLoadedBoundaryCheckpoint(
+	entry: StoredCompactionBoundaryEntry,
+	latestCompatible: CheckpointReductionEntry | null,
+	pathIndex: Map<string, number>,
+): boolean {
+	const primary = entry.boundary.primary;
+	if (primary.kind !== "checkpoint") return false;
+	const checkpoint = primary.checkpoint;
+	if (
+		checkpoint.type !== "provider_checkpoint" ||
+		checkpoint.version !== 1 ||
+		!isProviderCheckpointIdentity(checkpoint.identity) ||
+		typeof checkpoint.frontierEntryId !== "string"
+	) {
+		return false;
+	}
+	const boundaryIndex = pathIndex.get(entry.id);
+	const frontierIndex = pathIndex.get(checkpoint.frontierEntryId);
+	if (
+		boundaryIndex === undefined ||
+		frontierIndex === undefined ||
+		frontierIndex !== boundaryIndex - 1 ||
+		entry.parentId !== checkpoint.frontierEntryId ||
+		!Number.isSafeInteger(checkpoint.windowGeneration) ||
+		checkpoint.windowGeneration! < 1
+	) {
+		return false;
+	}
+	if (!latestCompatible) return checkpoint.predecessorEntryId === undefined && checkpoint.windowGeneration === 1;
+	const latestCheckpoint = getStoredCheckpoint(latestCompatible);
+	return (
+		checkpoint.predecessorEntryId === latestCompatible.id &&
+		checkpoint.windowGeneration === latestCheckpoint!.windowGeneration! + 1
 	);
 }
 
@@ -535,6 +644,24 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "compaction") {
 		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
 	}
+	if (entry.type === "compaction_boundary") {
+		const messages: AgentMessage[] = [];
+		if (entry.boundary.primary.kind === "text") {
+			messages.push(
+				createCompactionSummaryMessage(
+					entry.boundary.primary.summary,
+					entry.boundary.tokensBefore,
+					entry.timestamp,
+				),
+			);
+		}
+		for (const projection of entry.boundary.projections) {
+			messages.push(
+				createCompactionSummaryMessage(projection.summary, entry.boundary.tokensBefore, entry.timestamp),
+			);
+		}
+		return messages;
+	}
 	return [];
 }
 
@@ -554,57 +681,89 @@ export function buildContextEntries(
 ): SessionEntry[] {
 	const path = buildSessionPath(entries, leafId, byId);
 	const pathIndex = new Map(path.map((entry, index) => [entry.id, index]));
-	let compaction: CompactionEntry | null = null;
-	let providerCheckpoint: ProviderCheckpointEntry | null = null;
+	let latestCompatibleCheckpoint: CheckpointReductionEntry | null = null;
+	let latestReduction: CompactionEntry | ProviderCheckpointEntry | StoredCompactionBoundaryEntry | null = null;
 
 	for (const entry of path) {
 		if (entry.type === "compaction") {
-			compaction = entry;
-		} else if (
-			entry.type === "provider_checkpoint" &&
-			options?.providerCheckpoint &&
-			isValidLoadedProviderCheckpoint(entry, providerCheckpoint, pathIndex) &&
-			providerCheckpointIdentitiesMatch(entry.checkpoint.identity, options.providerCheckpoint.identity)
-		) {
-			providerCheckpoint = entry;
+			latestReduction = entry;
+		} else if (entry.type === "provider_checkpoint") {
+			const valid = isValidLoadedProviderCheckpoint(entry, latestCompatibleCheckpoint, pathIndex);
+			if (
+				valid &&
+				options?.providerCheckpoint &&
+				providerCheckpointIdentitiesMatch(entry.checkpoint.identity, options.providerCheckpoint.identity)
+			) {
+				latestCompatibleCheckpoint = entry;
+			}
+			if (
+				valid &&
+				options?.providerCheckpoint &&
+				providerCheckpointIdentitiesMatch(entry.checkpoint.identity, options.providerCheckpoint.identity)
+			) {
+				latestReduction = entry;
+			}
+		} else if (entry.type === "compaction_boundary" && isStoredCompactionBoundaryEntry(entry)) {
+			if (entry.boundary.primary.kind === "checkpoint") {
+				const valid = isValidLoadedBoundaryCheckpoint(entry, latestCompatibleCheckpoint, pathIndex);
+				if (
+					valid &&
+					options?.providerCheckpoint &&
+					providerCheckpointIdentitiesMatch(
+						entry.boundary.primary.checkpoint.identity,
+						options.providerCheckpoint.identity,
+					)
+				) {
+					latestCompatibleCheckpoint = entry;
+				}
+			}
+			latestReduction = entry;
 		}
 	}
+	if (!latestReduction) return path;
+	const reductionIndex = pathIndex.get(latestReduction.id);
+	if (reductionIndex === undefined) return path;
 
-	const effectiveCompaction =
-		compaction && providerCheckpoint
-			? path.findIndex((entry) => entry.id === compaction.id) >
-				path.findIndex((entry) => entry.id === providerCheckpoint.id)
-				? compaction
-				: null
-			: compaction;
-	if (!effectiveCompaction && !providerCheckpoint) {
-		return path;
-	}
-
-	if (providerCheckpoint && !effectiveCompaction) {
-		const checkpointIdx = path.findIndex((entry) => entry.id === providerCheckpoint.id);
-		if (checkpointIdx < 0) return path;
-		return [providerCheckpoint, ...path.slice(checkpointIdx + 1)];
-	}
-
-	const compactionIdx = path.findIndex((entry) => entry.id === effectiveCompaction!.id);
-	if (compactionIdx < 0) {
-		return path;
-	}
-
-	const contextEntries: SessionEntry[] = [effectiveCompaction!];
-	let foundFirstKept = false;
-	for (let i = 0; i < compactionIdx; i++) {
-		const entry = path[i];
-		if (entry.id === effectiveCompaction!.firstKeptEntryId) {
-			foundFirstKept = true;
+	if (latestReduction.type === "compaction") {
+		const contextEntries: SessionEntry[] = [latestReduction];
+		let foundFirstKept = false;
+		for (let i = 0; i < reductionIndex; i++) {
+			const entry = path[i];
+			if (entry.id === latestReduction.firstKeptEntryId) foundFirstKept = true;
+			if (foundFirstKept) contextEntries.push(entry);
 		}
-		if (foundFirstKept) {
-			contextEntries.push(entry);
-		}
+		contextEntries.push(...path.slice(reductionIndex + 1));
+		return contextEntries;
 	}
-	contextEntries.push(...path.slice(compactionIdx + 1));
-	return contextEntries;
+
+	if (latestReduction.type === "provider_checkpoint") {
+		return latestCompatibleCheckpoint?.id === latestReduction.id
+			? [latestReduction, ...path.slice(reductionIndex + 1)]
+			: path.filter((entry) => entry.type !== "provider_checkpoint");
+	}
+
+	const primary = latestReduction.boundary.primary;
+	if (primary.kind === "text") {
+		const contextEntries: SessionEntry[] = [latestReduction];
+		let foundFirstKept = false;
+		for (let i = 0; i < reductionIndex; i++) {
+			const entry = path[i];
+			if (entry.id === primary.firstKeptEntryId) foundFirstKept = true;
+			if (foundFirstKept) contextEntries.push(entry);
+		}
+		contextEntries.push(...path.slice(reductionIndex + 1));
+		return contextEntries;
+	}
+	if (latestCompatibleCheckpoint?.id === latestReduction.id) {
+		return [latestReduction, ...path.slice(reductionIndex + 1)];
+	}
+	return path.filter(
+		(entry) =>
+			entry.type !== "provider_checkpoint" &&
+			(entry.type !== "compaction_boundary" ||
+				entry.boundary.primary.kind !== "checkpoint" ||
+				entry.id === latestReduction.id),
+	);
 }
 
 /**
@@ -623,16 +782,24 @@ export function buildSessionContext(
 	const contextEntries = buildContextEntries(entries, leafId, byId, options);
 	const messages = contextEntries.flatMap(sessionEntryToContextMessages);
 	const checkpointEntry = contextEntries.find(
-		(entry): entry is ProviderCheckpointEntry =>
-			entry.type === "provider_checkpoint" &&
-			contextEntries[0] === entry &&
-			options?.providerCheckpoint !== undefined,
+		(entry): entry is ProviderCheckpointEntry | StoredCompactionBoundaryEntry =>
+			(entry.type === "provider_checkpoint" ||
+				(entry.type === "compaction_boundary" && entry.boundary.primary.kind === "checkpoint")) &&
+			contextEntries[0] === entry,
 	);
+	const providerCheckpoint =
+		checkpointEntry?.type === "provider_checkpoint"
+			? checkpointEntry.checkpoint
+			: checkpointEntry?.type === "compaction_boundary" && checkpointEntry.boundary.primary.kind === "checkpoint"
+				? checkpointEntry.boundary.primary.checkpoint
+				: undefined;
 	return {
 		messages,
 		thinkingLevel,
 		model,
-		...(checkpointEntry ? { providerCheckpoint: cloneProviderCheckpoint(checkpointEntry.checkpoint) } : {}),
+		...(providerCheckpoint && options?.providerCheckpoint
+			? { providerCheckpoint: cloneProviderCheckpoint(providerCheckpoint) }
+			: {}),
 	};
 }
 
@@ -1288,6 +1455,84 @@ export class SessionManager {
 			details,
 			usage,
 			fromHook,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Capture the append-only session state a compaction attempt must still match when it commits. */
+	captureCompactionBoundaryAppendState(): CompactionBoundaryAppendState {
+		return {
+			sessionId: this.sessionId,
+			generation: this.generation,
+			version: this.version,
+			branch: this.leafId,
+		};
+	}
+
+	/** Append one generic compaction boundary if its captured branch state is still current. */
+	appendCompactionBoundary(draft: CompactionBoundaryDraft, options: AppendCompactionBoundaryOptions): string {
+		validateCompactionBoundaryDraft(draft);
+		const expected = options.expected;
+		if (expected.sessionId !== this.sessionId) throw new Error("Compaction boundary session changed before append");
+		if (expected.generation !== this.generation)
+			throw new Error("Compaction boundary generation changed before append");
+		if (expected.version !== this.version) throw new Error("Compaction boundary version changed before append");
+		if (expected.branch !== this.leafId) throw new Error("Compaction boundary branch changed before append");
+
+		if (draft.primary.kind === "text") {
+			if (!this.byId.has(draft.primary.firstKeptEntryId)) {
+				throw new Error(`Compaction boundary first kept entry ${draft.primary.firstKeptEntryId} not found`);
+			}
+		} else {
+			const checkpoint = draft.primary.checkpoint;
+			validateProviderCheckpointIdentity(checkpoint.identity);
+			if (options.currentCheckpointIdentity) {
+				validateProviderCheckpointIdentity(options.currentCheckpointIdentity);
+				if (!providerCheckpointIdentitiesMatch(options.currentCheckpointIdentity, checkpoint.identity)) {
+					throw new Error("Compaction boundary current checkpoint identity is incompatible before append");
+				}
+			}
+			if (checkpoint.type !== "provider_checkpoint" || checkpoint.version !== 1) {
+				throw new Error("Unsupported provider checkpoint version or adapter");
+			}
+			if (checkpoint.frontierEntryId !== this.leafId) {
+				throw new Error("Compaction boundary checkpoint frontier must match the current branch boundary");
+			}
+			const branch = this.getBranch(checkpoint.frontierEntryId);
+			const compatible = branch.filter((entry): entry is CheckpointReductionEntry => {
+				const candidate =
+					entry.type === "provider_checkpoint"
+						? entry.checkpoint
+						: entry.type === "compaction_boundary" && entry.boundary.primary.kind === "checkpoint"
+							? entry.boundary.primary.checkpoint
+							: undefined;
+				return (
+					candidate !== undefined && providerCheckpointIdentitiesMatch(candidate.identity, checkpoint.identity)
+				);
+			});
+			const latestCompatible = compatible.at(-1);
+			const expectedWindowGeneration = latestCompatible
+				? (getStoredCheckpoint(latestCompatible)!.windowGeneration ?? 1) + 1
+				: 1;
+			if (checkpoint.predecessorEntryId !== latestCompatible?.id) {
+				throw new Error(
+					"Compaction boundary checkpoint predecessor must be the ancestral latest compatible checkpoint",
+				);
+			}
+			if (checkpoint.windowGeneration !== expectedWindowGeneration) {
+				throw new Error(
+					`Provider checkpoint window generation must be ${expectedWindowGeneration}, received ${String(checkpoint.windowGeneration)}`,
+				);
+			}
+		}
+
+		const entry: StoredCompactionBoundaryEntry = {
+			type: "compaction_boundary",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			boundary: structuredClone(draft),
 		};
 		this._appendEntry(entry);
 		return entry.id;
