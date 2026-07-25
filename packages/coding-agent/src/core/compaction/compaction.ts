@@ -84,8 +84,8 @@ function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | u
 	return sessionEntryToContextMessages(entry)[0];
 }
 
-/** Result from compact() - SessionManager adds uuid/parentUuid when saving */
-export interface CompactionResult<T = unknown> {
+/** Textual summarization result before it is committed as a generic compaction boundary. */
+export interface LegacyCompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
@@ -95,6 +95,9 @@ export interface CompactionResult<T = unknown> {
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 }
+
+/** @deprecated Use CompactionOutcome for committed results. */
+export type CompactionResult<T = unknown> = LegacyCompactionResult<T>;
 
 function combineUsage(first: Usage, second: Usage): Usage {
 	return {
@@ -826,7 +829,7 @@ export async function compact(
 	env?: Record<string, string>,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
-): Promise<CompactionResult> {
+): Promise<LegacyCompactionResult> {
 	const {
 		firstKeptEntryId,
 		messagesToSummarize,
