@@ -11,18 +11,18 @@ import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-cor
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { type SessionEntry, sessionEntryToContextMessages } from "../../src/core/session-manager.ts";
+import { type InternalSessionEntry, sessionEntryToContextMessages } from "../../src/core/session-manager.ts";
 import type { ExtensionFactory } from "../../src/index.ts";
 import { createHarness } from "./harness.ts";
 
-function messageEntry(message: Record<string, unknown>): SessionEntry {
+function messageEntry(message: Record<string, unknown>): InternalSessionEntry {
 	return {
 		type: "message",
 		id: "entry-1",
 		parentId: null,
 		timestamp: new Date().toISOString(),
 		message,
-	} as unknown as SessionEntry;
+	} as unknown as InternalSessionEntry;
 }
 
 describe("lax message content handling", () => {
@@ -147,7 +147,7 @@ describe("lax message content handling", () => {
 			content: null,
 			display: false,
 			details: undefined,
-		} as unknown as SessionEntry;
+		} as unknown as InternalSessionEntry;
 
 		const [message] = sessionEntryToContextMessages(entry);
 		expect(message).toMatchObject({ role: "custom", content: [] });

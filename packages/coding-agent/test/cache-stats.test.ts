@@ -6,7 +6,7 @@ import {
 	detectCacheMiss,
 	type ModelPriceSource,
 } from "../src/core/cache-stats.ts";
-import type { SessionEntry } from "../src/core/session-manager.ts";
+import type { InternalSessionEntry } from "../src/core/session-manager.ts";
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 
@@ -42,8 +42,8 @@ function assistant(options: {
 	} as AssistantMessage;
 }
 
-function entry(message: AssistantMessage): SessionEntry {
-	return { type: "message", id: "x", parentId: null, timestamp: "", message } as SessionEntry;
+function entry(message: AssistantMessage): InternalSessionEntry {
+	return { type: "message", id: "x", parentId: null, timestamp: "", message } as InternalSessionEntry;
 }
 
 // Turn 1: fresh 100k cache write at $3.75/M
@@ -73,10 +73,72 @@ describe("computeCacheWaste", () => {
 	});
 
 	it("skips the turn after a compaction reset", () => {
-		const reset = { type: "compaction", id: "c", parentId: null, timestamp: "" } as SessionEntry;
+		const reset = { type: "compaction", id: "c", parentId: null, timestamp: "" } as InternalSessionEntry;
 		const afterReset = assistant({ cacheWrite: 20_000, cost: { cacheWrite: 0.075 } });
 		const totals = computeCacheWaste([entry(turn1), reset, entry(afterReset)], models);
 		expect(totals.missedTokens).toBe(0);
+	});
+
+	it.each(["text", "checkpoint"] as const)("resets at a valid generic %s boundary", (kind) => {
+		const boundary = {
+			type: "compaction_boundary",
+			id: "boundary",
+			parentId: "before",
+			timestamp: "2026-01-01T00:00:00.000Z",
+			boundary: {
+				version: 1,
+				tokensBefore: 100_000,
+				primary:
+					kind === "text"
+						? { kind, summary: "summary", firstKeptEntryId: "before", fromExtension: false }
+						: {
+								kind,
+								checkpoint: {
+									type: "provider_checkpoint",
+									version: 1,
+									identity: {
+										adapter: "openai-responses-compact-v1",
+										realm: "test",
+										provider: "openai",
+										endpoint: "https://example.invalid/v1",
+										modelFamily: "gpt-5",
+									},
+									frontierEntryId: "before",
+									windowGeneration: 1,
+									payload: {
+										id: "response",
+										created_at: 1,
+										object: "response.compaction",
+										output: [{ type: "compaction", id: "checkpoint", encrypted_content: "private" }],
+										usage: {
+											input_tokens: 1,
+											input_tokens_details: { cached_tokens: 0 },
+											output_tokens: 1,
+											output_tokens_details: { reasoning_tokens: 0 },
+											total_tokens: 2,
+										},
+									},
+								},
+							},
+				projections: [],
+			},
+		} as InternalSessionEntry;
+		const afterReset = assistant({ cacheWrite: 20_000, cost: { cacheWrite: 0.075 } });
+
+		expect(computeCacheWaste([entry(turn1), boundary, entry(afterReset)], models).missCount).toBe(0);
+	});
+
+	it("ignores malformed generic boundaries", () => {
+		const malformed = {
+			type: "compaction_boundary",
+			id: "boundary",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			boundary: { version: 1, tokensBefore: 100_000, primary: { kind: "text" }, projections: [] },
+		} as unknown as InternalSessionEntry;
+		const miss = assistant({ cacheWrite: 110_000, cost: { cacheWrite: 0.4125 }, timestamp: 120_000 });
+
+		expect(computeCacheWaste([entry(turn1), malformed, entry(miss)], models).missCount).toBe(1);
 	});
 
 	it("counts misses caused by model switches", () => {

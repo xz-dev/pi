@@ -15,7 +15,11 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
+import {
+	type InternalSessionEntry,
+	type ReadonlySessionManager,
+	sessionEntryToContextMessages,
+} from "../session-manager.ts";
 import { completeSummarization, estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
@@ -59,7 +63,7 @@ export interface BranchPreparation {
 
 export interface CollectEntriesResult {
 	/** Entries to summarize, in chronological order */
-	entries: SessionEntry[];
+	entries: InternalSessionEntry[];
 	/** Common ancestor between old and new position, if any */
 	commonAncestorId: string | null;
 }
@@ -129,7 +133,7 @@ export function collectEntriesForBranchSummary(
 	}
 
 	// Collect entries from old leaf back to common ancestor
-	const entries: SessionEntry[] = [];
+	const entries: InternalSessionEntry[] = [];
 	let current: string | null = oldLeafId;
 
 	while (current && current !== commonAncestorId) {
@@ -153,7 +157,7 @@ export function collectEntriesForBranchSummary(
  * Extract AgentMessage from a session entry.
  * Similar to getMessageFromEntry in compaction.ts but also handles compaction entries.
  */
-function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
+function getMessageFromEntry(entry: InternalSessionEntry): AgentMessage | undefined {
 	switch (entry.type) {
 		case "message":
 			// Skip tool results - context is in assistant's tool call
@@ -168,6 +172,11 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 
 		case "compaction":
 			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
+
+		// Generic boundaries can contribute a primary text summary plus portable projections.
+		// prepareBranchEntries handles all of them through sessionEntryToContextMessages.
+		case "compaction_boundary":
+			return undefined;
 
 		// These don't contribute to conversation content
 		case "thinking_level_change":
@@ -192,7 +201,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
  * @param entries - Entries in chronological order
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
  */
-export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: number = 0): BranchPreparation {
+export function prepareBranchEntries(entries: InternalSessionEntry[], tokenBudget: number = 0): BranchPreparation {
 	const messages: AgentMessage[] = [];
 	const fileOps = createFileOps();
 	let totalTokens = 0;
@@ -218,29 +227,38 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	// Second pass: walk from newest to oldest, adding messages until token budget
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		const message = getMessageFromEntry(entry);
-		if (!message) continue;
+		const entryMessages =
+			entry.type === "compaction_boundary"
+				? sessionEntryToContextMessages(entry)
+				: [getMessageFromEntry(entry)].filter((message): message is AgentMessage => message !== undefined);
+		if (entryMessages.length === 0) continue;
 
-		// Extract file ops from assistant messages (tool calls)
-		extractFileOpsFromMessage(message, fileOps);
+		for (let messageIndex = entryMessages.length - 1; messageIndex >= 0; messageIndex--) {
+			const message = entryMessages[messageIndex];
+			// Extract file ops from assistant messages (tool calls)
+			extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateTokens(message);
+			const tokens = estimateTokens(message);
 
-		// Check budget before adding
-		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
-			// If this is a summary entry, try to fit it anyway as it's important context
-			if (entry.type === "compaction" || entry.type === "branch_summary") {
-				if (totalTokens < tokenBudget * 0.9) {
-					messages.unshift(message);
-					totalTokens += tokens;
+			// Check budget before adding
+			if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
+				// If this is a summary entry, try to fit it anyway as it's important context
+				if (
+					entry.type === "compaction" ||
+					entry.type === "branch_summary" ||
+					entry.type === "compaction_boundary"
+				) {
+					if (totalTokens < tokenBudget * 0.9) {
+						messages.unshift(message);
+						totalTokens += tokens;
+					}
 				}
+				return { messages, fileOps, totalTokens };
 			}
-			// Stop - we've hit the budget
-			break;
-		}
 
-		messages.unshift(message);
-		totalTokens += tokens;
+			messages.unshift(message);
+			totalTokens += tokens;
+		}
 	}
 
 	return { messages, fileOps, totalTokens };
@@ -291,7 +309,7 @@ Keep each section concise. Preserve exact file paths, function names, and error 
  * @param options - Generation options
  */
 export async function generateBranchSummary(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
 	const {

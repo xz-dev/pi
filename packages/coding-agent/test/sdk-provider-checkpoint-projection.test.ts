@@ -62,6 +62,32 @@ describe("provider checkpoint request projection", () => {
 		).toEqual({ messages: [checkpointSuffix, pending], applied: true });
 	});
 
+	it("projects an exact checkpoint when overflow recovery removes the persisted failed assistant", () => {
+		const retainedPrompt = user("retained prompt", 1);
+		const persistedOverflow: AgentMessage = {
+			role: "assistant",
+			content: [],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			timestamp: 2,
+		};
+		const checkpointSuffix = user("checkpoint suffix", 10);
+
+		expect(
+			mergePortableCheckpointProjection([retainedPrompt, persistedOverflow], [checkpointSuffix], [retainedPrompt]),
+		).toEqual({ messages: [checkpointSuffix], applied: true });
+	});
+
 	it("preserves the current loop projection unchanged when persisted history is not an ordered prefix or subsequence", () => {
 		const persisted = user("persisted", 1);
 		const current = user("current", 2);

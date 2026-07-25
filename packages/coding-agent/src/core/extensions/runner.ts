@@ -6,10 +6,18 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import { type CompactionPreparation, toPublicCompactionPreparation } from "../compaction/compaction.ts";
+import type { LegacyCompactionResult, PortableCompactionProjection } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { SessionManager } from "../session-manager.ts";
+import {
+	createExtensionSessionManagerView,
+	type ExtensionSessionManagerView,
+	type InternalSessionEntry,
+	projectPublicSessionEntries,
+	type SessionManager,
+} from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type {
 	BeforeAgentStartEvent,
@@ -51,9 +59,11 @@ import type {
 	ResolvedCommand,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
+	SessionBeforeCompactEvent,
 	SessionBeforeCompactResult,
 	SessionBeforeForkResult,
 	SessionBeforeSwitchResult,
+	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
 	SessionShutdownEvent,
 	ToolCallEvent,
@@ -110,6 +120,35 @@ const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltI
 	return builtinKeybindings;
 };
 
+function assertJsonSerializable(value: unknown, path = "projection"): void {
+	if (value === undefined || value === null || typeof value === "string" || typeof value === "boolean") return;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new Error(`${path} must contain only finite numbers`);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (let i = 0; i < value.length; i++) assertJsonSerializable(value[i], `${path}[${i}]`);
+		return;
+	}
+	if (typeof value !== "object") throw new Error(`${path} must be JSON serializable`);
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) throw new Error(`${path} must be JSON serializable`);
+	for (const [key, child] of Object.entries(value)) assertJsonSerializable(child, `${path}.${key}`);
+}
+
+function clonePortableProjection(projection: PortableCompactionProjection): PortableCompactionProjection {
+	if (
+		projection.type !== "portable_compaction_projection" ||
+		projection.version !== 1 ||
+		projection.customType.trim().length === 0 ||
+		projection.summary.trim().length === 0
+	) {
+		throw new Error("Invalid portable compaction projection");
+	}
+	assertJsonSerializable(projection);
+	return structuredClone(projection);
+}
+
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
 	messages?: NonNullable<BeforeAgentStartEventResult["message"]>[];
@@ -133,28 +172,25 @@ type RunnerEmitEvent = Exclude<
 	| MessageEndEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
+	| SessionBeforeCompactEvent
+	| SessionBeforeTreeEvent
 >;
 
-type SessionBeforeEvent = Extract<
-	RunnerEmitEvent,
-	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
->;
+type SessionBeforeEvent = Extract<RunnerEmitEvent, { type: "session_before_switch" | "session_before_fork" }>;
 
-type SessionBeforeEventResult =
-	| SessionBeforeSwitchResult
-	| SessionBeforeForkResult
-	| SessionBeforeCompactResult
-	| SessionBeforeTreeResult;
+type SessionBeforeEventResult = SessionBeforeSwitchResult | SessionBeforeForkResult | SessionBeforeTreeResult;
 
 type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_switch" }
 	? SessionBeforeSwitchResult | undefined
 	: TEvent extends { type: "session_before_fork" }
 		? SessionBeforeForkResult | undefined
-		: TEvent extends { type: "session_before_compact" }
-			? SessionBeforeCompactResult | undefined
-			: TEvent extends { type: "session_before_tree" }
-				? SessionBeforeTreeResult | undefined
-				: undefined;
+		: undefined;
+
+export interface SessionBeforeCompactAggregate {
+	cancel: boolean;
+	replacement?: LegacyCompactionResult;
+	projections: PortableCompactionProjection[];
+}
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
@@ -269,7 +305,7 @@ export class ExtensionRunner {
 	private uiContext: ExtensionUIContext;
 	private mode: ExtensionMode = "print";
 	private cwd: string;
-	private sessionManager: SessionManager;
+	private extensionSessionManager: ExtensionSessionManagerView;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
@@ -304,7 +340,7 @@ export class ExtensionRunner {
 		this.runtime = runtime;
 		this.uiContext = noOpUIContext;
 		this.cwd = cwd;
-		this.sessionManager = sessionManager;
+		this.extensionSessionManager = createExtensionSessionManagerView(sessionManager);
 		this.modelRegistry = modelRegistry;
 	}
 
@@ -662,6 +698,10 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
+	getSessionManagerView(): ExtensionSessionManagerView {
+		return this.extensionSessionManager;
+	}
+
 	createContext(): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
@@ -684,7 +724,7 @@ export class ExtensionRunner {
 			},
 			get sessionManager() {
 				runner.assertActive();
-				return runner.sessionManager;
+				return runner.extensionSessionManager;
 			},
 			get modelRegistry() {
 				runner.assertActive();
@@ -777,12 +817,96 @@ export class ExtensionRunner {
 	}
 
 	private isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
-		return (
-			event.type === "session_before_switch" ||
-			event.type === "session_before_fork" ||
-			event.type === "session_before_compact" ||
-			event.type === "session_before_tree"
-		);
+		return event.type === "session_before_switch" || event.type === "session_before_fork";
+	}
+
+	async emitSessionBeforeCompact(
+		event: Omit<SessionBeforeCompactEvent, "preparation" | "branchEntries"> & {
+			preparation: CompactionPreparation;
+			branchEntries: InternalSessionEntry[];
+		},
+	): Promise<SessionBeforeCompactAggregate> {
+		const ctx = this.createContext();
+		const publicEvent: SessionBeforeCompactEvent = {
+			...event,
+			preparation: toPublicCompactionPreparation(event.preparation),
+			branchEntries: projectPublicSessionEntries(event.branchEntries, event.branchEntries.at(-1)?.id ?? null)
+				.entries,
+		};
+		let replacement: LegacyCompactionResult | undefined;
+		const projections: PortableCompactionProjection[] = [];
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("session_before_compact");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					const result = (await handler(publicEvent, ctx)) as SessionBeforeCompactResult | undefined;
+					if (!result) continue;
+					if (result.cancel) return { cancel: true, projections: [] };
+					if (result.compaction && result.projection) {
+						throw new Error("session_before_compact handlers cannot return both compaction and projection");
+					}
+					if (result.compaction) replacement = result.compaction;
+					if (result.projection) projections.push(clonePortableProjection(result.projection));
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: event.type,
+						error: message,
+						stack,
+					});
+				}
+			}
+		}
+
+		return {
+			cancel: false,
+			...(replacement ? { replacement } : {}),
+			projections,
+		};
+	}
+
+	async emitSessionBeforeTree(
+		event: Omit<SessionBeforeTreeEvent, "preparation"> & {
+			preparation: Omit<SessionBeforeTreeEvent["preparation"], "entriesToSummarize"> & {
+				entriesToSummarize: InternalSessionEntry[];
+			};
+		},
+	): Promise<SessionBeforeTreeResult | undefined> {
+		const publicEvent: SessionBeforeTreeEvent = {
+			...event,
+			preparation: {
+				...event.preparation,
+				entriesToSummarize: projectPublicSessionEntries(
+					event.preparation.entriesToSummarize,
+					event.preparation.oldLeafId,
+				).entries,
+			},
+		};
+		const ctx = this.createContext();
+		let result: SessionBeforeTreeResult | undefined;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("session_before_tree");
+			if (!handlers || handlers.length === 0) continue;
+			for (const handler of handlers) {
+				try {
+					const handlerResult = (await handler(publicEvent, ctx)) as SessionBeforeTreeResult | undefined;
+					if (handlerResult) {
+						result = handlerResult;
+						if (result.cancel) return result;
+					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({ extensionPath: ext.path, event: publicEvent.type, error: message, stack });
+				}
+			}
+		}
+		return result;
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {

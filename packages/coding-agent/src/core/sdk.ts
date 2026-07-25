@@ -12,6 +12,7 @@ import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+import { mergeCheckpointProjectionWithLiveSuffix } from "./checkpoint-projection.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -138,12 +139,6 @@ function getDefaultAgentDir(): string {
 	return getAgentDir();
 }
 
-function agentMessagesHaveSameStableIdentity(left: AgentMessage, right: AgentMessage): boolean {
-	if (left === right) return true;
-	if (left.role !== right.role || left.timestamp !== right.timestamp) return false;
-	return JSON.stringify(left) === JSON.stringify(right);
-}
-
 /**
  * Replace the persisted portable history with its provider checkpoint projection while
  * retaining messages that have reached the live agent loop but not SessionManager yet.
@@ -163,24 +158,13 @@ export function mergePortableCheckpointProjection(
 	checkpointProjection: AgentMessage[],
 	currentLoopMessages: AgentMessage[],
 ): ProviderCheckpointProjectionMerge {
-	let frontier = -1;
-	let searchFrom = 0;
-	for (const persistedMessage of persistedPortableMessages) {
-		let match = -1;
-		for (let i = searchFrom; i < currentLoopMessages.length; i++) {
-			if (agentMessagesHaveSameStableIdentity(persistedMessage, currentLoopMessages[i])) {
-				match = i;
-				break;
-			}
-		}
-		if (match < 0) return { messages: currentLoopMessages, applied: false };
-		frontier = match;
-		searchFrom = match + 1;
-	}
-	return {
-		messages: [...checkpointProjection, ...currentLoopMessages.slice(frontier + 1)],
-		applied: true,
-	};
+	const merged = mergeCheckpointProjectionWithLiveSuffix(
+		persistedPortableMessages,
+		persistedPortableMessages,
+		checkpointProjection,
+		currentLoopMessages,
+	);
+	return { messages: merged.activeMessages, applied: merged.applied };
 }
 
 /**

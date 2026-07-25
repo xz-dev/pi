@@ -51,12 +51,12 @@ describe("Documentation example", () => {
 		const checkCompactEvent = (pi: ExtensionAPI) => {
 			pi.on("session_compact", async (event: SessionCompactEvent) => {
 				// These should all be accessible
-				const entry = event.compactionEntry;
+				const boundary = event.boundary;
 				const fromExtension = event.fromExtension;
 
-				expect(entry.type).toBe("compaction");
-				expect(typeof entry.summary).toBe("string");
-				expect(typeof entry.tokensBefore).toBe("number");
+				expect(["text", "checkpoint"]).toContain(boundary.kind);
+				expect(typeof boundary.tokensBefore).toBe("number");
+				expect(typeof event.outcome.boundaryEntryId).toBe("string");
 				expect(typeof fromExtension).toBe("boolean");
 			});
 		};

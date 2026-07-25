@@ -7,13 +7,22 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { contentText, type RetryCallbacks, type RetryPolicy, retryAssistantCall, uuidv7 } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	Usage,
+} from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
+import { toPublicMessage } from "../public-message.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
-	type SessionEntry,
+	getLatestReductionEntry,
+	type InternalSessionEntry,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
 import {
@@ -22,6 +31,7 @@ import {
 	extractFileOpsFromMessage,
 	type FileOperations,
 	formatFileOperations,
+	type ProviderNeutralMessage,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
@@ -41,7 +51,7 @@ export interface CompactionDetails {
  */
 function extractFileOperations(
 	messages: AgentMessage[],
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	prevCompactionIndex: number,
 ): FileOperations {
 	const fileOps = createFileOps();
@@ -77,15 +87,13 @@ function extractFileOperations(
  * Extract AgentMessage from an entry if it produces one.
  * Returns undefined for entries that don't contribute to LLM context.
  */
-function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "compaction") {
-		return undefined;
-	}
+function getMessageFromEntryForCompaction(entry: InternalSessionEntry): AgentMessage | undefined {
+	if (entry.type === "compaction" || entry.type === "compaction_boundary") return undefined;
 	return sessionEntryToContextMessages(entry)[0];
 }
 
-/** Result from compact() - SessionManager adds uuid/parentUuid when saving */
-export interface CompactionResult<T = unknown> {
+/** Textual summarization result before it is committed as a generic compaction boundary. */
+export interface LegacyCompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
@@ -95,6 +103,9 @@ export interface CompactionResult<T = unknown> {
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 }
+
+/** @deprecated Use CompactionOutcome for committed results. */
+export type CompactionResult<T = unknown> = LegacyCompactionResult<T>;
 
 function combineUsage(first: Usage, second: Usage): Usage {
 	return {
@@ -169,7 +180,7 @@ function getAssistantUsage(msg: AgentMessage): Usage | undefined {
 /**
  * Find the last valid assistant message usage from session entries.
  */
-export function getLastAssistantUsage(entries: SessionEntry[]): Usage | undefined {
+export function getLastAssistantUsage(entries: InternalSessionEntry[]): Usage | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (entry.type === "message") {
@@ -335,7 +346,7 @@ function isTurnStartMessage(message: AgentMessage): boolean {
 	return false;
 }
 
-function isTurnStartEntry(entry: SessionEntry): boolean {
+function isTurnStartEntry(entry: InternalSessionEntry): boolean {
 	if (entry.type === "compaction") {
 		return false;
 	}
@@ -348,7 +359,7 @@ function isTurnStartEntry(entry: SessionEntry): boolean {
  * When we cut at an assistant message with tool calls, its tool results follow it
  * and will be kept.
  */
-function findValidCutPoints(entries: SessionEntry[], startIndex: number, endIndex: number): number[] {
+function findValidCutPoints(entries: InternalSessionEntry[], startIndex: number, endIndex: number): number[] {
 	const cutPoints: number[] = [];
 	for (let i = startIndex; i < endIndex; i++) {
 		const entry = entries[i];
@@ -366,7 +377,7 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
  * Find the context-visible user-role message that starts the turn containing the given entry index.
  * Returns -1 if no turn start found before the index.
  */
-export function findTurnStartIndex(entries: SessionEntry[], entryIndex: number, startIndex: number): number {
+export function findTurnStartIndex(entries: InternalSessionEntry[], entryIndex: number, startIndex: number): number {
 	for (let i = entryIndex; i >= startIndex; i--) {
 		if (isTurnStartEntry(entries[i])) {
 			return i;
@@ -401,7 +412,7 @@ export interface CutPointResult {
  * Only considers entries between `startIndex` and `endIndex` (exclusive).
  */
 export function findCutPoint(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	startIndex: number,
 	endIndex: number,
 	keepRecentTokens: number,
@@ -689,6 +700,8 @@ export async function generateSummaryWithUsage(
 // Compaction Preparation (for extensions)
 // ============================================================================
 
+export type ProviderNeutralCompactionMessage = ProviderNeutralMessage;
+
 export interface CompactionPreparation {
 	/** UUID of first entry to keep */
 	firstKeptEntryId: string;
@@ -707,28 +720,53 @@ export interface CompactionPreparation {
 	settings: CompactionSettings;
 }
 
+export interface PublicCompactionPreparation
+	extends Omit<CompactionPreparation, "messagesToSummarize" | "turnPrefixMessages"> {
+	messagesToSummarize: ProviderNeutralCompactionMessage[];
+	turnPrefixMessages: ProviderNeutralCompactionMessage[];
+}
+
+function toProviderNeutralCompactionMessage(message: Message): ProviderNeutralCompactionMessage {
+	return toPublicMessage(message);
+}
+
+export function toPublicCompactionPreparation(preparation: CompactionPreparation): PublicCompactionPreparation {
+	return {
+		...preparation,
+		messagesToSummarize: convertToLlm(preparation.messagesToSummarize).map(toProviderNeutralCompactionMessage),
+		turnPrefixMessages: convertToLlm(preparation.turnPrefixMessages).map(toProviderNeutralCompactionMessage),
+		fileOps: {
+			read: new Set(preparation.fileOps.read),
+			written: new Set(preparation.fileOps.written),
+			edited: new Set(preparation.fileOps.edited),
+		},
+		settings: { ...preparation.settings },
+	};
+}
+
 export function prepareCompaction(
-	pathEntries: SessionEntry[],
+	pathEntries: InternalSessionEntry[],
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
-	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
-		return undefined;
-	}
+	const latestReduction = getLatestReductionEntry(pathEntries);
+	if (latestReduction && pathEntries.at(-1)?.id === latestReduction.id) return undefined;
 
 	let prevCompactionIndex = -1;
-	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "compaction") {
-			prevCompactionIndex = i;
-			break;
-		}
+	let previousSummary: string | undefined;
+	let previousFirstKeptEntryId: string | undefined;
+	if (latestReduction?.type === "compaction") {
+		prevCompactionIndex = pathEntries.lastIndexOf(latestReduction);
+		previousSummary = latestReduction.summary;
+		previousFirstKeptEntryId = latestReduction.firstKeptEntryId;
+	} else if (latestReduction?.type === "compaction_boundary" && latestReduction.boundary.primary.kind === "text") {
+		prevCompactionIndex = pathEntries.lastIndexOf(latestReduction);
+		previousSummary = latestReduction.boundary.primary.summary;
+		previousFirstKeptEntryId = latestReduction.boundary.primary.firstKeptEntryId;
 	}
 
-	let previousSummary: string | undefined;
 	let boundaryStart = 0;
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
-		previousSummary = prevCompaction.summary;
-		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
+	if (previousFirstKeptEntryId) {
+		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === previousFirstKeptEntryId);
 		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
 	}
 	const boundaryEnd = pathEntries.length;
@@ -826,7 +864,7 @@ export async function compact(
 	env?: Record<string, string>,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
-): Promise<CompactionResult> {
+): Promise<LegacyCompactionResult> {
 	const {
 		firstKeptEntryId,
 		messagesToSummarize,

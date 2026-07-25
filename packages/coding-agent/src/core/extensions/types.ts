@@ -47,7 +47,13 @@ import type {
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { BashResult } from "../bash-executor.ts";
-import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
+import type {
+	CompactionBoundary,
+	CompactionOutcome,
+	LegacyCompactionResult,
+	PortableCompactionProjection,
+	PublicCompactionPreparation,
+} from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
@@ -58,8 +64,8 @@ import type {
 	BranchSummaryEntry,
 	CompactionEntry,
 	CustomEntry,
-	ReadonlySessionManager,
-	SessionEntry,
+	ExtensionSessionManagerView,
+	PublicSessionEntry,
 	SessionManager,
 } from "../session-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
@@ -294,7 +300,7 @@ export interface ContextUsage {
 
 export interface CompactOptions {
 	customInstructions?: string;
-	onComplete?: (result: CompactionResult) => void;
+	onComplete?: (result: CompactionOutcome) => void;
 	onError?: (error: Error) => void;
 }
 
@@ -312,8 +318,8 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** Session manager (read-only) */
-	sessionManager: ReadonlySessionManager;
+	/** Provider-neutral session manager view (read-only). */
+	sessionManager: ExtensionSessionManagerView;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined) */
@@ -585,8 +591,8 @@ export interface SessionBeforeForkEvent {
 /** Fired before context compaction (can be cancelled or customized) */
 export interface SessionBeforeCompactEvent {
 	type: "session_before_compact";
-	preparation: CompactionPreparation;
-	branchEntries: SessionEntry[];
+	preparation: PublicCompactionPreparation;
+	branchEntries: PublicSessionEntry[];
 	customInstructions?: string;
 	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
 	reason: "manual" | "threshold" | "overflow";
@@ -598,12 +604,16 @@ export interface SessionBeforeCompactEvent {
 /** Fired after context compaction */
 export interface SessionCompactEvent {
 	type: "session_compact";
-	compactionEntry: CompactionEntry;
-	fromExtension: boolean;
+	boundary: CompactionBoundary;
+	outcome: CompactionOutcome;
 	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
 	reason: "manual" | "threshold" | "overflow";
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
+	/** Present only while replaying a historical compaction event. */
+	compactionEntry?: CompactionEntry;
+	/** @deprecated True only for a legacy replacement primary. */
+	fromExtension: boolean;
 }
 
 /** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */
@@ -619,7 +629,7 @@ export interface TreePreparation {
 	targetId: string;
 	oldLeafId: string | null;
 	commonAncestorId: string | null;
-	entriesToSummarize: SessionEntry[];
+	entriesToSummarize: PublicSessionEntry[];
 	userWantsSummary: boolean;
 	/** Custom instructions for summarization */
 	customInstructions?: string;
@@ -1105,7 +1115,8 @@ export interface SessionBeforeForkResult {
 
 export interface SessionBeforeCompactResult {
 	cancel?: boolean;
-	compaction?: CompactionResult;
+	compaction?: LegacyCompactionResult;
+	projection?: PortableCompactionProjection;
 }
 
 export interface SessionBeforeTreeResult {
@@ -1522,7 +1533,7 @@ export interface ExtensionShortcut {
 	extensionPath: string;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+type HandlerFn = (...args: unknown[]) => unknown | Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,

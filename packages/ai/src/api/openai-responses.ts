@@ -27,6 +27,7 @@ import { splitDeferredTools } from "../utils/deferred-tools.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { isValidOpenAIResponsesCheckpointPayload } from "../utils/openai-responses-checkpoint.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
@@ -199,10 +200,25 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				compat.supportsOpenAIGrammarTools,
 			);
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
-			let params = buildParams(model, context, options, compat, grammarToolInputProperties);
+			const providerState = getOpenAIResponsesProviderState(context.providerState);
+			const publicContext = providerState
+				? { ...context, providerState: undefined, systemPrompt: undefined }
+				: context;
+			let params = buildParams(model, publicContext, options, compat, grammarToolInputProperties);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
-				params = nextParams as ResponseCreateParamsStreaming;
+				assertResponseCreateParamsStreaming(nextParams);
+				params = nextParams;
+			}
+			assertResponseCreateParamsStreaming(params);
+			if (providerState) {
+				params = {
+					...params,
+					input: [
+						...responsesCompactionAdapter.renderCheckpoint(model, providerState.checkpoint),
+						...params.input,
+					],
+				};
 			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
@@ -412,7 +428,11 @@ function buildParams(
 	return params;
 }
 
-export { getOpenAIResponsesCheckpointIdentity, normalizeOpenAIResponsesCompactionEndpoint };
+export {
+	getOpenAIResponsesCheckpointIdentity,
+	isValidOpenAIResponsesCheckpointPayload,
+	normalizeOpenAIResponsesCompactionEndpoint,
+};
 
 function snapshotCompactionIdentity(model: Model<"openai-responses">): OpenAIResponsesCheckpointIdentity {
 	const declared = model.compat?.responsesCompaction;
@@ -444,45 +464,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isNonNegativeFiniteNumber(value: unknown): value is number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
+type ResponseCreateParamsStreamingWithInput = ResponseCreateParamsStreaming & { input: ResponseInput };
 
-function validateUsageObject(value: unknown): value is CompactedResponse["usage"] {
-	if (!isRecord(value)) return false;
-	if (
-		!isNonNegativeFiniteNumber(value.input_tokens) ||
-		!isNonNegativeFiniteNumber(value.output_tokens) ||
-		!isNonNegativeFiniteNumber(value.total_tokens) ||
-		!isRecord(value.input_tokens_details) ||
-		!isNonNegativeFiniteNumber(value.input_tokens_details.cached_tokens) ||
-		!isRecord(value.output_tokens_details) ||
-		!isNonNegativeFiniteNumber(value.output_tokens_details.reasoning_tokens)
-	) {
-		return false;
+function assertResponseCreateParamsStreaming(value: unknown): asserts value is ResponseCreateParamsStreamingWithInput {
+	if (!isRecord(value) || value.stream !== true || typeof value.model !== "string" || !Array.isArray(value.input)) {
+		throw new Error("Invalid before_provider_request result for an OpenAI Responses streaming request");
 	}
-	const cacheWriteTokens = value.input_tokens_details.cache_write_tokens;
-	return cacheWriteTokens === undefined || isNonNegativeFiniteNumber(cacheWriteTokens);
 }
 
 function validateCompactedResponse(value: unknown): asserts value is CompactedResponse {
-	const invalid = (reason: string): never => {
-		throw new Error(`Invalid Responses compact response: ${reason}`);
-	};
-	if (!isRecord(value)) invalid("expected an object envelope");
-	const envelope = value as Record<string, unknown>;
-	if (typeof envelope.id !== "string" || envelope.id.trim().length === 0) invalid("expected a non-empty id");
-	if (typeof envelope.created_at !== "number" || !Number.isFinite(envelope.created_at)) {
-		invalid("expected a numeric created_at");
-	}
-	if (envelope.object !== "response.compaction") invalid('expected object "response.compaction"');
-	if (!validateUsageObject(envelope.usage)) invalid("expected a usage object with numeric counters");
-	if (!Array.isArray(envelope.output) || envelope.output.length === 0) invalid("expected non-empty output");
-	const output = envelope.output as unknown[];
-	for (const item of output) {
-		if (!isRecord(item) || typeof item.type !== "string" || item.type.trim().length === 0) {
-			invalid("expected every output item to be an object with a non-empty type");
-		}
+	if (!isValidOpenAIResponsesCheckpointPayload(value)) {
+		throw new Error("Invalid Responses compact response: expected a complete non-empty checkpoint payload");
 	}
 }
 

@@ -20,6 +20,7 @@ import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-sessi
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
+import { mergePortableCheckpointProjection } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
@@ -73,6 +74,7 @@ export interface HarnessOptions {
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
+	persistedSession?: boolean;
 }
 
 export interface Harness {
@@ -110,7 +112,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = options.persistedSession
+		? SessionManager.create(tempDir, tempDir)
+		: SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
@@ -157,26 +161,11 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			const portable = sessionManager.buildSessionContext();
 			const projected = sessionManager.buildSessionContext({ providerCheckpoint: { identity } });
 			if (!projected.providerCheckpoint) return { messages };
-			let frontier = -1;
-			let searchFrom = 0;
-			for (const persistedMessage of portable.messages) {
-				const match = messages.findIndex(
-					(message, index) =>
-						index >= searchFrom &&
-						(message === persistedMessage ||
-							(message.role === persistedMessage.role &&
-								message.timestamp === persistedMessage.timestamp &&
-								JSON.stringify(message) === JSON.stringify(persistedMessage))),
-				);
-				if (match < 0) return { messages };
-				frontier = match;
-				searchFrom = match + 1;
-			}
-			const providerState: OpenAIResponsesProviderState = {
-				type: "openai_responses_provider_state",
-				checkpoint: projected.providerCheckpoint,
-			};
-			return { messages: [...projected.messages, ...messages.slice(frontier + 1)], providerState };
+			const merged = mergePortableCheckpointProjection(portable.messages, projected.messages, messages);
+			const providerState: OpenAIResponsesProviderState | undefined = merged.applied
+				? { type: "openai_responses_provider_state", checkpoint: projected.providerCheckpoint }
+				: undefined;
+			return { messages: merged.messages, providerState };
 		},
 		onPayload: async (payload) => {
 			const runner = extensionRunnerRef.current;

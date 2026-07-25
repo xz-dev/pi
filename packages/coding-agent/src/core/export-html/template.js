@@ -346,13 +346,14 @@
             parts.push(typeof entry.content === 'string' ? entry.content : extractContent(entry.content));
             break;
           case 'compaction':
+          case 'compaction_boundary':
             parts.push('compaction');
             break;
           case 'branch_summary':
             parts.push('branch summary', entry.summary);
             break;
           case 'model_change':
-            parts.push('model', entry.modelId);
+            parts.push('model transition');
             break;
           case 'thinking_level_change':
             parts.push('thinking', entry.thinkingLevel);
@@ -684,6 +685,8 @@
           }
           case 'compaction':
             return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
+          case 'compaction_boundary':
+            return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.boundary.tokensBefore/1000)}k tokens]</span>`;
           case 'branch_summary': {
             const summary = truncate(normalize(entry.summary || ''));
             return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
@@ -693,7 +696,7 @@
             return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
           }
           case 'model_change':
-            return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.modelId)}]</span>`;
+            return labelHtml + '<span class="tree-muted">[model transition]</span>';
           case 'thinking_level_change':
             return labelHtml + `<span class="tree-muted">[thinking: ${escapeHtml(entry.thinkingLevel)}]</span>`;
           default:
@@ -1288,7 +1291,7 @@
         }
 
         if (entry.type === 'model_change') {
-          return `<div class="model-change" id="${entryDomId}">${tsHtml}Switched to model: <span class="model-name">${escapeHtml(entry.provider)}/${escapeHtml(entry.modelId)}</span></div>`;
+          return `<div class="model-change" id="${entryDomId}">${tsHtml}Switched model</div>`;
         }
 
         if (entry.type === 'compaction') {
@@ -1296,6 +1299,21 @@
             <div class="compaction-label">[compaction]</div>
             <div class="compaction-collapsed">Compacted from ${entry.tokensBefore.toLocaleString()} tokens</div>
             <div class="compaction-content"><strong>Compacted from ${entry.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(entry.summary)}</div>
+          </div>`;
+        }
+
+        if (entry.type === 'compaction_boundary') {
+          const boundary = entry.boundary;
+          if (boundary.kind === 'text' && boundary.text) {
+            return `<div class="compaction" id="${entryDomId}" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
+              <div class="compaction-label">[compaction]</div>
+              <div class="compaction-collapsed">Compacted from ${boundary.tokensBefore.toLocaleString()} tokens</div>
+              <div class="compaction-content"><strong>Compacted from ${boundary.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(boundary.text.summary)}</div>
+            </div>`;
+          }
+          return `<div class="compaction" id="${entryDomId}">
+            <div class="compaction-label">[compaction]</div>
+            <div class="compaction-collapsed">Context compacted from ${boundary.tokensBefore.toLocaleString()} tokens</div>
           </div>`;
         }
 
@@ -1349,7 +1367,7 @@
               toolCalls += msg.content.filter(c => c.type === 'toolCall').length;
             }
             if (msg.role === 'toolResult') toolResults++;
-          } else if (entry.type === 'compaction') {
+          } else if (entry.type === 'compaction' || entry.type === 'compaction_boundary') {
             compactions++;
           } else if (entry.type === 'branch_summary') {
             branchSummaries++;

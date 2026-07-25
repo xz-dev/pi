@@ -8,23 +8,203 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { getModel, streamSimple } from "@earendil-works/pi-ai/compat";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { CompactionPreparation } from "../src/core/compaction/index.ts";
 import {
 	createExtensionRuntime,
 	type Extension,
+	type ExtensionAPI,
+	ExtensionRunner,
 	type SessionBeforeCompactEvent,
 	type SessionCompactEvent,
 	type SessionEvent,
 } from "../src/core/extensions/index.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { type InternalSessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createCodingTools } from "../src/index.ts";
-import { createTestResourceLoader } from "./utilities.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 const API_KEY = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
+
+const projectionA = {
+	type: "portable_compaction_projection" as const,
+	version: 1 as const,
+	customType: "test.a",
+	summary: "portable A",
+	details: { order: 1 },
+};
+const projectionB = {
+	type: "portable_compaction_projection" as const,
+	version: 1 as const,
+	customType: "test.b",
+	summary: "portable B",
+	details: { order: 2 },
+};
+const legacyReplacementA = {
+	summary: "legacy A",
+	firstKeptEntryId: "entry-a",
+	tokensBefore: 10,
+};
+const legacyReplacementB = {
+	summary: "legacy B",
+	firstKeptEntryId: "entry-b",
+	tokensBefore: 20,
+};
+
+async function createAggregationRunner(factories: Array<(pi: ExtensionAPI) => void>) {
+	const tempDir = join(tmpdir(), `pi-compaction-fold-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	mkdirSync(tempDir, { recursive: true });
+	const extensionResult = await createTestExtensionsResult(factories, tempDir);
+	const sessionManager = SessionManager.inMemory(tempDir);
+	const modelRegistry = await createModelRegistry(AuthStorage.inMemory());
+	const runner = new ExtensionRunner(
+		extensionResult.extensions,
+		extensionResult.runtime,
+		tempDir,
+		sessionManager,
+		modelRegistry,
+	);
+	return { runner, tempDir };
+}
+
+type RawSessionBeforeCompactEvent = Omit<SessionBeforeCompactEvent, "preparation" | "branchEntries"> & {
+	preparation: CompactionPreparation;
+	branchEntries: InternalSessionEntry[];
+};
+
+const beforeCompactEvent: RawSessionBeforeCompactEvent = {
+	type: "session_before_compact",
+	preparation: {
+		firstKeptEntryId: "entry-a",
+		messagesToSummarize: [],
+		turnPrefixMessages: [],
+		isSplitTurn: false,
+		tokensBefore: 20,
+		fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+		settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1000 },
+	},
+	branchEntries: [],
+	reason: "manual",
+	willRetry: false,
+	signal: new AbortController().signal,
+};
+
+describe("Compaction extension aggregation", () => {
+	it("preserves projection order while the last legacy replacement wins", async () => {
+		const { runner, tempDir } = await createAggregationRunner([
+			(pi) => pi.on("session_before_compact", () => ({ projection: projectionA })),
+			(pi) => pi.on("session_before_compact", () => ({ compaction: legacyReplacementA })),
+			(pi) => pi.on("session_before_compact", () => ({ projection: projectionB })),
+			(pi) => pi.on("session_before_compact", () => ({ compaction: legacyReplacementB })),
+		]);
+		try {
+			await expect(runner.emitSessionBeforeCompact(beforeCompactEvent)).resolves.toEqual({
+				cancel: false,
+				replacement: legacyReplacementB,
+				projections: [projectionA, projectionB],
+			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects one handler returning replacement and projection through extension_error", async () => {
+		const { runner, tempDir } = await createAggregationRunner([
+			(pi) =>
+				pi.on("session_before_compact", () => ({
+					compaction: legacyReplacementA,
+					projection: projectionA,
+				})),
+		]);
+		const error = vi.fn();
+		runner.onError(error);
+		try {
+			await expect(runner.emitSessionBeforeCompact(beforeCompactEvent)).resolves.toEqual({
+				cancel: false,
+				projections: [],
+			});
+			expect(error).toHaveBeenCalledWith(
+				expect.objectContaining({
+					event: "session_before_compact",
+					error: expect.stringMatching(/compaction.*projection/i),
+				}),
+			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("publishes a detached provider-neutral preparation event", async () => {
+		const privateSentinels = {
+			api: "private-api-sentinel",
+			provider: "private-provider-sentinel",
+			model: "private-model-sentinel",
+		};
+		const sourceMessage = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "safe assistant text" }],
+			...privateSentinels,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: 1,
+		};
+		let captured: SessionBeforeCompactEvent | undefined;
+		const { runner, tempDir } = await createAggregationRunner([
+			(pi) =>
+				pi.on("session_before_compact", (event) => {
+					captured = event;
+					const message = event.preparation.messagesToSummarize[0];
+					if (message && "content" in message) message.content = [];
+				}),
+		]);
+		const event: RawSessionBeforeCompactEvent = {
+			...beforeCompactEvent,
+			preparation: {
+				...beforeCompactEvent.preparation,
+				messagesToSummarize: [sourceMessage],
+				turnPrefixMessages: [structuredClone(sourceMessage)],
+			},
+		};
+		try {
+			await runner.emitSessionBeforeCompact(event);
+			const serialized = JSON.stringify(captured);
+			expect(serialized).toContain("safe assistant text");
+			for (const sentinel of Object.values(privateSentinels)) expect(serialized).not.toContain(sentinel);
+			expect(sourceMessage.content).toEqual([{ type: "text", text: "safe assistant text" }]);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("cancellation discards prior values and prevents later handlers", async () => {
+		const later = vi.fn(() => ({ projection: projectionB }));
+		const { runner, tempDir } = await createAggregationRunner([
+			(pi) => pi.on("session_before_compact", () => ({ projection: projectionA })),
+			(pi) => pi.on("session_before_compact", () => ({ compaction: legacyReplacementA })),
+			(pi) => pi.on("session_before_compact", () => ({ cancel: true })),
+			(pi) => pi.on("session_before_compact", later),
+		]);
+		try {
+			await expect(runner.emitSessionBeforeCompact(beforeCompactEvent)).resolves.toEqual({
+				cancel: true,
+				projections: [],
+			});
+			expect(later).not.toHaveBeenCalled();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
 
 describe.skipIf(!API_KEY)("Compaction extensions", () => {
 	let session: AgentSession;
@@ -151,9 +331,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		// sessionManager, modelRegistry, and model are now on ctx, not event
 
 		const afterEvent = compactEvents[0];
-		expect(afterEvent.compactionEntry).toBeDefined();
-		expect(afterEvent.compactionEntry.summary.length).toBeGreaterThan(0);
-		expect(afterEvent.compactionEntry.tokensBefore).toBeGreaterThanOrEqual(0);
+		expect(afterEvent.boundary.kind).toBe("text");
+		expect(afterEvent.boundary.text?.summary.length).toBeGreaterThan(0);
+		expect(afterEvent.boundary.tokensBefore).toBeGreaterThanOrEqual(0);
 		expect(afterEvent.fromExtension).toBe(false);
 	}, 120000);
 
@@ -195,14 +375,14 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const result = await session.compact();
 
-		expect(result.summary).toBe(customSummary);
+		expect(result.kind === "text" ? result.summary : undefined).toBe(customSummary);
 
 		const compactEvents = capturedEvents.filter((e) => e.type === "session_compact");
 		expect(compactEvents.length).toBe(1);
 
 		const afterEvent = compactEvents[0];
 		if (afterEvent.type === "session_compact") {
-			expect(afterEvent.compactionEntry.summary).toBe(customSummary);
+			expect(afterEvent.boundary.text?.summary).toBe(customSummary);
 			expect(afterEvent.fromExtension).toBe(true);
 		}
 	}, 120000);
@@ -267,8 +447,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const result = await session.compact();
 
-		expect(result.summary).toBeDefined();
-		expect(result.summary.length).toBeGreaterThan(0);
+		expect(result.kind === "text" ? result.summary : undefined).toBeDefined();
+		expect(result.kind === "text" ? result.summary.length : 0).toBeGreaterThan(0);
 
 		const compactEvents = capturedEvents.filter((e): e is SessionCompactEvent => e.type === "session_compact");
 		expect(compactEvents.length).toBe(1);
@@ -410,7 +590,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const result = await session.compact();
 
-		expect(result.summary).toBe(customSummary);
+		expect(result.kind === "text" ? result.summary : undefined).toBe(customSummary);
 		expect(result.tokensBefore).toBe(999);
 	}, 120000);
 });

@@ -190,6 +190,192 @@ describe("RPC prompt response semantics", () => {
 		rpcIo.lineHandler = undefined;
 	});
 
+	it.each(["get_entries", "get_tree"] as const)(
+		"sanitizes provider-private messages and model transitions from %s",
+		async (command) => {
+			rpcIo.outputLines = [];
+			rpcIo.lineHandler = undefined;
+			const { runtimeHost, cleanup } = await createRuntimeHost({ withAuth: true, responseDelayMs: 0 });
+			runtimeHost.session.sessionManager.appendMessage({ role: "user", content: "visible rpc user", timestamp: 1 });
+			const modelChangeId = runtimeHost.session.sessionManager.appendModelChange(
+				"private-rpc-model-change-provider",
+				"private-rpc-model-change-id",
+			);
+			const sourceModelChange = runtimeHost.session.sessionManager.getEntry(modelChangeId);
+			if (!sourceModelChange || sourceModelChange.type !== "model_change") throw new Error("model change missing");
+			runtimeHost.session.sessionManager.appendMessage({
+				...createAssistantMessage("visible rpc assistant"),
+				content: [
+					{ type: "text", text: "visible rpc assistant", textSignature: "private-rpc-text-signature" },
+					{
+						type: "toolCall",
+						id: "visible-rpc-call",
+						name: "visible-rpc-tool",
+						arguments: { provider: "ordinary rpc tool provider" },
+						thoughtSignature: "private-rpc-thought-signature",
+					},
+				],
+				responseModel: "private-rpc-response-model",
+				responseId: "private-rpc-response-id",
+				diagnostics: [{ type: "private-rpc-diagnostic", timestamp: 1 }],
+			});
+			void runRpcMode(runtimeHost);
+			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+
+			try {
+				if (!rpcIo.lineHandler) throw new Error("RPC line handler missing");
+				Reflect.apply(rpcIo.lineHandler, undefined, [JSON.stringify({ id: command, type: command })]);
+				await vi.waitFor(() => {
+					const output = parseOutputLines(rpcIo.outputLines).find(
+						(record) => record.id === command && record.command === command,
+					);
+					expect(output).toBeDefined();
+					const serialized = JSON.stringify(output);
+					for (const sentinel of [
+						"anthropic-messages",
+						"anthropic",
+						"claude-sonnet-4-5",
+						"private-rpc-text-signature",
+						"private-rpc-thought-signature",
+						"private-rpc-response-model",
+						"private-rpc-response-id",
+						"private-rpc-diagnostic",
+						"private-rpc-model-change-provider",
+						"private-rpc-model-change-id",
+					]) {
+						expect(serialized).not.toContain(sentinel);
+					}
+					expect(serialized).toContain('"type":"model_change"');
+					expect(serialized).toContain(sourceModelChange.timestamp);
+					for (const visible of [
+						"visible rpc user",
+						"visible rpc assistant",
+						"visible-rpc-call",
+						"visible-rpc-tool",
+						"ordinary rpc tool provider",
+					]) {
+						expect(serialized).toContain(visible);
+					}
+				});
+			} finally {
+				await cleanup();
+			}
+		},
+	);
+
+	it.each(["get_entries", "get_tree"] as const)(
+		"preserves visible topology when %s omits an invalid private boundary leaf",
+		async (command) => {
+			const { runtimeHost, cleanup } = await createRuntimeHost({ withAuth: true, responseDelayMs: 0 });
+			const manager = runtimeHost.session.sessionManager;
+			const rootId = manager.appendMessage({ role: "user", content: "visible root", timestamp: 1 });
+			const internals = manager as unknown as { fileEntries: unknown[]; _buildIndex(): void };
+			internals.fileEntries.push({
+				type: "compaction_boundary",
+				id: "invalid-rpc-boundary",
+				parentId: rootId,
+				timestamp: new Date().toISOString(),
+				boundary: { version: 2, private: "private-rpc-boundary" },
+			});
+			internals._buildIndex();
+			void runRpcMode(runtimeHost);
+			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+			try {
+				Reflect.apply(rpcIo.lineHandler!, undefined, [JSON.stringify({ id: command, type: command })]);
+				await vi.waitFor(() => {
+					const output = parseOutputLines(rpcIo.outputLines).find(
+						(record) => record.id === command && record.command === command,
+					);
+					expect(output).toBeDefined();
+					const serialized = JSON.stringify(output);
+					expect(serialized).not.toContain("private-rpc-boundary");
+					expect(serialized).toContain(rootId);
+					expect(serialized).toContain(`"leafId":"${rootId}"`);
+				});
+			} finally {
+				await cleanup();
+			}
+		},
+	);
+
+	it("sanitizes and detaches get_messages while preserving visible message behavior", async () => {
+		rpcIo.outputLines = [];
+		rpcIo.lineHandler = undefined;
+		const { runtimeHost, cleanup } = await createRuntimeHost({ withAuth: true, responseDelayMs: 0 });
+		const sourceAssistant = {
+			...createAssistantMessage("visible rpc message assistant"),
+			content: [
+				{
+					type: "text" as const,
+					text: "visible rpc message assistant",
+					textSignature: "private-rpc-message-signature",
+				},
+				{
+					type: "toolCall" as const,
+					id: "visible-rpc-message-call",
+					name: "visible-rpc-message-tool",
+					arguments: { exact: "visible-rpc-message-arguments" },
+					thoughtSignature: "private-rpc-message-thought-signature",
+				},
+			],
+			responseId: "private-rpc-message-response-id",
+			diagnostics: [{ type: "private-rpc-message-diagnostic", timestamp: 1 }],
+		};
+		runtimeHost.session.agent.state.messages = [
+			{ role: "user", content: "visible rpc message user", timestamp: 1 },
+			sourceAssistant,
+			{
+				role: "toolResult",
+				toolCallId: "visible-rpc-message-call",
+				toolName: "visible-rpc-message-tool",
+				content: [{ type: "text", text: "visible rpc message result", textSignature: "ordinary-rpc-result-field" }],
+				details: { provider: "ordinary-rpc-result-provider" },
+				usage: sourceAssistant.usage,
+				isError: true,
+				timestamp: 3,
+			},
+		];
+		void runRpcMode(runtimeHost);
+		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+
+		try {
+			if (!rpcIo.lineHandler) throw new Error("RPC line handler missing");
+			Reflect.apply(rpcIo.lineHandler, undefined, [JSON.stringify({ id: "messages", type: "get_messages" })]);
+			await vi.waitFor(() => {
+				const output = parseOutputLines(rpcIo.outputLines).find(
+					(record) => record.id === "messages" && record.command === "get_messages",
+				);
+				expect(output).toBeDefined();
+				const serialized = JSON.stringify(output);
+				for (const sentinel of [
+					"private-rpc-message-signature",
+					"private-rpc-message-thought-signature",
+					"private-rpc-message-response-id",
+					"private-rpc-message-diagnostic",
+				]) {
+					expect(serialized).not.toContain(sentinel);
+				}
+				for (const visible of [
+					"visible rpc message user",
+					"visible rpc message assistant",
+					"visible-rpc-message-call",
+					"visible-rpc-message-tool",
+					"visible-rpc-message-arguments",
+					"visible rpc message result",
+					"ordinary-rpc-result-field",
+					"ordinary-rpc-result-provider",
+				]) {
+					expect(serialized).toContain(visible);
+				}
+				const response = output as { data: { messages: Array<{ role: string; content: unknown[] }> } };
+				response.data.messages.find((message) => message.role === "assistant")!.content = [];
+				expect(sourceAssistant.content).toHaveLength(2);
+			});
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("emits one failure response when prompt preflight rejects", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({
 			withAuth: false,

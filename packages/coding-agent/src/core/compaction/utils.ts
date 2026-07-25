@@ -3,7 +3,11 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { contentText, type Message } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
+import type { PublicMessage } from "../public-message.ts";
+
+/** LLM-compatible message shape with provider-private transport state removed. */
+export type ProviderNeutralMessage = PublicMessage;
 
 // ============================================================================
 // File Operation Tracking
@@ -106,7 +110,7 @@ function truncateForSummary(text: string, maxChars: number): string {
  * Tool results are truncated to keep the summarization request within
  * reasonable token budgets. Full content is not needed for summarization.
  */
-export function serializeConversation(messages: Message[]): string {
+export function serializeConversation(messages: readonly ProviderNeutralMessage[]): string {
 	const parts: string[] = [];
 
 	for (const msg of messages) {

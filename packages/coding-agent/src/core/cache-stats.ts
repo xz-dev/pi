@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { SessionEntry } from "./session-manager.ts";
+import { isStoredCompactionBoundaryEntry } from "./compaction/boundary.ts";
+import type { InternalSessionEntry } from "./session-manager.ts";
 
 /**
  * Prompt-cache TTL: idle gaps longer than this are worth mentioning as the
@@ -102,7 +103,7 @@ function asPreviousRequest(message: AssistantMessage, reportedCache: boolean): P
 }
 
 function scan(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	models: ModelPriceSource,
 ): { prev: PreviousRequest | undefined; totals: CacheWasteTotals; misses: Map<AssistantMessage, CacheMiss> } {
 	let prev: PreviousRequest | undefined;
@@ -110,7 +111,11 @@ function scan(
 	const misses = new Map<AssistantMessage, CacheMiss>();
 
 	for (const entry of entries) {
-		if (entry.type === "compaction" || entry.type === "branch_summary") {
+		if (
+			entry.type === "compaction" ||
+			entry.type === "branch_summary" ||
+			(entry.type === "compaction_boundary" && isStoredCompactionBoundaryEntry(entry))
+		) {
 			// The context legitimately changed; the next turn's prompt is new content,
 			// not re-billed content. Model switches are NOT exempt: they re-bill the
 			// full prompt and should be counted.
@@ -135,7 +140,7 @@ function scan(
  * Cumulative cache waste across a session: prompt tokens that should have been
  * cache reads (they were in the previous turn's prompt) but were re-billed.
  */
-export function computeCacheWaste(entries: SessionEntry[], models: ModelPriceSource): CacheWasteTotals {
+export function computeCacheWaste(entries: InternalSessionEntry[], models: ModelPriceSource): CacheWasteTotals {
 	return scan(entries, models).totals;
 }
 
@@ -145,7 +150,7 @@ export function computeCacheWaste(entries: SessionEntry[], models: ModelPriceSou
  * rebuilding the chat from entries (resume, post-compaction rebuild).
  */
 export function collectCacheMisses(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	models: ModelPriceSource,
 ): Map<AssistantMessage, CacheMiss> {
 	return scan(entries, models).misses;
@@ -156,7 +161,7 @@ export function collectCacheMisses(
  * `entries` must not yet contain `message` (message_end fires before persistence).
  */
 export function detectCacheMiss(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	message: AssistantMessage,
 	models: ModelPriceSource,
 ): CacheMiss | undefined {

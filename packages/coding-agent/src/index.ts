@@ -28,7 +28,11 @@ export { readStoredCredential } from "./core/auth-storage.ts";
 export {
 	type BranchPreparation,
 	type BranchSummaryResult,
+	type CheckpointCompactionOutcome,
 	type CollectEntriesResult,
+	type CompactionBoundary,
+	type CompactionBoundaryEntry,
+	type CompactionOutcome,
 	type CompactionResult,
 	type CutPointResult,
 	calculateContextTokens,
@@ -44,9 +48,14 @@ export {
 	generateSummary,
 	generateSummaryWithUsage,
 	getLastAssistantUsage,
+	type LegacyCompactionResult,
+	type PortableCompactionProjection,
 	prepareBranchEntries,
+	readCompactionBoundaries,
 	serializeConversation,
 	shouldCompact,
+	type TextCompactionOutcome,
+	toCompactionBoundary,
 } from "./core/compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
@@ -189,6 +198,12 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.ts";
 export { DefaultPackageManager } from "./core/package-manager.ts";
+export type {
+	PublicAgentMessage,
+	PublicAssistantContent,
+	PublicAssistantMessage,
+	PublicMessage,
+} from "./core/public-message.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 // SDK for programmatic usage
@@ -220,16 +235,20 @@ export {
 	type PromptTemplate,
 } from "./core/sdk.ts";
 export {
+	type AppendCompactionBoundaryOptions,
 	type AppendProviderCheckpointOptions,
 	type BranchSummaryEntry,
 	buildContextEntries,
 	buildSessionContext,
+	type CompactionBoundaryAppendState,
+	type CompactionBoundaryDraft,
 	type CompactionEntry,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
 	type FileEntry,
 	getLatestCompactionEntry,
+	type InternalSessionEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	type NewSessionOptions,
@@ -237,6 +256,10 @@ export {
 	type ProviderCheckpointAppendState,
 	type ProviderCheckpointEntry,
 	type ProviderCheckpointProjectionOptions,
+	type PublicModelChangeEntry,
+	type PublicSessionEntry,
+	type PublicSessionMessageEntry,
+	type PublicSessionTreeNode,
 	parseSessionEntries,
 	type SessionContext,
 	type SessionEntry,

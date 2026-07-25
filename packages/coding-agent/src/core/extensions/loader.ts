@@ -146,7 +146,7 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+type HandlerFn = (...args: unknown[]) => unknown | Promise<unknown>;
 
 let extensionCacheCwd: string | undefined;
 let extensionCacheGeneration = 0;

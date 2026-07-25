@@ -1,5 +1,6 @@
 import type { Usage } from "@earendil-works/pi-ai/compat";
-import type { SessionEntry } from "./session-manager.ts";
+import { combinedBoundaryUsage } from "./compaction/boundary.ts";
+import type { InternalSessionEntry } from "./session-manager.ts";
 
 export interface UsageTotals {
 	input: number;
@@ -34,7 +35,7 @@ export interface UsageCostBreakdownEntry {
 }
 
 /** Group attributable assistant usage by model and all other usage into a separate bucket. */
-export function getUsageCostBreakdown(entries: SessionEntry[]): UsageCostBreakdownEntry[] {
+export function getUsageCostBreakdown(entries: InternalSessionEntry[]): UsageCostBreakdownEntry[] {
 	const totalsByKey = new Map<string, UsageTotals>();
 
 	for (const entry of entries) {
@@ -49,6 +50,9 @@ export function getUsageCostBreakdown(entries: SessionEntry[]): UsageCostBreakdo
 		} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 			key = "Tools/summaries";
 			usage = entry.usage;
+		} else if (entry.type === "compaction_boundary") {
+			key = "Tools/summaries";
+			usage = combinedBoundaryUsage(entry);
 		}
 		if (!key || !usage) continue;
 

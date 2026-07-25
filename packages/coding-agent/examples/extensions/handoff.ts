@@ -12,10 +12,9 @@
  * The generated prompt appears as a draft in the editor for review/editing.
  */
 
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { uuidv7 } from "@earendil-works/pi-ai";
 import { complete, type Message } from "@earendil-works/pi-ai/compat";
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, PublicAgentMessage, PublicSessionEntry } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
@@ -40,7 +39,7 @@ Files involved:
 ## Task
 [Clear description of what to do next based on user's goal]`;
 
-function entryToMessage(entry: SessionEntry): AgentMessage | undefined {
+function entryToMessage(entry: PublicSessionEntry): PublicAgentMessage | undefined {
 	if (entry.type === "message") {
 		return entry.message;
 	}
@@ -55,7 +54,7 @@ function entryToMessage(entry: SessionEntry): AgentMessage | undefined {
 	return undefined;
 }
 
-function getHandoffMessages(branch: SessionEntry[]): AgentMessage[] {
+function getHandoffMessages(branch: PublicSessionEntry[]): PublicAgentMessage[] {
 	let compactionIndex = -1;
 	for (let i = branch.length - 1; i >= 0; i--) {
 		if (branch[i].type === "compaction") {

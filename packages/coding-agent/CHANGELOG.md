@@ -2,12 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added portable extension projections that can accompany either text or provider-native compaction without exposing provider-owned checkpoint state.
+
 ### Changed
 
 - Changed pi.dev model catalog refreshes to revalidate with `If-None-Match`, so unchanged provider catalogs answer with an empty `304` instead of a full download.
+- Changed SDK, RPC, extension, tree, and export compaction surfaces to use sanitized `CompactionBoundary` and discriminated `CompactionOutcome` contracts; checkpoint outcomes contain no private payload or compatibility identity.
 
 ### Fixed
 
+- Fixed compaction commits to validate and append one generic boundary atomically, rejecting cancelled, failed, stale-session, stale-branch, and stale-provider attempts before persistence.
 - Fixed compaction and branch summaries for providers whose authentication resolves entirely to request headers ([#5871](https://github.com/earendil-works/pi/issues/5871))
 - Fixed unavailable scoped models being hidden from `/models`, allowing them to be removed without editing settings manually ([#6949](https://github.com/earendil-works/pi/issues/6949)).
 

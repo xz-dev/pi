@@ -98,7 +98,7 @@ describe("#6647 compaction retries transient summarization failures", () => {
 
 		const result = await harness.session.compact();
 
-		expect(result.summary).toContain("recovered summary");
+		expect(result.kind === "text" ? result.summary : undefined).toContain("recovered summary");
 		expect(getCallCount()).toBe(3); // 1 initial + 2 retries
 		const starts = harness.eventsOfType("summarization_retry_scheduled");
 		const ends = harness.eventsOfType("summarization_retry_finished");

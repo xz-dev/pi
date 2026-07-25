@@ -391,10 +391,14 @@ Response:
   "command": "compact",
   "success": true,
   "data": {
-    "summary": "Summary of conversation...",
-    "firstKeptEntryId": "abc123",
+    "kind": "text",
+    "boundaryEntryId": "boundary123",
     "tokensBefore": 150000,
     "estimatedTokensAfter": 32000,
+    "projectionCount": 0,
+    "summary": "Summary of conversation...",
+    "firstKeptEntryId": "abc123",
+    "fromExtension": false,
     "usage": {
       "input": 32000,
       "output": 1200,
@@ -402,13 +406,14 @@ Response:
       "cacheWrite": 0,
       "totalTokens": 33200,
       "cost": {"input": 0.01, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.03}
-    },
-    "details": {}
+    }
   }
 }
 ```
 
-`estimatedTokensAfter` is a heuristic estimate over the rebuilt message context immediately after compaction, not a provider-exact token count. `usage` reports the LLM call or calls that generated the summary and may be omitted by custom compaction handlers.
+The response `data` is a `CompactionOutcome`, discriminated by `kind`. A provider-native success instead returns `kind: "checkpoint"` with the shared `boundaryEntryId`, token estimates, optional aggregate `usage`, and `projectionCount`; it does not contain a summary, kept-entry frontier, provider/model identity, or opaque checkpoint state.
+
+`estimatedTokensAfter` is a heuristic estimate over the rebuilt message context immediately after compaction, not a provider-exact token count. `usage` combines the primary and portable-projection work when supplied. `projectionCount` is the number of portable projections committed with the boundary.
 
 #### set_auto_compaction
 
@@ -1040,10 +1045,14 @@ The `reason` field is `"manual"`, `"threshold"`, or `"overflow"`.
   "type": "compaction_end",
   "reason": "threshold",
   "result": {
-    "summary": "Summary of conversation...",
-    "firstKeptEntryId": "abc123",
+    "kind": "text",
+    "boundaryEntryId": "boundary123",
     "tokensBefore": 150000,
     "estimatedTokensAfter": 32000,
+    "projectionCount": 0,
+    "summary": "Summary of conversation...",
+    "firstKeptEntryId": "abc123",
+    "fromExtension": false,
     "usage": {
       "input": 32000,
       "output": 1200,
@@ -1051,17 +1060,18 @@ The `reason` field is `"manual"`, `"threshold"`, or `"overflow"`.
       "cacheWrite": 0,
       "totalTokens": 33200,
       "cost": {"input": 0.01, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.03}
-    },
-    "details": {}
+    }
   },
   "aborted": false,
   "willRetry": false
 }
 ```
 
+`result` uses the same `CompactionOutcome` union as the `compact` response. For provider-native compaction it is the payload-free `kind: "checkpoint"` variant.
+
 If `reason` was `"overflow"` and compaction succeeds, `willRetry` is `true` and the agent will automatically retry the prompt.
 
-If compaction was aborted, `result` is `null` and `aborted` is `true`.
+If compaction was aborted, `result` is absent and `aborted` is `true`.
 
 If compaction failed (e.g., API quota exceeded), `result` is `null`, `aborted` is `false`, and `errorMessage` contains the error description.
 
