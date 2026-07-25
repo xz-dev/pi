@@ -251,12 +251,13 @@ describe("generic compaction boundaries", () => {
 	});
 
 	it("uses the last ancestral reduction row across text and checkpoint kinds", () => {
+		const checkpointBoundary = storedCheckpoint("b-checkpoint", "m3");
 		const textThenCheckpoint: SessionEntry[] = [
 			user("m1", null, "old"),
 			user("m2", "m1", "kept"),
 			storedText("b-text", "m2", "m2"),
 			user("m3", "b-text", "between"),
-			storedCheckpoint("b-checkpoint", "m3"),
+			checkpointBoundary,
 			user("m4", "b-checkpoint", "after checkpoint"),
 		];
 		const checkpointThenText: SessionEntry[] = [

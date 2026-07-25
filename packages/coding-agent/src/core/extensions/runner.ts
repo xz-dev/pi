@@ -10,7 +10,13 @@ import type { LegacyCompactionResult, PortableCompactionProjection } from "../co
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { SessionManager } from "../session-manager.ts";
+import {
+	createExtensionSessionManagerView,
+	type ExtensionSessionManagerView,
+	type ReadonlySessionManager,
+	type SessionManager,
+	toPublicSessionEntry,
+} from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type {
 	BeforeAgentStartEvent,
@@ -301,7 +307,7 @@ export class ExtensionRunner {
 	private uiContext: ExtensionUIContext;
 	private mode: ExtensionMode = "print";
 	private cwd: string;
-	private sessionManager: SessionManager;
+	private extensionSessionManager: ExtensionSessionManagerView & ReadonlySessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
@@ -336,7 +342,8 @@ export class ExtensionRunner {
 		this.runtime = runtime;
 		this.uiContext = noOpUIContext;
 		this.cwd = cwd;
-		this.sessionManager = sessionManager;
+		this.extensionSessionManager = createExtensionSessionManagerView(sessionManager) as ExtensionSessionManagerView &
+			ReadonlySessionManager;
 		this.modelRegistry = modelRegistry;
 	}
 
@@ -694,6 +701,10 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
+	getSessionManagerView(): ReadonlySessionManager {
+		return this.extensionSessionManager as ReadonlySessionManager;
+	}
+
 	createContext(): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
@@ -716,7 +727,7 @@ export class ExtensionRunner {
 			},
 			get sessionManager() {
 				runner.assertActive();
-				return runner.sessionManager;
+				return runner.extensionSessionManager;
 			},
 			get modelRegistry() {
 				runner.assertActive();
@@ -818,6 +829,7 @@ export class ExtensionRunner {
 
 	async emitSessionBeforeCompact(event: SessionBeforeCompactEvent): Promise<SessionBeforeCompactAggregate> {
 		const ctx = this.createContext();
+		const publicEvent = { ...event, branchEntries: event.branchEntries.map(toPublicSessionEntry) };
 		let replacement: LegacyCompactionResult | undefined;
 		const projections: PortableCompactionProjection[] = [];
 
@@ -827,7 +839,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const result = (await handler(event, ctx)) as SessionBeforeCompactResult | undefined;
+					const result = (await handler(publicEvent, ctx)) as SessionBeforeCompactResult | undefined;
 					if (!result) continue;
 					if (result.cancel) return { cancel: true, projections: [] };
 					if (result.compaction && result.projection) {
