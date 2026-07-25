@@ -8,20 +8,9 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { type PiAiCreateAgentArgs, type PiAiRuntime, type PiAiToolset, piAiHarness } from "@vitest-evals/harness-pi-ai";
+import { createHarness, type SimpleHarnessResult } from "vitest-evals/harness";
 
 type EvalSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
-
-interface EvalRunResult {
-	output: string;
-	metrics: {
-		provider: string;
-		model: string;
-		inputTokens: number;
-		outputTokens: number;
-		totalTokens: number;
-	};
-}
 
 async function cleanupEvalResources(session: EvalSession | undefined, removeRoot: () => Promise<void>): Promise<void> {
 	const failures: unknown[] = [];
@@ -54,8 +43,7 @@ function getRequiredModelSelection(): { provider: string; model: string } {
 	return { provider, model };
 }
 
-async function createPiEvalAgent({ context }: PiAiCreateAgentArgs<string>) {
-	const signal = context.signal;
+async function runPiEval(input: string, signal: AbortSignal | undefined): Promise<SimpleHarnessResult<string>> {
 	signal?.throwIfAborted();
 	const selection = getRequiredModelSelection();
 	const modelRuntime = await ModelRuntime.create();
@@ -74,7 +62,7 @@ async function createPiEvalAgent({ context }: PiAiCreateAgentArgs<string>) {
 	const cwd = join(root, "workspace");
 	const agentDir = join(root, "agent");
 	const cleanup = () => rm(root, { recursive: true, force: true });
-	let session: EvalSession | undefined;
+	let createdSession: EvalSession | undefined;
 	try {
 		signal?.throwIfAborted();
 		await Promise.all([mkdir(cwd), mkdir(agentDir)]);
@@ -94,7 +82,7 @@ async function createPiEvalAgent({ context }: PiAiCreateAgentArgs<string>) {
 		await resourceLoader.reload();
 		signal?.throwIfAborted();
 
-		session = (
+		createdSession = (
 			await createAgentSession({
 				cwd,
 				agentDir,
@@ -110,73 +98,69 @@ async function createPiEvalAgent({ context }: PiAiCreateAgentArgs<string>) {
 		signal?.throwIfAborted();
 	} catch (error) {
 		try {
-			await cleanupEvalResources(session, cleanup);
+			await cleanupEvalResources(createdSession, cleanup);
 		} catch (cleanupError) {
 			throw new AggregateError([error, cleanupError], "Pi eval setup failed and cleanup also failed.");
 		}
 		throw error;
 	}
-	if (!session) {
+	if (!createdSession) {
 		throw new Error("Pi eval session setup completed without a session.");
 	}
 
-	return {
-		agent: session.agent,
-		async run(input: string, runtime: PiAiRuntime<PiAiToolset<string>, string>) {
-			const abort = () => void session.abort();
-			runtime.signal?.addEventListener("abort", abort, { once: true });
-			let result: EvalRunResult;
-			try {
-				runtime.signal?.throwIfAborted();
-				await session.prompt(input);
-				const assistant = session.messages
-					.slice()
-					.reverse()
-					.find((message) => message.role === "assistant");
-				if (!assistant) {
-					throw new Error("Pi eval did not produce an assistant message.");
-				}
-				if (assistant.stopReason !== "stop") {
-					throw new Error(assistant.errorMessage ?? `Pi eval stopped unexpectedly: ${assistant.stopReason}`);
-				}
+	const session = createdSession;
+	const abort = () => void session.abort();
+	signal?.addEventListener("abort", abort, { once: true });
+	let result: SimpleHarnessResult<string>;
+	try {
+		signal?.throwIfAborted();
+		await session.prompt(input);
+		const assistant = session.messages
+			.slice()
+			.reverse()
+			.find((message) => message.role === "assistant");
+		if (!assistant) {
+			throw new Error("Pi eval did not produce an assistant message.");
+		}
+		if (assistant.stopReason !== "stop") {
+			throw new Error(assistant.errorMessage ?? `Pi eval stopped unexpectedly: ${assistant.stopReason}`);
+		}
 
-				const output = session.getLastAssistantText();
-				if (!output) {
-					throw new Error("Pi eval produced an empty assistant response.");
-				}
+		const output = session.getLastAssistantText();
+		if (!output) {
+			throw new Error("Pi eval produced an empty assistant response.");
+		}
 
-				const stats = session.getSessionStats();
-				runtime.events.assistant(output, {
-					provider: model.provider,
-					model: model.id,
-				});
-				result = {
-					output,
-					metrics: {
-						provider: model.provider,
-						model: model.id,
-						inputTokens: stats.tokens.input,
-						outputTokens: stats.tokens.output,
-						totalTokens: stats.tokens.total,
-					},
-				};
-			} catch (error) {
-				runtime.signal?.removeEventListener("abort", abort);
-				try {
-					await cleanupEvalResources(session, cleanup);
-				} catch (cleanupError) {
-					throw new AggregateError([error, cleanupError], "Pi eval run failed and cleanup also failed.");
-				}
-				throw error;
-			}
-			runtime.signal?.removeEventListener("abort", abort);
+		const stats = session.getSessionStats();
+		result = {
+			output,
+			events: [
+				{ type: "message", role: "user", content: input },
+				{ type: "message", role: "assistant", content: output },
+			],
+			usage: {
+				provider: model.provider,
+				model: model.id,
+				inputTokens: stats.tokens.input,
+				outputTokens: stats.tokens.output,
+				totalTokens: stats.tokens.total,
+			},
+		};
+	} catch (error) {
+		signal?.removeEventListener("abort", abort);
+		try {
 			await cleanupEvalResources(session, cleanup);
-			return result;
-		},
-	};
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], "Pi eval run failed and cleanup also failed.");
+		}
+		throw error;
+	}
+	signal?.removeEventListener("abort", abort);
+	await cleanupEvalResources(session, cleanup);
+	return result;
 }
 
-export const piCodingAgentHarness = piAiHarness({
+export const piCodingAgentHarness = createHarness<string, string>({
 	name: "pi-coding-agent",
-	agent: createPiEvalAgent,
+	run: ({ input, signal }) => runPiEval(input, signal),
 });

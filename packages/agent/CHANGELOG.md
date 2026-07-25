@@ -6,6 +6,8 @@
 
 - Added an explicit provider-state request channel resolved at each model request boundary for provider-owned context projections ([#6492](https://github.com/earendil-works/pi/issues/6492)).
 
+## [0.82.1] - 2026-07-25
+
 ## [0.82.0] - 2026-07-24
 
 ### Breaking Changes

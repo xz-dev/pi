@@ -25,7 +25,7 @@ function runSyncVersions(root) {
 	});
 }
 
-test("synchronizes private dependencies without touching generated manifests or relaxing published lockstep", async () => {
+test("synchronizes private dependencies without touching registry aliases, generated manifests, or published lockstep", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-sync-versions-"));
 	try {
 		await writeManifest(root, "packages/ai", {
@@ -59,7 +59,7 @@ test("synchronizes private dependencies without touching generated manifests or 
 
 		const evalsManifest = await readManifest(root, "packages/evals");
 		assert.equal(evalsManifest.dependencies["@earendil-works/pi-coding-agent"], "^2.0.0");
-		assert.equal(evalsManifest.dependencies["@mariozechner/pi-ai"], "npm:@earendil-works/pi-ai@2.0.0");
+		assert.equal(evalsManifest.dependencies["@mariozechner/pi-ai"], "npm:@earendil-works/pi-ai@1.0.0");
 		const generatedManifest = await readManifest(root, "packages/coding-agent/install-lock");
 		assert.equal(generatedManifest.dependencies["@earendil-works/pi-coding-agent"], "^1.0.0");
 

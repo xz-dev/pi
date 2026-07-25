@@ -1,6 +1,9 @@
 # Pi evals
 
-Behavioral evaluations for Pi using `vitest-evals` and its Pi harness.
+Behavioral evaluations for Pi using `vitest-evals`.
+
+The Pi harness in `src/pi-harness.ts` is built on `createHarness` from `vitest-evals/harness`. It drives a real
+`createAgentSession` in a temporary workspace and reports the final assistant message, transcript, and token usage.
 
 ## Running
 
@@ -23,12 +26,3 @@ npm run eval -- -t "capital of France"
 ```
 
 Authentication is resolved by Pi's normal `ModelRuntime`. Subscription-backed providers such as `openai-codex` use credentials from the user's Pi configuration. API-backed providers use their standard environment variables, such as `OPENAI_API_KEY` for `openai`.
-
-## Pi harness compatibility
-
-`@vitest-evals/harness-pi-ai` 0.15.0 still declares and imports the former
-`@mariozechner/pi-ai` and `@mariozechner/pi-agent-core` package names. The eval
-package provides aliases at the current Pi version and routes the legacy AI
-import through `src/pi-ai-compat.ts`. Keep those alias versions synchronized
-with the Pi workspace version until the upstream harness supports the current
-`@earendil-works` packages.

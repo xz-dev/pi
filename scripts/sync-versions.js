@@ -11,21 +11,6 @@ import { findPackageDirectories } from "./package-workspaces.mjs";
 
 const GENERATED_PACKAGE_SUFFIXES = [join("coding-agent", "install-lock")];
 
-function synchronizedDependencyVersion(dependencyName, currentSpecifier, versionMap) {
-	const directVersion = versionMap.get(dependencyName);
-	if (directVersion) {
-		return `^${directVersion}`;
-	}
-	if (typeof currentSpecifier !== "string" || !currentSpecifier.startsWith("npm:")) {
-		return null;
-	}
-
-	const separator = currentSpecifier.lastIndexOf("@");
-	const aliasPackage = currentSpecifier.slice("npm:".length, separator);
-	const aliasVersion = versionMap.get(aliasPackage);
-	return aliasVersion ? `npm:${aliasPackage}@${aliasVersion}` : null;
-}
-
 const packageRoot = process.argv[2] ?? "packages";
 const workspacePackages = findPackageDirectories(packageRoot)
 	.filter((directory) => !GENERATED_PACKAGE_SUFFIXES.some((suffix) => directory.endsWith(suffix)))
@@ -63,7 +48,10 @@ for (const pkg of workspacePackages) {
 		}
 
 		for (const [dependencyName, currentSpecifier] of Object.entries(dependencies)) {
-			const newSpecifier = synchronizedDependencyVersion(dependencyName, currentSpecifier, versionMap);
+			// Registry aliases such as `npm:@earendil-works/pi-ai@0.1.2` are never workspace-linked,
+			// so lockstep bumping them would point at a version that is not published yet.
+			const version = versionMap.get(dependencyName);
+			const newSpecifier = version ? `^${version}` : null;
 			if (!newSpecifier || currentSpecifier === newSpecifier) {
 				continue;
 			}
