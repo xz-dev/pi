@@ -12,7 +12,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { projectPublicSessionEntries, SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { getUsageCostBreakdown } from "../src/core/usage-totals.ts";
 import { createInMemoryModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
@@ -55,6 +55,45 @@ function createUserMessage(text: string, timestamp: number) {
 		role: "user" as const,
 		content: text,
 		timestamp,
+	};
+}
+
+function createHistoricalCheckpoint(): Record<string, unknown> {
+	return {
+		type: "provider_checkpoint",
+		version: 1,
+		identity: {
+			adapter: "openai-responses-compact-v1",
+			realm: "openai:test",
+			provider: "openai",
+			endpoint: "https://api.openai.com/v1",
+			modelFamily: "gpt-5",
+		},
+		frontierEntryId: "assistant",
+		windowGeneration: 1,
+		usage: {
+			input: 2,
+			output: 3,
+			cacheRead: 5,
+			cacheWrite: 7,
+			cacheWrite1h: 11,
+			reasoning: 13,
+			totalTokens: 41,
+			cost: { input: 0.2, output: 0.3, cacheRead: 0.5, cacheWrite: 0.7, total: 1.7 },
+		},
+		payload: {
+			id: "resp_checkpoint",
+			created_at: 1,
+			object: "response.compaction",
+			output: [{ type: "compaction", id: "cmp_checkpoint", encrypted_content: "opaque" }],
+			usage: {
+				input_tokens: 1,
+				input_tokens_details: { cached_tokens: 0 },
+				output_tokens: 1,
+				output_tokens_details: { reasoning_tokens: 0 },
+				total_tokens: 2,
+			},
+		},
 	};
 }
 
@@ -353,6 +392,119 @@ describe("AgentSession.getSessionStats", () => {
 				},
 			},
 		],
+		[
+			"missing usage cost",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				delete (checkpoint.usage as Record<string, unknown>).cost;
+				return checkpoint;
+			})(),
+		],
+		[
+			"null usage cost",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				(checkpoint.usage as Record<string, unknown>).cost = null;
+				return checkpoint;
+			})(),
+		],
+		[
+			"missing required usage field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				delete (checkpoint.usage as Record<string, unknown>).output;
+				return checkpoint;
+			})(),
+		],
+		[
+			"string usage field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				(checkpoint.usage as Record<string, unknown>).input = "2";
+				return checkpoint;
+			})(),
+		],
+		[
+			"non-finite required usage field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				(checkpoint.usage as Record<string, unknown>).input = Number.NaN;
+				return checkpoint;
+			})(),
+		],
+		[
+			"missing usage cost field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				delete ((checkpoint.usage as Record<string, unknown>).cost as Record<string, unknown>).output;
+				return checkpoint;
+			})(),
+		],
+		[
+			"string usage cost field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				((checkpoint.usage as Record<string, unknown>).cost as Record<string, unknown>).input = "0.2";
+				return checkpoint;
+			})(),
+		],
+		[
+			"infinite usage cost serialized as null",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				((checkpoint.usage as Record<string, unknown>).cost as Record<string, unknown>).total =
+					Number.POSITIVE_INFINITY;
+				return checkpoint;
+			})(),
+		],
+		[
+			"negative usage cost",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				((checkpoint.usage as Record<string, unknown>).cost as Record<string, unknown>).total = -1;
+				return checkpoint;
+			})(),
+		],
+		[
+			"infinite optional usage field serialized as null",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				(checkpoint.usage as Record<string, unknown>).reasoning = Number.POSITIVE_INFINITY;
+				return checkpoint;
+			})(),
+		],
+		[
+			"negative optional usage field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				(checkpoint.usage as Record<string, unknown>).cacheWrite1h = -1;
+				return checkpoint;
+			})(),
+		],
+		[
+			"string optional usage field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				(checkpoint.usage as Record<string, unknown>).reasoning = "13";
+				return checkpoint;
+			})(),
+		],
+		[
+			"unexpected usage field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				(checkpoint.usage as Record<string, unknown>).extra = 1;
+				return checkpoint;
+			})(),
+		],
+		[
+			"unexpected usage cost field",
+			(() => {
+				const checkpoint = createHistoricalCheckpoint();
+				((checkpoint.usage as Record<string, unknown>).cost as Record<string, unknown>).extra = 1;
+				return checkpoint;
+			})(),
+		],
 	])("ignores a loaded malformed historical provider checkpoint with %s", async (_name, checkpoint) => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-malformed-checkpoint-stats-"));
 		let session: AgentSession | undefined;
@@ -389,6 +541,9 @@ describe("AgentSession.getSessionStats", () => {
 				"user",
 			]);
 			expect(JSON.stringify(loaded.getEntries())).toContain("malformed-checkpoint");
+			expect(projectPublicSessionEntries(loaded.getEntries(), loaded.getLeafId()).entries).not.toEqual(
+				expect.arrayContaining([expect.objectContaining({ id: "malformed-checkpoint" })]),
+			);
 
 			const boundaryId = loaded.appendCompactionBoundary(
 				{
@@ -431,6 +586,57 @@ describe("AgentSession.getSessionStats", () => {
 			const reopened = SessionManager.open(file, dir);
 			expect(JSON.stringify(reopened.getEntries())).toContain("malformed-checkpoint");
 			expect(() => reopened.buildSessionContext()).not.toThrow();
+		} finally {
+			session?.dispose();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("retains complete usage costs from a valid loaded historical provider checkpoint", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-valid-checkpoint-stats-"));
+		let session: AgentSession | undefined;
+		try {
+			const initial = SessionManager.create(dir);
+			initial.appendMessage(createUserMessage("before", 1));
+			const assistantId = initial.appendMessage(createAssistantMessage("intact assistant", 12, 2));
+			const file = initial.getSessionFile()!;
+			const checkpoint = createHistoricalCheckpoint();
+			checkpoint.frontierEntryId = assistantId;
+			appendFileSync(
+				file,
+				`${JSON.stringify({
+					type: "provider_checkpoint",
+					id: "valid-checkpoint",
+					parentId: assistantId,
+					timestamp: "2026-07-25T00:00:00.000Z",
+					checkpoint,
+				})}\n`,
+			);
+
+			const loaded = SessionManager.open(file, dir);
+			const created = await createSession(loaded);
+			session = created.session;
+			const stats = session.getSessionStats();
+			expect(stats.tokens).toEqual({ input: 14, output: 3, cacheRead: 5, cacheWrite: 7, total: 29 });
+			expect(stats.cost).toBe(1.7);
+			const publicCheckpoint = projectPublicSessionEntries(loaded.getEntries(), loaded.getLeafId()).entries.find(
+				(entry) => entry.id === "valid-checkpoint",
+			);
+			expect(publicCheckpoint).toMatchObject({
+				type: "compaction_boundary",
+				id: "valid-checkpoint",
+				boundary: { kind: "checkpoint", tokensBefore: 2 },
+			});
+			const loadedCheckpoint = loaded.getEntries().at(-1);
+			expect(loadedCheckpoint?.type).toBe("provider_checkpoint");
+			if (loadedCheckpoint?.type !== "provider_checkpoint") throw new Error("Expected provider checkpoint");
+			expect(loadedCheckpoint.checkpoint.usage).toEqual(
+				expect.objectContaining({
+					cacheWrite1h: 11,
+					reasoning: 13,
+					cost: { input: 0.2, output: 0.3, cacheRead: 0.5, cacheWrite: 0.7, total: 1.7 },
+				}),
+			);
 		} finally {
 			session?.dispose();
 			rmSync(dir, { recursive: true, force: true });

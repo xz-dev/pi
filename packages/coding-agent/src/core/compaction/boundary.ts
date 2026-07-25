@@ -104,7 +104,7 @@ function isJsonValue(value: unknown): boolean {
 	return Object.values(value).every(isJsonValue);
 }
 
-function isUsage(value: unknown): value is Usage {
+export function isUsage(value: unknown): value is Usage {
 	if (
 		!isRecord(value) ||
 		!hasOnlyKeys(value, [
