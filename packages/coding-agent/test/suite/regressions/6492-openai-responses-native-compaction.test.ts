@@ -348,6 +348,149 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 		expect(request?.body.hook_marker).toBeUndefined();
 	});
 
+	it("keeps private checkpoint state behind the public inference payload hook", async () => {
+		const publicPayloads: Record<string, unknown>[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_provider_request", (event) => {
+						if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) {
+							throw new Error("Expected an object provider request");
+						}
+						const payload: Record<string, unknown> = { ...event.payload };
+						publicPayloads.push(structuredClone(payload));
+						const input = payload.input;
+						if (!Array.isArray(input)) throw new Error("Expected Responses input");
+						return {
+							...payload,
+							hook_marker: "ordinary-mutation",
+							input: [
+								...input,
+								{ role: "user", content: [{ type: "input_text", text: "public hook mutation" }] },
+							],
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const model = nativeCompactionModel(harness);
+		seedNativeCompactableSession(harness, model, 100);
+		const transport = mockTransport();
+
+		await harness.session.compact();
+		await harness.session.prompt("portable inference prompt");
+
+		expect(publicPayloads).toHaveLength(1);
+		const publicPayload = JSON.stringify(publicPayloads[0]);
+		expect(publicPayload).toContain("portable inference prompt");
+		expect(publicPayload).not.toContain("opaque-lifecycle");
+		expect(publicPayload).not.toContain("provider-owned:faux-account-a:gpt-5");
+		expect(publicPayload).not.toContain("openai-responses-compact-v1");
+		const request = inferenceRequests(transport)[0];
+		expect(request?.body.hook_marker).toBe("ordinary-mutation");
+		expect(request?.body.input).toEqual([
+			...canonicalOutput,
+			{ role: "user", content: [{ type: "input_text", text: "portable inference prompt" }] },
+			{ role: "user", content: [{ type: "input_text", text: "public hook mutation" }] },
+		]);
+		expect(JSON.stringify(request?.body.input).match(/opaque-lifecycle/g)).toHaveLength(1);
+	});
+
+	it("keeps ordinary non-checkpoint provider request hook mutations working", async () => {
+		const publicPayloads: Record<string, unknown>[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_provider_request", (event) => {
+						if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) {
+							throw new Error("Expected an object provider request");
+						}
+						const payload = { ...event.payload };
+						publicPayloads.push(structuredClone(payload));
+						return { ...payload, hook_marker: "ordinary-request" };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const model = nativeCompactionModel(harness);
+		harness.session.agent.state.model = model;
+		const transport = mockTransport();
+
+		await harness.session.prompt("ordinary visible prompt");
+
+		expect(publicPayloads).toHaveLength(1);
+		expect(JSON.stringify(publicPayloads[0])).toContain("ordinary visible prompt");
+		expect(inferenceRequests(transport)[0]?.body.hook_marker).toBe("ordinary-request");
+	});
+
+	it("falls back to portable history without exposing an incompatible checkpoint", async () => {
+		const publicPayloads: Record<string, unknown>[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_provider_request", (event) => {
+						if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) {
+							throw new Error("Expected an object provider request");
+						}
+						publicPayloads.push(structuredClone({ ...event.payload }));
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const compactingModel = nativeCompactionModel(harness);
+		seedNativeCompactableSession(harness, compactingModel, 100);
+		const transport = mockTransport();
+		await harness.session.compact();
+		const incompatibleModel = nativeCompactionModel(harness, {
+			realm: "provider-owned:incompatible-account:gpt-5",
+		});
+		harness.session.agent.state.model = incompatibleModel;
+
+		await harness.session.prompt("portable fallback prompt");
+
+		expect(publicPayloads).toHaveLength(1);
+		const publicPayload = JSON.stringify(publicPayloads[0]);
+		expect(publicPayload).toContain("history to compact");
+		expect(publicPayload).toContain("portable fallback prompt");
+		expect(publicPayload).not.toContain("opaque-lifecycle");
+		expect(publicPayload).not.toContain("provider-owned:faux-account-a:gpt-5");
+		const request = JSON.stringify(inferenceRequests(transport)[0]?.body);
+		expect(request).toContain("history to compact");
+		expect(request).not.toContain("opaque-lifecycle");
+	});
+
+	it("rejects malformed hook replacements without leaking private checkpoint state in errors", async () => {
+		const extensionErrors: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_provider_request", () => ({ invalid: true }));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.session.bindExtensions({
+			onError: (error) => extensionErrors.push(JSON.stringify(error)),
+		});
+		const model = nativeCompactionModel(harness);
+		seedNativeCompactableSession(harness, model, 100);
+		const transport = mockTransport();
+		await harness.session.compact();
+
+		await harness.session.prompt("malformed hook result");
+
+		const assistant = harness.session.messages.at(-1);
+		expect(assistant).toMatchObject({ role: "assistant", stopReason: "error" });
+		const publicErrors = JSON.stringify({ assistant, events: harness.events, extensionErrors });
+		expect(publicErrors).toContain("Invalid before_provider_request result");
+		expect(publicErrors).not.toContain("opaque-lifecycle");
+		expect(publicErrors).not.toContain("provider-owned:faux-account-a:gpt-5");
+		expect(inferenceRequests(transport)).toHaveLength(0);
+	});
+
 	it("manual native compaction reports operation accounting separately from the active estimate", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
