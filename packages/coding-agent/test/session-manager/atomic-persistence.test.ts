@@ -9,6 +9,7 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -178,6 +179,54 @@ describe("SessionManager atomic persistence", () => {
 		if (!collidedPath) throw new Error("temporary path was not captured");
 		expect(readFileSync(collidedPath, "utf8")).toBe("must survive");
 		expect(manager.getEntries()).toHaveLength(1);
+	});
+
+	it.skipIf(process.platform === "win32")("creates the first persisted session with mode 0600", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-session-private-mode-initial-"));
+		cleanup.push(dir);
+		const manager = SessionManager.create(dir, dir);
+		manager.appendMessage({ role: "user", content: "visible user", timestamp: 1 });
+		manager.appendMessage(assistant("private first flush"));
+
+		expect(statSync(manager.getSessionFile()!).mode & 0o777).toBe(0o600);
+	});
+
+	it.skipIf(process.platform === "win32")("keeps an existing private session at mode 0600 after replacement", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-session-private-mode-replace-"));
+		cleanup.push(dir);
+		const manager = SessionManager.create(dir, dir);
+		manager.appendMessage({ role: "user", content: "visible user", timestamp: 1 });
+		manager.appendMessage(assistant("initial private mode"));
+		const sessionFile = manager.getSessionFile()!;
+		expect(statSync(sessionFile).mode & 0o777).toBe(0o600);
+
+		manager.appendMessage(assistant("replacement private mode"));
+
+		expect(statSync(sessionFile).mode & 0o777).toBe(0o600);
+	});
+
+	it("opens every staged temporary session file with explicit mode 0600", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-session-private-temp-mode-"));
+		cleanup.push(dir);
+		const observedModes: Array<number | undefined> = [];
+		const operations: SessionPersistenceOperations = {
+			open(path, flags, mode) {
+				observedModes.push(mode);
+				return openSync(path, flags, mode);
+			},
+			write: writeFileSync,
+			fsync: fsyncSync,
+			close: closeSync,
+			rename: renameSync,
+			link: linkSync,
+			unlink: unlinkSync,
+		};
+		const manager = SessionManager.create(dir, dir, undefined, operations);
+		manager.appendMessage({ role: "user", content: "visible user", timestamp: 1 });
+		manager.appendMessage(assistant("private staging"));
+		manager.appendMessage(assistant("private replacement staging"));
+
+		expect(observedModes).toEqual([0o600, 0o600]);
 	});
 
 	it("keeps a successful first flush committed when temporary cleanup fails once after linking", () => {

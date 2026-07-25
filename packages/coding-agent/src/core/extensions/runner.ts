@@ -14,7 +14,6 @@ import type { ModelRegistry } from "../model-registry.ts";
 import {
 	createExtensionSessionManagerView,
 	type ExtensionSessionManagerView,
-	type ReadonlySessionManager,
 	type SessionEntry,
 	type SessionManager,
 	toPublicSessionEntry,
@@ -309,7 +308,7 @@ export class ExtensionRunner {
 	private uiContext: ExtensionUIContext;
 	private mode: ExtensionMode = "print";
 	private cwd: string;
-	private extensionSessionManager: ExtensionSessionManagerView & ReadonlySessionManager;
+	private extensionSessionManager: ExtensionSessionManagerView;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
@@ -344,8 +343,7 @@ export class ExtensionRunner {
 		this.runtime = runtime;
 		this.uiContext = noOpUIContext;
 		this.cwd = cwd;
-		this.extensionSessionManager = createExtensionSessionManagerView(sessionManager) as ExtensionSessionManagerView &
-			ReadonlySessionManager;
+		this.extensionSessionManager = createExtensionSessionManagerView(sessionManager);
 		this.modelRegistry = modelRegistry;
 	}
 
@@ -703,8 +701,8 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
-	getSessionManagerView(): ReadonlySessionManager {
-		return this.extensionSessionManager as ReadonlySessionManager;
+	getSessionManagerView(): ExtensionSessionManagerView {
+		return this.extensionSessionManager;
 	}
 
 	createContext(): ExtensionContext {

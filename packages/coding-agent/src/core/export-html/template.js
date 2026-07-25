@@ -353,7 +353,7 @@
             parts.push('branch summary', entry.summary);
             break;
           case 'model_change':
-            parts.push('model', entry.modelId);
+            parts.push('model transition');
             break;
           case 'thinking_level_change':
             parts.push('thinking', entry.thinkingLevel);
@@ -696,7 +696,7 @@
             return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
           }
           case 'model_change':
-            return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.modelId)}]</span>`;
+            return labelHtml + '<span class="tree-muted">[model transition]</span>';
           case 'thinking_level_change':
             return labelHtml + `<span class="tree-muted">[thinking: ${escapeHtml(entry.thinkingLevel)}]</span>`;
           default:
@@ -1291,7 +1291,7 @@
         }
 
         if (entry.type === 'model_change') {
-          return `<div class="model-change" id="${entryDomId}">${tsHtml}Switched to model: <span class="model-name">${escapeHtml(entry.provider)}/${escapeHtml(entry.modelId)}</span></div>`;
+          return `<div class="model-change" id="${entryDomId}">${tsHtml}Switched model</div>`;
         }
 
         if (entry.type === 'compaction') {

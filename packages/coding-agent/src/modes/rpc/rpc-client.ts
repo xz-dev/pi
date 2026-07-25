@@ -5,11 +5,12 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionOutcome } from "../../core/compaction/index.ts";
+import type { PublicAgentMessage } from "../../core/public-message.ts";
 import type { PublicSessionEntry, PublicSessionTreeNode } from "../../core/session-manager.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
@@ -431,9 +432,9 @@ export class RpcClient {
 	/**
 	 * Get all messages in the session.
 	 */
-	async getMessages(): Promise<AgentMessage[]> {
+	async getMessages(): Promise<PublicAgentMessage[]> {
 		const response = await this.send({ type: "get_messages" });
-		return this.getData<{ messages: AgentMessage[] }>(response).messages;
+		return this.getData<{ messages: PublicAgentMessage[] }>(response).messages;
 	}
 
 	/**

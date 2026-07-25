@@ -52,7 +52,7 @@ export const CURRENT_SESSION_VERSION = 3;
 
 /** @internal Narrow instance-scoped seam for deterministic persistence fault injection. */
 export interface SessionPersistenceOperations {
-	open(path: string, flags: string): number;
+	open(path: string, flags: string, mode?: number): number;
 	write(fd: number, data: string): void;
 	fsync(fd: number): void;
 	close(fd: number): void;
@@ -81,13 +81,15 @@ function writeSessionFileAtomically(
 	let fd: number | undefined;
 	let ownsTemporaryFile = false;
 	try {
-		fd = operations.open(temporaryPath, "wx");
+		fd = operations.open(temporaryPath, "wx", 0o600);
 		ownsTemporaryFile = true;
 		for (const entry of entries) operations.write(fd, `${JSON.stringify(entry)}\n`);
 		operations.fsync(fd);
 		operations.close(fd);
 		fd = undefined;
 		if (requireNewFile) {
+			// The temporary and target paths share a directory, so this same-filesystem
+			// hard link gives first-creator-wins semantics without a clobber race.
 			operations.link(temporaryPath, sessionFile);
 			try {
 				operations.unlink(temporaryPath);
@@ -301,9 +303,16 @@ export interface PublicSessionMessageEntry extends Omit<SessionMessageEntry, "me
 	message: PublicAgentMessage;
 }
 
+/** Records that a model transition occurred without exposing provider or model identity. */
+export type PublicModelChangeEntry = Omit<ModelChangeEntry, "provider" | "modelId">;
+
 export type PublicSessionEntry =
-	| Exclude<SessionEntry, SessionMessageEntry | ProviderCheckpointEntry | StoredCompactionBoundaryEntry>
+	| Exclude<
+			SessionEntry,
+			SessionMessageEntry | ModelChangeEntry | ProviderCheckpointEntry | StoredCompactionBoundaryEntry
+	  >
 	| PublicSessionMessageEntry
+	| PublicModelChangeEntry
 	| CompactionBoundaryEntry;
 
 /** Raw file entry (includes header) */
@@ -358,8 +367,6 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getSessionName"
-	| "captureProviderCheckpointAppendState"
-	| "captureCompactionBoundaryAppendState"
 >;
 
 export function toPublicSessionEntry(entry: SessionEntry): PublicSessionEntry {
@@ -368,6 +375,10 @@ export function toPublicSessionEntry(entry: SessionEntry): PublicSessionEntry {
 	}
 	if (entry.type === "message") {
 		return { ...structuredClone(entry), message: toPublicAgentMessage(entry.message) };
+	}
+	if (entry.type === "model_change") {
+		const { provider: _, modelId: __, ...transition } = structuredClone(entry);
+		return transition;
 	}
 	return structuredClone(entry);
 }
@@ -417,8 +428,6 @@ export function createExtensionSessionManagerView(manager: SessionManager): Exte
 		getEntries: () => manager.getEntries().map(toPublicSessionEntry),
 		getTree: () => sanitizeTree(manager.getTree()),
 		getSessionName: () => manager.getSessionName(),
-		captureProviderCheckpointAppendState: (identity) => manager.captureProviderCheckpointAppendState(identity),
-		captureCompactionBoundaryAppendState: () => manager.captureCompactionBoundaryAppendState(),
 	};
 }
 
