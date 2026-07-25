@@ -48,6 +48,8 @@ import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type {
+	CompactionBoundary,
+	CompactionOutcome,
 	CompactionPreparation,
 	LegacyCompactionResult,
 	PortableCompactionProjection,
@@ -298,7 +300,7 @@ export interface ContextUsage {
 
 export interface CompactOptions {
 	customInstructions?: string;
-	onComplete?: (result: LegacyCompactionResult) => void;
+	onComplete?: (result: CompactionOutcome) => void;
 	onError?: (error: Error) => void;
 }
 
@@ -602,12 +604,16 @@ export interface SessionBeforeCompactEvent {
 /** Fired after context compaction */
 export interface SessionCompactEvent {
 	type: "session_compact";
-	compactionEntry: CompactionEntry;
-	fromExtension: boolean;
+	boundary: CompactionBoundary;
+	outcome: CompactionOutcome;
 	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
 	reason: "manual" | "threshold" | "overflow";
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
+	/** Present only while replaying a historical compaction event. */
+	compactionEntry?: CompactionEntry;
+	/** @deprecated True only for a legacy replacement primary. */
+	fromExtension: boolean;
 }
 
 /** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */

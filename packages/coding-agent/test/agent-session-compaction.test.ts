@@ -94,8 +94,8 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 		// Manually compact
 		const result = await session.compact();
 
-		expect(result.summary).toBeDefined();
-		expect(result.summary.length).toBeGreaterThan(0);
+		expect(result.kind === "text" ? result.summary : undefined).toBeDefined();
+		expect(result.kind === "text" ? result.summary.length : 0).toBeGreaterThan(0);
 		expect(result.tokensBefore).toBeGreaterThan(0);
 
 		// Verify messages were compacted (should have summary + recent)
@@ -148,15 +148,15 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 		const entries = sessionManager.getEntries();
 
 		// Should have a compaction entry
-		const compactionEntries = entries.filter((e) => e.type === "compaction");
+		const compactionEntries = entries.filter((e) => e.type === "compaction_boundary");
 		expect(compactionEntries.length).toBe(1);
 
 		const compaction = compactionEntries[0];
-		expect(compaction.type).toBe("compaction");
-		if (compaction.type === "compaction") {
-			expect(compaction.summary.length).toBeGreaterThan(0);
-			expect(typeof compaction.firstKeptEntryId).toBe("string");
-			expect(compaction.tokensBefore).toBeGreaterThan(0);
+		expect(compaction.type).toBe("compaction_boundary");
+		if (compaction.boundary.primary.kind === "text") {
+			expect(compaction.boundary.primary.summary.length).toBeGreaterThan(0);
+			expect(typeof compaction.boundary.primary.firstKeptEntryId).toBe("string");
+			expect(compaction.boundary.tokensBefore).toBeGreaterThan(0);
 		}
 	}, 120000);
 
@@ -173,12 +173,12 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 		// Compact should work even without file persistence
 		const result = await session.compact();
 
-		expect(result.summary).toBeDefined();
-		expect(result.summary.length).toBeGreaterThan(0);
+		expect(result.kind === "text" ? result.summary : undefined).toBeDefined();
+		expect(result.kind === "text" ? result.summary.length : 0).toBeGreaterThan(0);
 
 		// In-memory entries should have the compaction
 		const entries = sessionManager.getEntries();
-		const compactionEntries = entries.filter((e) => e.type === "compaction");
+		const compactionEntries = entries.filter((e) => e.type === "compaction_boundary");
 		expect(compactionEntries.length).toBe(1);
 	}, 120000);
 

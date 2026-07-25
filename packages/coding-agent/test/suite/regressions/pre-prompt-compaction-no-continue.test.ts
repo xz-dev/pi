@@ -1,6 +1,6 @@
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHarness, getUserTexts, type Harness } from "../harness.ts";
+import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 function createUsage(totalTokens: number) {
 	return {
@@ -64,12 +64,17 @@ describe("pre-prompt compaction regression", () => {
 		await expect(harness.session.prompt("next prompt")).resolves.toBeUndefined();
 
 		expect(continueSpy).not.toHaveBeenCalled();
-		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+		expect(harness.eventsOfType("compaction_end")[0]).toMatchObject({
 			reason: "overflow",
 			aborted: false,
 			willRetry: true,
 		});
-		expect(getUserTexts(harness)).toContain("next prompt");
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.flatMap((entry) => (entry.type === "message" && entry.message.role === "user" ? [entry.message] : []))
+				.map(getMessageText),
+		).toContain("next prompt");
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 });

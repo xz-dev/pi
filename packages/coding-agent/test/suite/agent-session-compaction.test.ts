@@ -5,7 +5,6 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { estimateTokens } from "../../src/core/compaction/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
@@ -129,16 +128,27 @@ describe("AgentSession compaction characterization", () => {
 
 		const result = await harness.session.compact();
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
-		const estimatedTokensAfter = harness.session.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 
-		expect(result.summary).toBe("summary from extension");
-		expect(result.usage).toEqual(summaryUsage);
-		expect(result.estimatedTokensAfter).toBe(estimatedTokensAfter);
-		expect(compactionEntries).toHaveLength(1);
-		const compactionEntry = compactionEntries[0];
-		if (compactionEntry?.type === "compaction") {
-			expect(compactionEntry.usage).toEqual(summaryUsage);
-		}
+		expect(result).toEqual({
+			kind: "text",
+			boundaryEntryId: expect.any(String),
+			summary: "summary from extension",
+			firstKeptEntryId: expect.any(String),
+			tokensBefore: expect.any(Number),
+			estimatedTokensAfter: expect.any(Number),
+			usage: summaryUsage,
+			details: { source: "extension" },
+			fromExtension: true,
+			projectionCount: 0,
+		});
+		expect(compactionEntries).toHaveLength(0);
+		const boundaryEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "compaction_boundary" && entry.id === result.boundaryEntryId);
+		expect(boundaryEntry).toMatchObject({
+			type: "compaction_boundary",
+			boundary: { primary: { kind: "text", usage: summaryUsage }, projections: [] },
+		});
 		const statsAfter = harness.session.getSessionStats();
 		expect(statsAfter.tokens.input).toBe(statsBefore.tokens.input + summaryUsage.input);
 		expect(statsAfter.tokens.output).toBe(statsBefore.tokens.output + summaryUsage.output);
@@ -159,6 +169,7 @@ describe("AgentSession compaction characterization", () => {
 	it("throws when compacting without configured auth", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
+		seedCompactableSession(harness);
 
 		await expect(harness.session.compact()).rejects.toThrow(`No API key found for ${harness.getModel().provider}.`);
 	});
@@ -171,7 +182,7 @@ describe("AgentSession compaction characterization", () => {
 
 		const result = await harness.session.compact();
 
-		expect(result.summary).toContain("summary from custom stream");
+		expect(result.kind === "text" ? result.summary : undefined).toContain("summary from custom stream");
 		expect(getStreamCallCount()).toBe(1);
 	});
 
@@ -206,7 +217,7 @@ describe("AgentSession compaction characterization", () => {
 
 		const result = await harness.session.compact();
 
-		expect(result.summary).toContain("summary with bearer auth");
+		expect(result.kind === "text" ? result.summary : undefined).toContain("summary with bearer auth");
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 
@@ -220,10 +231,14 @@ describe("AgentSession compaction characterization", () => {
 
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
 		expect(result.usage).toEqual(createUsage(10));
-		expect(compactionEntries).toHaveLength(1);
-		expect(compactionEntries[0]?.type === "compaction" ? compactionEntries[0].usage : undefined).toEqual(
-			createUsage(10),
-		);
+		expect(compactionEntries).toHaveLength(0);
+		const boundaryEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "compaction_boundary" && entry.id === result.boundaryEntryId);
+		expect(boundaryEntry).toMatchObject({
+			type: "compaction_boundary",
+			boundary: { primary: { kind: "text", usage: createUsage(10) } },
+		});
 	});
 
 	it("auto-compacts with a custom streamFn when registry auth is absent", async () => {
@@ -235,7 +250,9 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._runAutoCompaction("threshold", false);
 
-		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		const compactionEntries = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "compaction_boundary");
 		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
 		expect(compactionEntries).toHaveLength(1);
 		expect(compactionEnd?.result?.estimatedTokensAfter).toBeGreaterThan(0);
