@@ -36,6 +36,7 @@ import {
 	type CompactionBoundaryDraft,
 	type CompactionBoundaryEntry,
 	decodeStoredCompactionBoundaryEntry,
+	isUsage,
 	type PortableCompactionProjection,
 	type StoredCompactionBoundaryEntry,
 	toCompactionBoundary,
@@ -663,10 +664,6 @@ function cloneProviderCheckpoint(checkpoint: ProviderCheckpoint): ProviderCheckp
 	return structuredClone(checkpoint);
 }
 
-function isNonNegativeFinite(value: unknown): value is number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-
 function isValidProviderCheckpointValue(value: unknown): value is ProviderCheckpoint {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const checkpoint = value as Partial<ProviderCheckpoint>;
@@ -684,12 +681,7 @@ function isValidProviderCheckpointValue(value: unknown): value is ProviderCheckp
 			(typeof checkpoint.metadata === "object" &&
 				checkpoint.metadata !== null &&
 				!Array.isArray(checkpoint.metadata))) &&
-		(checkpoint.usage === undefined ||
-			(isNonNegativeFinite(checkpoint.usage.input) &&
-				isNonNegativeFinite(checkpoint.usage.output) &&
-				isNonNegativeFinite(checkpoint.usage.cacheRead) &&
-				isNonNegativeFinite(checkpoint.usage.cacheWrite) &&
-				isNonNegativeFinite(checkpoint.usage.totalTokens))) &&
+		(checkpoint.usage === undefined || isUsage(checkpoint.usage)) &&
 		isValidOpenAIResponsesCheckpointPayload(checkpoint.payload)
 	);
 }
