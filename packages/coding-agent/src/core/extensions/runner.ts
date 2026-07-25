@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import type { LegacyCompactionResult, PortableCompactionProjection } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -51,6 +52,7 @@ import type {
 	ResolvedCommand,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
+	SessionBeforeCompactEvent,
 	SessionBeforeCompactResult,
 	SessionBeforeForkResult,
 	SessionBeforeSwitchResult,
@@ -110,6 +112,35 @@ const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltI
 	return builtinKeybindings;
 };
 
+function assertJsonSerializable(value: unknown, path = "projection"): void {
+	if (value === undefined || value === null || typeof value === "string" || typeof value === "boolean") return;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new Error(`${path} must contain only finite numbers`);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (let i = 0; i < value.length; i++) assertJsonSerializable(value[i], `${path}[${i}]`);
+		return;
+	}
+	if (typeof value !== "object") throw new Error(`${path} must be JSON serializable`);
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) throw new Error(`${path} must be JSON serializable`);
+	for (const [key, child] of Object.entries(value)) assertJsonSerializable(child, `${path}.${key}`);
+}
+
+function clonePortableProjection(projection: PortableCompactionProjection): PortableCompactionProjection {
+	if (
+		projection.type !== "portable_compaction_projection" ||
+		projection.version !== 1 ||
+		projection.customType.trim().length === 0 ||
+		projection.summary.trim().length === 0
+	) {
+		throw new Error("Invalid portable compaction projection");
+	}
+	assertJsonSerializable(projection);
+	return structuredClone(projection);
+}
+
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
 	messages?: NonNullable<BeforeAgentStartEventResult["message"]>[];
@@ -133,28 +164,29 @@ type RunnerEmitEvent = Exclude<
 	| MessageEndEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
+	| SessionBeforeCompactEvent
 >;
 
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
-	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
+	{ type: "session_before_switch" | "session_before_fork" | "session_before_tree" }
 >;
 
-type SessionBeforeEventResult =
-	| SessionBeforeSwitchResult
-	| SessionBeforeForkResult
-	| SessionBeforeCompactResult
-	| SessionBeforeTreeResult;
+type SessionBeforeEventResult = SessionBeforeSwitchResult | SessionBeforeForkResult | SessionBeforeTreeResult;
 
 type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_switch" }
 	? SessionBeforeSwitchResult | undefined
 	: TEvent extends { type: "session_before_fork" }
 		? SessionBeforeForkResult | undefined
-		: TEvent extends { type: "session_before_compact" }
-			? SessionBeforeCompactResult | undefined
-			: TEvent extends { type: "session_before_tree" }
-				? SessionBeforeTreeResult | undefined
-				: undefined;
+		: TEvent extends { type: "session_before_tree" }
+			? SessionBeforeTreeResult | undefined
+			: undefined;
+
+export interface SessionBeforeCompactAggregate {
+	cancel: boolean;
+	replacement?: LegacyCompactionResult;
+	projections: PortableCompactionProjection[];
+}
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
@@ -780,9 +812,47 @@ export class ExtensionRunner {
 		return (
 			event.type === "session_before_switch" ||
 			event.type === "session_before_fork" ||
-			event.type === "session_before_compact" ||
 			event.type === "session_before_tree"
 		);
+	}
+
+	async emitSessionBeforeCompact(event: SessionBeforeCompactEvent): Promise<SessionBeforeCompactAggregate> {
+		const ctx = this.createContext();
+		let replacement: LegacyCompactionResult | undefined;
+		const projections: PortableCompactionProjection[] = [];
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("session_before_compact");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					const result = (await handler(event, ctx)) as SessionBeforeCompactResult | undefined;
+					if (!result) continue;
+					if (result.cancel) return { cancel: true, projections: [] };
+					if (result.compaction && result.projection) {
+						throw new Error("session_before_compact handlers cannot return both compaction and projection");
+					}
+					if (result.compaction) replacement = result.compaction;
+					if (result.projection) projections.push(clonePortableProjection(result.projection));
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: event.type,
+						error: message,
+						stack,
+					});
+				}
+			}
+		}
+
+		return {
+			cancel: false,
+			...(replacement ? { replacement } : {}),
+			projections,
+		};
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {

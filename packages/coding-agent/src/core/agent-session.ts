@@ -84,7 +84,6 @@ import {
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
-	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
 	type SessionStartEvent,
 	type ShutdownHandler,
@@ -2032,7 +2031,7 @@ export class AgentSession {
 			let fromExtension = false;
 
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
-				const result = (await this._extensionRunner.emit({
+				const result = await this._extensionRunner.emitSessionBeforeCompact({
 					type: "session_before_compact",
 					preparation,
 					branchEntries: pathEntries,
@@ -2040,14 +2039,14 @@ export class AgentSession {
 					reason: "manual",
 					willRetry: false,
 					signal: this._compactionAbortController.signal,
-				})) as SessionBeforeCompactResult | undefined;
+				});
 
-				if (result?.cancel) {
+				if (result.cancel) {
 					throw new Error("Compaction cancelled");
 				}
 
-				if (result?.compaction) {
-					extensionCompaction = result.compaction;
+				if (result.replacement) {
+					extensionCompaction = result.replacement;
 					fromExtension = true;
 				}
 			}
@@ -2316,7 +2315,7 @@ export class AgentSession {
 			let fromExtension = false;
 
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
-				const extensionResult = (await this._extensionRunner.emit({
+				const extensionResult = await this._extensionRunner.emitSessionBeforeCompact({
 					type: "session_before_compact",
 					preparation,
 					branchEntries: pathEntries,
@@ -2324,9 +2323,9 @@ export class AgentSession {
 					reason,
 					willRetry,
 					signal: this._autoCompactionAbortController.signal,
-				})) as SessionBeforeCompactResult | undefined;
+				});
 
-				if (extensionResult?.cancel) {
+				if (extensionResult.cancel) {
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -2337,8 +2336,8 @@ export class AgentSession {
 					return false;
 				}
 
-				if (extensionResult?.compaction) {
-					extensionCompaction = extensionResult.compaction;
+				if (extensionResult.replacement) {
+					extensionCompaction = extensionResult.replacement;
 					fromExtension = true;
 				}
 			}
