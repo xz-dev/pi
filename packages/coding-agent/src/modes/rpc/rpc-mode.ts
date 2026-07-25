@@ -25,6 +25,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import { toPublicSessionEntry } from "../../core/session-manager.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -617,7 +618,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "get_entries": {
 				const sessionManager = session.sessionManager;
-				let entries = sessionManager.getEntries();
+				let entries = sessionManager.getEntries().map(toPublicSessionEntry);
 				if (command.since !== undefined) {
 					const sinceIndex = entries.findIndex((e) => e.id === command.since);
 					if (sinceIndex === -1) {
@@ -630,7 +631,18 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "get_tree": {
 				const sessionManager = session.sessionManager;
-				return success(id, "get_tree", { tree: sessionManager.getTree(), leafId: sessionManager.getLeafId() });
+				const sanitizeTree = (
+					nodes: ReturnType<typeof sessionManager.getTree>,
+				): ReturnType<typeof sessionManager.getTree> =>
+					nodes.map((node) => ({
+						...node,
+						entry: toPublicSessionEntry(node.entry) as typeof node.entry,
+						children: sanitizeTree(node.children),
+					}));
+				return success(id, "get_tree", {
+					tree: sanitizeTree(sessionManager.getTree()),
+					leafId: sessionManager.getLeafId(),
+				});
 			}
 
 			case "get_last_assistant_text": {

@@ -5,8 +5,8 @@ import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { SessionEntry } from "../session-manager.ts";
-import { SessionManager } from "../session-manager.ts";
+import type { PublicSessionEntry } from "../session-manager.ts";
+import { SessionManager, toPublicSessionEntry } from "../session-manager.ts";
 
 /**
  * Interface for rendering custom tools to HTML.
@@ -129,7 +129,7 @@ function generateThemeVars(themeName?: string): string {
 
 interface SessionData {
 	header: ReturnType<SessionManager["getHeader"]>;
-	entries: ReturnType<SessionManager["getEntries"]>;
+	entries: PublicSessionEntry[];
 	leafId: string | null;
 	systemPrompt?: string;
 	tools?: Array<Pick<ToolDefinition, "name" | "description" | "parameters">>;
@@ -181,7 +181,7 @@ const TEMPLATE_RENDERED_TOOLS = new Set(["bash", "read", "write", "edit", "ls"])
  * Pre-render custom tools to HTML using their TUI renderers.
  */
 function preRenderCustomTools(
-	entries: SessionEntry[],
+	entries: PublicSessionEntry[],
 	toolRenderer: ToolHtmlRenderer,
 ): Record<string, RenderedToolHtml> {
 	const renderedTools: Record<string, RenderedToolHtml> = {};
@@ -248,7 +248,7 @@ export async function exportSessionToHtml(
 		throw new Error("Nothing to export yet - start a conversation first");
 	}
 
-	const entries = sm.getEntries();
+	const entries = sm.getEntries().map(toPublicSessionEntry);
 
 	// Pre-render custom tools if a tool renderer is provided
 	let renderedTools: Record<string, RenderedToolHtml> | undefined;
@@ -297,7 +297,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
-		entries: sm.getEntries(),
+		entries: sm.getEntries().map(toPublicSessionEntry),
 		leafId: sm.getLeafId(),
 		systemPrompt: undefined,
 		tools: undefined,

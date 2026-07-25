@@ -94,7 +94,8 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 
 		// Compact
 		const result = await client.compact();
-		expect(result.summary).toBeDefined();
+		expect(result.kind).toBe("text");
+		expect(result.kind === "text" ? result.summary : undefined).toBeDefined();
 		expect(result.tokensBefore).toBeGreaterThan(0);
 
 		// Wait for file writes
@@ -111,9 +112,8 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 			.split("\n")
 			.map((line) => JSON.parse(line));
 
-		const compactionEntries = entries.filter((e: { type: string }) => e.type === "compaction");
+		const compactionEntries = entries.filter((e: { type: string }) => e.type === "compaction_boundary");
 		expect(compactionEntries.length).toBe(1);
-		expect(compactionEntries[0].summary).toBeDefined();
 	}, 120000);
 
 	test("should execute bash command", async () => {
@@ -358,7 +358,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		const after = await client.getEntries();
 		// Append-only: pre-compaction entries are still there, in the same order
 		expect(after.entries.slice(0, before.entries.length).map((e) => e.id)).toEqual(before.entries.map((e) => e.id));
-		expect(after.entries.some((e) => e.type === "compaction")).toBe(true);
+		expect(after.entries.some((e) => e.type === "compaction_boundary")).toBe(true);
 	}, 120000);
 
 	test("should set and get session name", async () => {
