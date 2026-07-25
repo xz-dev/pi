@@ -445,7 +445,7 @@ Native `/responses/compact` checkpoints are disabled unless an `openai-responses
 
 Use this only with direct OpenAI Responses models whose stable compact endpoint and checkpoint compatibility you control. `realm` is a non-secret label for one provider authentication/retention realm; credential rotation within that realm remains compatible. `modelFamily` must identify models that the provider guarantees can replay each other's checkpoints. Pi also binds checkpoints to the provider ID and normalized endpoint, so changing any of those values falls back to the intact portable history.
 
-Do not enable this for Azure, Codex, or generic proxies merely because they use a Responses-shaped API. Pi does not probe or fall back between native transports. Native checkpoints are opaque and non-portable; successful native compaction replaces textual summary compaction for that operation.
+Do not enable this for Azure, Codex, or generic proxies merely because they use a Responses-shaped API. Pi does not probe or fall back between native transports. Native checkpoints are opaque and non-portable; successful native compaction is the primary execution and may coexist with portable projections.
 
 ```json
 {
