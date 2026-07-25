@@ -1785,7 +1785,7 @@ export class InteractiveMode {
 			mode: "tui",
 			hasUI: true,
 			cwd: this.sessionManager.getCwd(),
-			sessionManager: this.sessionManager,
+			sessionManager: extensionRunner.getSessionManagerView(),
 			modelRegistry: extensionRunner.getModelRegistry(),
 			model: this.session.model,
 			thinkingLevel: this.session.thinkingLevel,
@@ -3088,13 +3088,15 @@ export class InteractiveMode {
 				} else if (event.result) {
 					this.chatContainer.clear();
 					this.rebuildChatFromMessages();
-					this.addMessageToChat(
-						createCompactionSummaryMessage(
-							event.result.summary,
-							event.result.tokensBefore,
-							new Date().toISOString(),
-						),
-					);
+					if (event.result.kind === "text") {
+						this.addMessageToChat(
+							createCompactionSummaryMessage(
+								event.result.summary,
+								event.result.tokensBefore,
+								new Date().toISOString(),
+							),
+						);
+					}
 					this.footer.invalidate();
 				} else if (event.errorMessage) {
 					if (event.reason === "manual") {

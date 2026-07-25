@@ -30,9 +30,11 @@ import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts"
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type CompactionBoundaryDraft,
+	type CompactionBoundaryEntry,
 	isStoredCompactionBoundaryEntry,
 	type PortableCompactionProjection,
 	type StoredCompactionBoundaryEntry,
+	toCompactionBoundary,
 } from "./compaction/boundary.ts";
 import {
 	type BashExecutionMessage,
@@ -217,6 +219,10 @@ export type SessionEntry =
 	| LabelEntry
 	| SessionInfoEntry;
 
+export type PublicSessionEntry =
+	| Exclude<SessionEntry, ProviderCheckpointEntry | StoredCompactionBoundaryEntry>
+	| CompactionBoundaryEntry;
+
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
 
@@ -272,6 +278,63 @@ export type ReadonlySessionManager = Pick<
 	| "captureProviderCheckpointAppendState"
 	| "captureCompactionBoundaryAppendState"
 >;
+
+export function toPublicSessionEntry(entry: SessionEntry): PublicSessionEntry {
+	if (entry.type === "provider_checkpoint" || entry.type === "compaction_boundary") {
+		return toCompactionBoundary(entry);
+	}
+	return structuredClone(entry);
+}
+
+export type ExtensionSessionManagerView = Omit<
+	ReadonlySessionManager,
+	"getLeafEntry" | "getEntry" | "getBranch" | "buildContextEntries" | "getEntries" | "getTree"
+> & {
+	getLeafEntry(): PublicSessionEntry | undefined;
+	getEntry(id: string): PublicSessionEntry | undefined;
+	getBranch(fromId?: string): PublicSessionEntry[];
+	buildContextEntries(): PublicSessionEntry[];
+	getEntries(): PublicSessionEntry[];
+	getTree(): Array<
+		Omit<SessionTreeNode, "entry" | "children"> & {
+			entry: PublicSessionEntry;
+			children: ReturnType<ExtensionSessionManagerView["getTree"]>;
+		}
+	>;
+};
+
+export function createExtensionSessionManagerView(manager: SessionManager): ExtensionSessionManagerView {
+	const sanitizeTree = (nodes: SessionTreeNode[]): ReturnType<ExtensionSessionManagerView["getTree"]> =>
+		nodes.map((node) => ({
+			...node,
+			entry: toPublicSessionEntry(node.entry),
+			children: sanitizeTree(node.children),
+		}));
+	return {
+		getCwd: () => manager.getCwd(),
+		getSessionDir: () => manager.getSessionDir(),
+		getSessionId: () => manager.getSessionId(),
+		getSessionFile: () => manager.getSessionFile(),
+		getLeafId: () => manager.getLeafId(),
+		getLeafEntry: () => {
+			const entry = manager.getLeafEntry();
+			return entry ? toPublicSessionEntry(entry) : undefined;
+		},
+		getEntry: (id) => {
+			const entry = manager.getEntry(id);
+			return entry ? toPublicSessionEntry(entry) : undefined;
+		},
+		getLabel: (id) => manager.getLabel(id),
+		getBranch: (fromId) => manager.getBranch(fromId).map(toPublicSessionEntry),
+		buildContextEntries: () => manager.buildContextEntries().map(toPublicSessionEntry),
+		getHeader: () => structuredClone(manager.getHeader()),
+		getEntries: () => manager.getEntries().map(toPublicSessionEntry),
+		getTree: () => sanitizeTree(manager.getTree()),
+		getSessionName: () => manager.getSessionName(),
+		captureProviderCheckpointAppendState: (identity) => manager.captureProviderCheckpointAppendState(identity),
+		captureCompactionBoundaryAppendState: () => manager.captureCompactionBoundaryAppendState(),
+	};
+}
 
 function createSessionId(): string {
 	return uuidv7();
@@ -547,8 +610,9 @@ function isValidLoadedBoundaryCheckpoint(
 	if (
 		boundaryIndex === undefined ||
 		frontierIndex === undefined ||
-		frontierIndex !== boundaryIndex - 1 ||
-		entry.parentId !== checkpoint.frontierEntryId ||
+		frontierIndex > boundaryIndex - 1 ||
+		entry.parentId === null ||
+		!pathIndex.has(entry.parentId) ||
 		!Number.isSafeInteger(checkpoint.windowGeneration) ||
 		checkpoint.windowGeneration! < 1
 	) {
@@ -695,15 +759,10 @@ export function buildContextEntries(
 				providerCheckpointIdentitiesMatch(entry.checkpoint.identity, options.providerCheckpoint.identity)
 			) {
 				latestCompatibleCheckpoint = entry;
-			}
-			if (
-				valid &&
-				options?.providerCheckpoint &&
-				providerCheckpointIdentitiesMatch(entry.checkpoint.identity, options.providerCheckpoint.identity)
-			) {
 				latestReduction = entry;
 			}
 		} else if (entry.type === "compaction_boundary" && isStoredCompactionBoundaryEntry(entry)) {
+			latestReduction = entry;
 			if (entry.boundary.primary.kind === "checkpoint") {
 				const valid = isValidLoadedBoundaryCheckpoint(entry, latestCompatibleCheckpoint, pathIndex);
 				if (
@@ -716,8 +775,9 @@ export function buildContextEntries(
 				) {
 					latestCompatibleCheckpoint = entry;
 				}
+			} else {
+				latestReduction = entry;
 			}
-			latestReduction = entry;
 		}
 	}
 	if (!latestReduction) return path;
@@ -760,9 +820,7 @@ export function buildContextEntries(
 	return path.filter(
 		(entry) =>
 			entry.type !== "provider_checkpoint" &&
-			(entry.type !== "compaction_boundary" ||
-				entry.boundary.primary.kind !== "checkpoint" ||
-				entry.id === latestReduction.id),
+			(entry.type !== "compaction_boundary" || entry.id === latestReduction.id),
 	);
 }
 

@@ -163,9 +163,23 @@ export function mergePortableCheckpointProjection(
 	checkpointProjection: AgentMessage[],
 	currentLoopMessages: AgentMessage[],
 ): ProviderCheckpointProjectionMerge {
+	const checkpointedMessages = [...persistedPortableMessages];
+	const persistedTail = checkpointedMessages.at(-1);
+	if (
+		persistedTail?.role === "assistant" &&
+		persistedTail.stopReason === "error" &&
+		!currentLoopMessages.some(
+			(message) => message.role === "assistant" && message.timestamp === persistedTail.timestamp,
+		)
+	) {
+		checkpointedMessages.pop();
+	}
+	if (currentLoopMessages.length === 0 && checkpointProjection.length > 0) {
+		return { messages: checkpointProjection, applied: true };
+	}
 	let frontier = -1;
 	let searchFrom = 0;
-	for (const persistedMessage of persistedPortableMessages) {
+	for (const persistedMessage of checkpointedMessages) {
 		let match = -1;
 		for (let i = searchFrom; i < currentLoopMessages.length; i++) {
 			if (agentMessagesHaveSameStableIdentity(persistedMessage, currentLoopMessages[i])) {

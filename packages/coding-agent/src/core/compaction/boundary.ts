@@ -118,7 +118,10 @@ function combinedBoundaryUsage(entry: StoredCompactionBoundaryEntry): Usage | un
 	return usage;
 }
 
-export function toCompactionBoundary(entry: StoredCompactionBoundaryEntry): CompactionBoundaryEntry {
+export function toCompactionBoundary(
+	entry: StoredCompactionBoundaryEntry | ProviderCheckpointEntry,
+): CompactionBoundaryEntry {
+	if (entry.type === "provider_checkpoint") return adaptProviderCheckpoint(entry);
 	const primary = entry.boundary.primary;
 	return {
 		type: "compaction_boundary",
@@ -249,7 +252,7 @@ export function readCompactionBoundaries(path: string): CompactionBoundaryEntry[
 	for (const entry of ancestry) {
 		if (entry.type === "compaction") boundaries.push(adaptCompaction(entry as CompactionEntry));
 		else if (entry.type === "provider_checkpoint") {
-			boundaries.push(adaptProviderCheckpoint(entry as ProviderCheckpointEntry));
+			boundaries.push(toCompactionBoundary(entry as ProviderCheckpointEntry));
 		} else if (isStoredCompactionBoundaryEntry(entry)) {
 			boundaries.push(toCompactionBoundary(entry));
 		}
