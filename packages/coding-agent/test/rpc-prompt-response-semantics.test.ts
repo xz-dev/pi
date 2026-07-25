@@ -190,6 +190,66 @@ describe("RPC prompt response semantics", () => {
 		rpcIo.lineHandler = undefined;
 	});
 
+	it("sanitizes provider-private assistant state from get_entries", async () => {
+		rpcIo.outputLines = [];
+		rpcIo.lineHandler = undefined;
+		const { runtimeHost, cleanup } = await createRuntimeHost({ withAuth: true, responseDelayMs: 0 });
+		runtimeHost.session.sessionManager.appendMessage({ role: "user", content: "visible rpc user", timestamp: 1 });
+		runtimeHost.session.sessionManager.appendMessage({
+			...createAssistantMessage("visible rpc assistant"),
+			content: [
+				{ type: "text", text: "visible rpc assistant", textSignature: "private-rpc-text-signature" },
+				{
+					type: "toolCall",
+					id: "visible-rpc-call",
+					name: "visible-rpc-tool",
+					arguments: { provider: "ordinary rpc tool provider" },
+					thoughtSignature: "private-rpc-thought-signature",
+				},
+			],
+			responseModel: "private-rpc-response-model",
+			responseId: "private-rpc-response-id",
+			diagnostics: [{ type: "private-rpc-diagnostic", timestamp: 1 }],
+		});
+		void runRpcMode(runtimeHost);
+		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+
+		try {
+			if (!rpcIo.lineHandler) throw new Error("RPC line handler missing");
+			Reflect.apply(rpcIo.lineHandler, undefined, [JSON.stringify({ id: "entries", type: "get_entries" })]);
+			await vi.waitFor(() => {
+				const output = parseOutputLines(rpcIo.outputLines).find(
+					(record) => record.id === "entries" && record.command === "get_entries",
+				);
+				expect(output).toBeDefined();
+				const serialized = JSON.stringify(output);
+				for (const sentinel of [
+					"anthropic-messages",
+					"anthropic",
+					"claude-sonnet-4-5",
+					"private-rpc-text-signature",
+					"private-rpc-thought-signature",
+					"private-rpc-response-model",
+					"private-rpc-response-id",
+					"private-rpc-diagnostic",
+				]) {
+					expect(serialized).not.toContain(sentinel);
+				}
+				for (const visible of [
+					"visible rpc user",
+					"visible rpc assistant",
+					"visible-rpc-call",
+					"visible-rpc-tool",
+					"ordinary rpc tool provider",
+				]) {
+					expect(serialized).toContain(visible);
+				}
+			});
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("emits one failure response when prompt preflight rejects", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({
 			withAuth: false,

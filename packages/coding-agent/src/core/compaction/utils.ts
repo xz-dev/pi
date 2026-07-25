@@ -3,12 +3,11 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { contentText, type Message } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
+import type { PublicMessage } from "../public-message.ts";
 
-type WithoutProviderIdentity<T> = T extends unknown ? Omit<T, "api" | "provider" | "model"> : never;
-
-/** LLM-compatible message shape with provider identity removed from assistant messages. */
-export type ProviderNeutralMessage = WithoutProviderIdentity<Message>;
+/** LLM-compatible message shape with provider-private transport state removed. */
+export type ProviderNeutralMessage = PublicMessage;
 
 // ============================================================================
 // File Operation Tracking

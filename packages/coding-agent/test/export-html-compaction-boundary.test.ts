@@ -14,9 +14,90 @@ function decodeSessionData(html: string): unknown {
 	return JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
 }
 
+const privateAssistantSentinels = [
+	"private-api-sentinel",
+	"private-provider-sentinel",
+	"private-model-sentinel",
+	"private-response-model-sentinel",
+	"private-response-id-sentinel",
+	"private-text-signature-sentinel",
+	"private-thinking-signature-sentinel",
+	"private-thought-signature-sentinel",
+	"private-diagnostic-sentinel",
+];
+
 describe("export HTML compaction boundaries", () => {
 	afterEach(() => {
 		while (cleanup.length > 0) rmSync(cleanup.pop()!, { recursive: true, force: true });
+	});
+
+	it("exports provider-neutral ordinary messages without damaging visible tool data", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-export-message-"));
+		cleanup.push(dir);
+		const manager = SessionManager.create(dir, dir);
+		manager.appendMessage({ role: "user", content: "visible user export", timestamp: 1 });
+		manager.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "text", text: "visible assistant export", textSignature: "private-text-signature-sentinel" },
+				{
+					type: "thinking",
+					thinking: "visible thinking export",
+					thinkingSignature: "private-thinking-signature-sentinel",
+				},
+				{
+					type: "toolCall",
+					id: "visible-call-export",
+					name: "visible-tool-export",
+					arguments: { provider: "ordinary tool argument provider" },
+					thoughtSignature: "private-thought-signature-sentinel",
+				},
+			],
+			api: "private-api-sentinel",
+			provider: "private-provider-sentinel",
+			model: "private-model-sentinel",
+			responseModel: "private-response-model-sentinel",
+			responseId: "private-response-id-sentinel",
+			diagnostics: [{ type: "private-diagnostic-sentinel", timestamp: 1 }],
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 2,
+		});
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "visible-call-export",
+			toolName: "visible-tool-export",
+			content: [{ type: "text", text: "visible result export", textSignature: "ordinary result signature field" }],
+			details: { provider: "ordinary result provider detail" },
+			isError: false,
+			timestamp: 3,
+		});
+		const output = join(dir, "session.html");
+
+		await exportSessionToHtml(manager, undefined, { outputPath: output });
+
+		const serialized = JSON.stringify(decodeSessionData(readFileSync(output, "utf8")));
+		for (const sentinel of privateAssistantSentinels) expect(serialized).not.toContain(sentinel);
+		for (const visible of [
+			"visible user export",
+			"visible assistant export",
+			"visible thinking export",
+			"visible-call-export",
+			"visible-tool-export",
+			"ordinary tool argument provider",
+			"visible result export",
+			"ordinary result signature field",
+			"ordinary result provider detail",
+		]) {
+			expect(serialized).toContain(visible);
+		}
 	});
 
 	it("exports a sanitized checkpoint boundary without private checkpoint sentinels", async () => {
