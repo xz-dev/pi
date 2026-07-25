@@ -1,4 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai/compat";
+import { combinedBoundaryUsage } from "./compaction/boundary.ts";
 import type { InternalSessionEntry } from "./session-manager.ts";
 
 export interface UsageTotals {
@@ -49,6 +50,9 @@ export function getUsageCostBreakdown(entries: InternalSessionEntry[]): UsageCos
 		} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 			key = "Tools/summaries";
 			usage = entry.usage;
+		} else if (entry.type === "compaction_boundary") {
+			key = "Tools/summaries";
+			usage = combinedBoundaryUsage(entry);
 		}
 		if (!key || !usage) continue;
 

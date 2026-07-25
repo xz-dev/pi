@@ -298,6 +298,36 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
+	it("groups generic boundary primary and projection usage exactly once", () => {
+		const manager = SessionManager.inMemory();
+		const keptId = manager.appendMessage(createUserMessage("kept", 1));
+		manager.appendCompactionBoundary(
+			{
+				version: 1,
+				tokensBefore: 100,
+				primary: {
+					kind: "text",
+					summary: "summary",
+					firstKeptEntryId: keptId,
+					fromExtension: false,
+					usage: createUsage(10),
+				},
+				projections: [
+					{
+						type: "portable_compaction_projection",
+						version: 1,
+						customType: "test",
+						summary: "projection",
+						usage: createUsage(20),
+					},
+				],
+			},
+			{ expected: manager.captureCompactionBoundaryAppendState() },
+		);
+
+		expect(getUsageCostBreakdown(manager.getEntries())).toEqual([{ key: "Tools/summaries", cost: 0, tokens: 30 }]);
+	});
+
 	it("groups tool and summary usage separately from model-attributed usage", () => {
 		const sessionManager = SessionManager.inMemory();
 		const rootId = sessionManager.appendMessage(createUserMessage("hello", 1));

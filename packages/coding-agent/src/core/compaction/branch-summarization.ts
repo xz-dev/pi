@@ -15,7 +15,11 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import type { InternalSessionEntry, ReadonlySessionManager } from "../session-manager.ts";
+import {
+	type InternalSessionEntry,
+	type ReadonlySessionManager,
+	sessionEntryToContextMessages,
+} from "../session-manager.ts";
 import { completeSummarization, estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
@@ -169,6 +173,11 @@ function getMessageFromEntry(entry: InternalSessionEntry): AgentMessage | undefi
 		case "compaction":
 			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
 
+		// Generic boundaries can contribute a primary text summary plus portable projections.
+		// prepareBranchEntries handles all of them through sessionEntryToContextMessages.
+		case "compaction_boundary":
+			return undefined;
+
 		// These don't contribute to conversation content
 		case "thinking_level_change":
 		case "model_change":
@@ -218,29 +227,38 @@ export function prepareBranchEntries(entries: InternalSessionEntry[], tokenBudge
 	// Second pass: walk from newest to oldest, adding messages until token budget
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		const message = getMessageFromEntry(entry);
-		if (!message) continue;
+		const entryMessages =
+			entry.type === "compaction_boundary"
+				? sessionEntryToContextMessages(entry)
+				: [getMessageFromEntry(entry)].filter((message): message is AgentMessage => message !== undefined);
+		if (entryMessages.length === 0) continue;
 
-		// Extract file ops from assistant messages (tool calls)
-		extractFileOpsFromMessage(message, fileOps);
+		for (let messageIndex = entryMessages.length - 1; messageIndex >= 0; messageIndex--) {
+			const message = entryMessages[messageIndex];
+			// Extract file ops from assistant messages (tool calls)
+			extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateTokens(message);
+			const tokens = estimateTokens(message);
 
-		// Check budget before adding
-		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
-			// If this is a summary entry, try to fit it anyway as it's important context
-			if (entry.type === "compaction" || entry.type === "branch_summary") {
-				if (totalTokens < tokenBudget * 0.9) {
-					messages.unshift(message);
-					totalTokens += tokens;
+			// Check budget before adding
+			if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
+				// If this is a summary entry, try to fit it anyway as it's important context
+				if (
+					entry.type === "compaction" ||
+					entry.type === "branch_summary" ||
+					entry.type === "compaction_boundary"
+				) {
+					if (totalTokens < tokenBudget * 0.9) {
+						messages.unshift(message);
+						totalTokens += tokens;
+					}
 				}
+				return { messages, fileOps, totalTokens };
 			}
-			// Stop - we've hit the budget
-			break;
-		}
 
-		messages.unshift(message);
-		totalTokens += tokens;
+			messages.unshift(message);
+			totalTokens += tokens;
+		}
 	}
 
 	return { messages, fileOps, totalTokens };
