@@ -46,9 +46,10 @@ function toPublicAssistantMessage(message: AssistantMessage): PublicAssistantMes
 		responseModel: ____,
 		responseId: _____,
 		diagnostics: ______,
+		metadata: _______,
 		content,
 		...visible
-	} = structuredClone(message);
+	} = structuredClone(message) as AssistantMessage & { metadata?: unknown };
 	return { ...visible, content: sanitizeAssistantContent(content) };
 }
 

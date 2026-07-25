@@ -1,3 +1,6 @@
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
@@ -67,9 +70,8 @@ function createToolResultMessage(usage: Usage): ToolResultMessage {
 	};
 }
 
-async function createSession() {
+async function createSession(sessionManager = SessionManager.inMemory()) {
 	const settingsManager = SettingsManager.inMemory();
-	const sessionManager = SessionManager.inMemory();
 	const authStorage = AuthStorage.inMemory();
 	await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
 	const session = new AgentSession({
@@ -280,6 +282,159 @@ describe("AgentSession.getSessionStats", () => {
 			{ key: "Tools/summaries", cost: 6, tokens: 300 },
 			{ key: `${model.provider}/${model.id}`, cost: 0.5, tokens: 100 },
 		]);
+	});
+
+	it.each([
+		["missing checkpoint", undefined],
+		["null checkpoint", null],
+		["primitive checkpoint", "invalid"],
+		[
+			"primitive output",
+			{
+				type: "provider_checkpoint",
+				version: 1,
+				identity: {
+					adapter: "openai-responses-compact-v1",
+					realm: "openai:test",
+					provider: "openai",
+					endpoint: "https://api.openai.com/v1",
+					modelFamily: "gpt-5",
+				},
+				frontierEntryId: "assistant",
+				windowGeneration: 1,
+				payload: {
+					id: "resp_bad",
+					created_at: 1,
+					object: "response.compaction",
+					output: "invalid",
+					usage: {
+						input_tokens: 1,
+						input_tokens_details: { cached_tokens: 0 },
+						output_tokens: 1,
+						output_tokens_details: { reasoning_tokens: 0 },
+						total_tokens: 2,
+					},
+				},
+			},
+		],
+		[
+			"negative counters",
+			{
+				type: "provider_checkpoint",
+				version: 1,
+				identity: {
+					adapter: "openai-responses-compact-v1",
+					realm: "openai:test",
+					provider: "openai",
+					endpoint: "https://api.openai.com/v1",
+					modelFamily: "gpt-5",
+				},
+				frontierEntryId: "assistant",
+				windowGeneration: 1,
+				usage: {
+					input: -1,
+					output: 10_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 9_999,
+				},
+				payload: {
+					id: "resp_bad",
+					created_at: 1,
+					object: "response.compaction",
+					output: [{ type: "compaction", id: "cmp_bad", encrypted_content: "bad" }],
+					usage: {
+						input_tokens: 1,
+						input_tokens_details: { cached_tokens: 0 },
+						output_tokens: 1,
+						output_tokens_details: { reasoning_tokens: 0 },
+						total_tokens: 2,
+					},
+				},
+			},
+		],
+	])("ignores a loaded malformed historical provider checkpoint with %s", async (_name, checkpoint) => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-malformed-checkpoint-stats-"));
+		let session: AgentSession | undefined;
+		try {
+			const initial = SessionManager.create(dir);
+			initial.appendMessage(createUserMessage("before", 1));
+			const assistantId = initial.appendMessage(createAssistantMessage("intact assistant", 12, 2));
+			const file = initial.getSessionFile()!;
+			appendFileSync(
+				file,
+				`${JSON.stringify({
+					type: "provider_checkpoint",
+					id: "malformed-checkpoint",
+					parentId: assistantId,
+					timestamp: "2026-07-25T00:00:00.000Z",
+					...(checkpoint !== undefined ? { checkpoint } : {}),
+				})}\n${JSON.stringify({
+					type: "message",
+					id: "after-malformed",
+					parentId: "malformed-checkpoint",
+					timestamp: "2026-07-25T00:00:01.000Z",
+					message: createUserMessage("after malformed", 3),
+				})}\n`,
+			);
+
+			const loaded = SessionManager.open(file, dir);
+			const created = await createSession(loaded);
+			session = created.session;
+			expect(() => created.session.getSessionStats()).not.toThrow();
+			expect(created.session.getSessionStats().tokens.input).toBe(12);
+			expect(loaded.buildSessionContext().messages.map((message) => message.role)).toEqual([
+				"user",
+				"assistant",
+				"user",
+			]);
+			expect(JSON.stringify(loaded.getEntries())).toContain("malformed-checkpoint");
+
+			const boundaryId = loaded.appendCompactionBoundary(
+				{
+					version: 1,
+					tokensBefore: 2,
+					primary: {
+						kind: "checkpoint",
+						checkpoint: {
+							type: "provider_checkpoint",
+							version: 1,
+							identity: {
+								adapter: "openai-responses-compact-v1",
+								realm: "openai:test",
+								provider: "openai",
+								endpoint: "https://api.openai.com/v1",
+								modelFamily: "gpt-5",
+							},
+							frontierEntryId: "after-malformed",
+							windowGeneration: 1,
+							payload: {
+								id: "resp_good",
+								created_at: 1,
+								object: "response.compaction",
+								output: [{ type: "compaction", id: "cmp_good", encrypted_content: "good" }],
+								usage: {
+									input_tokens: 1,
+									input_tokens_details: { cached_tokens: 0 },
+									output_tokens: 1,
+									output_tokens_details: { reasoning_tokens: 0 },
+									total_tokens: 2,
+								},
+							},
+						},
+					},
+					projections: [],
+				},
+				{ expected: loaded.captureCompactionBoundaryAppendState() },
+			);
+			expect(boundaryId).toEqual(expect.any(String));
+			const reopened = SessionManager.open(file, dir);
+			expect(JSON.stringify(reopened.getEntries())).toContain("malformed-checkpoint");
+			expect(() => reopened.buildSessionContext()).not.toThrow();
+		} finally {
+			session?.dispose();
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("ignores zero-usage messages when checking for post-compaction context usage", async () => {
