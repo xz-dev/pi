@@ -837,7 +837,7 @@ export class ExtensionRunner {
 		const publicEvent: SessionBeforeCompactEvent = {
 			...event,
 			preparation: toPublicCompactionPreparation(event.preparation),
-			branchEntries: event.branchEntries.map(toPublicSessionEntry),
+			branchEntries: event.branchEntries.map(toPublicSessionEntry).filter((entry) => entry !== undefined),
 		};
 		let replacement: LegacyCompactionResult | undefined;
 		const projections: PortableCompactionProjection[] = [];

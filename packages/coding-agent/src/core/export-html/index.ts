@@ -248,7 +248,10 @@ export async function exportSessionToHtml(
 		throw new Error("Nothing to export yet - start a conversation first");
 	}
 
-	const entries = sm.getEntries().map(toPublicSessionEntry);
+	const entries = sm
+		.getEntries()
+		.map(toPublicSessionEntry)
+		.filter((entry) => entry !== undefined);
 
 	// Pre-render custom tools if a tool renderer is provided
 	let renderedTools: Record<string, RenderedToolHtml> | undefined;
@@ -297,7 +300,10 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
-		entries: sm.getEntries().map(toPublicSessionEntry),
+		entries: sm
+			.getEntries()
+			.map(toPublicSessionEntry)
+			.filter((entry) => entry !== undefined),
 		leafId: sm.getLeafId(),
 		systemPrompt: undefined,
 		tools: undefined,

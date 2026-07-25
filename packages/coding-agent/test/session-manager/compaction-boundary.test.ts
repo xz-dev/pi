@@ -14,6 +14,7 @@ import {
 	type CompactionBoundaryAppendState,
 	type CompactionBoundaryDraft,
 	type CompactionEntry,
+	createExtensionSessionManagerView,
 	type ProviderCheckpoint,
 	type ProviderCheckpointEntry,
 	type SessionEntry,
@@ -321,6 +322,109 @@ describe("generic compaction boundaries", () => {
 
 		expect(() => readCompactionBoundaries(path)).not.toThrow();
 		expect(readCompactionBoundaries(path)).toEqual([]);
+	});
+
+	it("fails safe for malformed loaded boundaries across context and every extension reader", () => {
+		const malformedRows: unknown[] = [
+			{ ...storedText("bad-outer", "m1", "m1"), unexpected: "private-sentinel" },
+			{ ...storedText("bad-boundary", "m1", "m1"), boundary: { version: 2 } },
+			{
+				...storedText("bad-text", "m1", "m1"),
+				boundary: {
+					...storedText("x", "m1", "m1").boundary,
+					primary: { kind: "text", summary: "", firstKeptEntryId: "m1", fromExtension: false },
+				},
+			},
+			{
+				...storedCheckpoint("bad-checkpoint", "m1"),
+				boundary: {
+					...storedCheckpoint("x", "m1").boundary,
+					primary: { kind: "checkpoint", checkpoint: { private: "private-sentinel" } },
+				},
+			},
+			{
+				...storedText("bad-projection", "m1", "m1"),
+				boundary: {
+					...storedText("x", "m1", "m1").boundary,
+					projections: [
+						{ type: "portable_compaction_projection", version: 1, customType: "", summary: "private-sentinel" },
+					],
+				},
+			},
+			{
+				...storedText("bad-usage", "m1", "m1"),
+				boundary: {
+					...storedText("x", "m1", "m1").boundary,
+					primary: { ...storedText("x", "m1", "m1").boundary.primary, usage: { input: Number.POSITIVE_INFINITY } },
+				},
+			},
+		];
+		for (const [index, malformed] of malformedRows.entries()) {
+			const dir = mkdtempSync(join(tmpdir(), `pi-malformed-boundary-${index}-`));
+			tempPaths.push(dir);
+			const path = join(dir, "session.jsonl");
+			const rows = [
+				{ type: "session", version: 3, id: `session-${index}`, timestamp, cwd: dir },
+				user("m1", null, "intact portable history"),
+				malformed,
+			];
+			writeFileSync(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+			const manager = SessionManager.open(path);
+			expect(textMessages(manager.getEntries())).toContain("intact portable history");
+			const view = createExtensionSessionManagerView(manager);
+			const publicValues = [
+				view.getEntries(),
+				view.getBranch(),
+				view.buildContextEntries(),
+				view.getTree(),
+				view.getEntry("m1"),
+				view.getLeafEntry(),
+			];
+			expect(() => JSON.stringify(publicValues)).not.toThrow();
+			expect(JSON.stringify(publicValues)).not.toContain("private-sentinel");
+			expect(readCompactionBoundaries(path)).toEqual([]);
+		}
+	});
+
+	it("resets a checkpoint chain after a superseding text boundary", () => {
+		const manager = SessionManager.inMemory();
+		const firstFrontier = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const firstExpected = manager.captureCompactionBoundaryAppendState();
+		const firstCheckpointId = manager.appendCompactionBoundary(
+			{
+				version: 1,
+				tokensBefore: 100,
+				primary: { kind: "checkpoint", checkpoint: checkpoint(firstFrontier) },
+				projections: [],
+			},
+			{ expected: firstExpected, currentCheckpointIdentity: identity },
+		);
+		const keptId = manager.appendMessage({ role: "user", content: "kept", timestamp: 2 });
+		manager.appendCompactionBoundary(
+			{
+				version: 1,
+				tokensBefore: 80,
+				primary: { kind: "text", summary: "text reset", firstKeptEntryId: keptId, fromExtension: false },
+				projections: [],
+			},
+			{ expected: manager.captureCompactionBoundaryAppendState() },
+		);
+		const frontier = manager.appendMessage({ role: "user", content: "after text", timestamp: 3 });
+		const nextId = manager.appendCompactionBoundary(
+			{
+				version: 1,
+				tokensBefore: 60,
+				primary: { kind: "checkpoint", checkpoint: checkpoint(frontier) },
+				projections: [],
+			},
+			{ expected: manager.captureCompactionBoundaryAppendState(), currentCheckpointIdentity: identity },
+		);
+		const next = manager.getEntry(nextId);
+		expect(next?.type).toBe("compaction_boundary");
+		if (next?.type !== "compaction_boundary" || next.boundary.primary.kind !== "checkpoint")
+			throw new Error("checkpoint missing");
+		expect(next.boundary.primary.checkpoint).toMatchObject({ windowGeneration: 1, predecessorEntryId: undefined });
+		expect(firstCheckpointId).not.toBe(nextId);
 	});
 
 	it("rejects text boundaries whose first kept entry is not an earlier active ancestor", () => {
