@@ -104,6 +104,7 @@ describe("AgentSession compaction characterization", () => {
 			totalTokens: 100,
 			cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
 		};
+		const projectionUsage = createUsage(7);
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
 			extensionFactories: [
@@ -115,6 +116,17 @@ describe("AgentSession compaction characterization", () => {
 							tokensBefore: event.preparation.tokensBefore,
 							usage: summaryUsage,
 							details: { source: "extension" },
+						},
+					}));
+				},
+				(pi) => {
+					pi.on("session_before_compact", async () => ({
+						projection: {
+							type: "portable_compaction_projection",
+							version: 1,
+							customType: "test.stats",
+							summary: "portable projection",
+							usage: projectionUsage,
 						},
 					}));
 				},
@@ -136,10 +148,14 @@ describe("AgentSession compaction characterization", () => {
 			firstKeptEntryId: expect.any(String),
 			tokensBefore: expect.any(Number),
 			estimatedTokensAfter: expect.any(Number),
-			usage: summaryUsage,
+			usage: {
+				...summaryUsage,
+				input: summaryUsage.input + projectionUsage.input,
+				totalTokens: summaryUsage.totalTokens + projectionUsage.totalTokens,
+			},
 			details: { source: "extension" },
 			fromExtension: true,
-			projectionCount: 0,
+			projectionCount: 1,
 		});
 		expect(compactionEntries).toHaveLength(0);
 		const boundaryEntry = harness.sessionManager
@@ -147,14 +163,21 @@ describe("AgentSession compaction characterization", () => {
 			.find((entry) => entry.type === "compaction_boundary" && entry.id === result.boundaryEntryId);
 		expect(boundaryEntry).toMatchObject({
 			type: "compaction_boundary",
-			boundary: { primary: { kind: "text", usage: summaryUsage }, projections: [] },
+			boundary: {
+				primary: { kind: "text", usage: summaryUsage },
+				projections: [expect.objectContaining({ customType: "test.stats", usage: projectionUsage })],
+			},
 		});
 		const statsAfter = harness.session.getSessionStats();
-		expect(statsAfter.tokens.input).toBe(statsBefore.tokens.input + summaryUsage.input);
-		expect(statsAfter.tokens.output).toBe(statsBefore.tokens.output + summaryUsage.output);
-		expect(statsAfter.tokens.cacheRead).toBe(statsBefore.tokens.cacheRead + summaryUsage.cacheRead);
-		expect(statsAfter.tokens.cacheWrite).toBe(statsBefore.tokens.cacheWrite + summaryUsage.cacheWrite);
-		expect(statsAfter.cost).toBe(statsBefore.cost + summaryUsage.cost.total);
+		expect(statsAfter.tokens.input).toBe(statsBefore.tokens.input + summaryUsage.input + projectionUsage.input);
+		expect(statsAfter.tokens.output).toBe(statsBefore.tokens.output + summaryUsage.output + projectionUsage.output);
+		expect(statsAfter.tokens.cacheRead).toBe(
+			statsBefore.tokens.cacheRead + summaryUsage.cacheRead + projectionUsage.cacheRead,
+		);
+		expect(statsAfter.tokens.cacheWrite).toBe(
+			statsBefore.tokens.cacheWrite + summaryUsage.cacheWrite + projectionUsage.cacheWrite,
+		);
+		expect(statsAfter.cost).toBe(statsBefore.cost + summaryUsage.cost.total + projectionUsage.cost.total);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
 	});
 
@@ -257,6 +280,68 @@ describe("AgentSession compaction characterization", () => {
 		expect(compactionEntries).toHaveLength(1);
 		expect(compactionEnd?.result?.estimatedTokensAfter).toBeGreaterThan(0);
 		expect(getStreamCallCount()).toBe(1);
+	});
+
+	it("preserves live-only messages when the post-commit persisted frontier cannot be matched", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "portable summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const liveOnly = {
+			role: "custom" as const,
+			customType: "test.live-only",
+			content: [{ type: "text" as const, text: "must survive rebuild" }],
+			display: false,
+			timestamp: Date.now(),
+		};
+		harness.session.agent.state.messages = [liveOnly];
+
+		await harness.session.compact();
+
+		expect(harness.session.agent.state.messages).toEqual([liveOnly]);
+	});
+
+	it("does not continue overflow recovery when the boundary append fails", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "summary that cannot commit",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const entriesBefore = structuredClone(harness.sessionManager.getEntries());
+		vi.spyOn(harness.sessionManager, "appendCompactionBoundary").mockImplementation(() => {
+			throw new Error("injected append failure");
+		});
+		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		await expect(sessionInternals._runAutoCompaction("overflow", true)).resolves.toBe(false);
+
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(harness.sessionManager.getEntries()).toEqual(entriesBefore);
+		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction_boundary")).toBe(false);
 	});
 
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {

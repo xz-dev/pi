@@ -610,9 +610,8 @@ function isValidLoadedBoundaryCheckpoint(
 	if (
 		boundaryIndex === undefined ||
 		frontierIndex === undefined ||
-		frontierIndex > boundaryIndex - 1 ||
-		entry.parentId === null ||
-		!pathIndex.has(entry.parentId) ||
+		frontierIndex !== boundaryIndex - 1 ||
+		entry.parentId !== checkpoint.frontierEntryId ||
 		!Number.isSafeInteger(checkpoint.windowGeneration) ||
 		checkpoint.windowGeneration! < 1
 	) {
@@ -1441,11 +1440,30 @@ export class SessionManager {
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		if (this.persist && this.sessionFile && this.flushed) {
+			this._persist(entry);
+			this.fileEntries.push(entry);
+			this.byId.set(entry.id, entry);
+			this.leafId = entry.id;
+			this.version++;
+			return;
+		}
+
+		const previousFlushed = this.flushed;
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this.version++;
-		this._persist(entry);
+		try {
+			this._persist(entry);
+		} catch (error) {
+			this.fileEntries.pop();
+			this.byId.delete(entry.id);
+			this.leafId = entry.parentId;
+			this.version--;
+			this.flushed = previousFlushed;
+			throw error;
+		}
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1539,8 +1557,14 @@ export class SessionManager {
 		if (expected.branch !== this.leafId) throw new Error("Compaction boundary branch changed before append");
 
 		if (draft.primary.kind === "text") {
-			if (!this.byId.has(draft.primary.firstKeptEntryId)) {
-				throw new Error(`Compaction boundary first kept entry ${draft.primary.firstKeptEntryId} not found`);
+			const firstKeptEntryId = draft.primary.firstKeptEntryId;
+			if (!this.byId.has(firstKeptEntryId)) {
+				throw new Error(`Compaction boundary first kept entry ${firstKeptEntryId} not found`);
+			}
+			const activeAncestry = this.getBranch();
+			const firstKeptIndex = activeAncestry.findIndex((entry) => entry.id === firstKeptEntryId);
+			if (firstKeptIndex < 0) {
+				throw new Error("Compaction boundary first kept entry must be on the active ancestry");
 			}
 		} else {
 			const checkpoint = draft.primary.checkpoint;

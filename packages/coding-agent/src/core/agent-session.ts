@@ -58,6 +58,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { mergeCheckpointProjectionWithLiveSuffix } from "./checkpoint-projection.ts";
 import {
 	type CheckpointPrimaryDraft,
 	type CompactionOutcome,
@@ -1907,9 +1908,6 @@ export class AgentSession {
 					transformHeaders: this._extensionRunner.hasHandlers("before_provider_headers")
 						? (compactHeaders) => this._extensionRunner.emitBeforeProviderHeaders(compactHeaders)
 						: undefined,
-					onPayload: this._extensionRunner.hasHandlers("before_provider_request")
-						? (payload) => this._extensionRunner.emitBeforeProviderRequest(payload)
-						: undefined,
 					onResponse: (response, responseModel) => this._observeNativeCompactionResponse(response, responseModel),
 				},
 			);
@@ -2017,41 +2015,23 @@ export class AgentSession {
 				const activeContext = identity
 					? this.sessionManager.buildSessionContext({ providerCheckpoint: { identity } })
 					: portableContext;
-				let frontier = -1;
-				let searchFrom = 0;
-				for (const persistedMessage of portableBefore) {
-					let match = -1;
-					for (let i = searchFrom; i < agentMessagesBefore.length; i++) {
-						const liveMessage = agentMessagesBefore[i];
-						if (
-							persistedMessage === liveMessage ||
-							(persistedMessage.role === liveMessage.role &&
-								persistedMessage.timestamp === liveMessage.timestamp &&
-								JSON.stringify(persistedMessage) === JSON.stringify(liveMessage))
-						) {
-							match = i;
-							break;
-						}
-					}
-					if (match < 0) {
-						this.agent.state.messages = portableContext.messages;
-						return estimateMessagesTokens(activeContext.messages);
-					}
-					frontier = match;
-					searchFrom = match + 1;
-				}
-				const pendingMessages = agentMessagesBefore.slice(frontier + 1);
-				this.agent.state.messages = [...portableContext.messages, ...pendingMessages];
+				const merged = mergeCheckpointProjectionWithLiveSuffix(
+					portableBefore,
+					portableContext.messages,
+					activeContext.messages,
+					agentMessagesBefore,
+				);
+				this.agent.state.messages = merged.portableMessages;
 				if (failedOverflowMessage?.role === "assistant") {
-					const persistedLastMessage = this.agent.state.messages.at(-1);
+					const liveLastMessage = this.agent.state.messages.at(-1);
 					if (
-						persistedLastMessage?.role === "assistant" &&
-						persistedLastMessage.timestamp === failedOverflowMessage.timestamp
+						liveLastMessage?.role === "assistant" &&
+						liveLastMessage.timestamp === failedOverflowMessage.timestamp
 					) {
 						this.agent.state.messages = this.agent.state.messages.slice(0, -1);
 					}
 				}
-				return estimateMessagesTokens([...activeContext.messages, ...pendingMessages]);
+				return estimateMessagesTokens(merged.activeMessages);
 			},
 			emitCompact: async (boundary, committedOutcome) => {
 				await this._extensionRunner.emit({

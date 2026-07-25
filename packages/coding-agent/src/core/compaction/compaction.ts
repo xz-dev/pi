@@ -7,7 +7,14 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { contentText, type RetryCallbacks, type RetryPolicy, retryAssistantCall, uuidv7 } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	Usage,
+} from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
 import {
@@ -22,6 +29,7 @@ import {
 	extractFileOpsFromMessage,
 	type FileOperations,
 	formatFileOperations,
+	type ProviderNeutralMessage,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
@@ -692,6 +700,8 @@ export async function generateSummaryWithUsage(
 // Compaction Preparation (for extensions)
 // ============================================================================
 
+export type ProviderNeutralCompactionMessage = ProviderNeutralMessage;
+
 export interface CompactionPreparation {
 	/** UUID of first entry to keep */
 	firstKeptEntryId: string;
@@ -708,6 +718,32 @@ export interface CompactionPreparation {
 	fileOps: FileOperations;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
+}
+
+export interface PublicCompactionPreparation
+	extends Omit<CompactionPreparation, "messagesToSummarize" | "turnPrefixMessages"> {
+	messagesToSummarize: ProviderNeutralCompactionMessage[];
+	turnPrefixMessages: ProviderNeutralCompactionMessage[];
+}
+
+function toProviderNeutralCompactionMessage(message: Message): ProviderNeutralCompactionMessage {
+	if (message.role !== "assistant") return structuredClone(message);
+	const { api: _, provider: __, model: ___, ...providerNeutral } = structuredClone(message);
+	return providerNeutral;
+}
+
+export function toPublicCompactionPreparation(preparation: CompactionPreparation): PublicCompactionPreparation {
+	return {
+		...preparation,
+		messagesToSummarize: convertToLlm(preparation.messagesToSummarize).map(toProviderNeutralCompactionMessage),
+		turnPrefixMessages: convertToLlm(preparation.turnPrefixMessages).map(toProviderNeutralCompactionMessage),
+		fileOps: {
+			read: new Set(preparation.fileOps.read),
+			written: new Set(preparation.fileOps.written),
+			edited: new Set(preparation.fileOps.edited),
+		},
+		settings: { ...preparation.settings },
+	};
 }
 
 export function prepareCompaction(

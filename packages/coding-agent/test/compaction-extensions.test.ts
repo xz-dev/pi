@@ -11,6 +11,7 @@ import { getModel, streamSimple } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { CompactionPreparation } from "../src/core/compaction/index.ts";
 import {
 	createExtensionRuntime,
 	type Extension,
@@ -20,7 +21,7 @@ import {
 	type SessionCompactEvent,
 	type SessionEvent,
 } from "../src/core/extensions/index.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createCodingTools } from "../src/index.ts";
@@ -69,7 +70,12 @@ async function createAggregationRunner(factories: Array<(pi: ExtensionAPI) => vo
 	return { runner, tempDir };
 }
 
-const beforeCompactEvent: SessionBeforeCompactEvent = {
+type RawSessionBeforeCompactEvent = Omit<SessionBeforeCompactEvent, "preparation" | "branchEntries"> & {
+	preparation: CompactionPreparation;
+	branchEntries: SessionEntry[];
+};
+
+const beforeCompactEvent: RawSessionBeforeCompactEvent = {
 	type: "session_before_compact",
 	preparation: {
 		firstKeptEntryId: "entry-a",
@@ -126,6 +132,55 @@ describe("Compaction extension aggregation", () => {
 					error: expect.stringMatching(/compaction.*projection/i),
 				}),
 			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("publishes a detached provider-neutral preparation event", async () => {
+		const privateSentinels = {
+			api: "private-api-sentinel",
+			provider: "private-provider-sentinel",
+			model: "private-model-sentinel",
+		};
+		const sourceMessage = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "safe assistant text" }],
+			...privateSentinels,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: 1,
+		};
+		let captured: SessionBeforeCompactEvent | undefined;
+		const { runner, tempDir } = await createAggregationRunner([
+			(pi) =>
+				pi.on("session_before_compact", (event) => {
+					captured = event;
+					const message = event.preparation.messagesToSummarize[0];
+					if (message && "content" in message) message.content = [];
+				}),
+		]);
+		const event: RawSessionBeforeCompactEvent = {
+			...beforeCompactEvent,
+			preparation: {
+				...beforeCompactEvent.preparation,
+				messagesToSummarize: [sourceMessage],
+				turnPrefixMessages: [structuredClone(sourceMessage)],
+			},
+		};
+		try {
+			await runner.emitSessionBeforeCompact(event);
+			const serialized = JSON.stringify(captured);
+			expect(serialized).toContain("safe assistant text");
+			for (const sentinel of Object.values(privateSentinels)) expect(serialized).not.toContain(sentinel);
+			expect(sourceMessage.content).toEqual([{ type: "text", text: "safe assistant text" }]);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
