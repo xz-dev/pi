@@ -5,8 +5,8 @@ import {
 	buildSessionContext,
 	type CompactionEntry,
 	type CustomEntry,
+	type InternalSessionEntry,
 	type ModelChangeEntry,
-	type SessionEntry,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "../../src/core/session-manager.ts";
@@ -76,14 +76,14 @@ describe("buildSessionContext", () => {
 		});
 
 		it("single user message", () => {
-			const entries: SessionEntry[] = [msg("1", null, "user", "hello")];
+			const entries: InternalSessionEntry[] = [msg("1", null, "user", "hello")];
 			const ctx = buildSessionContext(entries);
 			expect(ctx.messages).toHaveLength(1);
 			expect(ctx.messages[0].role).toBe("user");
 		});
 
 		it("simple conversation", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "hello"),
 				msg("2", "1", "assistant", "hi there"),
 				msg("3", "2", "user", "how are you"),
@@ -95,7 +95,7 @@ describe("buildSessionContext", () => {
 		});
 
 		it("tracks thinking level changes", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "hello"),
 				thinkingLevel("2", "1", "high"),
 				msg("3", "2", "assistant", "thinking hard"),
@@ -106,13 +106,13 @@ describe("buildSessionContext", () => {
 		});
 
 		it("tracks model from assistant message", () => {
-			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
+			const entries: InternalSessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
 			const ctx = buildSessionContext(entries);
 			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
 		});
 
 		it("tracks model from model change entry", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "hello"),
 				modelChange("2", "1", "openai", "gpt-4"),
 				msg("3", "2", "assistant", "hi"),
@@ -125,7 +125,7 @@ describe("buildSessionContext", () => {
 
 	describe("with compaction", () => {
 		it("includes summary before kept messages", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "first"),
 				msg("2", "1", "assistant", "response1"),
 				msg("3", "2", "user", "second"),
@@ -146,7 +146,7 @@ describe("buildSessionContext", () => {
 		});
 
 		it("handles compaction keeping from first message", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "first"),
 				msg("2", "1", "assistant", "response"),
 				compaction("3", "2", "Empty summary", "1"),
@@ -160,7 +160,7 @@ describe("buildSessionContext", () => {
 		});
 
 		it("multiple compactions uses latest", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "a"),
 				msg("2", "1", "assistant", "b"),
 				compaction("3", "2", "First summary", "1"),
@@ -177,7 +177,7 @@ describe("buildSessionContext", () => {
 		});
 
 		it("buildContextEntries returns compaction-aware entries including custom entries", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "first"),
 				custom("2", "1", "old-state", { hidden: true }),
 				msg("3", "2", "assistant", "response1"),
@@ -194,7 +194,7 @@ describe("buildSessionContext", () => {
 		});
 
 		it("keeps settings from the full path after compaction", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "first"),
 				thinkingLevel("2", "1", "high"),
 				msg("3", "2", "assistant", "response1"),
@@ -213,7 +213,7 @@ describe("buildSessionContext", () => {
 			// Tree:
 			//   1 -> 2 -> 3 (branch A)
 			//         \-> 4 (branch B)
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "start"),
 				msg("2", "1", "assistant", "response"),
 				msg("3", "2", "user", "branch A"),
@@ -230,7 +230,7 @@ describe("buildSessionContext", () => {
 		});
 
 		it("includes branch summary in path", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "start"),
 				msg("2", "1", "assistant", "response"),
 				msg("3", "2", "user", "abandoned path"),
@@ -249,7 +249,7 @@ describe("buildSessionContext", () => {
 			//   1 -> 2 -> 3 -> 4 -> compaction(5) -> 6 -> 7 (main path)
 			//              \-> 8 -> 9 (abandoned branch)
 			//                    \-> branchSummary(10) -> 11 (resumed from 3)
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "start"),
 				msg("2", "1", "assistant", "r1"),
 				msg("3", "2", "user", "q2"),
@@ -287,13 +287,13 @@ describe("buildSessionContext", () => {
 
 	describe("edge cases", () => {
 		it("uses last entry when leafId not found", () => {
-			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
+			const entries: InternalSessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
 			const ctx = buildSessionContext(entries, "nonexistent");
 			expect(ctx.messages).toHaveLength(2);
 		});
 
 		it("handles orphaned entries gracefully", () => {
-			const entries: SessionEntry[] = [
+			const entries: InternalSessionEntry[] = [
 				msg("1", null, "user", "hello"),
 				msg("2", "missing", "assistant", "orphan"), // parent doesn't exist
 			];

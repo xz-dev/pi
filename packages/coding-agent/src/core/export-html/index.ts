@@ -6,7 +6,7 @@ import { getResolvedThemeColors, getThemeExportColors } from "../../modes/intera
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { PublicSessionEntry } from "../session-manager.ts";
-import { SessionManager, toPublicSessionEntry } from "../session-manager.ts";
+import { projectPublicSessionEntries, SessionManager } from "../session-manager.ts";
 
 /**
  * Interface for rendering custom tools to HTML.
@@ -248,10 +248,8 @@ export async function exportSessionToHtml(
 		throw new Error("Nothing to export yet - start a conversation first");
 	}
 
-	const entries = sm
-		.getEntries()
-		.map(toPublicSessionEntry)
-		.filter((entry) => entry !== undefined);
+	const projection = projectPublicSessionEntries(sm.getEntries(), sm.getLeafId());
+	const entries = projection.entries;
 
 	// Pre-render custom tools if a tool renderer is provided
 	let renderedTools: Record<string, RenderedToolHtml> | undefined;
@@ -266,7 +264,7 @@ export async function exportSessionToHtml(
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
 		entries,
-		leafId: sm.getLeafId(),
+		leafId: projection.leafId,
 		systemPrompt: state?.systemPrompt,
 		tools: state?.tools?.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
 		renderedTools,
@@ -298,13 +296,11 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	const sm = SessionManager.open(resolvedInputPath);
 
+	const projection = projectPublicSessionEntries(sm.getEntries(), sm.getLeafId());
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
-		entries: sm
-			.getEntries()
-			.map(toPublicSessionEntry)
-			.filter((entry) => entry !== undefined),
-		leafId: sm.getLeafId(),
+		entries: projection.entries,
+		leafId: projection.leafId,
 		systemPrompt: undefined,
 		tools: undefined,
 	};

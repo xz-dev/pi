@@ -3,7 +3,7 @@ import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works
 import { Container, Text, type TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import type { SessionEntry } from "../../../src/core/session-manager.ts";
+import type { InternalSessionEntry } from "../../../src/core/session-manager.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
@@ -43,7 +43,7 @@ type RenderSessionContextThis = {
 		getImageWidthCells(): number;
 		getShowCacheMissNotices(): boolean;
 	};
-	sessionManager: { getCwd(): string; getEntries(): SessionEntry[] };
+	sessionManager: { getCwd(): string; getEntries(): InternalSessionEntry[] };
 	session: { retryAttempt: number; modelRegistry: { find(provider: string, modelId: string): undefined } };
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
@@ -55,7 +55,7 @@ type RenderSessionContextThis = {
 
 type RenderSessionEntries = (
 	this: RenderSessionContextThis,
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	options?: { updateFooter?: boolean; populateHistory?: boolean },
 ) => void;
 
@@ -118,10 +118,10 @@ function createToolResultMessage(text: string): ToolResultMessage {
 	};
 }
 
-function createSessionEntries(messages: AgentMessage[]): SessionEntry[] {
+function createSessionEntries(messages: AgentMessage[]): InternalSessionEntry[] {
 	let parentId: string | null = null;
 	return messages.map((message, index) => {
-		const entry: SessionEntry = {
+		const entry: InternalSessionEntry = {
 			type: "message",
 			id: `entry-${index}`,
 			parentId,

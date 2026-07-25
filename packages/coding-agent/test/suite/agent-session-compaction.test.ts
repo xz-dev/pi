@@ -5,6 +5,7 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
@@ -179,6 +180,69 @@ describe("AgentSession compaction characterization", () => {
 		);
 		expect(statsAfter.cost).toBe(statsBefore.cost + summaryUsage.cost.total + projectionUsage.cost.total);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
+	});
+
+	it("commits two real text compactions and reopens the exact projected context", async () => {
+		let compactionNumber = 0;
+		const harness = await createHarness({
+			persistedSession: true,
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: `summary ${++compactionNumber}`,
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+				(pi) => {
+					pi.on("session_before_compact", async () => ({
+						projection: {
+							type: "portable_compaction_projection",
+							version: 1,
+							customType: "test.lifecycle",
+							summary: `portable ${compactionNumber}`,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("answer one"),
+			fauxAssistantMessage("answer two"),
+			fauxAssistantMessage("answer three"),
+			fauxAssistantMessage("answer four"),
+		]);
+
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		const first = await harness.session.compact();
+		expect(first).toMatchObject({ kind: "text", summary: "summary 1", projectionCount: 1 });
+
+		await harness.session.prompt("three");
+		await harness.session.prompt("four");
+		const second = await harness.session.compact();
+		expect(second).toMatchObject({ kind: "text", summary: "summary 2", projectionCount: 1 });
+		expect(compactionNumber).toBe(2);
+
+		const boundaries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction_boundary");
+		expect(boundaries).toHaveLength(2);
+		expect(boundaries.map((entry) => entry.boundary.primary.kind)).toEqual(["text", "text"]);
+		const liveContext = harness.sessionManager.buildSessionContext();
+		const liveSummaries = liveContext.messages
+			.filter((message) => message.role === "compactionSummary")
+			.map((message) => message.summary);
+		expect(liveSummaries).toEqual(["summary 2", "portable 2"]);
+		expect(liveSummaries).not.toContain("portable 1");
+		expect(liveSummaries).not.toContain("summary 1");
+
+		const reopened = SessionManager.open(harness.sessionManager.getSessionFile()!, harness.tempDir);
+		expect(reopened.buildSessionContext()).toEqual(liveContext);
+		expect(reopened.getLeafId()).toBe(harness.sessionManager.getLeafId());
+		expect(reopened.getEntries()).toEqual(harness.sessionManager.getEntries());
 	});
 
 	it("throws when compacting without a model", async () => {
@@ -497,6 +561,48 @@ describe("AgentSession compaction characterization", () => {
 		await sessionInternals._checkCompaction(staleAssistant, false);
 
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+	});
+
+	it("uses generic boundaries for stale threshold, stale overflow, equal clocks, and fresh usage", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const oldOverflow = createAssistant(harness, { stopReason: "length", totalTokens: 610_000, timestamp: 1000 });
+		harness.sessionManager.appendMessage({ role: "user", content: "old", timestamp: 900 });
+		harness.sessionManager.appendMessage(oldOverflow);
+		const keptId = harness.sessionManager.appendMessage({ role: "user", content: "kept", timestamp: 1100 });
+		harness.sessionManager.appendCompactionBoundary(
+			{
+				version: 1,
+				tokensBefore: 610_000,
+				primary: { kind: "text", summary: "generic summary", firstKeptEntryId: keptId, fromExtension: false },
+				projections: [],
+			},
+			{ expected: harness.sessionManager.captureCompactionBoundaryAppendState() },
+		);
+		const boundaryTimestamp = new Date(
+			harness.sessionManager.getEntry(harness.sessionManager.getLeafId()!)!.timestamp,
+		).getTime();
+		const contextWindow = harness.session.model!.contextWindow!;
+		const thresholdTokens = contextWindow - harness.settingsManager.getCompactionSettings().reserveTokens + 1;
+		const equalTimeFresh = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: thresholdTokens,
+			timestamp: boundaryTimestamp,
+		});
+		harness.sessionManager.appendMessage(equalTimeFresh);
+		harness.session.agent.state.messages = [oldOverflow, equalTimeFresh];
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+
+		await sessionInternals._checkCompaction(oldOverflow, false);
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		await sessionInternals._checkCompaction(equalTimeFresh, false);
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(harness.session.getContextUsage()).toEqual({
+			tokens: thresholdTokens,
+			contextWindow,
+			percent: (thresholdTokens / contextWindow) * 100,
+		});
 	});
 
 	it("triggers threshold compaction for error messages using the last successful usage", async () => {

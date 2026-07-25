@@ -1,5 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai/compat";
-import type { SessionEntry } from "./session-manager.ts";
+import type { InternalSessionEntry } from "./session-manager.ts";
 
 export interface UsageTotals {
 	input: number;
@@ -34,7 +34,7 @@ export interface UsageCostBreakdownEntry {
 }
 
 /** Group attributable assistant usage by model and all other usage into a separate bucket. */
-export function getUsageCostBreakdown(entries: SessionEntry[]): UsageCostBreakdownEntry[] {
+export function getUsageCostBreakdown(entries: InternalSessionEntry[]): UsageCostBreakdownEntry[] {
 	const totalsByKey = new Map<string, UsageTotals>();
 
 	for (const entry of entries) {

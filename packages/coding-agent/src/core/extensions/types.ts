@@ -65,8 +65,8 @@ import type {
 	CompactionEntry,
 	CustomEntry,
 	ExtensionSessionManagerView,
+	InternalSessionEntry,
 	PublicSessionEntry,
-	SessionEntry,
 	SessionManager,
 } from "../session-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
@@ -630,7 +630,7 @@ export interface TreePreparation {
 	targetId: string;
 	oldLeafId: string | null;
 	commonAncestorId: string | null;
-	entriesToSummarize: SessionEntry[];
+	entriesToSummarize: InternalSessionEntry[];
 	userWantsSummary: boolean;
 	/** Custom instructions for summarization */
 	customInstructions?: string;

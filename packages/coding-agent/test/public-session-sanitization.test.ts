@@ -12,7 +12,7 @@ import {
 import {
 	createExtensionSessionManagerView,
 	type ExtensionSessionManagerView,
-	type SessionEntry,
+	type InternalSessionEntry,
 	SessionManager,
 	toPublicSessionEntry,
 } from "../src/core/session-manager.ts";
@@ -225,6 +225,41 @@ describe("public session message sanitization", () => {
 		);
 	});
 
+	it("reparents visible descendants and visible leaf when an invalid private boundary is omitted", () => {
+		const manager = SessionManager.inMemory(process.cwd());
+		const rootId = manager.appendMessage({ role: "user", content: "visible root", timestamp: 1 });
+		const malformedBoundary = {
+			type: "compaction_boundary",
+			id: "invalid-private-boundary",
+			parentId: rootId,
+			timestamp: new Date().toISOString(),
+			boundary: { version: 2, private: "private-boundary-sentinel" },
+		} as unknown as InternalSessionEntry;
+		const managerInternals = manager as unknown as {
+			fileEntries: unknown[];
+			_buildIndex(): void;
+		};
+		managerInternals.fileEntries.push(malformedBoundary);
+		managerInternals._buildIndex();
+		const childId = manager.appendMessage({ role: "user", content: "visible child", timestamp: 2 });
+		manager.branch("invalid-private-boundary");
+
+		const view = createExtensionSessionManagerView(manager);
+		const entries = view.getEntries();
+		const child = entries.find((entry) => entry.id === childId);
+		expect(child?.parentId).toBe(rootId);
+		expect(view.getLeafId()).toBe(rootId);
+		expect(view.getLeafEntry()?.id).toBe(rootId);
+		expect(view.getBranch(childId).map((entry) => entry.id)).toEqual([rootId, childId]);
+		expect(view.getTree()).toEqual([
+			expect.objectContaining({
+				entry: expect.objectContaining({ id: rootId }),
+				children: [expect.objectContaining({ entry: expect.objectContaining({ id: childId }) })],
+			}),
+		]);
+		expect(JSON.stringify([entries, view.getTree()])).not.toContain("private-boundary-sentinel");
+	});
+
 	it("exposes only the provider-neutral extension session manager contract", () => {
 		expectTypeOf<ExtensionContext["sessionManager"]>().toEqualTypeOf<ExtensionSessionManagerView>();
 		type ExtensionKeys = keyof ExtensionContext["sessionManager"];
@@ -269,7 +304,7 @@ describe("public session message sanitization", () => {
 				settings: { enabled: true, reserveTokens: 1, keepRecentTokens: 1 },
 			}),
 		]);
-		const custom: SessionEntry = {
+		const custom: InternalSessionEntry = {
 			type: "custom",
 			id: "custom",
 			parentId: null,

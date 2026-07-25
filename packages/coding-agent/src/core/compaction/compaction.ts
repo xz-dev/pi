@@ -22,7 +22,7 @@ import {
 	buildSessionContext,
 	type CompactionEntry,
 	getLatestReductionEntry,
-	type SessionEntry,
+	type InternalSessionEntry,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
 import {
@@ -51,7 +51,7 @@ export interface CompactionDetails {
  */
 function extractFileOperations(
 	messages: AgentMessage[],
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	prevCompactionIndex: number,
 ): FileOperations {
 	const fileOps = createFileOps();
@@ -87,10 +87,8 @@ function extractFileOperations(
  * Extract AgentMessage from an entry if it produces one.
  * Returns undefined for entries that don't contribute to LLM context.
  */
-function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "compaction") {
-		return undefined;
-	}
+function getMessageFromEntryForCompaction(entry: InternalSessionEntry): AgentMessage | undefined {
+	if (entry.type === "compaction" || entry.type === "compaction_boundary") return undefined;
 	return sessionEntryToContextMessages(entry)[0];
 }
 
@@ -182,7 +180,7 @@ function getAssistantUsage(msg: AgentMessage): Usage | undefined {
 /**
  * Find the last valid assistant message usage from session entries.
  */
-export function getLastAssistantUsage(entries: SessionEntry[]): Usage | undefined {
+export function getLastAssistantUsage(entries: InternalSessionEntry[]): Usage | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (entry.type === "message") {
@@ -348,7 +346,7 @@ function isTurnStartMessage(message: AgentMessage): boolean {
 	return false;
 }
 
-function isTurnStartEntry(entry: SessionEntry): boolean {
+function isTurnStartEntry(entry: InternalSessionEntry): boolean {
 	if (entry.type === "compaction") {
 		return false;
 	}
@@ -361,7 +359,7 @@ function isTurnStartEntry(entry: SessionEntry): boolean {
  * When we cut at an assistant message with tool calls, its tool results follow it
  * and will be kept.
  */
-function findValidCutPoints(entries: SessionEntry[], startIndex: number, endIndex: number): number[] {
+function findValidCutPoints(entries: InternalSessionEntry[], startIndex: number, endIndex: number): number[] {
 	const cutPoints: number[] = [];
 	for (let i = startIndex; i < endIndex; i++) {
 		const entry = entries[i];
@@ -379,7 +377,7 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
  * Find the context-visible user-role message that starts the turn containing the given entry index.
  * Returns -1 if no turn start found before the index.
  */
-export function findTurnStartIndex(entries: SessionEntry[], entryIndex: number, startIndex: number): number {
+export function findTurnStartIndex(entries: InternalSessionEntry[], entryIndex: number, startIndex: number): number {
 	for (let i = entryIndex; i >= startIndex; i--) {
 		if (isTurnStartEntry(entries[i])) {
 			return i;
@@ -414,7 +412,7 @@ export interface CutPointResult {
  * Only considers entries between `startIndex` and `endIndex` (exclusive).
  */
 export function findCutPoint(
-	entries: SessionEntry[],
+	entries: InternalSessionEntry[],
 	startIndex: number,
 	endIndex: number,
 	keepRecentTokens: number,
@@ -747,7 +745,7 @@ export function toPublicCompactionPreparation(preparation: CompactionPreparation
 }
 
 export function prepareCompaction(
-	pathEntries: SessionEntry[],
+	pathEntries: InternalSessionEntry[],
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
 	const latestReduction = getLatestReductionEntry(pathEntries);
