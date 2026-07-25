@@ -2,8 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added portable extension projections that can accompany either text or provider-native compaction without exposing provider-owned checkpoint state.
+
+### Changed
+
+- Changed SDK, RPC, extension, tree, and export compaction surfaces to use sanitized `CompactionBoundary` and discriminated `CompactionOutcome` contracts; checkpoint outcomes contain no private payload or compatibility identity.
+
 ### Fixed
 
+- Fixed compaction commits to validate and append one generic boundary atomically, rejecting cancelled, failed, stale-session, stale-branch, and stale-provider attempts before persistence.
 - Fixed compaction and branch summaries for providers whose authentication resolves entirely to request headers ([#5871](https://github.com/earendil-works/pi/issues/5871))
 
 ## [0.82.0] - 2026-07-24

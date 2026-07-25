@@ -224,9 +224,15 @@ Emitted when the user changes the thinking/reasoning level.
 {"type":"thinking_level_change","id":"e5f6g7h8","parentId":"d4e5f6g7","timestamp":"2024-12-03T14:06:00.000Z","thinkingLevel":"high"}
 ```
 
-### CompactionEntry
+### CompactionBoundaryEntry
 
-Created when context is compacted. Stores a summary of earlier messages.
+Current coding-agent compaction appends a `compaction_boundary` entry. Its stored primary is either a text summary or provider-owned checkpoint state, and it may carry portable extension projections. The on-disk checkpoint primary is private implementation data: do not parse, copy, display, or expose it through integrations. Use `SessionManager` read methods or the exported `readCompactionBoundaries()` helper to obtain the sanitized `CompactionBoundaryEntry` view.
+
+The public boundary exposes its `kind`, token accounting, and portable projections. Text boundaries additionally expose summary/frontier data. Checkpoint boundaries never expose the checkpoint payload or compatibility identity.
+
+### Legacy CompactionEntry
+
+Older context compactions store a summary of earlier messages and remain supported:
 
 ```json
 {"type":"compaction","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:10:00.000Z","summary":"User discussed X, Y, Z...","firstKeptEntryId":"c3d4e5f6","tokensBefore":50000}
@@ -319,25 +325,24 @@ Entries form a tree:
 
 `buildContextEntries()` walks from the current leaf to the root, producing the active entry list while honoring compaction:
 
-1. Collects all entries on the path
-2. If a `CompactionEntry` is on the path:
-   - Includes the compaction entry first
-   - If `retainedTail` is present, it acts as a self-contained checkpoint and entries after the compaction are included
-   - Otherwise entries from `firstKeptEntryId` to the compaction are included
-   - Then entries after compaction are included
-3. Preserves non-message entries in the selected range so interactive mode can render them
+1. Collects all entries on the path.
+2. Selects the latest applicable compaction boundary.
+3. For a text boundary, rebuilds from its summary and kept-history frontier.
+4. For a checkpoint boundary, uses the newest valid compatible provider checkpoint plus post-frontier history; when the current request is incompatible, rebuilds portable context from the intact append-only branch without exposing or sending the checkpoint.
+5. Preserves non-message entries in the selected range so interactive mode can render them.
 
 `buildSessionContext()` builds on that entry list to produce the message list for the LLM:
 
-1. Extracts current model and thinking level settings from the full path
+1. Extracts current model and thinking level settings from the full path.
 2. Converts selected entries to messages:
    - `message` -> stored `AgentMessage`
-   - `compaction` -> `compactionSummary` plus `retainedTail` when present
+   - text boundary or legacy `compaction` -> `compactionSummary` plus retained context
+   - compatible checkpoint boundary -> provider checkpoint selected separately from portable messages
    - `branch_summary` -> `branchSummary`
    - `custom_message` -> `CustomMessage`
    - `custom` -> no context message
 
-This makes newer compactions act like self-contained checkpoints. `retainedTail` is optional only so older sessions that only store `firstKeptEntryId` continue to load correctly.
+Public entry and tree reads convert stored `compaction_boundary` and legacy `provider_checkpoint` entries to sanitized `CompactionBoundaryEntry` values. Public model-change entries also omit provider and model identity, so extension and RPC branch inspection cannot reconstruct private checkpoint compatibility.
 
 ## Parsing Example
 
