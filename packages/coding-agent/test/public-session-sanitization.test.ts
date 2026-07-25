@@ -1,11 +1,17 @@
 import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { CompactionPreparation } from "../src/core/compaction/index.ts";
 import { toPublicCompactionPreparation } from "../src/core/compaction/index.ts";
-import { type ExtensionAPI, ExtensionRunner, type SessionBeforeCompactEvent } from "../src/core/extensions/index.ts";
+import {
+	type ExtensionAPI,
+	type ExtensionContext,
+	ExtensionRunner,
+	type SessionBeforeCompactEvent,
+} from "../src/core/extensions/index.ts";
 import {
 	createExtensionSessionManagerView,
+	type ExtensionSessionManagerView,
 	type SessionEntry,
 	SessionManager,
 	toPublicSessionEntry,
@@ -106,11 +112,20 @@ function expectPublicPayload(
 	}
 }
 
-function seed(manager: SessionManager): { assistantId: string; resultId: string } {
+function seed(manager: SessionManager): { assistantId: string; modelChangeId: string; resultId: string } {
 	manager.appendMessage({ role: "user", content: "visible user text", timestamp: 1 });
 	const assistantId = manager.appendMessage(privateAssistant());
+	const modelChangeId = manager.appendModelChange("private-model-change-provider", "private-model-change-id");
 	const resultId = manager.appendMessage(toolResult());
-	return { assistantId, resultId };
+	return { assistantId, modelChangeId, resultId };
+}
+
+function expectNeutralModelChange(payload: unknown, timestamp: string): void {
+	const serialized = JSON.stringify(payload);
+	expect(serialized).not.toContain("private-model-change-provider");
+	expect(serialized).not.toContain("private-model-change-id");
+	expect(serialized).toContain('"type":"model_change"');
+	expect(serialized).toContain(timestamp);
 }
 
 describe("public session message sanitization", () => {
@@ -154,6 +169,9 @@ describe("public session message sanitization", () => {
 		});
 
 		expectPublicPayload(captured);
+		const modelChange = manager.getEntries().find((entry) => entry.type === "model_change");
+		if (!modelChange) throw new Error("model change missing");
+		expectNeutralModelChange(captured, modelChange.timestamp);
 		expect(JSON.stringify(captured)).toContain("visible user text");
 		expect(JSON.stringify(captured)).toContain("visible previous summary");
 		if (!captured) throw new Error("event was not captured");
@@ -178,11 +196,14 @@ describe("public session message sanitization", () => {
 
 	it("sanitizes every extension session manager message read and returns detached clones", () => {
 		const manager = SessionManager.inMemory(process.cwd());
-		const { assistantId } = seed(manager);
+		const { assistantId, modelChangeId } = seed(manager);
+		const sourceModelChange = manager.getEntry(modelChangeId);
+		if (!sourceModelChange || sourceModelChange.type !== "model_change") throw new Error("model change missing");
+		manager.branch(modelChangeId);
 		const view = createExtensionSessionManagerView(manager);
 		const payloads = [
 			view.getLeafEntry(),
-			view.getEntry(assistantId),
+			view.getEntry(modelChangeId),
 			view.getBranch(),
 			view.buildContextEntries(),
 			view.getEntries(),
@@ -191,6 +212,7 @@ describe("public session message sanitization", () => {
 		for (const payload of payloads) {
 			const serialized = JSON.stringify(payload);
 			for (const sentinel of privateSentinels) expect(serialized).not.toContain(sentinel);
+			expectNeutralModelChange(payload, sourceModelChange.timestamp);
 		}
 		expectPublicPayload(view.getEntries());
 		const entry = view.getEntry(assistantId);
@@ -201,6 +223,33 @@ describe("public session message sanitization", () => {
 		expect(source?.type === "message" && source.message.role === "assistant" && source.message.content).toHaveLength(
 			3,
 		);
+	});
+
+	it("exposes only the provider-neutral extension session manager contract", () => {
+		expectTypeOf<ExtensionContext["sessionManager"]>().toEqualTypeOf<ExtensionSessionManagerView>();
+		type ExtensionKeys = keyof ExtensionContext["sessionManager"];
+		expectTypeOf<"captureProviderCheckpointAppendState">().not.toMatchTypeOf<ExtensionKeys>();
+		expectTypeOf<"captureCompactionBoundaryAppendState">().not.toMatchTypeOf<ExtensionKeys>();
+	});
+
+	it("sanitizes model transitions without mutating the private source entry", () => {
+		const manager = SessionManager.inMemory(process.cwd());
+		const id = manager.appendModelChange("private-model-change-provider", "private-model-change-id");
+		const source = manager.getEntry(id);
+		if (!source || source.type !== "model_change") throw new Error("model change missing");
+
+		const publicEntry = toPublicSessionEntry(source);
+
+		expect(publicEntry).toEqual({
+			type: "model_change",
+			id: source.id,
+			parentId: source.parentId,
+			timestamp: source.timestamp,
+		});
+		expect(source).toMatchObject({
+			provider: "private-model-change-provider",
+			modelId: "private-model-change-id",
+		});
 	});
 
 	it("sanitizes ordinary public message entries while preserving custom projection details", () => {

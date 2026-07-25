@@ -25,6 +25,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import { toPublicAgentMessage } from "../../core/public-message.ts";
 import { type PublicSessionTreeNode, toPublicSessionEntry } from "../../core/session-manager.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
@@ -662,7 +663,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "get_messages": {
-				return success(id, "get_messages", { messages: session.messages });
+				return success(id, "get_messages", { messages: session.messages.map(toPublicAgentMessage) });
 			}
 
 			// =================================================================

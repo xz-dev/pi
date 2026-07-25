@@ -7,6 +7,7 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
+import type { PublicAgentMessage, PublicMessage } from "./public-message.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -145,9 +146,11 @@ export function createCustomMessage(
  * - Compaction's generateSummary (for summarization)
  * - Custom extensions and tools
  */
-export function convertToLlm(messages: AgentMessage[]): Message[] {
+export function convertToLlm(messages: AgentMessage[]): Message[];
+export function convertToLlm(messages: PublicAgentMessage[]): PublicMessage[];
+export function convertToLlm(messages: PublicAgentMessage[]): PublicMessage[] {
 	return messages
-		.map((m): Message | undefined => {
+		.map((m): PublicMessage | undefined => {
 			switch (m.role) {
 				case "bashExecution":
 					// Skip messages excluded from context (!! prefix)

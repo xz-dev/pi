@@ -31,6 +31,46 @@ describe("export HTML compaction boundaries", () => {
 		while (cleanup.length > 0) rmSync(cleanup.pop()!, { recursive: true, force: true });
 	});
 
+	it("exports provider-neutral model transitions with their timestamp", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-export-model-change-"));
+		cleanup.push(dir);
+		const manager = SessionManager.create(dir, dir);
+		manager.appendMessage({ role: "user", content: "visible user export", timestamp: 1 });
+		const id = manager.appendModelChange("private-html-model-change-provider", "private-html-model-change-id");
+		const source = manager.getEntry(id);
+		if (!source || source.type !== "model_change") throw new Error("model change missing");
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "visible assistant export" }],
+			api: "test-api",
+			provider: "test-provider",
+			model: "test-model",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		const output = join(dir, "session.html");
+
+		await exportSessionToHtml(manager, undefined, { outputPath: output });
+
+		const html = readFileSync(output, "utf8");
+		const serialized = JSON.stringify(decodeSessionData(html));
+		expect(serialized).toContain('"type":"model_change"');
+		expect(serialized).toContain(source.timestamp);
+		expect(serialized).not.toContain("private-html-model-change-provider");
+		expect(serialized).not.toContain("private-html-model-change-id");
+		expect(html).toContain("Switched model");
+		expect(html).not.toContain("entry.provider");
+		expect(html).not.toContain("entry.modelId");
+	});
+
 	it("exports provider-neutral ordinary messages without damaging visible tool data", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-export-message-"));
 		cleanup.push(dir);

@@ -199,6 +199,12 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.ts";
 export { DefaultPackageManager } from "./core/package-manager.ts";
+export type {
+	PublicAgentMessage,
+	PublicAssistantContent,
+	PublicAssistantMessage,
+	PublicMessage,
+} from "./core/public-message.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 // SDK for programmatic usage
@@ -250,6 +256,10 @@ export {
 	type ProviderCheckpointAppendState,
 	type ProviderCheckpointEntry,
 	type ProviderCheckpointProjectionOptions,
+	type PublicModelChangeEntry,
+	type PublicSessionEntry,
+	type PublicSessionMessageEntry,
+	type PublicSessionTreeNode,
 	parseSessionEntries,
 	type SessionContext,
 	type SessionEntry,
