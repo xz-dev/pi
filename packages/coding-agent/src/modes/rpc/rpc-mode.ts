@@ -619,7 +619,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "get_entries": {
 				const sessionManager = session.sessionManager;
-				let entries = sessionManager.getEntries().map(toPublicSessionEntry);
+				let entries = sessionManager
+					.getEntries()
+					.map(toPublicSessionEntry)
+					.filter((entry) => entry !== undefined);
 				if (command.since !== undefined) {
 					const sinceIndex = entries.findIndex((e) => e.id === command.since);
 					if (sinceIndex === -1) {
@@ -633,11 +636,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "get_tree": {
 				const sessionManager = session.sessionManager;
 				const sanitizeTree = (nodes: ReturnType<typeof sessionManager.getTree>): PublicSessionTreeNode[] =>
-					nodes.map((node) => ({
-						...node,
-						entry: toPublicSessionEntry(node.entry),
-						children: sanitizeTree(node.children),
-					}));
+					nodes.flatMap((node) => {
+						const entry = toPublicSessionEntry(node.entry);
+						return entry
+							? [{ ...node, entry, children: sanitizeTree(node.children) }]
+							: sanitizeTree(node.children);
+					});
 				return success(id, "get_tree", {
 					tree: sanitizeTree(sessionManager.getTree()),
 					leafId: sessionManager.getLeafId(),

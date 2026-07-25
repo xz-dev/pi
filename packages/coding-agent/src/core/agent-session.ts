@@ -59,6 +59,7 @@ import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { mergeCheckpointProjectionWithLiveSuffix } from "./checkpoint-projection.ts";
+import { decodeStoredCompactionBoundaryEntry } from "./compaction/boundary.ts";
 import {
 	type CheckpointPrimaryDraft,
 	type CompactionOutcome,
@@ -109,7 +110,7 @@ import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { BranchSummaryEntry, ProviderCheckpoint, SessionEntry, SessionManager } from "./session-manager.ts";
-import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
+import { CURRENT_SESSION_VERSION, getLatestReductionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -1821,11 +1822,12 @@ export class AgentSession {
 		const branch = this.sessionManager.getBranch();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
+			const boundary = entry.type === "compaction_boundary" ? decodeStoredCompactionBoundaryEntry(entry) : undefined;
 			const checkpoint =
 				entry.type === "provider_checkpoint"
 					? entry.checkpoint
-					: entry.type === "compaction_boundary" && entry.boundary.primary.kind === "checkpoint"
-						? entry.boundary.primary.checkpoint
+					: boundary?.boundary.primary.kind === "checkpoint"
+						? boundary.boundary.primary.checkpoint
 						: undefined;
 			if (
 				checkpoint?.frontierEntryId === projectedCheckpoint.frontierEntryId &&
@@ -2134,9 +2136,9 @@ export class AgentSession {
 		// Skip compaction checks if this assistant message is older than the latest
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const compactionEntry = getLatestReductionEntry(this.sessionManager.getBranch());
 		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
+			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
 		if (assistantIsFromBeforeCompaction) {
 			return false;
 		}
@@ -2186,7 +2188,7 @@ export class AgentSession {
 			if (
 				compactionEntry &&
 				usageMsg.role === "assistant" &&
-				(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
+				(usageMsg as AssistantMessage).timestamp < new Date(compactionEntry.timestamp).getTime()
 			) {
 				return false;
 			}
@@ -3140,8 +3142,10 @@ export class AgentSession {
 			} else if (entry.type === "provider_checkpoint" && entry.checkpoint.usage) {
 				addUsageToTotals(usageTotals, entry.checkpoint.usage);
 			} else if (entry.type === "compaction_boundary") {
-				if (entry.boundary.primary.usage) addUsageToTotals(usageTotals, entry.boundary.primary.usage);
-				for (const projection of entry.boundary.projections) {
+				const boundary = decodeStoredCompactionBoundaryEntry(entry);
+				if (!boundary) continue;
+				if (boundary.boundary.primary.usage) addUsageToTotals(usageTotals, boundary.boundary.primary.usage);
+				for (const projection of boundary.boundary.projections) {
 					if (projection.usage) addUsageToTotals(usageTotals, projection.usage);
 				}
 			}
@@ -3196,7 +3200,7 @@ export class AgentSession {
 		// We can only trust usage from an assistant that responded after the latest compaction.
 		// If no such assistant exists, context token count is unknown until the next LLM response.
 		const branchEntries = this.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		const latestCompaction = getLatestReductionEntry(branchEntries);
 
 		if (latestCompaction) {
 			// Check if there's a valid assistant usage after the compaction boundary

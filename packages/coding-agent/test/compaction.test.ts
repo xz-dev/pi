@@ -17,6 +17,7 @@ import {
 } from "../src/core/compaction/index.ts";
 import {
 	buildSessionContext,
+	type CompactionBoundaryDraft,
 	type CompactionEntry,
 	type CustomMessageEntry,
 	type ModelChangeEntry,
@@ -477,6 +478,40 @@ describe("prepareCompaction with previous compaction", () => {
 		const preparation = prepareCompaction(pathEntries, DEFAULT_COMPACTION_SETTINGS);
 
 		expect(preparation).toBeUndefined();
+	});
+
+	it("uses a generic text boundary summary and frontier for repeated compaction", () => {
+		const u1 = createMessageEntry(createUserMessage("old history ".repeat(30)));
+		const a1 = createMessageEntry(createAssistantMessage("old answer ".repeat(30)));
+		const u2 = createMessageEntry(createUserMessage("kept history ".repeat(30)));
+		const a2 = createMessageEntry(createAssistantMessage("kept answer ".repeat(30)));
+		const boundary: SessionEntry = {
+			type: "compaction_boundary",
+			id: "boundary",
+			parentId: a2.id,
+			timestamp: new Date().toISOString(),
+			boundary: {
+				version: 1,
+				tokensBefore: 1000,
+				primary: {
+					kind: "text",
+					summary: "previous boundary summary",
+					firstKeptEntryId: u2.id,
+					fromExtension: false,
+				},
+				projections: [],
+			} satisfies CompactionBoundaryDraft,
+		};
+		const u3 = { ...createMessageEntry(createUserMessage("new history ".repeat(30))), parentId: boundary.id };
+		const a3 = { ...createMessageEntry(createAssistantMessage("new answer ".repeat(30))), parentId: u3.id };
+		const preparation = prepareCompaction([u1, a1, u2, a2, boundary, u3, a3], {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 20,
+		});
+		expect(preparation?.previousSummary).toBe("previous boundary summary");
+		const summarizedText = extractText(preparation!.messagesToSummarize);
+		expect(summarizedText).toContain("kept history");
+		expect(summarizedText).not.toContain("old history");
 	});
 
 	it("should re-summarize previously kept messages when the recent window moves past them", () => {

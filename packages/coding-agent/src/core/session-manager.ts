@@ -34,7 +34,7 @@ import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type CompactionBoundaryDraft,
 	type CompactionBoundaryEntry,
-	isStoredCompactionBoundaryEntry,
+	decodeStoredCompactionBoundaryEntry,
 	type PortableCompactionProjection,
 	type StoredCompactionBoundaryEntry,
 	toCompactionBoundary,
@@ -369,9 +369,11 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionName"
 >;
 
-export function toPublicSessionEntry(entry: SessionEntry): PublicSessionEntry {
-	if (entry.type === "provider_checkpoint" || entry.type === "compaction_boundary") {
-		return toCompactionBoundary(entry);
+export function toPublicSessionEntry(entry: SessionEntry): PublicSessionEntry | undefined {
+	if (entry.type === "provider_checkpoint") return toCompactionBoundary(entry);
+	if (entry.type === "compaction_boundary") {
+		const boundary = decodeStoredCompactionBoundaryEntry(entry);
+		return boundary ? toCompactionBoundary(boundary) : undefined;
 	}
 	if (entry.type === "message") {
 		return { ...structuredClone(entry), message: toPublicAgentMessage(entry.message) };
@@ -401,12 +403,13 @@ export type ExtensionSessionManagerView = Omit<
 };
 
 export function createExtensionSessionManagerView(manager: SessionManager): ExtensionSessionManagerView {
+	const sanitizeEntries = (entries: SessionEntry[]): PublicSessionEntry[] =>
+		entries.map(toPublicSessionEntry).filter((entry): entry is PublicSessionEntry => entry !== undefined);
 	const sanitizeTree = (nodes: SessionTreeNode[]): ReturnType<ExtensionSessionManagerView["getTree"]> =>
-		nodes.map((node) => ({
-			...node,
-			entry: toPublicSessionEntry(node.entry),
-			children: sanitizeTree(node.children),
-		}));
+		nodes.flatMap((node) => {
+			const entry = toPublicSessionEntry(node.entry);
+			return entry ? [{ ...node, entry, children: sanitizeTree(node.children) }] : sanitizeTree(node.children);
+		});
 	return {
 		getCwd: () => manager.getCwd(),
 		getSessionDir: () => manager.getSessionDir(),
@@ -422,10 +425,10 @@ export function createExtensionSessionManagerView(manager: SessionManager): Exte
 			return entry ? toPublicSessionEntry(entry) : undefined;
 		},
 		getLabel: (id) => manager.getLabel(id),
-		getBranch: (fromId) => manager.getBranch(fromId).map(toPublicSessionEntry),
-		buildContextEntries: () => manager.buildContextEntries().map(toPublicSessionEntry),
+		getBranch: (fromId) => sanitizeEntries(manager.getBranch(fromId)),
+		buildContextEntries: () => sanitizeEntries(manager.buildContextEntries()),
 		getHeader: () => structuredClone(manager.getHeader()),
-		getEntries: () => manager.getEntries().map(toPublicSessionEntry),
+		getEntries: () => sanitizeEntries(manager.getEntries()),
 		getTree: () => sanitizeTree(manager.getTree()),
 		getSessionName: () => manager.getSessionName(),
 	};
@@ -541,11 +544,43 @@ export function parseSessionEntries(content: string): FileEntry[] {
 
 export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
-		if (entries[i].type === "compaction") {
-			return entries[i] as CompactionEntry;
-		}
+		if (entries[i].type === "compaction") return entries[i] as CompactionEntry;
 	}
 	return null;
+}
+
+/** Return the latest structurally valid ancestral reduction of any persisted format. */
+export function getLatestReductionEntry(entries: SessionEntry[]): SessionEntry | null {
+	const path = buildSessionPath(entries);
+	const pathIndex = new Map(path.map((entry, index) => [entry.id, index]));
+	let latestCheckpoint: CheckpointReductionEntry | null = null;
+	let latestReduction: SessionEntry | null = null;
+	for (const rawEntry of path) {
+		if (rawEntry.type === "compaction") {
+			latestReduction = rawEntry;
+			latestCheckpoint = null;
+		} else if (rawEntry.type === "provider_checkpoint") {
+			if (isValidLoadedProviderCheckpoint(rawEntry, latestCheckpoint, pathIndex)) {
+				latestReduction = rawEntry;
+				latestCheckpoint = rawEntry;
+			}
+		} else if (rawEntry.type === "compaction_boundary") {
+			const entry = decodeStoredCompactionBoundaryEntry(rawEntry);
+			if (!entry) continue;
+			if (entry.boundary.primary.kind === "text") {
+				const boundaryIndex = pathIndex.get(entry.id);
+				const keptIndex = pathIndex.get(entry.boundary.primary.firstKeptEntryId);
+				if (boundaryIndex !== undefined && keptIndex !== undefined && keptIndex < boundaryIndex) {
+					latestReduction = entry;
+					latestCheckpoint = null;
+				}
+			} else if (isValidLoadedBoundaryCheckpoint(entry, latestCheckpoint, pathIndex)) {
+				latestReduction = entry;
+				latestCheckpoint = entry;
+			}
+		}
+	}
+	return latestReduction;
 }
 
 function cloneProviderCheckpoint(checkpoint: ProviderCheckpoint): ProviderCheckpoint {
@@ -803,19 +838,21 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
 	}
 	if (entry.type === "compaction_boundary") {
+		const boundary = decodeStoredCompactionBoundaryEntry(entry);
+		if (!boundary) return [];
 		const messages: AgentMessage[] = [];
-		if (entry.boundary.primary.kind === "text") {
+		if (boundary.boundary.primary.kind === "text") {
 			messages.push(
 				createCompactionSummaryMessage(
-					entry.boundary.primary.summary,
-					entry.boundary.tokensBefore,
-					entry.timestamp,
+					boundary.boundary.primary.summary,
+					boundary.boundary.tokensBefore,
+					boundary.timestamp,
 				),
 			);
 		}
-		for (const projection of entry.boundary.projections) {
+		for (const projection of boundary.boundary.projections) {
 			messages.push(
-				createCompactionSummaryMessage(projection.summary, entry.boundary.tokensBefore, entry.timestamp),
+				createCompactionSummaryMessage(projection.summary, boundary.boundary.tokensBefore, boundary.timestamp),
 			);
 		}
 		return messages;
@@ -839,37 +876,34 @@ export function buildContextEntries(
 ): SessionEntry[] {
 	const path = buildSessionPath(entries, leafId, byId);
 	const pathIndex = new Map(path.map((entry, index) => [entry.id, index]));
-	let latestCompatibleCheckpoint: CheckpointReductionEntry | null = null;
+	let latestCheckpoint: CheckpointReductionEntry | null = null;
 	let latestReduction: CompactionEntry | ProviderCheckpointEntry | StoredCompactionBoundaryEntry | null = null;
 
-	for (const entry of path) {
-		if (entry.type === "compaction") {
-			latestReduction = entry;
-		} else if (entry.type === "provider_checkpoint") {
-			const valid = isValidLoadedProviderCheckpoint(entry, latestCompatibleCheckpoint, pathIndex);
+	for (const rawEntry of path) {
+		if (rawEntry.type === "compaction") {
+			latestReduction = rawEntry;
+			latestCheckpoint = null;
+		} else if (rawEntry.type === "provider_checkpoint") {
 			if (
-				valid &&
+				isValidLoadedProviderCheckpoint(rawEntry, latestCheckpoint, pathIndex) &&
 				options?.providerCheckpoint &&
-				providerCheckpointIdentitiesMatch(entry.checkpoint.identity, options.providerCheckpoint.identity)
+				providerCheckpointIdentitiesMatch(rawEntry.checkpoint.identity, options.providerCheckpoint.identity)
 			) {
-				latestCompatibleCheckpoint = entry;
-				latestReduction = entry;
+				latestCheckpoint = rawEntry;
+				latestReduction = rawEntry;
 			}
-		} else if (entry.type === "compaction_boundary" && isStoredCompactionBoundaryEntry(entry)) {
-			latestReduction = entry;
-			if (entry.boundary.primary.kind === "checkpoint") {
-				const valid = isValidLoadedBoundaryCheckpoint(entry, latestCompatibleCheckpoint, pathIndex);
-				if (
-					valid &&
-					options?.providerCheckpoint &&
-					providerCheckpointIdentitiesMatch(
-						entry.boundary.primary.checkpoint.identity,
-						options.providerCheckpoint.identity,
-					)
-				) {
-					latestCompatibleCheckpoint = entry;
+		} else if (rawEntry.type === "compaction_boundary") {
+			const entry = decodeStoredCompactionBoundaryEntry(rawEntry);
+			if (!entry) continue;
+			if (entry.boundary.primary.kind === "text") {
+				const boundaryIndex = pathIndex.get(entry.id);
+				const keptIndex = pathIndex.get(entry.boundary.primary.firstKeptEntryId);
+				if (boundaryIndex !== undefined && keptIndex !== undefined && keptIndex < boundaryIndex) {
+					latestReduction = entry;
+					latestCheckpoint = null;
 				}
-			} else {
+			} else if (isValidLoadedBoundaryCheckpoint(entry, latestCheckpoint, pathIndex)) {
+				latestCheckpoint = entry;
 				latestReduction = entry;
 			}
 		}
@@ -879,38 +913,30 @@ export function buildContextEntries(
 	if (reductionIndex === undefined) return path;
 
 	if (latestReduction.type === "compaction") {
-		const contextEntries: SessionEntry[] = [latestReduction];
-		let foundFirstKept = false;
-		for (let i = 0; i < reductionIndex; i++) {
-			const entry = path[i];
-			if (entry.id === latestReduction.firstKeptEntryId) foundFirstKept = true;
-			if (foundFirstKept) contextEntries.push(entry);
-		}
-		contextEntries.push(...path.slice(reductionIndex + 1));
-		return contextEntries;
+		const keptIndex = pathIndex.get(latestReduction.firstKeptEntryId);
+		if (keptIndex === undefined || keptIndex >= reductionIndex) return path;
+		return [latestReduction, ...path.slice(keptIndex, reductionIndex), ...path.slice(reductionIndex + 1)];
 	}
 
 	if (latestReduction.type === "provider_checkpoint") {
-		return latestCompatibleCheckpoint?.id === latestReduction.id
+		const compatible =
+			options?.providerCheckpoint &&
+			providerCheckpointIdentitiesMatch(latestReduction.checkpoint.identity, options.providerCheckpoint.identity);
+		return compatible
 			? [latestReduction, ...path.slice(reductionIndex + 1)]
 			: path.filter((entry) => entry.type !== "provider_checkpoint");
 	}
 
 	const primary = latestReduction.boundary.primary;
 	if (primary.kind === "text") {
-		const contextEntries: SessionEntry[] = [latestReduction];
-		let foundFirstKept = false;
-		for (let i = 0; i < reductionIndex; i++) {
-			const entry = path[i];
-			if (entry.id === primary.firstKeptEntryId) foundFirstKept = true;
-			if (foundFirstKept) contextEntries.push(entry);
-		}
-		contextEntries.push(...path.slice(reductionIndex + 1));
-		return contextEntries;
+		const keptIndex = pathIndex.get(primary.firstKeptEntryId);
+		if (keptIndex === undefined || keptIndex >= reductionIndex) return path;
+		return [latestReduction, ...path.slice(keptIndex, reductionIndex), ...path.slice(reductionIndex + 1)];
 	}
-	if (latestCompatibleCheckpoint?.id === latestReduction.id) {
-		return [latestReduction, ...path.slice(reductionIndex + 1)];
-	}
+	const compatible =
+		options?.providerCheckpoint &&
+		providerCheckpointIdentitiesMatch(primary.checkpoint.identity, options.providerCheckpoint.identity);
+	if (compatible) return [latestReduction, ...path.slice(reductionIndex + 1)];
 	return path.filter(
 		(entry) =>
 			entry.type !== "provider_checkpoint" &&
@@ -934,10 +960,14 @@ export function buildSessionContext(
 	const contextEntries = buildContextEntries(entries, leafId, byId, options);
 	const messages = contextEntries.flatMap(sessionEntryToContextMessages);
 	const checkpointEntry = contextEntries.find(
-		(entry): entry is ProviderCheckpointEntry | StoredCompactionBoundaryEntry =>
-			(entry.type === "provider_checkpoint" ||
-				(entry.type === "compaction_boundary" && entry.boundary.primary.kind === "checkpoint")) &&
-			contextEntries[0] === entry,
+		(entry): entry is ProviderCheckpointEntry | StoredCompactionBoundaryEntry => {
+			if (contextEntries[0] !== entry) return false;
+			if (entry.type === "provider_checkpoint") return true;
+			return (
+				entry.type === "compaction_boundary" &&
+				decodeStoredCompactionBoundaryEntry(entry)?.boundary.primary.kind === "checkpoint"
+			);
+		},
 	);
 	const providerCheckpoint =
 		checkpointEntry?.type === "provider_checkpoint"
@@ -1666,12 +1696,28 @@ export class SessionManager {
 				throw new Error("Compaction boundary checkpoint frontier must match the current branch boundary");
 			}
 			const branch = this.getBranch(checkpoint.frontierEntryId);
-			const compatible = branch.filter((entry): entry is CheckpointReductionEntry => {
+			let activeChainStart = 0;
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const entry = branch[index];
+				if (entry.type === "compaction") {
+					activeChainStart = index + 1;
+					break;
+				}
+				const boundary =
+					entry.type === "compaction_boundary" ? decodeStoredCompactionBoundaryEntry(entry) : undefined;
+				if (boundary?.boundary.primary.kind === "text") {
+					activeChainStart = index + 1;
+					break;
+				}
+			}
+			const compatible = branch.slice(activeChainStart).filter((entry): entry is CheckpointReductionEntry => {
+				const boundary =
+					entry.type === "compaction_boundary" ? decodeStoredCompactionBoundaryEntry(entry) : undefined;
 				const candidate =
 					entry.type === "provider_checkpoint"
 						? entry.checkpoint
-						: entry.type === "compaction_boundary" && entry.boundary.primary.kind === "checkpoint"
-							? entry.boundary.primary.checkpoint
+						: boundary?.boundary.primary.kind === "checkpoint"
+							? boundary.boundary.primary.checkpoint
 							: undefined;
 				return (
 					candidate !== undefined && providerCheckpointIdentitiesMatch(candidate.identity, checkpoint.identity)

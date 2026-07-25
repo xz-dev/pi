@@ -33,7 +33,6 @@ export type {
 	CompactionBoundaryEntry,
 	CompactionOutcome,
 	PortableCompactionProjection,
-	StoredCompactionBoundaryEntry,
 	TextCompactionOutcome,
 } from "./compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";

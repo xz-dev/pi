@@ -52,7 +52,6 @@ export {
 	type PortableCompactionProjection,
 	prepareBranchEntries,
 	readCompactionBoundaries,
-	type StoredCompactionBoundaryEntry,
 	serializeConversation,
 	shouldCompact,
 	type TextCompactionOutcome,

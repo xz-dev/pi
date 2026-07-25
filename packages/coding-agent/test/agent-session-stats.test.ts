@@ -139,6 +139,31 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
+	it("reports unknown usage after a generic text boundary until fresh assistant usage", async () => {
+		const { session, sessionManager } = await createSession();
+		try {
+			const keptId = sessionManager.appendMessage(createUserMessage("before", 1));
+			sessionManager.appendMessage(createAssistantMessage("stale", 190_000, 2));
+			sessionManager.appendCompactionBoundary(
+				{
+					version: 1,
+					tokensBefore: 190_000,
+					primary: { kind: "text", summary: "summary", firstKeptEntryId: keptId, fromExtension: false },
+					projections: [],
+				},
+				{ expected: sessionManager.captureCompactionBoundaryAppendState() },
+			);
+			sessionManager.appendMessage(createUserMessage("after", 3));
+			syncAgentMessages(session, sessionManager);
+			expect(session.getContextUsage()).toEqual({ tokens: null, contextWindow: model.contextWindow, percent: null });
+			sessionManager.appendMessage(createAssistantMessage("fresh", 25_000, 4));
+			syncAgentMessages(session, sessionManager);
+			expect(session.getContextUsage()?.tokens).toBe(25_000);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("uses post-compaction usage for current context instead of stale kept usage", async () => {
 		const { session, sessionManager } = await createSession();
 

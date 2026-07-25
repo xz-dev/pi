@@ -21,6 +21,7 @@ import { toPublicMessage } from "../public-message.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
+	getLatestReductionEntry,
 	type SessionEntry,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
@@ -749,24 +750,25 @@ export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
-	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
-		return undefined;
-	}
+	const latestReduction = getLatestReductionEntry(pathEntries);
+	if (latestReduction && pathEntries.at(-1)?.id === latestReduction.id) return undefined;
 
 	let prevCompactionIndex = -1;
-	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "compaction") {
-			prevCompactionIndex = i;
-			break;
-		}
+	let previousSummary: string | undefined;
+	let previousFirstKeptEntryId: string | undefined;
+	if (latestReduction?.type === "compaction") {
+		prevCompactionIndex = pathEntries.lastIndexOf(latestReduction);
+		previousSummary = latestReduction.summary;
+		previousFirstKeptEntryId = latestReduction.firstKeptEntryId;
+	} else if (latestReduction?.type === "compaction_boundary" && latestReduction.boundary.primary.kind === "text") {
+		prevCompactionIndex = pathEntries.lastIndexOf(latestReduction);
+		previousSummary = latestReduction.boundary.primary.summary;
+		previousFirstKeptEntryId = latestReduction.boundary.primary.firstKeptEntryId;
 	}
 
-	let previousSummary: string | undefined;
 	let boundaryStart = 0;
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
-		previousSummary = prevCompaction.summary;
-		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
+	if (previousFirstKeptEntryId) {
+		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === previousFirstKeptEntryId);
 		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
 	}
 	const boundaryEnd = pathEntries.length;
