@@ -89,7 +89,6 @@ import {
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
-	type SessionBeforeTreeResult,
 	type SessionStartEvent,
 	type ShutdownHandler,
 	type ToolDefinition,
@@ -97,7 +96,6 @@ import {
 	type ToolExecutionStartEvent,
 	type ToolExecutionUpdateEvent,
 	type ToolInfo,
-	type TreePreparation,
 	type TurnEndEvent,
 	type TurnStartEvent,
 	wrapRegisteredTools,
@@ -115,7 +113,12 @@ import type {
 	ProviderCheckpoint,
 	SessionManager,
 } from "./session-manager.ts";
-import { CURRENT_SESSION_VERSION, getLatestReductionEntry, type SessionHeader } from "./session-manager.ts";
+import {
+	CURRENT_SESSION_VERSION,
+	decodeProviderCheckpointEntry,
+	getLatestReductionEntry,
+	type SessionHeader,
+} from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -1830,7 +1833,7 @@ export class AgentSession {
 			const boundary = entry.type === "compaction_boundary" ? decodeStoredCompactionBoundaryEntry(entry) : undefined;
 			const checkpoint =
 				entry.type === "provider_checkpoint"
-					? entry.checkpoint
+					? decodeProviderCheckpointEntry(entry)?.checkpoint
 					: boundary?.boundary.primary.kind === "checkpoint"
 						? boundary.boundary.primary.checkpoint
 						: undefined;
@@ -2953,7 +2956,7 @@ export class AgentSession {
 		let replaceInstructions = options.replaceInstructions;
 		let label = options.label;
 
-		const preparation: TreePreparation = {
+		const preparation = {
 			targetId,
 			oldLeafId,
 			commonAncestorId,
@@ -2973,11 +2976,11 @@ export class AgentSession {
 
 			// Emit session_before_tree event
 			if (this._extensionRunner.hasHandlers("session_before_tree")) {
-				const result = (await this._extensionRunner.emit({
+				const result = await this._extensionRunner.emitSessionBeforeTree({
 					type: "session_before_tree",
-					preparation,
+					preparation: { ...preparation, entriesToSummarize },
 					signal: this._branchSummaryAbortController.signal,
-				})) as SessionBeforeTreeResult | undefined;
+				});
 
 				if (result?.cancel) {
 					return { cancelled: true };
@@ -3144,8 +3147,9 @@ export class AgentSession {
 		for (const entry of this.sessionManager.getEntries()) {
 			if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
-			} else if (entry.type === "provider_checkpoint" && entry.checkpoint.usage) {
-				addUsageToTotals(usageTotals, entry.checkpoint.usage);
+			} else if (entry.type === "provider_checkpoint") {
+				const checkpoint = decodeProviderCheckpointEntry(entry)?.checkpoint;
+				if (checkpoint?.usage) addUsageToTotals(usageTotals, checkpoint.usage);
 			} else if (entry.type === "compaction_boundary") {
 				const boundary = decodeStoredCompactionBoundaryEntry(entry);
 				if (!boundary) continue;

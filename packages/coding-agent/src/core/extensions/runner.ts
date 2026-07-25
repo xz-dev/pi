@@ -63,6 +63,7 @@ import type {
 	SessionBeforeCompactResult,
 	SessionBeforeForkResult,
 	SessionBeforeSwitchResult,
+	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
 	SessionShutdownEvent,
 	ToolCallEvent,
@@ -172,12 +173,10 @@ type RunnerEmitEvent = Exclude<
 	| ResourcesDiscoverEvent
 	| InputEvent
 	| SessionBeforeCompactEvent
+	| SessionBeforeTreeEvent
 >;
 
-type SessionBeforeEvent = Extract<
-	RunnerEmitEvent,
-	{ type: "session_before_switch" | "session_before_fork" | "session_before_tree" }
->;
+type SessionBeforeEvent = Extract<RunnerEmitEvent, { type: "session_before_switch" | "session_before_fork" }>;
 
 type SessionBeforeEventResult = SessionBeforeSwitchResult | SessionBeforeForkResult | SessionBeforeTreeResult;
 
@@ -185,9 +184,7 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 	? SessionBeforeSwitchResult | undefined
 	: TEvent extends { type: "session_before_fork" }
 		? SessionBeforeForkResult | undefined
-		: TEvent extends { type: "session_before_tree" }
-			? SessionBeforeTreeResult | undefined
-			: undefined;
+		: undefined;
 
 export interface SessionBeforeCompactAggregate {
 	cancel: boolean;
@@ -820,11 +817,7 @@ export class ExtensionRunner {
 	}
 
 	private isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
-		return (
-			event.type === "session_before_switch" ||
-			event.type === "session_before_fork" ||
-			event.type === "session_before_tree"
-		);
+		return event.type === "session_before_switch" || event.type === "session_before_fork";
 	}
 
 	async emitSessionBeforeCompact(
@@ -875,6 +868,45 @@ export class ExtensionRunner {
 			...(replacement ? { replacement } : {}),
 			projections,
 		};
+	}
+
+	async emitSessionBeforeTree(
+		event: Omit<SessionBeforeTreeEvent, "preparation"> & {
+			preparation: Omit<SessionBeforeTreeEvent["preparation"], "entriesToSummarize"> & {
+				entriesToSummarize: InternalSessionEntry[];
+			};
+		},
+	): Promise<SessionBeforeTreeResult | undefined> {
+		const publicEvent: SessionBeforeTreeEvent = {
+			...event,
+			preparation: {
+				...event.preparation,
+				entriesToSummarize: projectPublicSessionEntries(
+					event.preparation.entriesToSummarize,
+					event.preparation.oldLeafId,
+				).entries,
+			},
+		};
+		const ctx = this.createContext();
+		let result: SessionBeforeTreeResult | undefined;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("session_before_tree");
+			if (!handlers || handlers.length === 0) continue;
+			for (const handler of handlers) {
+				try {
+					const handlerResult = (await handler(publicEvent, ctx)) as SessionBeforeTreeResult | undefined;
+					if (handlerResult) {
+						result = handlerResult;
+						if (result.cancel) return result;
+					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({ extensionPath: ext.path, event: publicEvent.type, error: message, stack });
+				}
+			}
+		}
+		return result;
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {

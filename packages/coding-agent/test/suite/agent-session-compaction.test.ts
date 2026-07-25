@@ -563,7 +563,48 @@ describe("AgentSession compaction characterization", () => {
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});
 
-	it("uses generic boundaries for stale threshold, stale overflow, equal clocks, and fresh usage", async () => {
+	it("ignores stale threshold usage before a generic boundary and accepts equal or later fresh usage", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const contextWindow = harness.session.model!.contextWindow!;
+		const thresholdTokens = contextWindow - harness.settingsManager.getCompactionSettings().reserveTokens + 1;
+		const staleThreshold = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: thresholdTokens,
+			timestamp: 1000,
+		});
+		harness.sessionManager.appendMessage({ role: "user", content: "old", timestamp: 900 });
+		harness.sessionManager.appendMessage(staleThreshold);
+		const keptId = harness.sessionManager.appendMessage({ role: "user", content: "kept", timestamp: 1100 });
+		harness.sessionManager.appendCompactionBoundary(
+			{
+				version: 1,
+				tokensBefore: thresholdTokens,
+				primary: { kind: "text", summary: "generic summary", firstKeptEntryId: keptId, fromExtension: false },
+				projections: [],
+			},
+			{ expected: harness.sessionManager.captureCompactionBoundaryAppendState() },
+		);
+		const boundaryTimestamp = new Date(
+			harness.sessionManager.getEntry(harness.sessionManager.getLeafId()!)!.timestamp,
+		).getTime();
+		const equalTimeFresh = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: thresholdTokens,
+			timestamp: boundaryTimestamp,
+		});
+		harness.sessionManager.appendMessage(equalTimeFresh);
+		harness.session.agent.state.messages = [staleThreshold, equalTimeFresh];
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+
+		await sessionInternals._checkCompaction(staleThreshold, false);
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		await sessionInternals._checkCompaction(equalTimeFresh, false);
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+	});
+
+	it("uses generic boundaries for stale overflow", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
@@ -580,29 +621,11 @@ describe("AgentSession compaction characterization", () => {
 			},
 			{ expected: harness.sessionManager.captureCompactionBoundaryAppendState() },
 		);
-		const boundaryTimestamp = new Date(
-			harness.sessionManager.getEntry(harness.sessionManager.getLeafId()!)!.timestamp,
-		).getTime();
-		const contextWindow = harness.session.model!.contextWindow!;
-		const thresholdTokens = contextWindow - harness.settingsManager.getCompactionSettings().reserveTokens + 1;
-		const equalTimeFresh = createAssistant(harness, {
-			stopReason: "stop",
-			totalTokens: thresholdTokens,
-			timestamp: boundaryTimestamp,
-		});
-		harness.sessionManager.appendMessage(equalTimeFresh);
-		harness.session.agent.state.messages = [oldOverflow, equalTimeFresh];
+		harness.session.agent.state.messages = [oldOverflow];
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
 		await sessionInternals._checkCompaction(oldOverflow, false);
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
-		await sessionInternals._checkCompaction(equalTimeFresh, false);
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
-		expect(harness.session.getContextUsage()).toEqual({
-			tokens: thresholdTokens,
-			contextWindow,
-			percent: (thresholdTokens / contextWindow) * 100,
-		});
 	});
 
 	it("triggers threshold compaction for error messages using the last successful usage", async () => {

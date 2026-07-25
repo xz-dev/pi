@@ -379,7 +379,8 @@ export type ReadonlySessionManager = Pick<
 
 export function toPublicSessionEntry(entry: InternalSessionEntry): PublicSessionEntry | undefined {
 	if (entry.type === "provider_checkpoint") {
-		return isValidProviderCheckpointValue(entry.checkpoint) ? toCompactionBoundary(entry) : undefined;
+		const checkpointEntry = decodeProviderCheckpointEntry(entry);
+		return checkpointEntry ? toCompactionBoundary(checkpointEntry) : undefined;
 	}
 	if (entry.type === "compaction_boundary") {
 		const boundary = decodeStoredCompactionBoundaryEntry(entry);
@@ -693,6 +694,23 @@ function isValidProviderCheckpointValue(value: unknown): value is ProviderCheckp
 	);
 }
 
+/** Strictly decode a historical provider checkpoint row before any checkpoint field is observed. */
+export function decodeProviderCheckpointEntry(value: unknown): ProviderCheckpointEntry | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const entry = value as Partial<ProviderCheckpointEntry>;
+	if (
+		entry.type !== "provider_checkpoint" ||
+		typeof entry.id !== "string" ||
+		entry.id.length === 0 ||
+		(entry.parentId !== null && typeof entry.parentId !== "string") ||
+		typeof entry.timestamp !== "string" ||
+		!isValidProviderCheckpointValue(entry.checkpoint)
+	) {
+		return undefined;
+	}
+	return entry as ProviderCheckpointEntry;
+}
+
 function assertJsonValue(value: unknown, path = "value"): void {
 	if (value === undefined || value === null || typeof value === "string" || typeof value === "boolean") return;
 	if (typeof value === "number") {
@@ -780,7 +798,7 @@ function validateProviderCheckpointIdentity(identity: OpenAIResponsesCheckpointI
 type CheckpointReductionEntry = ProviderCheckpointEntry | StoredCompactionBoundaryEntry;
 
 function getStoredCheckpoint(entry: CheckpointReductionEntry): ProviderCheckpoint | undefined {
-	if (entry.type === "provider_checkpoint") return entry.checkpoint;
+	if (entry.type === "provider_checkpoint") return decodeProviderCheckpointEntry(entry)?.checkpoint;
 	return entry.boundary.primary.kind === "checkpoint" ? entry.boundary.primary.checkpoint : undefined;
 }
 
@@ -789,11 +807,9 @@ function isValidLoadedProviderCheckpoint(
 	latestCompatible: CheckpointReductionEntry | null,
 	pathIndex: Map<string, number>,
 ): value is ProviderCheckpointEntry {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const entry = value as Partial<ProviderCheckpointEntry>;
-	if (entry.type !== "provider_checkpoint" || typeof entry.id !== "string") return false;
+	const entry = decodeProviderCheckpointEntry(value);
+	if (!entry) return false;
 	const checkpoint = entry.checkpoint;
-	if (!isValidProviderCheckpointValue(checkpoint)) return false;
 
 	const checkpointIndex = pathIndex.get(entry.id);
 	const frontierIndex = pathIndex.get(checkpoint.frontierEntryId);
@@ -812,8 +828,9 @@ function isValidLoadedProviderCheckpoint(
 	}
 	const latestCheckpoint = getStoredCheckpoint(latestCompatible);
 	return (
+		latestCheckpoint !== undefined &&
 		checkpoint.predecessorEntryId === latestCompatible.id &&
-		checkpoint.windowGeneration === latestCheckpoint!.windowGeneration! + 1
+		checkpoint.windowGeneration === latestCheckpoint.windowGeneration! + 1
 	);
 }
 
@@ -841,8 +858,9 @@ function isValidLoadedBoundaryCheckpoint(
 	if (!latestCompatible) return checkpoint.predecessorEntryId === undefined && checkpoint.windowGeneration === 1;
 	const latestCheckpoint = getStoredCheckpoint(latestCompatible);
 	return (
+		latestCheckpoint !== undefined &&
 		checkpoint.predecessorEntryId === latestCompatible.id &&
-		checkpoint.windowGeneration === latestCheckpoint!.windowGeneration! + 1
+		checkpoint.windowGeneration === latestCheckpoint.windowGeneration! + 1
 	);
 }
 
@@ -979,13 +997,15 @@ export function buildContextEntries(
 			latestReduction = rawEntry;
 			latestCheckpoint = null;
 		} else if (rawEntry.type === "provider_checkpoint") {
-			if (
-				isValidLoadedProviderCheckpoint(rawEntry, latestCheckpoint, pathIndex) &&
-				options?.providerCheckpoint &&
-				providerCheckpointIdentitiesMatch(rawEntry.checkpoint.identity, options.providerCheckpoint.identity)
-			) {
-				latestCheckpoint = rawEntry;
-				latestReduction = rawEntry;
+			if (isValidLoadedProviderCheckpoint(rawEntry, latestCheckpoint, pathIndex) && options?.providerCheckpoint) {
+				const checkpoint = decodeProviderCheckpointEntry(rawEntry)?.checkpoint;
+				if (
+					checkpoint &&
+					providerCheckpointIdentitiesMatch(checkpoint.identity, options.providerCheckpoint.identity)
+				) {
+					latestCheckpoint = rawEntry;
+					latestReduction = rawEntry;
+				}
 			}
 		} else if (rawEntry.type === "compaction_boundary") {
 			const entry = decodeStoredCompactionBoundaryEntry(rawEntry);
@@ -1022,9 +1042,11 @@ export function buildContextEntries(
 	}
 
 	if (latestReduction.type === "provider_checkpoint") {
+		const checkpoint = decodeProviderCheckpointEntry(latestReduction)?.checkpoint;
 		const compatible =
+			checkpoint &&
 			options?.providerCheckpoint &&
-			providerCheckpointIdentitiesMatch(latestReduction.checkpoint.identity, options.providerCheckpoint.identity);
+			providerCheckpointIdentitiesMatch(checkpoint.identity, options.providerCheckpoint.identity);
 		return compatible
 			? [latestReduction, ...path.slice(reductionIndex + 1)]
 			: path.filter((entry) => entry.type !== "provider_checkpoint");
@@ -1065,7 +1087,7 @@ export function buildSessionContext(
 	const checkpointEntry = contextEntries.find(
 		(entry): entry is ProviderCheckpointEntry | StoredCompactionBoundaryEntry => {
 			if (contextEntries[0] !== entry) return false;
-			if (entry.type === "provider_checkpoint") return true;
+			if (entry.type === "provider_checkpoint") return decodeProviderCheckpointEntry(entry) !== undefined;
 			return (
 				entry.type === "compaction_boundary" &&
 				decodeStoredCompactionBoundaryEntry(entry)?.boundary.primary.kind === "checkpoint"
@@ -1074,7 +1096,7 @@ export function buildSessionContext(
 	);
 	const providerCheckpoint =
 		checkpointEntry?.type === "provider_checkpoint"
-			? checkpointEntry.checkpoint
+			? decodeProviderCheckpointEntry(checkpointEntry)?.checkpoint
 			: checkpointEntry?.type === "compaction_boundary" && checkpointEntry.boundary.primary.kind === "checkpoint"
 				? checkpointEntry.boundary.primary.checkpoint
 				: undefined;
@@ -1819,7 +1841,7 @@ export class SessionManager {
 					entry.type === "compaction_boundary" ? decodeStoredCompactionBoundaryEntry(entry) : undefined;
 				const candidate =
 					entry.type === "provider_checkpoint"
-						? entry.checkpoint
+						? decodeProviderCheckpointEntry(entry)?.checkpoint
 						: boundary?.boundary.primary.kind === "checkpoint"
 							? boundary.boundary.primary.checkpoint
 							: undefined;
@@ -1828,9 +1850,8 @@ export class SessionManager {
 				);
 			});
 			const latestCompatible = compatible.at(-1);
-			const expectedWindowGeneration = latestCompatible
-				? (getStoredCheckpoint(latestCompatible)!.windowGeneration ?? 1) + 1
-				: 1;
+			const latestCheckpoint = latestCompatible ? getStoredCheckpoint(latestCompatible) : undefined;
+			const expectedWindowGeneration = latestCheckpoint ? (latestCheckpoint.windowGeneration ?? 1) + 1 : 1;
 			if (checkpoint.predecessorEntryId !== latestCompatible?.id) {
 				throw new Error(
 					"Compaction boundary checkpoint predecessor must be the ancestral latest compatible checkpoint",
@@ -1909,18 +1930,22 @@ export class SessionManager {
 		}
 
 		const branch = this.getBranch(checkpoint.frontierEntryId);
-		const compatibleCheckpoints = branch.filter(
-			(entry): entry is ProviderCheckpointEntry =>
-				entry.type === "provider_checkpoint" &&
-				providerCheckpointIdentitiesMatch(entry.checkpoint.identity, checkpoint.identity),
-		);
+		const compatibleCheckpoints = branch.filter((entry): entry is ProviderCheckpointEntry => {
+			if (entry.type !== "provider_checkpoint") return false;
+			const candidate = decodeProviderCheckpointEntry(entry)?.checkpoint;
+			return candidate !== undefined && providerCheckpointIdentitiesMatch(candidate.identity, checkpoint.identity);
+		});
 		const predecessor = checkpoint.predecessorEntryId ? this.byId.get(checkpoint.predecessorEntryId) : undefined;
-		if (checkpoint.predecessorEntryId && predecessor?.type !== "provider_checkpoint") {
-			throw new Error("Provider checkpoint predecessor is not a checkpoint entry");
+		const predecessorCheckpoint =
+			predecessor?.type === "provider_checkpoint"
+				? decodeProviderCheckpointEntry(predecessor)?.checkpoint
+				: undefined;
+		if (checkpoint.predecessorEntryId && !predecessorCheckpoint) {
+			throw new Error("Provider checkpoint predecessor is not a valid checkpoint entry");
 		}
 		if (
-			predecessor?.type === "provider_checkpoint" &&
-			!providerCheckpointIdentitiesMatch(predecessor.checkpoint.identity, checkpoint.identity)
+			predecessorCheckpoint &&
+			!providerCheckpointIdentitiesMatch(predecessorCheckpoint.identity, checkpoint.identity)
 		) {
 			throw new Error("Provider checkpoint predecessor identity is incompatible");
 		}
@@ -1931,7 +1956,12 @@ export class SessionManager {
 		if (!checkpoint.predecessorEntryId && latestCompatible) {
 			throw new Error("Provider checkpoint predecessor is required for a repeated checkpoint");
 		}
-		const expectedWindowGeneration = latestCompatible ? (latestCompatible.checkpoint.windowGeneration ?? 1) + 1 : 1;
+		const latestCompatibleCheckpoint = latestCompatible
+			? decodeProviderCheckpointEntry(latestCompatible)?.checkpoint
+			: undefined;
+		const expectedWindowGeneration = latestCompatibleCheckpoint
+			? (latestCompatibleCheckpoint.windowGeneration ?? 1) + 1
+			: 1;
 		if (checkpoint.windowGeneration !== expectedWindowGeneration) {
 			throw new Error(
 				`Provider checkpoint window generation must be ${expectedWindowGeneration}, received ${String(checkpoint.windowGeneration)}`,
