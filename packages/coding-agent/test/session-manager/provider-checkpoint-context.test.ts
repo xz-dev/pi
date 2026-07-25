@@ -474,6 +474,48 @@ describe("provider checkpoint session projection", () => {
 		]);
 	});
 
+	it("rejects a loaded boundary checkpoint with a stale non-immediate frontier while preserving its projection", () => {
+		const boundary = {
+			type: "compaction_boundary",
+			id: "b1",
+			parentId: "a2",
+			timestamp: "2026-07-24T00:00:03.000Z",
+			boundary: {
+				version: 1,
+				tokensBefore: 100,
+				primary: { kind: "checkpoint", checkpoint: checkpointValue("cmp_stale", "a1") },
+				projections: [
+					{
+						type: "portable_compaction_projection",
+						version: 1,
+						customType: "test.stale",
+						summary: "portable stale projection",
+					},
+				],
+			},
+		} as const;
+		const entries = [
+			user("u1", null, "original user"),
+			assistant("a1", "u1", "original assistant"),
+			user("u2", "a1", "intervening user"),
+			assistant("a2", "u2", "intervening assistant"),
+			boundary,
+			user("u3", "b1", "after stale boundary"),
+		] as unknown as SessionEntry[];
+
+		const context = project(entries);
+		expect(context.providerCheckpoint).toBeUndefined();
+		expect(context.messages.map(messageText)).toEqual([
+			"original user",
+			"original assistant",
+			"intervening user",
+			"intervening assistant",
+			"",
+			"after stale boundary",
+		]);
+		expect(context.messages[4]).toMatchObject({ role: "compactionSummary", summary: "portable stale projection" });
+	});
+
 	it("does not replay a later valid checkpoint whose predecessor chain contains an invalid loaded checkpoint", () => {
 		const first = corruptCheckpoint(checkpointEntry("cp1", "a1", checkpointValue("cmp_1", "a1")), (checkpoint) => {
 			checkpoint.version = 99;

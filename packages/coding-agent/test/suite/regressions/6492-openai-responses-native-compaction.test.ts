@@ -316,7 +316,7 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 		expect(harness.session.messages.some((message) => message.role === "compactionSummary")).toBe(false);
 	});
 
-	it("runs provider header, payload, and response hooks exactly once for native compaction", async () => {
+	it("keeps private native compaction payloads out of the public provider request hook", async () => {
 		const hookCalls: string[] = [];
 		const harness = await createHarness({
 			extensionFactories: [
@@ -343,9 +343,9 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 		await harness.session.compact();
 
 		const request = nativeRequests(transport)[0];
-		expect(hookCalls).toEqual(["headers", "payload", "response"]);
+		expect(hookCalls).toEqual(["headers", "response"]);
 		expect(request?.headers.get("x-native-hook")).toBe("enabled");
-		expect(request?.body.hook_marker).toBe("seen");
+		expect(request?.body.hook_marker).toBeUndefined();
 	});
 
 	it("manual native compaction reports operation accounting separately from the active estimate", async () => {

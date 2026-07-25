@@ -5,6 +5,11 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { contentText, type Message } from "@earendil-works/pi-ai";
 
+type WithoutProviderIdentity<T> = T extends unknown ? Omit<T, "api" | "provider" | "model"> : never;
+
+/** LLM-compatible message shape with provider identity removed from assistant messages. */
+export type ProviderNeutralMessage = WithoutProviderIdentity<Message>;
+
 // ============================================================================
 // File Operation Tracking
 // ============================================================================
@@ -106,7 +111,7 @@ function truncateForSummary(text: string, maxChars: number): string {
  * Tool results are truncated to keep the summarization request within
  * reasonable token budgets. Full content is not needed for summarization.
  */
-export function serializeConversation(messages: Message[]): string {
+export function serializeConversation(messages: readonly ProviderNeutralMessage[]): string {
 	const parts: string[] = [];
 
 	for (const msg of messages) {

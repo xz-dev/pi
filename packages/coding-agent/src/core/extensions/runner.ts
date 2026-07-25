@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import { type CompactionPreparation, toPublicCompactionPreparation } from "../compaction/compaction.ts";
 import type { LegacyCompactionResult, PortableCompactionProjection } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
@@ -14,6 +15,7 @@ import {
 	createExtensionSessionManagerView,
 	type ExtensionSessionManagerView,
 	type ReadonlySessionManager,
+	type SessionEntry,
 	type SessionManager,
 	toPublicSessionEntry,
 } from "../session-manager.ts";
@@ -827,9 +829,18 @@ export class ExtensionRunner {
 		);
 	}
 
-	async emitSessionBeforeCompact(event: SessionBeforeCompactEvent): Promise<SessionBeforeCompactAggregate> {
+	async emitSessionBeforeCompact(
+		event: Omit<SessionBeforeCompactEvent, "preparation" | "branchEntries"> & {
+			preparation: CompactionPreparation;
+			branchEntries: SessionEntry[];
+		},
+	): Promise<SessionBeforeCompactAggregate> {
 		const ctx = this.createContext();
-		const publicEvent = { ...event, branchEntries: event.branchEntries.map(toPublicSessionEntry) };
+		const publicEvent: SessionBeforeCompactEvent = {
+			...event,
+			preparation: toPublicCompactionPreparation(event.preparation),
+			branchEntries: event.branchEntries.map(toPublicSessionEntry),
+		};
 		let replacement: LegacyCompactionResult | undefined;
 		const projections: PortableCompactionProjection[] = [];
 

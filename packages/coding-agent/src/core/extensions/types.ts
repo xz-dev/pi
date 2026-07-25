@@ -50,9 +50,9 @@ import type { BashResult } from "../bash-executor.ts";
 import type {
 	CompactionBoundary,
 	CompactionOutcome,
-	CompactionPreparation,
 	LegacyCompactionResult,
 	PortableCompactionProjection,
+	PublicCompactionPreparation,
 } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
@@ -64,6 +64,7 @@ import type {
 	BranchSummaryEntry,
 	CompactionEntry,
 	CustomEntry,
+	PublicSessionEntry,
 	ReadonlySessionManager,
 	SessionEntry,
 	SessionManager,
@@ -591,8 +592,8 @@ export interface SessionBeforeForkEvent {
 /** Fired before context compaction (can be cancelled or customized) */
 export interface SessionBeforeCompactEvent {
 	type: "session_before_compact";
-	preparation: CompactionPreparation;
-	branchEntries: SessionEntry[];
+	preparation: PublicCompactionPreparation;
+	branchEntries: PublicSessionEntry[];
 	customInstructions?: string;
 	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
 	reason: "manual" | "threshold" | "overflow";

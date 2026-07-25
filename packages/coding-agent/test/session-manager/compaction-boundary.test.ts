@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
@@ -323,6 +323,31 @@ describe("generic compaction boundaries", () => {
 		expect(readCompactionBoundaries(path)).toEqual([]);
 	});
 
+	it("rejects text boundaries whose first kept entry is not an earlier active ancestor", () => {
+		const manager = SessionManager.inMemory();
+		const rootId = manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const siblingId = manager.appendMessage({ role: "user", content: "sibling", timestamp: 2 });
+		manager.branch(rootId);
+		const activeId = manager.appendMessage({ role: "user", content: "active", timestamp: 3 });
+		const expected = manager.captureCompactionBoundaryAppendState();
+		const textDraft = (firstKeptEntryId: string): CompactionBoundaryDraft => ({
+			version: 1,
+			tokensBefore: 100,
+			primary: {
+				kind: "text",
+				summary: "summary",
+				firstKeptEntryId,
+				fromExtension: true,
+			},
+			projections: [],
+		});
+
+		expect(() => manager.appendCompactionBoundary(textDraft(siblingId), { expected })).toThrow(/ancestr/i);
+		expect(() => manager.appendCompactionBoundary(textDraft("future-entry"), { expected })).toThrow(/not found/i);
+		expect(manager.getLeafId()).toBe(activeId);
+		expect(manager.getEntries().filter((entry) => entry.type === "compaction_boundary")).toHaveLength(0);
+	});
+
 	it("appends one cloned boundary row and rejects stale expected state atomically", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-boundary-append-"));
 		tempPaths.push(dir);
@@ -362,5 +387,48 @@ describe("generic compaction boundaries", () => {
 		const before = structuredClone(manager.getEntries());
 		expect(() => manager.appendCompactionBoundary(draft, { expected })).toThrow(/version/i);
 		expect(manager.getEntries()).toEqual(before);
+	});
+
+	it("leaves memory and JSONL unchanged when a boundary append cannot be persisted", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-boundary-write-failure-"));
+		tempPaths.push(dir);
+		const manager = SessionManager.create(dir, dir);
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "frontier" }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5",
+			usage: primaryUsage,
+			stopReason: "stop",
+			timestamp: 1,
+		});
+		const sessionFile = manager.getSessionFile()!;
+		const memoryBefore = structuredClone(manager.getEntries());
+		const leafBefore = manager.getLeafId();
+		const diskBefore = readFileSync(sessionFile, "utf8");
+		const expected = manager.captureCompactionBoundaryAppendState();
+		const draft: CompactionBoundaryDraft = {
+			version: 1,
+			tokensBefore: 1200,
+			primary: { kind: "checkpoint", checkpoint: checkpoint(leafBefore!), usage: primaryUsage },
+			projections: [portableProjection],
+		};
+
+		const displacedFile = `${sessionFile}.displaced`;
+		renameSync(sessionFile, displacedFile);
+		mkdirSync(sessionFile);
+		try {
+			expect(() =>
+				manager.appendCompactionBoundary(draft, { expected, currentCheckpointIdentity: identity }),
+			).toThrow();
+		} finally {
+			rmSync(sessionFile, { recursive: true });
+			renameSync(displacedFile, sessionFile);
+		}
+		expect(manager.getEntries()).toEqual(memoryBefore);
+		expect(manager.getLeafId()).toBe(leafBefore);
+		expect(readFileSync(sessionFile, "utf8")).toBe(diskBefore);
+		expect(manager.getEntries().some((entry) => entry.type === "compaction_boundary")).toBe(false);
 	});
 });
