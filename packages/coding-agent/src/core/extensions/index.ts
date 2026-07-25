@@ -15,6 +15,7 @@ export type {
 	ForkHandler,
 	NavigateTreeHandler,
 	NewSessionHandler,
+	SessionBeforeCompactAggregate,
 	ShutdownHandler,
 	SwitchSessionHandler,
 } from "./runner.ts";
