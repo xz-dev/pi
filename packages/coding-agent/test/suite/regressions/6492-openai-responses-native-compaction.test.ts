@@ -23,13 +23,22 @@ interface NativeCompactionModel extends Model<"openai-responses"> {
 	};
 }
 
-interface ProviderCheckpointSessionEntry extends SessionEntryBase {
-	type: "provider_checkpoint";
-	checkpoint: {
+interface CheckpointBoundarySessionEntry extends SessionEntryBase {
+	type: "compaction_boundary";
+	boundary: {
 		version: 1;
-		identity: PersistedProviderCheckpointIdentity;
-		frontierEntryId: string;
-		payload: CompactedResponse;
+		tokensBefore: number;
+		primary: {
+			kind: "checkpoint";
+			checkpoint: {
+				version: 1;
+				identity: PersistedProviderCheckpointIdentity;
+				frontierEntryId: string;
+				payload: CompactedResponse;
+			};
+			usage?: ReturnType<typeof createUsage>;
+		};
+		projections: Array<{ customType: string; summary: string }>;
 	};
 }
 
@@ -146,16 +155,20 @@ function seedNativeCompactableSession(harness: Harness, model: NativeCompactionM
 	return frontierEntryId;
 }
 
-function isProviderCheckpointEntry(entry: SessionEntryBase): entry is ProviderCheckpointSessionEntry {
-	return entry.type === "provider_checkpoint";
+function isCheckpointBoundaryEntry(entry: SessionEntryBase): entry is CheckpointBoundarySessionEntry {
+	return (
+		entry.type === "compaction_boundary" &&
+		"boundary" in entry &&
+		(entry as CheckpointBoundarySessionEntry).boundary.primary.kind === "checkpoint"
+	);
 }
 
 function isSessionMessageEntry(entry: SessionEntryBase): entry is SessionMessageEntry {
 	return entry.type === "message";
 }
 
-function providerCheckpointEntries(harness: Harness): ProviderCheckpointSessionEntry[] {
-	return (harness.sessionManager.getEntries() as SessionEntryBase[]).filter(isProviderCheckpointEntry);
+function checkpointBoundaryEntries(harness: Harness): CheckpointBoundarySessionEntry[] {
+	return (harness.sessionManager.getEntries() as SessionEntryBase[]).filter(isCheckpointBoundaryEntry);
 }
 
 function persistedUserMessages(harness: Harness, text: string): SessionMessageEntry[] {
@@ -217,6 +230,7 @@ function mockTransport(
 		compactStatus?: number;
 		inferenceUsage?: { inputTokens?: number; outputTokens?: number };
 		overflowFirstInference?: boolean;
+		onCompactRequest?: () => void;
 	} = {},
 ): MockTransport {
 	const requests: CapturedRequest[] = [];
@@ -241,6 +255,7 @@ function mockTransport(
 		await blocked;
 
 		if (url.endsWith("/responses/compact")) {
+			options.onCompactRequest?.();
 			if (options.compactStatus && options.compactStatus !== 200) {
 				return jsonResponse({ error: { message: "compact unavailable" } }, options.compactStatus);
 			}
@@ -289,15 +304,15 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 		expect(nativeRequests(transport)).toHaveLength(1);
 		expect(summaryRequests(transport)).toHaveLength(0);
 		expect(inferenceRequests(transport)).toHaveLength(0);
-		const entries = providerCheckpointEntries(harness);
+		const entries = checkpointBoundaryEntries(harness);
 		expect(entries).toHaveLength(1);
-		expect(entries[0]?.checkpoint.identity).toEqual({
+		expect(entries[0]?.boundary.primary.checkpoint.identity).toEqual({
 			...model.compat?.responsesCompaction,
 			provider: model.provider,
 			endpoint: model.baseUrl,
 		});
-		expect(entries[0]?.checkpoint.frontierEntryId).toBe(frontierEntryId);
-		expect(entries[0]?.checkpoint.payload).toEqual(compactResponse);
+		expect(entries[0]?.boundary.primary.checkpoint.frontierEntryId).toBe(frontierEntryId);
+		expect(entries[0]?.boundary.primary.checkpoint.payload).toEqual(compactResponse);
 		expect(harness.session.messages.some((message) => message.role === "compactionSummary")).toBe(false);
 	});
 
@@ -351,6 +366,18 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 				typeof event === "object" && event !== null && (event as { type?: unknown }).type === "compaction_end",
 		);
 		expect(compactionEnd).toMatchObject({ type: "compaction_end", result });
+		expect(result).toEqual({
+			kind: "checkpoint",
+			boundaryEntryId: checkpointBoundaryEntries(harness)[0]?.id,
+			tokensBefore: 100,
+			estimatedTokensAfter: expect.any(Number),
+			usage: expect.objectContaining({ input: 100, output: 10, totalTokens: 110 }),
+			projectionCount: 0,
+		});
+		expect(result).not.toHaveProperty("summary");
+		expect(result).not.toHaveProperty("firstKeptEntryId");
+		expect(result).not.toHaveProperty("details");
+		expect(result).not.toHaveProperty("checkpointEntry");
 		expect(result.usage).toMatchObject({ input: 100, output: 10, totalTokens: 110 });
 		const statsAfter = harness.session.getSessionStats();
 		expect(statsAfter.tokens.input - statsBefore.tokens.input).toBe(100);
@@ -413,15 +440,32 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 		harnesses.push(harness);
 		const model = nativeCompactionModel(harness);
 		seedNativeCompactableSession(harness, model, 100);
-		const transport = mockTransport({ overflowFirstInference: true });
+		const lifecycle: string[] = [];
+		const harnessWithHooks = harness as Harness;
+		const transport = mockTransport({
+			overflowFirstInference: true,
+			onCompactRequest: () => lifecycle.push("native execute"),
+		});
+		const appendBoundary = harnessWithHooks.sessionManager.appendCompactionBoundary.bind(
+			harnessWithHooks.sessionManager,
+		);
+		vi.spyOn(harnessWithHooks.sessionManager, "appendCompactionBoundary").mockImplementation((...args) => {
+			lifecycle.push("append boundary");
+			return appendBoundary(...args);
+		});
+		harnessWithHooks.session.subscribe((event) => {
+			if (event.type === "compaction_end") lifecycle.push("compaction_end");
+		});
 
 		await harness.session.prompt("unfinished real work");
 
 		expect(inferenceRequests(transport)).toHaveLength(2);
-		expect(inferenceRequests(transport)[1]?.body.input).toEqual(canonicalOutput);
+		const retryInput = inferenceRequests(transport)[1]?.body.input;
+		expect(retryInput).toEqual(canonicalOutput);
 		expect(nativeRequests(transport)).toHaveLength(1);
 		expect(summaryRequests(transport)).toHaveLength(0);
 		expect(persistedUserMessages(harness, "unfinished real work")).toHaveLength(1);
+		expect(lifecycle).toEqual(["native execute", "append boundary", "compaction_end"]);
 		expect(
 			(harness.sessionManager.getEntries() as SessionEntryBase[])
 				.filter(isSessionMessageEntry)
@@ -445,7 +489,7 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 
 		expect(nativeRequests(transport)).toHaveLength(1);
 		expect(summaryRequests(transport)).toHaveLength(0);
-		expect(providerCheckpointEntries(harness)).toHaveLength(0);
+		expect(checkpointBoundaryEntries(harness)).toHaveLength(0);
 		expect(harness.sessionManager.getEntries()).toEqual(entriesBefore);
 		expect(harness.session.agent.state.messages).toEqual(projectionBefore);
 	});
@@ -472,10 +516,13 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 		await Promise.allSettled([pending]);
 
 		expect(harness.session.model).toBe(replacementModel);
-		expect(providerCheckpointEntries(harness)).toHaveLength(0);
+		expect(checkpointBoundaryEntries(harness)).toHaveLength(0);
 		expect(
 			(harness.sessionManager.getEntries() as SessionEntryBase[]).some(
-				(entry) => entry.type === "compaction" || entry.type === "provider_checkpoint",
+				(entry) =>
+					entry.type === "compaction" ||
+					entry.type === "provider_checkpoint" ||
+					entry.type === "compaction_boundary",
 			),
 		).toBe(false);
 	});
@@ -500,6 +547,6 @@ describe("#6492 OpenAI Responses native compaction lifecycle", () => {
 		expect(manualResult.status).toBe("fulfilled");
 		expect(thresholdResult).toEqual({ status: "fulfilled", value: false });
 		expect(nativeRequests(transport)).toHaveLength(1);
-		expect(providerCheckpointEntries(harness)).toHaveLength(1);
+		expect(checkpointBoundaryEntries(harness)).toHaveLength(1);
 	});
 });

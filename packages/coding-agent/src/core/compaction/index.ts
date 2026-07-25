@@ -15,4 +15,5 @@ export type {
 export { isStoredCompactionBoundaryEntry, readCompactionBoundaries, toCompactionBoundary } from "./boundary.ts";
 export * from "./branch-summarization.ts";
 export * from "./compaction.ts";
+export * from "./coordinator.ts";
 export * from "./utils.ts";

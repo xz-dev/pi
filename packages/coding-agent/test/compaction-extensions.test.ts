@@ -276,9 +276,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		// sessionManager, modelRegistry, and model are now on ctx, not event
 
 		const afterEvent = compactEvents[0];
-		expect(afterEvent.compactionEntry).toBeDefined();
-		expect(afterEvent.compactionEntry.summary.length).toBeGreaterThan(0);
-		expect(afterEvent.compactionEntry.tokensBefore).toBeGreaterThanOrEqual(0);
+		expect(afterEvent.boundary.kind).toBe("text");
+		expect(afterEvent.boundary.text?.summary.length).toBeGreaterThan(0);
+		expect(afterEvent.boundary.tokensBefore).toBeGreaterThanOrEqual(0);
 		expect(afterEvent.fromExtension).toBe(false);
 	}, 120000);
 
@@ -320,14 +320,14 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const result = await session.compact();
 
-		expect(result.summary).toBe(customSummary);
+		expect(result.kind === "text" ? result.summary : undefined).toBe(customSummary);
 
 		const compactEvents = capturedEvents.filter((e) => e.type === "session_compact");
 		expect(compactEvents.length).toBe(1);
 
 		const afterEvent = compactEvents[0];
 		if (afterEvent.type === "session_compact") {
-			expect(afterEvent.compactionEntry.summary).toBe(customSummary);
+			expect(afterEvent.boundary.text?.summary).toBe(customSummary);
 			expect(afterEvent.fromExtension).toBe(true);
 		}
 	}, 120000);
@@ -392,8 +392,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const result = await session.compact();
 
-		expect(result.summary).toBeDefined();
-		expect(result.summary.length).toBeGreaterThan(0);
+		expect(result.kind === "text" ? result.summary : undefined).toBeDefined();
+		expect(result.kind === "text" ? result.summary.length : 0).toBeGreaterThan(0);
 
 		const compactEvents = capturedEvents.filter((e): e is SessionCompactEvent => e.type === "session_compact");
 		expect(compactEvents.length).toBe(1);
@@ -535,7 +535,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const result = await session.compact();
 
-		expect(result.summary).toBe(customSummary);
+		expect(result.kind === "text" ? result.summary : undefined).toBe(customSummary);
 		expect(result.tokensBefore).toBe(999);
 	}, 120000);
 });
