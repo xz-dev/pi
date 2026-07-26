@@ -15,7 +15,7 @@ type AgentSessionEvent =
   | AgentEvent
   | { type: "queue_update"; steering: readonly string[]; followUp: readonly string[] }
   | { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
-  | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
+  | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow"; result: CompactionOutcome | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
   | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
   | { type: "summarization_retry_scheduled"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
@@ -24,7 +24,7 @@ type AgentSessionEvent =
   | { type: "summarization_retry_finished" };
 ```
 
-`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction.
+`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction. Successful `compaction_end.result` values are discriminated by `kind: "text" | "checkpoint"`; checkpoint outcomes expose accounting and projection count but no provider-owned checkpoint payload or compatibility identity.
 
 Base events from [`AgentEvent`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/types.ts#L179):
 

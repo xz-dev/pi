@@ -13,14 +13,14 @@ For TypeScript definitions in your project, inspect `node_modules/@earendil-work
 
 ## Overview
 
-Pi has two summarization mechanisms:
+Pi has two context-reduction mechanisms:
 
 | Mechanism | Trigger | Purpose |
 |-----------|---------|---------|
-| Compaction | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
+| Compaction | Context exceeds threshold, or `/compact` | Replace older context with a text summary or a provider-owned checkpoint |
 | Branch summarization | `/tree` navigation | Preserve context when switching branches |
 
-Both use the same structured summary format and track file operations cumulatively. Compaction and branch-summary requests use fresh routing session IDs and, where supported by the provider, disable prompt-cache writes because these one-off prompts are unlikely to be reused.
+Text compaction and branch summarization use the same structured summary format and track file operations cumulatively. Their summarization requests use fresh routing session IDs and, where supported by the provider, disable prompt-cache writes because these one-off prompts are unlikely to be reused.
 
 ## Compaction
 
@@ -41,7 +41,7 @@ You can also trigger manually with `/compact [instructions]`, where optional ins
 1. **Find cut point**: Walk backwards from newest message, accumulating token estimates until `keepRecentTokens` (default 20k, configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`) is reached
 2. **Extract messages**: Collect messages from the previous kept boundary (or session start) up to the cut point
 3. **Generate summary**: Call LLM to summarize with structured format, passing the previous summary as iterative context when present
-4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
+4. **Commit boundary**: Atomically append one compaction boundary whose primary representation is the text summary
 5. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards
 
 ```
@@ -76,7 +76,48 @@ What the LLM sees:
     prompt   from cmp          messages from firstKeptEntryId
 ```
 
-On repeated compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Pi also recalculates `tokensBefore` from the rebuilt session context before writing the new `CompactionEntry`, so the token count reflects the actual pre-compaction context being replaced.
+On repeated text compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Pi also recalculates `tokensBefore` from the rebuilt session context before writing the new boundary, so the token count reflects the actual pre-compaction context being replaced.
+
+### Provider-Transparent Boundaries
+
+Compaction commits one generic boundary with one primary representation:
+
+- `kind: "text"` stores a portable summary and its kept-history frontier.
+- `kind: "checkpoint"` stores provider-owned continuation state privately. Compatible requests may use that state, while incompatible providers rebuild context from the intact append-only branch.
+
+Public SDK, RPC, extension, tree, and export surfaces expose the sanitized `CompactionBoundary`, never the stored checkpoint payload or its compatibility identity. A checkpoint boundary therefore reports only `kind: "checkpoint"`, accounting, and portable projections. Do not infer provider, model, authentication realm, endpoint, or checkpoint contents from it.
+
+Extensions may contribute `PortableCompactionProjection` values alongside either primary representation. A projection is provider-neutral, versioned data with `customType`, `summary`, optional `details`, and optional `usage`. It supplements the primary representation; it does not replace the provider checkpoint or participate in checkpoint compatibility. If an extension supplies a legacy `compaction` replacement, that text replacement becomes the primary representation for the run instead of provider-native compaction. A single handler cannot return both `compaction` and `projection`.
+
+The coordinator captures the active session, generation, version, and branch before running extension hooks. It selects the primary representation only after those hooks complete, validates the boundary, and appends it once. Cancellation, abort, stale session or branch state, stale provider compatibility, or primary execution failure before that append commits no boundary. After a successful append, Pi rebuilds context, emits `session_compact`, then emits `compaction_end`.
+
+All successful callers receive a discriminated `CompactionOutcome`:
+
+```typescript
+type CompactionOutcome =
+  | {
+      kind: "text";
+      boundaryEntryId: string;
+      tokensBefore: number;
+      estimatedTokensAfter?: number;
+      usage?: Usage;
+      projectionCount: number;
+      summary: string;
+      firstKeptEntryId: string;
+      details?: unknown;
+      fromExtension: boolean;
+    }
+  | {
+      kind: "checkpoint";
+      boundaryEntryId: string;
+      tokensBefore: number;
+      estimatedTokensAfter?: number;
+      usage?: Usage;
+      projectionCount: number;
+    };
+```
+
+`usage` combines primary and projection usage when supplied. `projectionCount` reports committed portable projections. Checkpoint outcomes deliberately contain no opaque checkpoint state.
 
 ### Split Turns
 
@@ -116,9 +157,9 @@ Valid cut points are:
 
 Never cut at tool results (they must stay with their tool call).
 
-### CompactionEntry Structure
+### Legacy CompactionEntry Structure
 
-Defined in [`session-manager.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/session-manager.ts):
+Older text compactions remain readable and are adapted to public text boundaries. The legacy entry is defined in [`session-manager.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/session-manager.ts):
 
 ```typescript
 interface CompactionEntry<T = unknown> {
@@ -270,7 +311,7 @@ Tool results are truncated to 2000 characters during serialization. Content beyo
 
 ## Custom Summarization via Extensions
 
-Extensions can intercept and customize both compaction and branch summarization. See [`extensions/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/extensions/types.ts) for event type definitions.
+Extensions can intercept and customize both compaction and branch summarization. Compaction hooks receive sanitized public preparation and branch entries; provider-owned checkpoint payloads and compatibility identities are not included. See [`extensions/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/extensions/types.ts) for event type definitions.
 
 ### session_before_compact
 
@@ -296,7 +337,7 @@ pi.on("session_before_compact", async (event, ctx) => {
   // Cancel:
   return { cancel: true };
 
-  // Custom summary:
+  // Replace the primary representation with a text summary:
   return {
     compaction: {
       summary: "Your summary...",
@@ -304,6 +345,18 @@ pi.on("session_before_compact", async (event, ctx) => {
       tokensBefore: preparation.tokensBefore,
       // usage: summaryResponse.usage, // Optional; included in session totals
       details: { /* custom data */ },
+    }
+  };
+
+  // Or supplement the selected primary with a portable projection:
+  return {
+    projection: {
+      type: "portable_compaction_projection",
+      version: 1,
+      customType: "my-extension",
+      summary: "Provider-neutral continuation context",
+      details: { /* JSON-serializable portable data */ },
+      // usage: projectionResponse.usage,
     }
   };
 });

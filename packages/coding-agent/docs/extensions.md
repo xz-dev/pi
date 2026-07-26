@@ -462,7 +462,7 @@ pi.on("session_before_compact", async (event, ctx) => {
   // Cancel:
   return { cancel: true };
 
-  // Custom summary:
+  // Replace the selected primary with a text summary:
   return {
     compaction: {
       summary: "...",
@@ -471,15 +471,32 @@ pi.on("session_before_compact", async (event, ctx) => {
       // usage: summaryResponse.usage, // Optional; included in session totals
     }
   };
+
+  // Or supplement the selected primary with provider-neutral context:
+  return {
+    projection: {
+      type: "portable_compaction_projection",
+      version: 1,
+      customType: "my-extension",
+      summary: "Portable continuation context",
+      details: {},
+    }
+  };
 });
 
 pi.on("session_compact", async (event, ctx) => {
-  // event.compactionEntry - the saved compaction
-  // event.fromExtension - whether extension provided it
+  // event.boundary - sanitized CompactionBoundary; no private checkpoint state
+  // event.outcome - CompactionOutcome, discriminated by "text" | "checkpoint"
+  // event.fromExtension - deprecated; true only for a legacy text replacement
   // event.reason - "manual" (/compact), "threshold", or "overflow"
   // event.willRetry - whether the aborted turn is retried after compaction (overflow recovery)
+  // event.compactionEntry - present only when replaying a historical legacy compaction event
 });
 ```
+
+`session_before_compact` receives sanitized public preparation and branch entries. It never exposes provider-owned checkpoint payloads or compatibility identity. Each handler may return either `compaction` or `projection`, not both. Projections from multiple handlers are collected in registration order and committed with the selected primary representation.
+
+On success, `session_compact` runs after the boundary is durably appended and context is rebuilt. Its `boundary` and `outcome` are public views: checkpoint boundaries expose `kind: "checkpoint"`, accounting, and portable projections, but no provider-private continuation state.
 
 #### session_before_tree / session_tree
 

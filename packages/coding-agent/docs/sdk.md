@@ -100,7 +100,7 @@ interface AgentSession {
   navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
 
   // Compaction
-  compact(customInstructions?: string): Promise<CompactionResult>;
+  compact(customInstructions?: string): Promise<CompactionOutcome>;
   abortCompaction(): void;
 
   // Abort current operation
@@ -110,6 +110,10 @@ interface AgentSession {
   dispose(): void;
 }
 ```
+
+`compact()` returns `CompactionOutcome`, discriminated by `kind: "text" | "checkpoint"`. Both variants include `boundaryEntryId`, `tokensBefore`, optional `estimatedTokensAfter`, optional aggregate `usage`, and `projectionCount`. Only the text variant includes `summary`, `firstKeptEntryId`, optional `details`, and `fromExtension`. The checkpoint variant deliberately exposes no provider/model identity, compatibility key, endpoint/authentication data, or opaque checkpoint payload.
+
+Use the exported `readCompactionBoundaries(sessionFile)` helper when an integration needs the active branch's sanitized compaction history without constructing a `SessionManager`. It returns `CompactionBoundaryEntry[]`, adapting legacy text compactions and legacy provider checkpoints to the same public shape. `SessionManager` read methods and tree APIs use that same sanitized boundary representation.
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
 
