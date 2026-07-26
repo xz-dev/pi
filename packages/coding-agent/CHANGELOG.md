@@ -9,18 +9,11 @@
 
 ### Changed
 
-- Changed pi.dev model catalog refreshes to revalidate with `If-None-Match`, so unchanged provider catalogs answer with an empty `304` instead of a full download.
 - Changed SDK, RPC, extension, tree, and export compaction surfaces to use sanitized `CompactionBoundary` and discriminated `CompactionOutcome` contracts; checkpoint outcomes contain no private payload or compatibility identity.
-- Changed inherited Radius OAuth device authorization, token exchange, and refresh requests to use the configured gateway directly.
-- Changed inherited model loading errors to append the underlying cause, so auth failures such as `OAuth refresh failed for openai-codex` report the provider response instead of a bare wrapper message.
 
 ### Fixed
 
 - Fixed compaction commits to validate and append one generic boundary atomically, rejecting cancelled, failed, stale-session, stale-branch, and stale-provider attempts before persistence.
-- Fixed compaction and branch summaries for providers whose authentication resolves entirely to request headers ([#5871](https://github.com/earendil-works/pi/issues/5871))
-- Fixed unavailable scoped models being hidden from `/models`, allowing them to be removed without editing settings manually ([#6949](https://github.com/earendil-works/pi/issues/6949), [#7032](https://github.com/earendil-works/pi/pull/7032) by [@christianklotz](https://github.com/christianklotz)).
-- Fixed startup context file discovery to skip directories that match context file names such as `AGENTS.md`, which produced `EISDIR` warnings ([#7106](https://github.com/earendil-works/pi/pull/7106) by [@mrexodia](https://github.com/mrexodia)).
-- Fixed the llama.cpp extension to persist its model catalog, so llama.cpp models stay listed before the first successful refresh. See [llama.cpp](docs/llama-cpp.md) ([#7072](https://github.com/earendil-works/pi/pull/7072) by [@davidbrai](https://github.com/davidbrai)).
 
 ## [0.82.1] - 2026-07-25
 
