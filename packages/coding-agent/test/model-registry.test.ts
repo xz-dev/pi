@@ -7,6 +7,7 @@ import type {
 	Context,
 	Model,
 	OpenAICompletionsCompat,
+	OpenAIResponsesCompat,
 } from "@earendil-works/pi-ai/compat";
 import { getApiProvider, getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -345,6 +346,39 @@ describe("ModelRegistry", () => {
 			for (const model of anthropicModels) {
 				expect(model.baseUrl).toBe("https://merged-proxy.example.com/v1");
 			}
+		});
+
+		test("loads explicit stable OpenAI Responses compaction identity without enabling proxies implicitly", async () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://api.openai.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-responses",
+					models: [
+						{
+							id: "gpt-5-demo",
+							compat: {
+								responsesCompaction: {
+									adapter: "openai-responses-compact-v1",
+									realm: "provider-owned:openai-account-a",
+									modelFamily: "gpt-5",
+								},
+							},
+						},
+					],
+				},
+			});
+
+			const registry = await createModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("demo", "gpt-5-demo");
+			const compat = model?.compat as OpenAIResponsesCompat | undefined;
+
+			expect(registry.getError()).toBeUndefined();
+			expect(compat?.responsesCompaction).toEqual({
+				adapter: "openai-responses-compact-v1",
+				realm: "provider-owned:openai-account-a",
+				modelFamily: "gpt-5",
+			});
 		});
 
 		test("provider-level compat applies to custom models", async () => {

@@ -24,7 +24,13 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText } from "@earendil-works/pi-ai";
+import {
+	contentText,
+	type Message,
+	type OpenAIResponsesCheckpointIdentity,
+	type ProviderResponse,
+} from "@earendil-works/pi-ai";
+import { responsesCompactionAdapter } from "@earendil-works/pi-ai/api/openai-responses";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -37,6 +43,7 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	getOpenAIResponsesCheckpointIdentity,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	isRetryableAssistantError,
@@ -96,8 +103,17 @@ import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	ProviderCheckpoint,
+	ProviderCheckpointAppendState,
+	ProviderCheckpointEntry,
+	SessionEntry,
+	SessionManager,
+} from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -186,6 +202,19 @@ export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 // ============================================================================
 // Types
 // ============================================================================
+
+type NativeCompactionReason = "manual" | "threshold" | "overflow";
+
+interface NativeCompactionAttempt {
+	id: number;
+	identity: OpenAIResponsesCheckpointIdentity;
+	expected: ProviderCheckpointAppendState;
+	controller: AbortController;
+}
+
+interface NativeCompactionResult extends CompactionResult {
+	checkpointEntry: ProviderCheckpointEntry;
+}
 
 function withoutDeletedHeaders(headers: ProviderHeaders | undefined): Record<string, string> | undefined {
 	return headers
@@ -324,6 +353,9 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _nativeCompactionAttempt: NativeCompactionAttempt | undefined = undefined;
+	private _nextNativeCompactionAttemptId = 0;
+	private _lifecycleGeneration = 0;
 	private _overflowRecoveryAttempted = false;
 
 	// Branch summarization state
@@ -835,6 +867,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._lifecycleGeneration++;
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -1576,6 +1609,8 @@ export class AgentSession {
 	 * @throws Error if no auth is configured for the model
 	 */
 	async setModel(model: Model<any>): Promise<void> {
+		this._lifecycleGeneration++;
+		this.abortCompaction();
 		if (!(await this._modelRuntime.checkAuth(model.provider))) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -1780,17 +1815,204 @@ export class AgentSession {
 	 * Aborts current agent operation first.
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
+	private _getNativeCompactionIdentity(
+		model: Model<any> | undefined = this.model,
+	): OpenAIResponsesCheckpointIdentity | undefined {
+		if (model?.api !== "openai-responses") return undefined;
+		return getOpenAIResponsesCheckpointIdentity(model as Model<"openai-responses">);
+	}
+
+	private _getLatestCompatibleProviderCheckpoint(
+		identity: OpenAIResponsesCheckpointIdentity,
+	): ProviderCheckpointEntry | undefined {
+		const projected = this.sessionManager.buildSessionContext({ providerCheckpoint: { identity } });
+		const projectedCheckpoint = projected.providerCheckpoint;
+		if (!projectedCheckpoint) return undefined;
+		const checkpoints = this.sessionManager
+			.getBranch()
+			.filter((entry): entry is ProviderCheckpointEntry => entry.type === "provider_checkpoint");
+		for (let index = checkpoints.length - 1; index >= 0; index--) {
+			const entry = checkpoints[index];
+			if (
+				entry.checkpoint.frontierEntryId === projectedCheckpoint.frontierEntryId &&
+				entry.checkpoint.windowGeneration === projectedCheckpoint.windowGeneration
+			) {
+				return entry;
+			}
+		}
+		return undefined;
+	}
+
+	private async _observeNativeCompactionResponse(
+		response: ProviderResponse,
+		_model: Model<"openai-responses">,
+	): Promise<void> {
+		const runner = this._extensionRunner;
+		if (!runner.hasHandlers("after_provider_response")) return;
+		await runner.emit({
+			type: "after_provider_response",
+			status: response.status,
+			headers: response.headers,
+		});
+	}
+
+	private async _runNativeCompaction(reason: NativeCompactionReason): Promise<NativeCompactionResult> {
+		if (this._nativeCompactionAttempt) {
+			throw new Error("Compaction already in progress");
+		}
+		const model = this.model;
+		const identity = this._getNativeCompactionIdentity(model);
+		if (!model || model.api !== "openai-responses" || !identity) {
+			throw new Error("Native compaction is not enabled for the current model");
+		}
+
+		const frontierEntryId = this.sessionManager.getLeafId();
+		if (!frontierEntryId) throw new Error("Nothing to compact (session too small)");
+		const previousCheckpoint = this._getLatestCompatibleProviderCheckpoint(identity);
+		if (frontierEntryId === previousCheckpoint?.id) throw new Error("Already compacted");
+		const tokensBefore = estimateMessagesTokens(this.agent.state.messages);
+
+		const lifecycleGeneration = this._lifecycleGeneration;
+		const operationContext = this.sessionManager.buildSessionContext({ providerCheckpoint: { identity } });
+		const controller = new AbortController();
+		const attempt: NativeCompactionAttempt = {
+			id: ++this._nextNativeCompactionAttemptId,
+			identity,
+			expected: this.sessionManager.captureProviderCheckpointAppendState(identity),
+			controller,
+		};
+		this._nativeCompactionAttempt = attempt;
+		if (reason === "manual") this._compactionAbortController = controller;
+		else this._autoCompactionAbortController = controller;
+
+		try {
+			const { apiKey, headers, env } = await this._getRequiredRequestAuth(model);
+			const requestHeaders = mergeProviderAttributionHeaders(
+				model,
+				this.settingsManager,
+				this.sessionManager.getSessionId(),
+				headers,
+			);
+			const providerRetry = this.settingsManager.getProviderRetrySettings();
+			const httpIdleTimeoutMs = this.settingsManager.getHttpIdleTimeoutMs();
+			const timeoutMs = providerRetry.timeoutMs ?? (httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs);
+			const operation = await responsesCompactionAdapter.compact(
+				model as Model<"openai-responses">,
+				{
+					systemPrompt: this.agent.state.systemPrompt,
+					messages: operationContext.messages.filter((message): message is Message =>
+						["user", "assistant", "toolResult"].includes(message.role),
+					),
+					tools: this.agent.state.tools,
+					providerState: operationContext.providerCheckpoint
+						? { type: "openai_responses_provider_state", checkpoint: operationContext.providerCheckpoint }
+						: undefined,
+				},
+				{
+					apiKey,
+					headers: requestHeaders,
+					env,
+					signal: controller.signal,
+					timeoutMs,
+					maxRetries: providerRetry.maxRetries,
+					maxRetryDelayMs: providerRetry.maxRetryDelayMs,
+					transformHeaders: this._extensionRunner.hasHandlers("before_provider_headers")
+						? (compactHeaders) => this._extensionRunner.emitBeforeProviderHeaders(compactHeaders)
+						: undefined,
+					onPayload: this._extensionRunner.hasHandlers("before_provider_request")
+						? (payload) => this._extensionRunner.emitBeforeProviderRequest(payload)
+						: undefined,
+					onResponse: (response, responseModel) => this._observeNativeCompactionResponse(response, responseModel),
+				},
+			);
+
+			if (
+				controller.signal.aborted ||
+				this._lifecycleGeneration !== lifecycleGeneration ||
+				this._nativeCompactionAttempt?.id !== attempt.id
+			) {
+				throw new DOMException("Compaction cancelled", "AbortError");
+			}
+			const currentIdentity = this._getNativeCompactionIdentity();
+			if (!currentIdentity) throw new Error("Provider checkpoint current identity is incompatible before append");
+
+			const checkpoint: ProviderCheckpoint = {
+				...operation,
+				frontierEntryId,
+				predecessorEntryId: previousCheckpoint?.id,
+				windowGeneration: previousCheckpoint ? (previousCheckpoint.checkpoint.windowGeneration ?? 1) + 1 : 1,
+			};
+			const checkpointId = this.sessionManager.appendProviderCheckpoint(checkpoint, {
+				expected: attempt.expected,
+				currentIdentity,
+			});
+			const checkpointEntry = this.sessionManager.getEntry(checkpointId);
+			if (checkpointEntry?.type !== "provider_checkpoint") {
+				throw new Error("Provider checkpoint append did not create a checkpoint entry");
+			}
+			if (reason === "overflow") {
+				this.agent.state.messages = [
+					...operationContext.messages,
+					{
+						role: "custom",
+						customType: "provider_checkpoint_boundary",
+						content: [],
+						display: false,
+						details: { checkpointEntryId: checkpointEntry.id },
+						timestamp: Date.now(),
+					},
+				];
+			} else {
+				this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+			}
+			return {
+				summary: "",
+				firstKeptEntryId: frontierEntryId,
+				tokensBefore,
+				estimatedTokensAfter: estimateMessagesTokens(
+					this.sessionManager.buildSessionContext({ providerCheckpoint: { identity: currentIdentity } }).messages,
+				),
+				usage: operation.usage,
+				details: { strategy: responsesCompactionAdapter.id },
+				checkpointEntry,
+			};
+		} finally {
+			if (this._nativeCompactionAttempt?.id === attempt.id) this._nativeCompactionAttempt = undefined;
+			if (reason === "manual" && this._compactionAbortController === controller) {
+				this._compactionAbortController = undefined;
+			}
+			if (reason !== "manual" && this._autoCompactionAbortController === controller) {
+				this._autoCompactionAbortController = undefined;
+			}
+		}
+	}
+
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		if (this._nativeCompactionAttempt) {
+			throw new Error("Compaction already in progress");
+		}
 		this._disconnectFromAgent();
 		await this.abort();
-		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 
 		try {
 			if (!this.model) {
 				throw new Error(formatNoModelSelectedMessage());
 			}
+			if (this._getNativeCompactionIdentity()) {
+				const nativeResult = await this._runNativeCompaction("manual");
+				const compactionResult: CompactionResult = nativeResult;
+				this._emit({
+					type: "compaction_end",
+					reason: "manual",
+					result: compactionResult,
+					aborted: false,
+					willRetry: false,
+				});
+				return compactionResult;
+			}
 
+			this._compactionAbortController = new AbortController();
 			const { apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
 
 			const pathEntries = this.sessionManager.getBranch();
@@ -1928,6 +2150,7 @@ export class AgentSession {
 	 * Cancel in-progress compaction (manual or auto).
 	 */
 	abortCompaction(): void {
+		this._nativeCompactionAttempt?.controller.abort();
 		this._compactionAbortController?.abort();
 		this._autoCompactionAbortController?.abort();
 	}
@@ -2048,9 +2271,25 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 		let started = false;
 
+		if (this._nativeCompactionAttempt) return false;
+
 		try {
 			if (!this.model) {
 				return false;
+			}
+			if (this._getNativeCompactionIdentity()) {
+				this._emit({ type: "compaction_start", reason });
+				started = true;
+				const nativeResult = await this._runNativeCompaction(reason);
+				this._emit({ type: "compaction_end", reason, result: nativeResult, aborted: false, willRetry });
+				if (willRetry) {
+					const messages = this.agent.state.messages;
+					const lastMessage = messages[messages.length - 1];
+					if (lastMessage?.role === "assistant" && lastMessage.stopReason === "error") {
+						this.agent.state.messages = messages.slice(0, -1);
+					}
+				}
+				return willRetry;
 			}
 
 			let apiKey: string | undefined;
@@ -2599,6 +2838,8 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		this._lifecycleGeneration++;
+		this.abortCompaction();
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
 		await this.settingsManager.reload();
@@ -2892,6 +3133,8 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		this._lifecycleGeneration++;
+		this.abortCompaction();
 		const oldLeafId = this.sessionManager.getLeafId();
 
 		// No-op if already at target
@@ -3112,6 +3355,8 @@ export class AgentSession {
 		for (const entry of this.sessionManager.getEntries()) {
 			if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
+			} else if (entry.type === "provider_checkpoint" && entry.checkpoint.usage) {
+				addUsageToTotals(usageTotals, entry.checkpoint.usage);
 			}
 			if (entry.type !== "message") continue;
 			totalMessages++;

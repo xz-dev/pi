@@ -478,6 +478,11 @@ export interface Context {
 	systemPrompt?: string;
 	messages: Message[];
 	tools?: Tool[];
+	/**
+	 * Explicit provider-specific request state. This is not a generic message and
+	 * must only be interpreted by the selected provider implementation.
+	 */
+	providerState?: unknown;
 }
 
 /**
@@ -562,7 +567,19 @@ export interface OpenAICompletionsCompat {
 }
 
 /** Compatibility settings for OpenAI Responses APIs. */
+export const OPENAI_RESPONSES_COMPACTION_ADAPTER = "openai-responses-compact-v1" as const;
+
+export interface OpenAIResponsesCompactionIdentity {
+	adapter: typeof OPENAI_RESPONSES_COMPACTION_ADAPTER;
+	/** Provider-declared non-secret compatibility realm. */
+	realm: string;
+	/** Provider-declared model family whose compact checkpoints are mutually compatible. */
+	modelFamily: string;
+}
+
 export interface OpenAIResponsesCompat {
+	/** Explicit native compaction capability and provider-owned compatibility identity. Default: disabled. */
+	responsesCompaction?: OpenAIResponsesCompactionIdentity;
 	/** Whether the provider supports the `developer` role (vs `system`). Default: true. */
 	supportsDeveloperRole?: boolean;
 	/** Session-affinity header format: `openai` sends `session_id` and `x-client-request-id`; `openai-nosession` sends `x-client-request-id`; `openrouter` sends `x-session-id`. Does not affect the `prompt_cache_key` body param, which is governed by cache retention. Default: auto-detected. */

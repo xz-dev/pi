@@ -1,5 +1,11 @@
 import OpenAI from "openai";
-import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import type {
+	CompactedResponse,
+	ResponseCompactParams,
+	ResponseCreateParamsStreaming,
+	ResponseInput,
+} from "openai/resources/responses/responses.js";
+import { getEnvApiKey } from "../env-api-keys.ts";
 import { clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
@@ -10,11 +16,13 @@ import type {
 	OpenAIResponsesCompat,
 	ProviderEnv,
 	ProviderHeaders,
+	ProviderResponse,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
 	Usage,
 } from "../types.ts";
+import { OPENAI_RESPONSES_COMPACTION_ADAPTER } from "../types.ts";
 import { splitDeferredTools } from "../utils/deferred-tools.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -24,7 +32,16 @@ import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	getOpenAIResponsesCheckpointIdentity,
+	normalizeOpenAIResponsesCompactionEndpoint,
+} from "./openai-responses.lazy.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	mapOpenAIResponsesUsage,
+	processResponsesStream,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -64,7 +81,9 @@ function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEn
 	return "short";
 }
 
-function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
+type ResolvedOpenAIResponsesCompat = Required<Omit<OpenAIResponsesCompat, "responsesCompaction">>;
+
+function getCompat(model: Model<"openai-responses">): ResolvedOpenAIResponsesCompat {
 	return {
 		supportsDeveloperRole: model.compat?.supportsDeveloperRole ?? true,
 		sessionAffinityFormat: model.compat?.sessionAffinityFormat ?? detectSessionAffinityFormat(model),
@@ -77,7 +96,7 @@ function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCo
 }
 
 function getPromptCacheRetention(
-	compat: Required<OpenAIResponsesCompat>,
+	compat: ResolvedOpenAIResponsesCompat,
 	cacheRetention: CacheRetention,
 ): "24h" | undefined {
 	return cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined;
@@ -93,6 +112,50 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	toolChoice?: ResponseCreateParamsStreaming["tool_choice"];
+}
+
+export interface OpenAIResponsesCompactionOptions {
+	apiKey?: string;
+	env?: ProviderEnv;
+	headers?: ProviderHeaders;
+	signal?: AbortSignal;
+	timeoutMs?: number;
+	maxRetries?: number;
+	maxRetryDelayMs?: number;
+	transformHeaders?: (headers: ProviderHeaders) => Promise<ProviderHeaders> | ProviderHeaders;
+	onPayload?: (payload: ResponseCompactParams, model: Model<"openai-responses">) => Promise<unknown> | unknown;
+	onResponse?: (response: ProviderResponse, model: Model<"openai-responses">) => void | Promise<void>;
+}
+
+export interface OpenAIResponsesCheckpointIdentity {
+	readonly adapter: typeof OPENAI_RESPONSES_COMPACTION_ADAPTER;
+	readonly realm: string;
+	readonly provider: string;
+	readonly endpoint: string;
+	readonly modelFamily: string;
+}
+
+export interface OpenAIResponsesCheckpoint {
+	type: "provider_checkpoint";
+	version: 1;
+	identity: OpenAIResponsesCheckpointIdentity;
+	payload: CompactedResponse;
+	usage?: Usage;
+}
+
+export interface OpenAIResponsesProviderState {
+	type: "openai_responses_provider_state";
+	checkpoint: OpenAIResponsesCheckpoint;
+}
+
+export interface OpenAIResponsesCompactionAdapter {
+	readonly id: typeof OPENAI_RESPONSES_COMPACTION_ADAPTER;
+	compact(
+		model: Model<"openai-responses">,
+		context: Context,
+		options?: OpenAIResponsesCompactionOptions,
+	): Promise<OpenAIResponsesCheckpoint>;
+	renderCheckpoint(model: Model<"openai-responses">, checkpoint: OpenAIResponsesCheckpoint): ResponseInput;
 }
 
 /**
@@ -249,18 +312,23 @@ function createClient(
 	});
 }
 
-function buildParams(
+function getOpenAIResponsesProviderState(value: unknown): OpenAIResponsesProviderState | undefined {
+	if (!isRecord(value) || value.type !== "openai_responses_provider_state") return undefined;
+	const checkpoint = value.checkpoint;
+	if (!isRecord(checkpoint) || checkpoint.type !== "provider_checkpoint" || checkpoint.version !== 1) return undefined;
+	return value as unknown as OpenAIResponsesProviderState;
+}
+
+function renderResponsesInput(
 	model: Model<"openai-responses">,
 	context: Context,
-	options: OpenAIResponsesOptions | undefined,
-	compat: Required<OpenAIResponsesCompat> = getCompat(model),
-	grammarToolInputProperties: ReadonlyMap<string, string> = createGrammarToolInputProperties(
-		context.tools,
-		compat.supportsOpenAIGrammarTools,
-	),
-) {
-	const toolPlacement = splitDeferredTools(context, compat.supportsToolSearch);
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+	compat: ResolvedOpenAIResponsesCompat,
+	grammarToolInputProperties: ReadonlyMap<string, string>,
+): { input: ResponseInput; immediateTools: ReturnType<typeof splitDeferredTools>["immediate"] } {
+	const providerState = getOpenAIResponsesProviderState(context.providerState);
+	const messageContext = providerState ? { ...context, systemPrompt: undefined } : context;
+	const toolPlacement = splitDeferredTools(messageContext, compat.supportsToolSearch);
+	const suffix = convertResponsesMessages(model, messageContext, OPENAI_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		deferredTools: toolPlacement.deferred,
 		toolOptions: {
@@ -268,12 +336,31 @@ function buildParams(
 			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
 		},
 	});
+	return {
+		input: providerState
+			? [...responsesCompactionAdapter.renderCheckpoint(model, providerState.checkpoint), ...suffix]
+			: suffix,
+		immediateTools: toolPlacement.immediate,
+	};
+}
+
+function buildParams(
+	model: Model<"openai-responses">,
+	context: Context,
+	options: OpenAIResponsesOptions | undefined,
+	compat: ResolvedOpenAIResponsesCompat = getCompat(model),
+	grammarToolInputProperties: ReadonlyMap<string, string> = createGrammarToolInputProperties(
+		context.tools,
+		compat.supportsOpenAIGrammarTools,
+	),
+) {
+	const rendered = renderResponsesInput(model, context, compat, grammarToolInputProperties);
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 	const disableImplicitPromptCache = cacheRetention === "none" && compat.supportsExplicitPromptCacheMode;
 	const params: ResponseCreateParamsStreaming & { prompt_cache_options?: { mode: "explicit" } } = {
 		model: model.id,
-		input: messages,
+		input: rendered.input,
 		stream: true,
 		prompt_cache_key: cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
 		prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention),
@@ -293,8 +380,8 @@ function buildParams(
 		params.service_tier = options.serviceTier;
 	}
 
-	if (toolPlacement.immediate.length > 0) {
-		params.tools = convertResponsesTools(toolPlacement.immediate, {
+	if (rendered.immediateTools.length > 0) {
+		params.tools = convertResponsesTools(rendered.immediateTools, {
 			supportsStrictMode: compat.supportsStrictMode,
 			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
 		});
@@ -324,6 +411,179 @@ function buildParams(
 
 	return params;
 }
+
+export { getOpenAIResponsesCheckpointIdentity, normalizeOpenAIResponsesCompactionEndpoint };
+
+function snapshotCompactionIdentity(model: Model<"openai-responses">): OpenAIResponsesCheckpointIdentity {
+	const declared = model.compat?.responsesCompaction;
+	if (declared?.adapter !== OPENAI_RESPONSES_COMPACTION_ADAPTER) {
+		throw new Error(
+			`OpenAI Responses native compaction is not supported without explicit ${OPENAI_RESPONSES_COMPACTION_ADAPTER} compatibility`,
+		);
+	}
+	const identity = getOpenAIResponsesCheckpointIdentity(model);
+	if (!identity) {
+		throw new Error(
+			"OpenAI Responses native compaction requires non-empty realm and modelFamily compatibility identity",
+		);
+	}
+	return identity;
+}
+
+function identitiesMatch(left: OpenAIResponsesCheckpointIdentity, right: OpenAIResponsesCheckpointIdentity): boolean {
+	return (
+		left.adapter === right.adapter &&
+		left.realm === right.realm &&
+		left.provider === right.provider &&
+		left.endpoint === right.endpoint &&
+		left.modelFamily === right.modelFamily
+	);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function validateUsageObject(value: unknown): value is CompactedResponse["usage"] {
+	if (!isRecord(value)) return false;
+	if (
+		!isNonNegativeFiniteNumber(value.input_tokens) ||
+		!isNonNegativeFiniteNumber(value.output_tokens) ||
+		!isNonNegativeFiniteNumber(value.total_tokens) ||
+		!isRecord(value.input_tokens_details) ||
+		!isNonNegativeFiniteNumber(value.input_tokens_details.cached_tokens) ||
+		!isRecord(value.output_tokens_details) ||
+		!isNonNegativeFiniteNumber(value.output_tokens_details.reasoning_tokens)
+	) {
+		return false;
+	}
+	const cacheWriteTokens = value.input_tokens_details.cache_write_tokens;
+	return cacheWriteTokens === undefined || isNonNegativeFiniteNumber(cacheWriteTokens);
+}
+
+function validateCompactedResponse(value: unknown): asserts value is CompactedResponse {
+	const invalid = (reason: string): never => {
+		throw new Error(`Invalid Responses compact response: ${reason}`);
+	};
+	if (!isRecord(value)) invalid("expected an object envelope");
+	const envelope = value as Record<string, unknown>;
+	if (typeof envelope.id !== "string" || envelope.id.trim().length === 0) invalid("expected a non-empty id");
+	if (typeof envelope.created_at !== "number" || !Number.isFinite(envelope.created_at)) {
+		invalid("expected a numeric created_at");
+	}
+	if (envelope.object !== "response.compaction") invalid('expected object "response.compaction"');
+	if (!validateUsageObject(envelope.usage)) invalid("expected a usage object with numeric counters");
+	if (!Array.isArray(envelope.output) || envelope.output.length === 0) invalid("expected non-empty output");
+	const output = envelope.output as unknown[];
+	for (const item of output) {
+		if (!isRecord(item) || typeof item.type !== "string" || item.type.trim().length === 0) {
+			invalid("expected every output item to be an object with a non-empty type");
+		}
+	}
+}
+
+function assertJsonValue(value: unknown, path = "checkpoint", ancestors = new Set<object>()): void {
+	if (value === null || typeof value === "string" || typeof value === "boolean") return;
+	if (typeof value === "number" && Number.isFinite(value)) return;
+	if (typeof value !== "object") {
+		throw new Error(`Invalid Responses compact checkpoint: unsupported non-JSON value at ${path}`);
+	}
+	if (ancestors.has(value)) {
+		throw new Error(`Invalid Responses compact checkpoint: circular value at ${path}`);
+	}
+	ancestors.add(value);
+	if (Array.isArray(value)) {
+		value.forEach((item, index) => {
+			assertJsonValue(item, `${path}[${index}]`, ancestors);
+		});
+	} else {
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null) {
+			throw new Error(`Invalid Responses compact checkpoint: unsupported non-JSON object at ${path}`);
+		}
+		for (const [key, item] of Object.entries(value)) assertJsonValue(item, `${path}.${key}`, ancestors);
+	}
+	ancestors.delete(value);
+}
+
+function cloneJson<T>(value: T): T {
+	assertJsonValue(value);
+	return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function formatCompactionError(error: unknown, secrets: Array<string | null | undefined>): Error {
+	const message = formatOpenAIResponsesError(error);
+	const redact = secrets.filter((value): value is string => typeof value === "string" && value.length > 0);
+	let redacted = message;
+	for (const secret of redact) redacted = redacted.replaceAll(secret, "[redacted]");
+	return new Error(redacted);
+}
+
+export const responsesCompactionAdapter: OpenAIResponsesCompactionAdapter = {
+	id: OPENAI_RESPONSES_COMPACTION_ADAPTER,
+	async compact(model, context, options) {
+		const identity = snapshotCompactionIdentity(model);
+		const compat = getCompat(model);
+		const grammarToolInputProperties = createGrammarToolInputProperties(
+			context.tools,
+			compat.supportsOpenAIGrammarTools,
+		);
+		const input = renderResponsesInput(model, context, compat, grammarToolInputProperties).input;
+		const configuredApiKey = options?.apiKey ?? getEnvApiKey(model.provider, options?.env);
+		const requestHeaders = options?.transformHeaders
+			? await options.transformHeaders(options.headers ?? {})
+			: options?.headers;
+		const apiKey = getClientApiKey(model.provider, configuredApiKey, requestHeaders);
+		const client = createClient(model, context, apiKey, requestHeaders);
+		let body: ResponseCompactParams = { model: model.id, input };
+		const nextBody = await options?.onPayload?.(body, model);
+		if (nextBody !== undefined) body = nextBody as ResponseCompactParams;
+		const requestOptions = {
+			...(options?.signal ? { signal: options.signal } : {}),
+			...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+			maxRetries: 0,
+		};
+		try {
+			const { data, response } = await retryProviderRequest(
+				() => client.responses.compact(body, requestOptions).withResponse(),
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				},
+			);
+			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			validateCompactedResponse(data);
+			const payload = cloneJson(data);
+			return {
+				type: "provider_checkpoint",
+				version: 1,
+				identity,
+				payload,
+				usage: mapOpenAIResponsesUsage(model, payload.usage),
+			};
+		} catch (error) {
+			if (options?.signal?.aborted) throw options.signal.reason ?? error;
+			if (error instanceof Error && error.message.startsWith("Invalid Responses compact response:")) throw error;
+			throw formatCompactionError(error, [configuredApiKey, ...Object.values(requestHeaders ?? {})]);
+		}
+	},
+	renderCheckpoint(model, checkpoint) {
+		if (checkpoint.type !== "provider_checkpoint" || checkpoint.version !== 1) {
+			throw new Error("Invalid Responses compact checkpoint version");
+		}
+		const expectedIdentity = snapshotCompactionIdentity(model);
+		if (!identitiesMatch(checkpoint.identity, expectedIdentity)) {
+			throw new Error("Responses compact checkpoint identity is not compatible with this model");
+		}
+		validateCompactedResponse(checkpoint.payload);
+		return cloneJson(checkpoint.payload.output) as ResponseInput;
+	},
+};
 
 function getServiceTierCostMultiplier(
 	model: Pick<Model<"openai-responses">, "id">,

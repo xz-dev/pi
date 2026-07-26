@@ -173,6 +173,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 
 	/**
+	 * Resolve a model-specific request projection immediately before each provider call.
+	 *
+	 * This runs after pending prompt/steering/follow-up messages enter the loop context
+	 * and before `transformContext`, so context hooks observe and can modify the selected
+	 * projection. Provider state remains separate from generic messages.
+	 */
+	resolveRequestContext?: (
+		model: Model<any>,
+		messages: AgentMessage[],
+	) => { messages: AgentMessage[]; providerState?: unknown };
+
+	/**
 	 * Optional transform applied to the context before `convertToLlm`.
 	 *
 	 * Use this for operations that work at the AgentMessage level:
@@ -410,6 +422,8 @@ export interface AgentContext {
 	messages: AgentMessage[];
 	/** Tools available for this run. */
 	tools?: AgentTool<any>[];
+	/** Explicit provider request state carried separately from generic messages. */
+	providerState?: unknown;
 }
 
 /**

@@ -98,6 +98,11 @@ export interface AgentOptions {
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	/** Resolve model-aware request messages and optional provider state immediately before a run starts. */
+	resolveRequestContext?: (
+		model: Model<any>,
+		messages: AgentMessage[],
+	) => { messages: AgentMessage[]; providerState?: unknown };
 	streamFn: StreamFn;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
@@ -176,6 +181,10 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	public resolveRequestContext?: (
+		model: Model<any>,
+		messages: AgentMessage[],
+	) => { messages: AgentMessage[]; providerState?: unknown };
 	public streamFunction: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
@@ -213,6 +222,7 @@ export class Agent {
 		this._state = createMutableAgentState(runtimeOptions.initialState);
 		this.convertToLlm = runtimeOptions.convertToLlm ?? defaultConvertToLlm;
 		this.transformContext = runtimeOptions.transformContext;
+		this.resolveRequestContext = runtimeOptions.resolveRequestContext;
 		this.streamFunction = runtimeOptions.streamFn ?? getDefaultStreamFn();
 		this.getApiKey = runtimeOptions.getApiKey;
 		this.onPayload = runtimeOptions.onPayload;
@@ -455,6 +465,7 @@ export class Agent {
 						}
 					: undefined,
 			convertToLlm: this.convertToLlm,
+			resolveRequestContext: this.resolveRequestContext,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
