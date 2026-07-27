@@ -1,0 +1,130 @@
+name: 'Upstream Sync'
+
+on:
+  schedule:
+    - cron: '28 5,17 * * *'
+    # scheduled at 13:28 and 01:28 Asia/Shanghai (UTC+8)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync-main-with-squash-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebuild main from upstream and squash branches
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/earendil-works/pi.git
+          git fetch upstream main
+          git fetch origin ci patch/dependency-audit patch/hibernate-resume patch/esc-abort tmp/patch/hibernate-esc-abort patch/tui-synchronized-cursor tmp/patch/hibernate-cursor-fixture patch/changelog-prerelease patch/skill-overrides
+          git reset --hard upstream/main
+
+          if ! git merge --squash origin/ci; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != README.md ]]; then
+              printf '::error::Unexpected ci squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+          fi
+          git restore --source=origin/ci --staged --worktree -- README.md
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after replacing README.md'
+            exit 1
+          fi
+          git commit -m "merge ci branch"
+
+          git merge --squash origin/patch/dependency-audit
+          git commit -m "merge patch/dependency-audit branch"
+
+          git merge --squash origin/patch/hibernate-resume
+          git commit -m "merge patch/hibernate-resume branch"
+
+          git merge --squash origin/patch/esc-abort
+          git commit -m "merge patch/esc-abort branch"
+
+          test "$(git rev-parse origin/tmp/patch/hibernate-esc-abort^)" = \
+            "$(git rev-parse origin/patch/hibernate-resume)"
+          git diff --binary --full-index \
+            origin/tmp/patch/hibernate-esc-abort^ \
+            origin/tmp/patch/hibernate-esc-abort | git apply --index --3way
+          git commit -m "merge tmp/patch/hibernate-esc-abort branch"
+
+          git merge --squash origin/patch/tui-synchronized-cursor
+          git commit -m "merge patch/tui-synchronized-cursor branch"
+
+          git diff --binary --full-index \
+            origin/patch/tui-synchronized-cursor \
+            origin/tmp/patch/hibernate-cursor-fixture | git apply --index --3way
+          git commit -m "merge tmp/patch/hibernate-cursor-fixture branch"
+
+
+          git merge --squash origin/patch/changelog-prerelease
+          git commit -m "merge patch/changelog-prerelease branch"
+
+          git merge --squash origin/patch/skill-overrides
+          git commit -m "merge patch/skill-overrides branch"
+
+      - name: Install dependencies for pre-push gates
+        run: npm ci --ignore-scripts
+
+      - name: Hydrate model data for pre-push gates
+        run: npm run hydrate:model-data
+
+      - name: Build rebuilt main
+        run: npm run build
+
+      - name: Check rebuilt main
+        run: npm run check
+
+      - name: Run focused integration tests
+        run: |
+          npx vitest run \
+            packages/coding-agent/test/extensions-discovery.test.ts \
+            --testNamePattern 'loads the coding-agent entrypoint without rewriting pi-ai provider subpaths' \
+            --testTimeout 15000
+          npx vitest run \
+            packages/coding-agent/test/suite/agent-session-hibernate-admission.test.ts \
+            packages/coding-agent/test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
+            packages/coding-agent/test/suite/regressions/6234-hibernate-esc-abort.test.ts \
+            packages/coding-agent/test/interactive-mode-queue-tui.test.ts
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Audit all dependencies
+        run: npm audit --audit-level=moderate
+
+      - name: Verify production dependency signatures
+        run: npm audit signatures --omit=dev
+
+      - name: Require sync workflow token
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          test -n "${PUSH_TOKEN}" || {
+            echo "::error::SYNC_WORKFLOW_TOKEN is required because GITHUB_TOKEN pushes do not trigger downstream workflows"
+            exit 1
+          }
+
+      - name: Push rebuilt main
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease origin HEAD:main
