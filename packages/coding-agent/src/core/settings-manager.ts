@@ -44,6 +44,8 @@ export type {
 	RetrySettings,
 	SessionShareDestination,
 	Settings,
+	SkillOverride,
+	SkillOverrides,
 	TerminalSettings,
 	ThinkingBudgetsSettings,
 	TransportSetting,

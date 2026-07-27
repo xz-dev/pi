@@ -168,6 +168,12 @@ const CodemodeSettingsSchema = Type.Object({
 	),
 });
 
+const SkillOverrideSchema = Type.Object({
+	disableModelInvocation: Type.Optional(Type.Boolean()),
+});
+
+const SkillOverridesSchema = Type.Record(Type.String(), SkillOverrideSchema);
+
 const PackageSourceSchema = Type.Union(
 	[
 		Type.String({ description: "Load all resources from the package." }),
@@ -178,6 +184,7 @@ const PackageSourceSchema = Type.Union(
 			),
 			extensions: Type.Optional(Type.Array(Type.String())),
 			skills: Type.Optional(Type.Array(Type.String())),
+			skillOverrides: Type.Optional(SkillOverridesSchema),
 			prompts: Type.Optional(Type.Array(Type.String())),
 			themes: Type.Optional(Type.Array(Type.String())),
 		}),
@@ -477,6 +484,8 @@ export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust
 export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
 export type TransportSetting = NonNullable<SettingsInput["transport"]>;
 export type SessionShareDestination = NonNullable<SettingsInput["sessionShareDestination"]>;
+export interface SkillOverride extends Static<typeof SkillOverrideSchema> {}
+export type SkillOverrides = Static<typeof SkillOverridesSchema>;
 export type PackageSource = Static<typeof PackageSourceSchema>;
 export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutput"]>;
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
