@@ -42,6 +42,8 @@ export type {
 	QuietStartup,
 	RetrySettings,
 	Settings,
+	SkillOverride,
+	SkillOverrides,
 	TerminalSettings,
 	ThinkingBudgetsSettings,
 	TransportSetting,
