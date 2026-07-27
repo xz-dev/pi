@@ -1,129 +1,230 @@
+> pi can help you create pi packages. Ask it to bundle your extensions, skills, prompt templates, or themes.
+
 # Pi Packages
 
-Pi packages install and distribute extensions, skills, prompt templates, and themes as one unit. Use a package when a customization should be shared through npm or git, or when several resources belong together.
+Pi packages bundle extensions, skills, prompt templates, and themes so you can share them through npm or git. A package can declare resources in `package.json` under the `pi` key, or use conventional directories.
 
-A package is an ordinary directory or npm package. It can expose conventional resource directories, declare explicit paths under the `pi` key in `package.json`, and carry its own runtime dependencies.
+## Table of Contents
 
-## Install and manage packages
+- [Install and Manage](#install-and-manage)
+- [Package Sources](#package-sources)
+- [Creating a Pi Package](#creating-a-pi-package)
+- [Package Structure](#package-structure)
+- [Dependencies](#dependencies)
+- [Package Filtering](#package-filtering)
+- [Enable and Disable Resources](#enable-and-disable-resources)
+- [Scope and Deduplication](#scope-and-deduplication)
 
-Install from npm, git, or a local path:
+## Install and Manage
 
-```bash
-pi install npm:@example/pi-tools@1.0.0
-pi install git:github.com/example/pi-tools@v1
-pi install ./local-package
-```
-
-`pi list` shows configured packages. Use `pi remove <source>` to remove one and `pi update --extensions` to reconcile package installations. See [Command Line](cli.md#package-commands) for every package command and option.
-
-Personal installs are written to `~/.pi/agent/settings.json`. Add `--local` or `-l` to write the package declaration to `.pi/settings.json`. Pi reads declarations from that file only after project trust is granted.
-
-Project packages are installed and loaded only after project trust is resolved. Packages can execute extension code and can include skills that instruct the model to run programs. Review third-party package source before installing it. Review project package declarations before granting project trust.
-
-Use `--extension` or `-e` to try a package for one invocation without adding it to settings:
+> **Security:** Pi packages run with full system access. Extensions execute arbitrary code, and skills can instruct the model to perform any action including running executables. Review source code before installing third-party packages.
 
 ```bash
-pi -e npm:@example/pi-tools
+pi install npm:@foo/bar@1.0.0
+pi install git:github.com/user/repo@v1
+pi install https://github.com/user/repo  # raw URLs work too
+pi install /absolute/path/to/package
+pi install ./relative/path/to/package
+
+pi remove npm:@foo/bar
+pi list                     # show installed packages from settings
+pi update                   # update pi only
+pi update --all             # update pi, update packages, and reconcile pinned git refs
+pi update --extensions      # update packages and reconcile pinned git refs only
+pi update --models          # refresh model catalogs only
+pi update --self            # update pi only
+pi update --self --force    # reinstall pi even if current
+pi update npm:@foo/bar      # update one package
+pi update --extension npm:@foo/bar
 ```
 
-## Choose a source
+These commands manage pi packages and `pi update` can update the pi CLI installation. For experimental installer-managed installations, `pi update` installs the exact checked version into a staged, lockfile-backed release and activates it only after verification, leaving the current release intact if the update fails. Managed installations do not support `--force`; rerun the installer to repair one. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
 
-| Source | Example | Behavior |
-|---|---|---|
-| npm | `npm:@example/pi-tools@1.0.0` | Installed under the Pi npm directory |
-| git | `git:github.com/example/pi-tools@v1` | Cloned and reconciled to the selected ref |
-| URL | `https://github.com/example/pi-tools` | Treated as a git source |
-| Local | `./pi-tools` | Loaded from the resolved path without copying |
+By default, `install` and `remove` write to user settings (`~/.pi/agent/settings.json`). Use `-l` to write to project settings (`.pi/settings.json`) instead. Project settings can be shared with your team, and pi installs any missing packages automatically on startup after the project is trusted.
 
-Versioned npm specifications are pinned. Git tags and commits are also pinned; package updates reconcile the checkout but do not move a configured ref.
+To try a package without installing it, use `--extension` or `-e`. This installs to a temporary directory for the current run only:
 
-Relative local paths resolve from the settings file that contains them. A file path loads one extension. A directory follows normal package discovery rules.
-
-## Create a package
-
-The simplest package uses conventional directories:
-
-```text
-my-pi-package/
-├── package.json
-├── extensions/
-├── skills/
-├── prompts/
-└── themes/
+```bash
+pi -e npm:@foo/bar
+pi -e git:github.com/user/repo
 ```
 
-Without a `pi` manifest, Pi discovers TypeScript and JavaScript extensions, skill directories, Markdown prompts, and JSON themes from those directories.
+## Package Sources
 
-Use an explicit manifest when resources live elsewhere or need filtering:
+Pi accepts three source types in settings and `pi install`.
+
+### npm
+
+```
+npm:@scope/pkg@1.2.3
+npm:pkg
+```
+
+- Versioned specs are pinned and skipped by package updates (`pi update --extensions`, `pi update --all`).
+- User installs go under `~/.pi/agent/npm/`.
+- Project installs go under `.pi/npm/`.
+- Set `npmCommand` in `settings.json` to pin npm package lookup and install operations to a specific wrapper command such as `mise` or `asdf`.
+
+Example:
 
 ```json
 {
-  "name": "my-pi-package",
+  "npmCommand": ["mise", "exec", "node@20", "--", "npm"]
+}
+```
+
+### git
+
+```
+git:github.com/user/repo@v1
+git:git@github.com:user/repo@v1
+https://github.com/user/repo@v1
+ssh://git@github.com/user/repo@v1
+```
+
+- Without `git:` prefix, only protocol URLs are accepted (`https://`, `http://`, `ssh://`, `git://`).
+- With `git:` prefix, shorthand formats are accepted, including `github.com/user/repo` and `git@github.com:user/repo`.
+- HTTPS and SSH URLs are both supported.
+- SSH URLs use your configured SSH keys automatically (respects `~/.ssh/config`).
+- For non-interactive runs (for example CI), you can set `GIT_TERMINAL_PROMPT=0` to disable credential prompts and set `GIT_SSH_COMMAND` (for example `ssh -o BatchMode=yes -o ConnectTimeout=5`) to fail fast.
+- Refs are pinned tags or commits. `pi update --extensions` and `pi update --all` do not move them to newer refs, but they do reconcile an existing clone to the configured ref.
+- Use `pi install git:host/user/repo@new-ref` to update settings and move an existing package to a new pinned ref.
+- Cloned to `~/.pi/agent/git/<host>/<path>` (global) or `.pi/git/<host>/<path>` (project).
+- When reconciliation changes the checkout, pi resets and cleans the clone, then runs `npm install` if `package.json` exists.
+
+**SSH examples:**
+```bash
+# git@host:path shorthand (requires git: prefix)
+pi install git:git@github.com:user/repo
+
+# ssh:// protocol format
+pi install ssh://git@github.com/user/repo
+
+# With version ref
+pi install git:git@github.com:user/repo@v1.0.0
+```
+
+### Local Paths
+
+```
+/absolute/path/to/package
+./relative/path/to/package
+```
+
+Local paths point to files or directories on disk and are added to settings without copying. Relative paths are resolved against the settings file they appear in. If the path is a file, it loads as a single extension. If it is a directory, pi loads resources using package rules.
+
+## Creating a Pi Package
+
+Add a `pi` manifest to `package.json` or use conventional directories. Include the `pi-package` keyword for discoverability.
+
+```json
+{
+  "name": "my-package",
   "keywords": ["pi-package"],
   "pi": {
-    "extensions": ["./src/extension.ts"],
-    "skills": ["./resources/skills"],
-    "prompts": ["./resources/prompts/*.md"],
-    "themes": ["./resources/themes/*.json"]
+    "extensions": ["./extensions"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"],
+    "themes": ["./themes"]
   }
 }
 ```
 
-Paths are relative to the package root. Arrays accept glob patterns and exclusions. List dot-prefixed or symlinked resource roots directly when traversal through a glob would not discover them.
+Paths are relative to the package root. Arrays support glob patterns and `!exclusions`. Positive manifest globs discover visible paths in lexical order. List dot-prefixed paths directly. If a glob would need to continue through a symlink, list the symlinked resource root directly.
 
-The `pi-package` keyword makes an npm package eligible for discovery in the [Pi package gallery](https://pi.dev/packages). Optional `pi.image` and `pi.video` fields add gallery previews.
+### Gallery Metadata
 
-## Declare dependencies
+The [package gallery](https://pi.dev/packages) displays packages tagged with `pi-package`. Add `video` or `image` fields to show a preview:
 
-Put runtime packages imported by extensions in `dependencies`. Pi installs package dependencies when it installs an npm or git source.
+```json
+{
+  "name": "my-package",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"],
+    "video": "https://example.com/demo.mp4",
+    "image": "https://example.com/screenshot.png"
+  }
+}
+```
 
-Pi supplies these packages to extensions and skills:
+- **video**: MP4 only. On desktop, autoplays on hover. Clicking opens a fullscreen player.
+- **image**: PNG, JPEG, GIF, or WebP. Displayed as a static preview.
 
-- `@earendil-works/pi-ai`
-- `@earendil-works/pi-agent-core`
-- `@earendil-works/pi-coding-agent`
-- `@earendil-works/pi-tui`
-- `typebox`
+If both are set, video takes precedence.
 
-Declare the host-provided packages listed above in `peerDependencies` with a `"*"` range and do not bundle them. Pi suppresses automatic peer installation for managed npm packages and git packages installed with npm, pnpm, or Bun. Local packages are not installed or modified, so their dependency tree remains the package author's responsibility.
+## Package Structure
 
-Do not list host-provided packages in `dependencies`. A physical copy can bypass Pi's extension module mapping in compiled ESM and create duplicate classes, registries, and initialization work. Pi reports an extension warning when it detects this manifest configuration. Other Pi packages used as dependencies must be included in the published tarball and referenced through their `node_modules` resource paths.
+### Convention Directories
 
-Installed packages load with separate module roots. Do not rely on two packages sharing one dependency instance or one package resolving another package’s undeclared dependency.
+If no `pi` manifest is present, pi auto-discovers resources from these directories:
 
-## Select package resources
+- `extensions/` loads `.ts` and `.js` files
+- `skills/` recursively finds `SKILL.md` folders and loads top-level `.md` files as skills
+- `prompts/` loads `.md` files
+- `themes/` loads `.json` files
 
-The object form in settings narrows which resources load from a package:
+## Dependencies
+
+Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When pi installs a package from npm or git, it runs `npm install`, so those dependencies are installed automatically.
+
+Pi bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `typebox`.
+
+Other pi packages must be bundled in your tarball. Add them to `dependencies` and `bundledDependencies`, then reference their resources through `node_modules/` paths. Pi loads packages with separate module roots, so separate installs do not collide or share modules.
+
+Example:
+
+```json
+{
+  "dependencies": {
+    "shitty-extensions": "^1.0.1"
+  },
+  "bundledDependencies": ["shitty-extensions"],
+  "pi": {
+    "extensions": ["extensions", "node_modules/shitty-extensions/extensions"],
+    "skills": ["skills", "node_modules/shitty-extensions/skills"]
+  }
+}
+```
+
+## Package Filtering
+
+Filter what a package loads using the object form in settings:
 
 ```json
 {
   "packages": [
+    "npm:simple-pkg",
     {
-      "source": "npm:@example/pi-tools",
+      "source": "npm:my-package",
       "extensions": ["extensions/*.ts", "!extensions/legacy.ts"],
       "skills": [],
-      "prompts": ["prompts/review.md"]
+      "prompts": ["prompts/review.md"],
+      "themes": ["+themes/legacy.json"]
     }
   ]
 }
 ```
 
-For each resource type:
+`+path` and `-path` are exact paths relative to the package root.
 
-- Omit the property to load everything allowed by the package.
+- Omit a key to load all of that type.
 - Use `[]` to load none of that type.
-- Use `!pattern` to exclude glob matches.
-- Use `+path` to include one exact allowed path.
-- Use `-path` to exclude one exact path.
+- `!pattern` excludes matches.
+- `+path` force-includes an exact path.
+- `-path` force-excludes an exact path.
+- Filters layer on top of the manifest. They narrow down what is already allowed.
 
-Filters narrow the package manifest. They do not expose resources that the package itself did not declare.
+A package may also set `skillOverrides` keyed by each skill's resolved `name`. Setting `disableModelInvocation` to `true` hides that skill from the model prompt while keeping `/skill:name` available; `false` overrides the skill's frontmatter. Unknown skill names are ignored, and overrides apply only to skills from that package. For an `autoload: false` project delta, same-name overrides replace global entries while unspecified skill overrides are inherited.
 
-Run `pi config` to enable or disable discovered resources. It starts with personal configuration; press Tab to switch scope, or run `pi config --local` to start with project overrides.
+## Enable and Disable Resources
 
-## Understand scope and identity
+Use `pi config` to enable or disable extensions, skills, prompt templates, and themes from installed packages and local directories. `pi config` starts in global settings (`~/.pi/agent/settings.json`); press Tab to switch between global and project-local modes. Use `pi config -l` to start in project overrides (`.pi/settings.json`) with inherited global resources dimmed.
 
-The same package can appear in personal and project settings. A project entry normally replaces the personal entry. With `autoload: false`, the project entry instead acts as a filtering delta over the personal package.
+## Scope and Deduplication
 
-Pi identifies npm packages by package name, git packages by repository URL without the ref, and local packages by resolved absolute path. This prevents the same package from loading twice through equivalent declarations.
+Packages can appear in both global and project settings. If the same package appears in both, the project entry wins unless the project entry has `autoload: false`, in which case it is applied as a delta over the global entry. Identity is determined by:
 
-Use [Extensions](extensions.md), [Skills](skills.md), [Prompt Templates](prompt-templates.md), and [Themes](themes.md) to design each resource before packaging it.
+- npm: package name
+- git: repository URL without ref
+- local: resolved absolute path
