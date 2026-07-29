@@ -11,11 +11,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ## Downstream changes
 
-### Features
-
-- Durable hibernation lets Pi quiesce and persist the current logical work graph, exit, and restore it with `/resume`; ordinary `/pause` remains process-local.
-  - Patch branch: [`patch/hibernate-resume`](https://github.com/xz-dev/pi/tree/patch/hibernate-resume)
-
 ### Fixes
 
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
@@ -37,17 +32,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - ~~Provider-transparent compaction keeps one portable session history across providers while allowing compatible providers to resume from private checkpoints.~~ This feature is retired and explicitly unsupported.
   - Archived branch: [`retired/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/retired/provider-transparent-compaction)
   - Responses API compaction does not reduce API charges: compacted or provider-held context remains billable. It also makes the client-visible state machine opaque, and that hidden state can amplify charges in some cases through unexpected context retention, replay, or repeated compaction.
-
-### Compatibility
-
-These branches contain only temporary integration compatibility for the named patch combinations:
-
-- Compose durable hibernation with the Esc-abort lifecycle fix.
-  - Compatibility branch: [`tmp/patch/hibernate-esc-abort`](https://github.com/xz-dev/pi/tree/tmp/patch/hibernate-esc-abort)
-  - Retire when hibernation and Esc abort merge upstream or no longer require downstream composition.
-- Keep the hibernation integration fixture compatible with synchronized-cursor rendering.
-  - Compatibility branch: [`tmp/patch/hibernate-cursor-fixture`](https://github.com/xz-dev/pi/tree/tmp/patch/hibernate-cursor-fixture)
-  - Retire when either patch lands upstream or their combined fixture no longer differs from upstream.
 
 ## Installation
 
