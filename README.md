@@ -11,6 +11,11 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ## Downstream changes
 
+### Features
+
+- Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
+  - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
+
 ### Fixes
 
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
@@ -20,8 +25,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ### Maintenance
 
-- Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
-  - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
   - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
 - Carry current security updates in the dependency lockfiles, validated by production and full dependency audits.
