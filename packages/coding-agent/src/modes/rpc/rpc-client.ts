@@ -318,6 +318,15 @@ export class RpcClient {
 	}
 
 	/**
+	 * Retry the current eligible settled error or aborted response.
+	 * The retry is a sibling of the failed attempt and uses the current model
+	 * and thinking configuration.
+	 */
+	async retry(): Promise<void> {
+		await this.send({ type: "retry" });
+	}
+
+	/**
 	 * Set auto-retry enabled/disabled.
 	 */
 	async setAutoRetry(enabled: boolean): Promise<void> {

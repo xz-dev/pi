@@ -6,15 +6,19 @@ import {
 	closeSync,
 	createReadStream,
 	existsSync,
+	fchmodSync,
+	fsyncSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
-import { join, resolve } from "path";
+import { dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -170,6 +174,37 @@ export interface SessionContext {
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
 }
+
+export interface RetryAppendScope {
+	/** Append a retry-generated message; the first must be an assistant sibling. */
+	appendMessage(message: Message): string;
+	/** Whether the first retry assistant has been appended. */
+	readonly hasAppendedAssistant: boolean;
+	/** The retry assistant entry id after append. */
+	readonly assistantEntryId: string | undefined;
+	/** Close the scope and reject any later scoped append. */
+	close(): void;
+}
+
+export interface SessionFileOperations {
+	open(path: string, flags: string, mode: number): number;
+	chmod(fd: number, mode: number): void;
+	write(fd: number, contents: string): void;
+	flush(fd: number): void;
+	close(fd: number): void;
+	rename(from: string, to: string): void;
+	remove(path: string): void;
+}
+
+const defaultSessionFileOperations: SessionFileOperations = {
+	open: (path, flags, mode) => openSync(path, flags, mode),
+	chmod: (fd, mode) => fchmodSync(fd, mode),
+	write: (fd, contents) => writeFileSync(fd, contents),
+	flush: (fd) => fsyncSync(fd),
+	close: (fd) => closeSync(fd),
+	rename: (from, to) => renameSync(from, to),
+	remove: (path) => unlinkSync(path),
+};
 
 export interface SessionInfo {
 	path: string;
@@ -864,6 +899,15 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private retryAppendScope:
+		| {
+				expectedLeafId: string;
+				parentId: string | null;
+				assistantEntryId?: string;
+				closed: boolean;
+		  }
+		| undefined;
+	private fileOperations: SessionFileOperations;
 
 	private constructor(
 		cwd: string,
@@ -872,7 +916,9 @@ export class SessionManager {
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
 		preloadedFileEntries?: FileEntry[],
+		fileOperations: SessionFileOperations = defaultSessionFileOperations,
 	) {
+		this.fileOperations = fileOperations;
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
@@ -1041,11 +1087,73 @@ export class SessionManager {
 		}
 	}
 
-	private _appendEntry(entry: SessionEntry): void {
+	private _appendEntry(entry: SessionEntry, retryScope?: RetryAppendScope): void {
+		const activeScope = this.retryAppendScope;
+		const isFirstRetryAssistant =
+			activeScope !== undefined && retryScope !== undefined && activeScope.assistantEntryId === undefined;
+		if (activeScope) {
+			if (!retryScope || activeScope.closed || entry.type !== "message") {
+				throw new Error("Cannot mutate the session while a manual retry owns the session branch.");
+			}
+			if (activeScope.assistantEntryId === undefined) {
+				if (entry.message.role !== "assistant") {
+					throw new Error("The first manual retry entry must be an assistant response.");
+				}
+				if (this.leafId !== activeScope.expectedLeafId) {
+					throw new Error("Cannot append retry response: the session leaf changed after retry admission.");
+				}
+				entry.parentId = activeScope.parentId;
+			}
+		}
+
+		const firstRetryScope = isFirstRetryAssistant ? activeScope : undefined;
+		if (isFirstRetryAssistant) {
+			this._persistRetryFirstAssistant(entry);
+		}
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
-		this._persist(entry);
+		if (!isFirstRetryAssistant) {
+			this._persist(entry);
+		}
+		if (firstRetryScope) {
+			firstRetryScope.assistantEntryId = entry.id;
+			// Consume the manager's special append permission immediately. The
+			// caller retains its local scope handle for post-run bookkeeping.
+			this.retryAppendScope = undefined;
+		}
+	}
+
+	private _persistRetryFirstAssistant(entry: SessionEntry): void {
+		if (!this.persist || !this.sessionFile) return;
+		const mode = statSync(this.sessionFile).mode & 0o777;
+		const temporaryPath = join(dirname(this.sessionFile), `.${randomUUID()}.retry.tmp`);
+		let fd: number | undefined;
+		try {
+			const contents = `${this.fileEntries.map((item) => JSON.stringify(item)).join("\\n")}\\n${JSON.stringify(entry)}\\n`;
+			fd = this.fileOperations.open(temporaryPath, "wx", mode);
+			this.fileOperations.chmod(fd, mode);
+			this.fileOperations.write(fd, contents);
+			this.fileOperations.flush(fd);
+			this.fileOperations.close(fd);
+			fd = undefined;
+			this.fileOperations.rename(temporaryPath, this.sessionFile);
+			this.flushed = true;
+		} catch (error) {
+			if (fd !== undefined) {
+				try {
+					this.fileOperations.close(fd);
+				} catch {
+					// Preserve the original persistence error.
+				}
+			}
+			try {
+				if (existsSync(temporaryPath)) this.fileOperations.remove(temporaryPath);
+			} catch {
+				// Preserve the original persistence error.
+			}
+			throw error;
+		}
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1064,6 +1172,60 @@ export class SessionManager {
 		};
 		this._appendEntry(entry);
 		return entry.id;
+	}
+
+	/**
+	 * Reserve the next assistant append as a direct sibling of a failed attempt.
+	 * While reserved, every ordinary append is rejected. Closing before append
+	 * leaves the leaf and append-only file unchanged.
+	 */
+	beginRetryAppendScope(expectedLeafId: string, failedAssistantId: string): RetryAppendScope {
+		if (this.retryAppendScope) {
+			throw new Error("A manual retry append scope is already active.");
+		}
+		if (this.leafId !== expectedLeafId) {
+			throw new Error("Cannot start retry: the session leaf changed.");
+		}
+		const failedEntry = this.byId.get(failedAssistantId);
+		if (failedEntry?.type !== "message" || failedEntry.message.role !== "assistant") {
+			throw new Error("Cannot start retry: the failed assistant entry is unavailable.");
+		}
+		const state = {
+			expectedLeafId,
+			parentId: failedEntry.parentId,
+			assistantEntryId: undefined as string | undefined,
+			closed: false,
+		};
+		this.retryAppendScope = state;
+		const scope: RetryAppendScope = {
+			appendMessage: (message) => {
+				if (state.closed) {
+					throw new Error("The manual retry append scope is closed.");
+				}
+				const entry: SessionMessageEntry = {
+					type: "message",
+					id: generateId(this.byId),
+					parentId: this.leafId,
+					timestamp: new Date().toISOString(),
+					message,
+				};
+				this._appendEntry(entry, scope);
+				return entry.id;
+			},
+			get hasAppendedAssistant() {
+				return state.assistantEntryId !== undefined;
+			},
+			get assistantEntryId() {
+				return state.assistantEntryId;
+			},
+			close: () => {
+				state.closed = true;
+				if (this.retryAppendScope === state) {
+					this.retryAppendScope = undefined;
+				}
+			},
+		};
+		return scope;
 	}
 
 	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
@@ -1283,6 +1445,14 @@ export class SessionManager {
 	 */
 	buildSessionContext(): SessionContext {
 		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
+	}
+
+	/** Build context at an arbitrary entry without changing the active leaf. */
+	buildSessionContextAt(parentId: string | null): SessionContext {
+		if (parentId !== null && !this.byId.has(parentId)) {
+			throw new Error(`Entry ${parentId} not found`);
+		}
+		return buildSessionContext(this.getEntries(), parentId, this.byId);
 	}
 
 	/**
@@ -1519,6 +1689,16 @@ export class SessionManager {
 	static create(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		return new SessionManager(cwd, dir, undefined, true, options);
+	}
+
+	/** @internal Package-local deterministic persistence-fault test factory. */
+	static createForTesting(
+		cwd: string,
+		sessionDir: string,
+		fileOperations: SessionFileOperations,
+		options?: NewSessionOptions,
+	): SessionManager {
+		return new SessionManager(cwd, normalizePath(sessionDir), undefined, true, options, undefined, fileOperations);
 	}
 
 	/**

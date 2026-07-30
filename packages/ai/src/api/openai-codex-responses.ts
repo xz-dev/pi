@@ -342,7 +342,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							reason: output.stopReason,
 							message: output,
 						});
-						stream.end();
+
 						return;
 					} catch (error) {
 						const aborted = options?.signal?.aborted;
@@ -486,7 +486,6 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 
 			assertSuccessfulOutput(output);
 			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				// Streaming scratch buffers are only used during parsing; never persist them.
@@ -496,7 +495,6 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatProviderError(normalizeProviderError(error));
 			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
 		}
 	})();
 

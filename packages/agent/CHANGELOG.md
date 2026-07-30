@@ -7,6 +7,14 @@
 - Changed `Session` into the sole opened-session aggregate and replaced `SessionStorage`, `SessionRepo`, and concrete per-session persistence classes with a non-owning `SessionRepository` and caller-owned, async-disposable `SessionStore` instances. Create stores with `createInMemorySessionStore()` or `createJsonlSessionStore()`, compose them with `createSessionRepository({ store, search: createScanningSessionSearch(store) })`, and dispose the store after draining harness and session work.
 - `Session` instances are now created by `SessionRepository`; direct construction from an independently supplied store and snapshot was removed.
 
+### Added
+
+- Added `Agent.continueFrom()` for continuing from a supplied context with provider-admission control.
+
+### Fixed
+
+- Fixed aborts waiting indefinitely on lifecycle listeners, context transforms, or provider streams.
+
 ## [0.83.0] - 2026-07-29
 
 ## [0.82.1] - 2026-07-25

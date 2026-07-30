@@ -79,6 +79,7 @@ export class AgentSessionRuntime {
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
+	private exclusiveOperation?: { session: AgentSession; name: string };
 
 	constructor(
 		_session: AgentSession,
@@ -92,6 +93,7 @@ export class AgentSessionRuntime {
 		this.createRuntime = createRuntime;
 		this._diagnostics = _diagnostics;
 		this._modelFallbackMessage = _modelFallbackMessage;
+		this.bindExclusiveOperationRunner(_session);
 	}
 
 	get services(): AgentSessionServices {
@@ -112,6 +114,38 @@ export class AgentSessionRuntime {
 
 	get modelFallbackMessage(): string | undefined {
 		return this._modelFallbackMessage;
+	}
+
+	/** Run one operation with exclusive ownership of the current AgentSession. */
+	async runExclusive<T>(session: AgentSession, name: string, operation: () => Promise<T>): Promise<T> {
+		if (session !== this._session) {
+			throw new Error(`Cannot start ${name}: the active session was replaced.`);
+		}
+		if (this.exclusiveOperation) {
+			throw new Error(
+				name === "manual retry" && this.exclusiveOperation.name === "manual retry"
+					? "Cannot retry: another manual retry is already in progress."
+					: `Cannot start ${name}: ${this.exclusiveOperation.name} is already in progress.`,
+			);
+		}
+		this.exclusiveOperation = { session, name };
+		try {
+			return await operation();
+		} finally {
+			if (this.exclusiveOperation?.session === session) {
+				this.exclusiveOperation = undefined;
+			}
+		}
+	}
+
+	assertOperationAllowed(operation: string): void {
+		if (this.exclusiveOperation) {
+			throw new Error(`Cannot ${operation} while ${this.exclusiveOperation.name} is in progress.`);
+		}
+	}
+
+	private assertReplacementAllowed(operation: string): void {
+		this.assertOperationAllowed(operation);
 	}
 
 	setRebindSession(rebindSession?: (session: AgentSession) => Promise<void>): void {
@@ -174,7 +208,14 @@ export class AgentSessionRuntime {
 			targetSessionFile,
 		});
 		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		this.session.disposeOwned();
+	}
+
+	private bindExclusiveOperationRunner(session: AgentSession): void {
+		session.bindExclusiveOperationRunner((ownedSession, name, operation) =>
+			this.runExclusive(ownedSession, name, operation),
+		);
+		session.bindOperationGuard((operation) => this.assertOperationAllowed(operation));
 	}
 
 	private apply(result: CreateAgentSessionRuntimeResult): void {
@@ -182,6 +223,7 @@ export class AgentSessionRuntime {
 		this._services = result.services;
 		this._diagnostics = result.diagnostics;
 		this._modelFallbackMessage = result.modelFallbackMessage;
+		this.bindExclusiveOperationRunner(result.session);
 	}
 
 	private async finishSessionReplacement(withSession?: (ctx: ReplacedSessionContext) => Promise<void>): Promise<void> {
@@ -201,6 +243,7 @@ export class AgentSessionRuntime {
 			projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
 		},
 	): Promise<{ cancelled: boolean }> {
+		this.assertReplacementAllowed("switch sessions");
 		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
 		if (beforeResult.cancelled) {
 			return beforeResult;
@@ -228,6 +271,7 @@ export class AgentSessionRuntime {
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }> {
+		this.assertReplacementAllowed("create a new session");
 		const beforeResult = await this.emitBeforeSwitch("new");
 		if (beforeResult.cancelled) {
 			return beforeResult;
@@ -263,6 +307,7 @@ export class AgentSessionRuntime {
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean; selectedText?: string }> {
+		this.assertReplacementAllowed("fork the session");
 		const position = options?.position ?? "before";
 		const beforeResult = await this.emitBeforeFork(entryId, { position });
 		if (beforeResult.cancelled) {
@@ -359,6 +404,7 @@ export class AgentSessionRuntime {
 	 * @throws {MissingSessionCwdError} When the imported session cwd cannot be resolved and no override is provided.
 	 */
 	async importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }> {
+		this.assertReplacementAllowed("import a session");
 		const resolvedPath = resolvePath(inputPath);
 		if (!existsSync(resolvedPath)) {
 			throw new SessionImportFileNotFoundError(resolvedPath);
@@ -396,12 +442,13 @@ export class AgentSessionRuntime {
 	}
 
 	async dispose(): Promise<void> {
+		this.assertReplacementAllowed("dispose the runtime");
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
 			reason: "quit",
 		});
 		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		this.session.disposeOwned();
 	}
 }
 

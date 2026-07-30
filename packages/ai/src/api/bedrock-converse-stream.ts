@@ -306,7 +306,6 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as Block).index;
@@ -319,7 +318,6 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 				appendBedrockFailureDiagnostic(output, error, responseRequestId);
 			}
 			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
 		}
 	})();
 

@@ -42,6 +42,44 @@ agent.subscribe((event) => {
 await agent.prompt("Hello!");
 ```
 
+### Continuing from an explicit context
+
+`Agent.continueFrom(context, options)` starts a provider turn from a supplied raw
+`AgentContext` without appending an input message. The agent still uses its
+current model, thinking level, tools, hooks, queues, and provider configuration.
+This is useful when a host owns durable conversation branching and needs to run
+from a reconstructed context.
+
+```typescript
+await agent.continueFrom(
+  {
+    systemPrompt: agent.state.systemPrompt,
+    messages: reconstructedMessages,
+    tools: agent.state.tools,
+  },
+  {
+    throwBeforeAdmission: true,
+    onAdmitted: () => {
+      // The first provider stream has been constructed.
+    },
+  },
+);
+```
+
+`ContinueFromOptions` controls the continuation lifecycle:
+
+- `onAdmitted` runs once after the first provider stream is constructed and
+  before its events are consumed.
+- `throwBeforeAdmission` surfaces setup failures instead of converting them to
+  a terminal assistant message. It also keeps already-started lifecycle
+  listeners authoritative after abort so the host can finish durable state
+  coordination before the run settles.
+- `continueAgentLifecycle` omits a second `agent_start` when this provider turn
+  belongs to an Agent lifecycle that the host has already started.
+
+The effective provider context must be non-empty and end in a non-assistant
+message after `transformContext` and `convertToLlm` run.
+
 ## Core Concepts
 
 ### AgentMessage vs LLM Message

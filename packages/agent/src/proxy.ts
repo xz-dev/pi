@@ -209,8 +209,6 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			if (options.signal?.aborted) {
 				throw new Error("Request aborted by user");
 			}
-
-			stream.end();
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const reason = options.signal?.aborted ? "aborted" : "error";
@@ -221,7 +219,6 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 				reason,
 				error: partial,
 			});
-			stream.end();
 		} finally {
 			if (options.signal) {
 				options.signal.removeEventListener("abort", abortHandler);

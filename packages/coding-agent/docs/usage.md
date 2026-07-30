@@ -50,6 +50,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
+| `/retry` | Retry the eligible settled error or aborted response as a sibling using current model/thinking settings |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML or JSONL |
 | `/import <file>` | Import and resume a session from a JSONL file |
@@ -92,6 +93,7 @@ Useful session commands:
 - `/fork` creates a new session from an earlier user message.
 - `/clone` duplicates the current active branch into a new session file.
 - `/compact` summarizes older messages to free context.
+- `/retry` is eligible only when the latest conversational attempt on the settled active branch is an assistant error or aborted response. Trailing model/thinking metadata is allowed, but a later conversation is not. The failed attempt and old settings stay as audit history; the new assistant is a direct sibling with the same parent, no user/custom/session marker is added, and the failed assistant is excluded from provider context. The current runtime model and thinking configuration drive the request, and current thinking metadata is appended after the result only when reopening requires it. Retry is rejected while an agent run, compaction/branch summary, direct bash command, manual retry, or queued message is active.
 
 See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 

@@ -172,6 +172,17 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 
+	/** Keep already-started context preparation authoritative after abort. */
+	awaitContextPreparationOnAbort?: boolean;
+
+	/** Internal continuation guard evaluated on the effective provider messages. */
+	validateConvertedTail?: boolean;
+
+	/** Narrow continuation admission callback invoked once, on the first provider stream. */
+	onAdmitted?: () => void | Promise<void>;
+	/** Internal continuation mode for a provider run that belongs to an already-started agent lifecycle. */
+	continueAgentLifecycle?: boolean;
+
 	/**
 	 * Optional transform applied to the context before `convertToLlm`.
 	 *

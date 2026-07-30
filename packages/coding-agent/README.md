@@ -189,6 +189,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
+| `/retry` | Retry the current settled error or aborted response as a sibling; uses the current model and thinking settings |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML or JSONL file |
 | `/import <file>` | Import and resume a session from a JSONL file |
@@ -273,6 +274,8 @@ Use `/session` in interactive mode to see the current session ID before reusing 
 Long sessions can exhaust context windows. Compaction summarizes older messages while keeping recent ones.
 
 **Manual:** `/compact` or `/compact <custom instructions>`
+
+**Retry:** `/retry` is available only when the latest conversational attempt on the settled active branch is an assistant error or aborted response; trailing model/thinking metadata is allowed, but a later conversation is not. It keeps the failed attempt and trailing settings as audit history, creates the new assistant as a direct sibling with the same parent, adds no user/custom/session marker, excludes the failed attempt from provider context, and uses the current runtime model and thinking configuration. If needed, current thinking metadata is appended after the retry result so reopening preserves the chosen thinking level. Retry is rejected while an agent run, compaction/branch summary, direct bash command, manual retry, or queued message is active.
 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 

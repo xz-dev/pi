@@ -26,4 +26,19 @@ describe("RpcClient clone", () => {
 		expect(send).toHaveBeenCalledWith({ type: "clone" });
 		expect(result).toEqual({ cancelled: false });
 	});
+
+	it("sends the retry RPC command", async () => {
+		const client = new RpcClient();
+		const privateClient = client as unknown as RpcClientPrivate;
+		const send = vi.fn(async () => ({
+			type: "response",
+			command: "retry",
+			success: true,
+		}));
+		privateClient.send = send;
+
+		await client.retry();
+
+		expect(send).toHaveBeenCalledWith({ type: "retry" });
+	});
 });

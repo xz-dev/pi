@@ -19,7 +19,7 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 type ShutdownThis = {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
-	runtimeHost: { dispose: () => Promise<void> };
+	runtimeHost: { assertOperationAllowed: (operation: string) => void; dispose: () => Promise<void> };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	themeController: { disableAutoSync: () => void };
 	stop: () => void;
@@ -71,6 +71,7 @@ function createContext(order: string[], sessionManager = createSessionManager())
 		isShuttingDown: false,
 		unregisterSignalHandlers: vi.fn(),
 		runtimeHost: {
+			assertOperationAllowed: vi.fn(),
 			dispose: vi.fn(async () => {
 				order.push("dispose");
 			}),

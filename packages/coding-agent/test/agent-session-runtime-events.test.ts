@@ -156,6 +156,33 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		]);
 	});
 
+	it("rejects session replacement while an exclusive operation owns the bound session", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		let release: (() => void) | undefined;
+		const held = runtimeHost.runExclusive(runtimeHost.session, "manual retry", async () => {
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+		});
+		await Promise.resolve();
+
+		const originalSession = runtimeHost.session;
+		const originalFile = originalSession.sessionFile;
+		await expect(runtimeHost.newSession()).rejects.toThrow(
+			"Cannot create a new session while manual retry is in progress",
+		);
+		await expect(runtimeHost.switchSession(originalFile!)).rejects.toThrow(
+			"Cannot switch sessions while manual retry is in progress",
+		);
+		await expect(runtimeHost.dispose()).rejects.toThrow(
+			"Cannot dispose the runtime while manual retry is in progress",
+		);
+		expect(runtimeHost.session).toBe(originalSession);
+		expect(runtimeHost.session.sessionFile).toBe(originalFile);
+		release?.();
+		await held;
+	});
+
 	it("honors session_before_switch cancellation", async () => {
 		const events: RecordedSessionEvent[] = [];
 		const { runtimeHost } = await createRuntimeHost((pi) => {

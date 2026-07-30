@@ -756,7 +756,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
@@ -766,7 +765,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
 		}
 	})();
 

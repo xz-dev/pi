@@ -7,6 +7,7 @@ import type {
 	ThinkingBudgets,
 	Transport,
 } from "@earendil-works/pi-ai";
+import { abortable } from "./abort.ts";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
@@ -160,7 +161,17 @@ type ActiveRun = {
 	promise: Promise<void>;
 	resolve: () => void;
 	abortController: AbortController;
+	awaitListenersOnAbort: boolean;
 };
+
+export interface ContinueFromOptions {
+	/** Called after the first provider stream has been constructed, before its events are consumed. */
+	onAdmitted?: () => void | Promise<void>;
+	/** Keep failures before admission out of the normal assistant lifecycle. */
+	throwBeforeAdmission?: boolean;
+	/** Continue an already-started lifecycle without another agent_start event. */
+	continueAgentLifecycle?: boolean;
+}
 
 /**
  * Stateful wrapper around the low-level agent loop.
@@ -196,6 +207,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	private eventHandlingFailure = false;
+	private eventHandlingFailureRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -235,7 +248,9 @@ export class Agent {
 	 *
 	 * Listener promises are awaited in subscription order and are included in
 	 * the current run's settlement. Listeners also receive the active abort
-	 * signal for the current run.
+	 * signal for the current run. Ordinary runs detach from a listener that
+	 * remains pending after abort; `continueFrom()` keeps listeners authoritative
+	 * when `throwBeforeAdmission` is enabled.
 	 *
 	 * `agent_end` is the final emitted event for a run, but the agent does not
 	 * become idle until all awaited listeners for that event have settled.
@@ -376,6 +391,34 @@ export class Agent {
 		await this.runContinuation();
 	}
 
+	/**
+	 * Continue from an explicit raw context without adding an input message.
+	 *
+	 * The current model, thinking level, tools, and provider configuration are
+	 * used. The first provider stream is admitted through `onAdmitted`; failures
+	 * before admission may be surfaced with `throwBeforeAdmission`. When
+	 * `throwBeforeAdmission` is enabled, started lifecycle listeners remain
+	 * authoritative after abort so callers can coordinate durable replacement.
+	 */
+	async continueFrom(context: AgentContext, options: ContinueFromOptions = {}): Promise<void> {
+		if (this.activeRun) {
+			throw new Error("Agent is already processing. Wait for completion before continuing.");
+		}
+		let admitted = false;
+		await this.runContinuation(
+			context,
+			{
+				validateConvertedTail: true,
+				continueAgentLifecycle: options.continueAgentLifecycle,
+				onAdmitted: async () => {
+					admitted = true;
+					await options.onAdmitted?.();
+				},
+			},
+			options.throwBeforeAdmission === true ? () => !admitted : undefined,
+		);
+	}
+
 	private normalizePromptInput(
 		input: string | AgentMessage | AgentMessage[],
 		images?: ImageContent[],
@@ -411,16 +454,28 @@ export class Agent {
 		});
 	}
 
-	private async runContinuation(): Promise<void> {
+	private async runContinuation(
+		context: AgentContext = this.createContextSnapshot(),
+		options: {
+			validateConvertedTail?: boolean;
+			onAdmitted?: () => void | Promise<void>;
+			continueAgentLifecycle?: boolean;
+		} = {},
+		shouldThrowFailure?: () => boolean,
+	): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoopContinue(
-				this.createContextSnapshot(),
-				this.createLoopConfig(),
+				{
+					...context,
+					messages: context.messages.slice(),
+					tools: context.tools?.slice(),
+				},
+				this.createLoopConfig(options),
 				(event) => this.processEvents(event),
 				signal,
 				this.streamFunction,
 			);
-		});
+		}, shouldThrowFailure);
 	}
 
 	private createContextSnapshot(): AgentContext {
@@ -431,10 +486,18 @@ export class Agent {
 		};
 	}
 
-	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+	private createLoopConfig(
+		options: {
+			skipInitialSteeringPoll?: boolean;
+			validateConvertedTail?: boolean;
+			onAdmitted?: () => void | Promise<void>;
+			continueAgentLifecycle?: boolean;
+		} = {},
+	): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
 			model: this._state.model,
+			awaitContextPreparationOnAbort: options.validateConvertedTail === true,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
@@ -456,6 +519,9 @@ export class Agent {
 					: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
+			validateConvertedTail: options.validateConvertedTail,
+			onAdmitted: options.onAdmitted,
+			continueAgentLifecycle: options.continueAgentLifecycle,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {
@@ -468,7 +534,10 @@ export class Agent {
 		};
 	}
 
-	private async runWithLifecycle(executor: (signal: AbortSignal) => Promise<void>): Promise<void> {
+	private async runWithLifecycle(
+		executor: (signal: AbortSignal) => Promise<void>,
+		shouldThrowFailure?: () => boolean,
+	): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing.");
 		}
@@ -478,7 +547,13 @@ export class Agent {
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});
-		this.activeRun = { promise, resolve: resolvePromise, abortController };
+		const run = {
+			promise,
+			resolve: resolvePromise,
+			abortController,
+			awaitListenersOnAbort: shouldThrowFailure !== undefined,
+		};
+		this.activeRun = run;
 
 		this._state.isStreaming = true;
 		this._state.streamingMessage = undefined;
@@ -487,6 +562,14 @@ export class Agent {
 		try {
 			await executor(abortController.signal);
 		} catch (error) {
+			if (this.eventHandlingFailure && this.eventHandlingFailureRun === run) {
+				this.eventHandlingFailure = false;
+				this.eventHandlingFailureRun = undefined;
+				throw error;
+			}
+			if (shouldThrowFailure?.()) {
+				throw error;
+			}
 			await this.handleRunFailure(error, abortController.signal.aborted);
 		} finally {
 			this.finishRun();
@@ -566,12 +649,30 @@ export class Agent {
 				break;
 		}
 
-		const signal = this.activeRun?.abortController.signal;
+		const activeRun = this.activeRun;
+		const signal = activeRun?.abortController.signal;
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
 		for (const listener of this.listeners) {
-			await listener(event, signal);
+			if (!activeRun.awaitListenersOnAbort && signal.aborted) {
+				void Promise.resolve(listener(event, signal)).catch(() => {});
+				continue;
+			}
+			try {
+				const result = listener(event, signal);
+				if (activeRun.awaitListenersOnAbort) {
+					await result;
+				} else {
+					await abortable(result, signal);
+				}
+			} catch (error) {
+				if (!signal.aborted) {
+					this.eventHandlingFailure = true;
+					this.eventHandlingFailureRun = this.activeRun;
+					throw error;
+				}
+			}
 		}
 	}
 }

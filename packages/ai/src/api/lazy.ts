@@ -35,7 +35,11 @@ async function forwardStream(
 	for await (const event of source) {
 		target.push(event);
 	}
-	target.end(hasResult(source) ? await source.result() : undefined);
+	if (!hasResult(source)) {
+		target.close();
+		return;
+	}
+	target.end(await source.result());
 }
 
 /**

@@ -93,7 +93,6 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				// partialArgs is only a streaming scratch buffer; never persist it.
@@ -102,7 +101,6 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatMistralError(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
 		}
 	})();
 

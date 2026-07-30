@@ -45,6 +45,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { abortable } from "../../../agent/src/abort.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -97,7 +98,13 @@ import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	RetryAppendScope,
+	SessionEntry,
+	SessionManager,
+} from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -144,6 +151,12 @@ export type AgentSessionEvent =
 			willRetry: boolean;
 	  }
 	| { type: "agent_settled" }
+	| {
+			type: "agent_operation_error";
+			operation: "manual_retry";
+			phase: "post_admission_persistence";
+			errorMessage: string;
+	  }
 	| {
 			type: "queue_update";
 			steering: readonly string[];
@@ -223,6 +236,10 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Runtime-owned operation serialization. */
+	runExclusiveOperation?: <T>(session: AgentSession, name: string, operation: () => Promise<T>) => Promise<T>;
+	/** Runtime-owned mutation preflight shared by public session mutators. */
+	assertOperationAllowed?: (operation: string) => void;
 }
 
 export interface ExtensionBindings {
@@ -371,6 +388,10 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	private _systemPromptOverride?: string;
+	private _runExclusiveOperation?: AgentSessionConfig["runExclusiveOperation"];
+	private _assertRuntimeOperationAllowed?: AgentSessionConfig["assertOperationAllowed"];
+	private _retryAppendScope?: RetryAppendScope;
+	private _isManualRetryPendingAdmission = false;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -387,6 +408,8 @@ export class AgentSession {
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		this._runExclusiveOperation = config.runExclusiveOperation;
+		this._assertRuntimeOperationAllowed = config.assertOperationAllowed;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -402,6 +425,17 @@ export class AgentSession {
 
 	get modelRuntime(): ModelRuntime {
 		return this._modelRuntime;
+	}
+
+	/** Bind runtime-owned operation serialization after the session is created. */
+	bindExclusiveOperationRunner(
+		runner?: <T>(session: AgentSession, name: string, operation: () => Promise<T>) => Promise<T>,
+	): void {
+		this._runExclusiveOperation = runner;
+	}
+
+	bindOperationGuard(guard?: (operation: string) => void): void {
+		this._assertRuntimeOperationAllowed = guard;
 	}
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
@@ -569,13 +603,44 @@ export class AgentSession {
 	}
 
 	private _resolveIdleWaitIfIdle(): void {
-		if (this._isAgentRunActive || !this._resolveIdleWait) {
+		if (
+			this.agent.state.isStreaming ||
+			this._isAgentRunActive ||
+			this._isManualRetryPendingAdmission ||
+			!this._resolveIdleWait
+		) {
 			return;
 		}
 		const resolve = this._resolveIdleWait;
 		this._idleWaitPromise = undefined;
 		this._resolveIdleWait = undefined;
 		resolve();
+	}
+
+	private _assertOperationAllowed(operation: string): void {
+		this._assertRuntimeOperationAllowed?.(operation);
+		if (this._isManualRetryPendingAdmission || this._retryAppendScope) {
+			throw new Error(`Cannot ${operation} while manual retry is in progress.`);
+		}
+	}
+
+	private _getRetryBusyMessage(): string | undefined {
+		if (this._isAgentRunActive || this.agent.state.isStreaming) {
+			return "Cannot retry while an agent response is running.";
+		}
+		if (this.isCompacting) {
+			return "Cannot retry while compaction is running.";
+		}
+		if (this._branchSummaryAbortController !== undefined) {
+			return "Cannot retry while branch summarization is running.";
+		}
+		if (this.isBashRunning) {
+			return "Cannot retry while a direct bash command is running.";
+		}
+		if (this.pendingMessageCount > 0 || this.agent.hasQueuedMessages()) {
+			return "Cannot retry while messages are queued.";
+		}
+		return undefined;
 	}
 
 	private async _emitAgentSettled(): Promise<void> {
@@ -615,8 +680,20 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		// Keep admitted retry replacement and persistence authoritative, but let
+		// an aborted ordinary run detach a stuck extension lifecycle hook.
+		const signal = this.agent.signal;
+		if (this._retryAppendScope) {
+			await this._emitExtensionEvent(event);
+		} else if (!signal?.aborted) {
+			try {
+				await abortable(this._emitExtensionEvent(event), signal);
+			} catch (error) {
+				if (!signal?.aborted) {
+					throw error;
+				}
+			}
+		}
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
@@ -637,8 +714,17 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				if (this._retryAppendScope) {
+					const scope = this._retryAppendScope;
+					const isFirstAssistant = event.message.role === "assistant" && !scope.hasAppendedAssistant;
+					scope.appendMessage(event.message);
+					if (isFirstAssistant) {
+						this._retryAppendScope = undefined;
+						this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+					}
+				} else {
+					this.sessionManager.appendMessage(event.message);
+				}
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -835,6 +921,12 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._assertOperationAllowed("dispose the session");
+		this.disposeOwned();
+	}
+
+	/** @internal Runtime-owned teardown after the exclusive replacement gate is validated. */
+	disposeOwned(): void {
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -862,6 +954,11 @@ export class AgentSession {
 		return this.agent.state;
 	}
 
+	/** Reject a host/RPC mutation before it performs extension or filesystem side effects. */
+	assertOperationAllowed(operation: string): void {
+		this._assertOperationAllowed(operation);
+	}
+
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
 		return this.agent.state.model;
@@ -877,9 +974,9 @@ export class AgentSession {
 		return this._isAgentRunActive;
 	}
 
-	/** Whether the session has no active agent run, retry, auto-compaction, or queued continuation. */
+	/** Whether the current agent run has settled. */
 	get isIdle(): boolean {
-		return !this._isAgentRunActive;
+		return !this._isAgentRunActive && !this._isManualRetryPendingAdmission;
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
@@ -924,6 +1021,7 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
+		this._assertOperationAllowed("change active tools");
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const name of toolNames) {
@@ -986,6 +1084,7 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
+		this._assertOperationAllowed("change scoped models");
 		this._scopedModels = scopedModels;
 	}
 
@@ -1058,17 +1157,142 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
-		this._isAgentRunActive = true;
+	private async _runAgentOperation(
+		start: () => Promise<void>,
+		options: { deferAdmission?: boolean; beforeSettledOnError?: (error: unknown) => Promise<void> | void } = {},
+	): Promise<void> {
+		if (!options.deferAdmission) {
+			this._isAgentRunActive = true;
+		}
+		let completed = false;
 		try {
-			await this.agent.prompt(messages);
-			while (await this._handlePostAgentRun()) {
-				await this.agent.continue();
+			try {
+				await start();
+				completed = true;
+				while (await this._handlePostAgentRun()) {
+					if (options.deferAdmission) {
+						await this.agent.continueFrom(this.agent.state, { continueAgentLifecycle: true });
+					} else {
+						await this.agent.continue();
+					}
+				}
+			} catch (error) {
+				await options.beforeSettledOnError?.(error);
+				throw error;
 			}
 		} finally {
 			this._systemPromptOverride = undefined;
-			this._flushPendingBashMessages();
-			await this._emitAgentSettled();
+			if (!options.deferAdmission || this._isAgentRunActive) {
+				this._flushPendingBashMessages();
+				await this._emitAgentSettled();
+				if (!completed) {
+					this._resolveIdleWaitIfIdle();
+				}
+			}
+		}
+	}
+
+	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		await this._runAgentOperation(() => this.agent.prompt(messages));
+	}
+
+	private _findRetryableAttempt(): Extract<SessionEntry, { type: "message" }> | undefined {
+		let entry = this.sessionManager.getLeafEntry();
+		while (entry?.type === "model_change" || entry?.type === "thinking_level_change") {
+			entry = entry.parentId ? this.sessionManager.getEntry(entry.parentId) : undefined;
+		}
+
+		if (
+			entry?.type !== "message" ||
+			entry.message.role !== "assistant" ||
+			(entry.message.stopReason !== "error" && entry.message.stopReason !== "aborted")
+		) {
+			return undefined;
+		}
+		return entry;
+	}
+
+	/**
+	 * Retry the current terminal error or aborted response without adding a message.
+	 * The failed attempt stays in the session tree while the new attempt branches from its parent.
+	 */
+	async retry(options: { onAdmitted?: () => void | Promise<void> } = {}): Promise<void> {
+		if (this._isAgentRunActive) {
+			throw new Error("Cannot retry while an agent response is running.");
+		}
+		const run = this._runExclusiveOperation
+			? (operation: () => Promise<void>) => this._runExclusiveOperation!(this, "manual retry", operation)
+			: (operation: () => Promise<void>) => operation();
+		await run(async () => {
+			if (this._retryAppendScope) {
+				throw new Error("Cannot retry: another manual retry is already in progress.");
+			}
+			const busyMessage = this._getRetryBusyMessage();
+			if (busyMessage) {
+				throw new Error(busyMessage);
+			}
+			await this._retryImpl(options);
+		});
+	}
+
+	private async _retryImpl(options: { onAdmitted?: () => void | Promise<void> }): Promise<void> {
+		const failedEntry = this._findRetryableAttempt();
+		if (!failedEntry) {
+			throw new Error("Nothing to retry. The current response did not end with an error or abort.");
+		}
+		const expectedLeafId = this.sessionManager.getLeafId();
+		if (!expectedLeafId || !failedEntry.parentId || !this.sessionManager.getEntry(failedEntry.parentId)) {
+			throw new Error("Cannot retry: the failed response has no valid parent context.");
+		}
+
+		const detached = this.sessionManager.buildSessionContextAt(failedEntry.parentId);
+		const scope = this.sessionManager.beginRetryAppendScope(expectedLeafId, failedEntry.id);
+		this._retryAppendScope = scope;
+		this._isManualRetryPendingAdmission = true;
+		try {
+			await this._runAgentOperation(
+				() =>
+					this.agent.continueFrom(
+						{
+							systemPrompt: this.agent.state.systemPrompt,
+							messages: detached.messages,
+							tools: this.agent.state.tools,
+						},
+						{
+							throwBeforeAdmission: true,
+							onAdmitted: async () => {
+								this._isManualRetryPendingAdmission = false;
+								this._isAgentRunActive = true;
+								await options.onAdmitted?.();
+							},
+						},
+					),
+				{
+					deferAdmission: true,
+					beforeSettledOnError: (error) => {
+						if (!this._isManualRetryPendingAdmission && !scope.hasAppendedAssistant) {
+							this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+							this._emit({
+								type: "agent_operation_error",
+								operation: "manual_retry",
+								phase: "post_admission_persistence",
+								errorMessage: error instanceof Error ? error.message : String(error),
+							});
+						}
+					},
+				},
+			);
+		} finally {
+			this._isManualRetryPendingAdmission = false;
+			scope.close();
+			this._resolveIdleWaitIfIdle();
+			this._retryAppendScope = undefined;
+			if (
+				scope.hasAppendedAssistant &&
+				this.sessionManager.buildSessionContext().thinkingLevel !== this.thinkingLevel
+			) {
+				this.sessionManager.appendThinkingLevelChange(this.thinkingLevel);
+			}
 		}
 	}
 
@@ -1112,6 +1336,7 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		this._assertOperationAllowed("send a prompt");
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -1333,6 +1558,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<void> {
+		this._assertOperationAllowed("steer");
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
@@ -1353,6 +1579,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<void> {
+		this._assertOperationAllowed("follow up");
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
@@ -1430,6 +1657,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
+		this._assertOperationAllowed("send a custom message");
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -1473,6 +1701,7 @@ export class AgentSession {
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): Promise<void> {
+		this._assertOperationAllowed("send a user message");
 		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
@@ -1508,6 +1737,7 @@ export class AgentSession {
 	 * @returns Object with steering and followUp arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
+		this._assertOperationAllowed("clear queued messages");
 		const steering = [...this._steeringMessages];
 		const followUp = [...this._followUpMessages];
 		this._steeringMessages = [];
@@ -1576,6 +1806,7 @@ export class AgentSession {
 	 * @throws Error if no auth is configured for the model
 	 */
 	async setModel(model: Model<any>): Promise<void> {
+		this._assertOperationAllowed("change the model");
 		if (!(await this._modelRuntime.checkAuth(model.provider))) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -1599,6 +1830,7 @@ export class AgentSession {
 	 * @returns The new model info, or undefined if only one model available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+		this._assertOperationAllowed("cycle the model");
 		if (this._scopedModels.length > 0) {
 			return this._cycleScopedModel(direction);
 		}
@@ -1675,6 +1907,7 @@ export class AgentSession {
 	 * Saves to session and settings only if the level actually changes.
 	 */
 	setThinkingLevel(level: ThinkingLevel): void {
+		this._assertOperationAllowed("change thinking level");
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
@@ -1703,6 +1936,7 @@ export class AgentSession {
 	 * @returns New level, or undefined if model doesn't support thinking
 	 */
 	cycleThinkingLevel(): ThinkingLevel | undefined {
+		this._assertOperationAllowed("cycle thinking level");
 		if (!this.supportsThinking()) return undefined;
 
 		const levels = this.getAvailableThinkingLevels();
@@ -1758,6 +1992,7 @@ export class AgentSession {
 	 * Saves to settings.
 	 */
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
+		this._assertOperationAllowed("change steering mode");
 		this.agent.steeringMode = mode;
 		this.settingsManager.setSteeringMode(mode);
 	}
@@ -1767,6 +2002,7 @@ export class AgentSession {
 	 * Saves to settings.
 	 */
 	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
+		this._assertOperationAllowed("change follow-up mode");
 		this.agent.followUpMode = mode;
 		this.settingsManager.setFollowUpMode(mode);
 	}
@@ -1781,6 +2017,7 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		this._assertOperationAllowed("compact");
 		this._disconnectFromAgent();
 		await this.abort();
 		this._compactionAbortController = new AbortController();
@@ -2218,6 +2455,7 @@ export class AgentSession {
 	 * Toggle auto-compaction setting.
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
+		this._assertOperationAllowed("change auto-compaction settings");
 		this.settingsManager.setCompactionEnabled(enabled);
 	}
 
@@ -2227,6 +2465,7 @@ export class AgentSession {
 	}
 
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+		this._assertOperationAllowed("bind extension resources");
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
 		}
@@ -2375,6 +2614,7 @@ export class AgentSession {
 					});
 				},
 				appendEntry: (customType, data) => {
+					this._assertOperationAllowed("append an extension entry");
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);
 					if (entry) {
@@ -2388,6 +2628,7 @@ export class AgentSession {
 					return this.sessionManager.getSessionName();
 				},
 				setLabel: (entryId, label) => {
+					this._assertOperationAllowed("set an entry label");
 					this.sessionManager.appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.getActiveToolNames(),
@@ -2437,14 +2678,17 @@ export class AgentSession {
 			},
 			{
 				registerProvider: (name, config) => {
+					this._assertOperationAllowed("register a provider");
 					this._modelRuntime.registerProvider(name, config);
 					this._refreshCurrentModelFromRegistry();
 				},
 				registerNativeProvider: (provider) => {
+					this._assertOperationAllowed("register a provider");
 					this._modelRuntime.registerNativeProvider(provider);
 					this._refreshCurrentModelFromRegistry();
 				},
 				unregisterProvider: (name) => {
+					this._assertOperationAllowed("unregister a provider");
 					this._modelRuntime.unregisterProvider(name);
 					this._refreshCurrentModelFromRegistry();
 				},
@@ -2453,6 +2697,7 @@ export class AgentSession {
 	}
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+		if (!options) this._assertOperationAllowed("refresh tools");
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
 		const allowedToolNames = this._allowedToolNames;
@@ -2600,6 +2845,7 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		this._assertOperationAllowed("reload resources");
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
 		await this.settingsManager.reload();
@@ -2746,6 +2992,7 @@ export class AgentSession {
 	 * Toggle auto-retry setting.
 	 */
 	setAutoRetryEnabled(enabled: boolean): void {
+		this._assertOperationAllowed("change auto-retry settings");
 		this.settingsManager.setRetryEnabled(enabled);
 	}
 
@@ -2767,6 +3014,7 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
 	): Promise<BashResult> {
+		this._assertOperationAllowed("execute direct bash");
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
@@ -2801,6 +3049,7 @@ export class AgentSession {
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+		this._assertOperationAllowed("record direct bash");
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
 			command,
@@ -2871,6 +3120,7 @@ export class AgentSession {
 	 * Set a display name for the current session.
 	 */
 	setSessionName(name: string): void {
+		this._assertOperationAllowed("set the session name");
 		this.sessionManager.appendSessionInfo(name);
 		const event = { type: "session_info_changed", name: this.sessionManager.getSessionName() } as const;
 		this._emit(event);
@@ -2896,6 +3146,7 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		this._assertOperationAllowed("navigate the session tree");
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish before navigating the session tree.");
 		}

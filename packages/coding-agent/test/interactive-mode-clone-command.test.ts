@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type CloneCommandContext = {
@@ -13,13 +14,26 @@ type CloneCommandContext = {
 	ui: { requestRender: () => void };
 };
 
+type RetryCommandContext = {
+	session: { retry: () => Promise<void> };
+	showError: (message: string) => void;
+};
+
 type InteractiveModePrototype = {
 	handleCloneCommand(this: CloneCommandContext): Promise<void>;
+	handleRetryCommand(this: RetryCommandContext): Promise<void>;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
 
 describe("InteractiveMode /clone", () => {
+	it("lists retry in the built-in command catalog", () => {
+		expect(BUILTIN_SLASH_COMMANDS).toContainEqual({
+			name: "retry",
+			description: "Retry the last failed or aborted response",
+		});
+	});
+
 	it("clones the current leaf into a new session", async () => {
 		const fork = vi.fn(async () => ({ cancelled: false }));
 		const renderCurrentSessionState = vi.fn();
@@ -46,6 +60,16 @@ describe("InteractiveMode /clone", () => {
 		expect(showStatus).toHaveBeenCalledWith("Cloned to new session");
 		expect(showError).not.toHaveBeenCalled();
 		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("dispatches /retry through the session retry operation", async () => {
+		const retry = vi.fn(async () => {});
+		const showError = vi.fn();
+
+		await interactiveModePrototype.handleRetryCommand.call({ session: { retry }, showError });
+
+		expect(retry).toHaveBeenCalledOnce();
+		expect(showError).not.toHaveBeenCalled();
 	});
 
 	it("shows a status message when there is nothing to clone", async () => {

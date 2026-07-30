@@ -425,7 +425,9 @@ Response:
 
 ### Retry
 
-#### set_auto_retry
+#### Automatic retry
+
+##### set_auto_retry
 
 Enable or disable automatic retry on transient errors (overloaded, rate limit, 5xx).
 
@@ -438,7 +440,7 @@ Response:
 {"type": "response", "command": "set_auto_retry", "success": true}
 ```
 
-#### abort_retry
+##### abort_retry
 
 Abort an in-progress retry (cancel the delay and stop retrying).
 
@@ -449,6 +451,26 @@ Abort an in-progress retry (cancel the delay and stop retrying).
 Response:
 ```json
 {"type": "response", "command": "abort_retry", "success": true}
+```
+
+#### Manual retry
+
+Retry the active branch's eligible settled assistant error or aborted response.
+
+```json
+{"id": "retry-1", "type": "retry"}
+```
+
+A retry is eligible only when the latest conversational attempt on the settled active branch is an assistant error or aborted response. Trailing model/thinking metadata is allowed, but a later conversation is not. The failed attempt and old settings remain audit history; the first retry assistant is durably appended as a direct sibling with the same `parentId`, no user/custom/session marker is added, and the failed assistant is excluded from provider context. The runtime's current model and thinking configuration drive the request. Current thinking metadata is appended after the result only when needed for reopening; the current leaf can therefore be that metadata while the active branch still contains the retry result. The command is rejected with one error response if the branch is not retryable or while an agent run, manual/automatic compaction, branch summarization, direct bash command, another manual retry, or queued steering/follow-up is active. A manual retry itself does not emit synthetic `auto_retry_*` events; the new run may naturally use the existing automatic retry flow.
+
+A successful response means retry ownership, detached context, and provider start were atomically admitted. It is emitted before normal retry lifecycle events. The run then continues asynchronously and ends through exactly one `agent_settled`. A failure before admission emits one `success: false` response and leaves the original leaf, in-memory transcript, and session file unchanged. A provider failure after admission is represented by the normal assistant error/aborted lifecycle, not a second RPC error response. If the first retry assistant cannot be durably appended after admission, the original durable leaf remains active and retryable, in-memory state is reconciled to that durable branch before observers run, and the client receives one `agent_operation_error` event followed by one `agent_settled`; no second retry response is emitted. `agent_operation_error` is an `AgentSession` event serialized by RPC mode, not an extension lifecycle event. Extensions see the reconciled state through their normal `agent_settled` callback, but do not receive `agent_operation_error`. The event is not a session entry and does not pretend the failed assistant was appended:
+
+```json
+{"type":"agent_operation_error","operation":"manual_retry","phase":"post_admission_persistence","errorMessage":"..."}
+```
+
+```json
+{"id": "retry-1", "type": "response", "command": "retry", "success": true}
 ```
 
 ### Bash

@@ -343,7 +343,6 @@ export function streamGitLabDuo(
 						);
 
 			for await (const event of innerStream) stream.push(event);
-			stream.end();
 		} catch (error) {
 			stream.push({
 				type: "error",
@@ -367,7 +366,6 @@ export function streamGitLabDuo(
 					timestamp: Date.now(),
 				},
 			});
-			stream.end();
 		}
 	})();
 

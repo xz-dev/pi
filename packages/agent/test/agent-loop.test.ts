@@ -76,6 +76,14 @@ function createUserMessage(text: string): UserMessage {
 	};
 }
 
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve = () => {};
+	const promise = new Promise<void>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
+}
+
 // Simple identity converter for tests - just passes through standard messages
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
@@ -1198,6 +1206,159 @@ describe("agentLoop with AgentMessage", () => {
 		]);
 	});
 
+	it("waits for beforeToolCall after abort and does not execute the tool", async () => {
+		const started = createDeferred();
+		const release = createDeferred();
+		let executions = 0;
+		const tool: AgentTool = {
+			name: "blocked",
+			label: "Blocked",
+			description: "Blocked tool",
+			parameters: Type.Object({}),
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "late" }], details: {} };
+			},
+		};
+		const controller = new AbortController();
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => {
+				started.resolve();
+				await release.promise;
+				return undefined;
+			},
+		};
+		const stream = agentLoop([createUserMessage("run")], context, config, controller.signal, () => {
+			const response = new MockAssistantStream();
+			queueMicrotask(() =>
+				response.push({
+					type: "done",
+					reason: "toolUse",
+					message: createAssistantMessage(
+						[{ type: "toolCall", id: "blocked-1", name: "blocked", arguments: {} }],
+						"toolUse",
+					),
+				}),
+			);
+			return response;
+		});
+
+		const result = stream.result();
+		await started.promise;
+		controller.abort();
+		let settled = false;
+		void result
+			.finally(() => {
+				settled = true;
+			})
+			.catch(() => {});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(settled).toBe(false);
+
+		release.resolve();
+		await expect(result).rejects.toThrow("This operation was aborted");
+		expect(executions).toBe(0);
+		expect(context.messages.some((message) => message.role === "toolResult")).toBe(false);
+	});
+
+	it("waits for afterToolCall replacement after abort before finalizing state", async () => {
+		const started = createDeferred();
+		const release = createDeferred();
+		const tool: AgentTool = {
+			name: "replace",
+			label: "Replace",
+			description: "Replace tool result",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "original" }], details: {} }),
+		};
+		const controller = new AbortController();
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			afterToolCall: async () => {
+				started.resolve();
+				await release.promise;
+				return { content: [{ type: "text", text: "replacement" }] };
+			},
+		};
+		const stream = agentLoop([createUserMessage("run")], context, config, controller.signal, () => {
+			const response = new MockAssistantStream();
+			queueMicrotask(() =>
+				response.push({
+					type: "done",
+					reason: "toolUse",
+					message: createAssistantMessage(
+						[{ type: "toolCall", id: "replace-1", name: "replace", arguments: {} }],
+						"toolUse",
+					),
+				}),
+			);
+			return response;
+		});
+
+		const result = stream.result();
+		await started.promise;
+		controller.abort();
+		let settled = false;
+		void result
+			.finally(() => {
+				settled = true;
+			})
+			.catch(() => {});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(settled).toBe(false);
+
+		release.resolve();
+		await expect(result).rejects.toThrow("This operation was aborted");
+		expect(context.messages.some((message) => message.role === "toolResult")).toBe(false);
+	});
+
+	it("waits for prepareNextTurn after abort before ending the loop", async () => {
+		const started = createDeferred();
+		const release = createDeferred();
+		const controller = new AbortController();
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareNextTurn: async () => {
+				started.resolve();
+				await release.promise;
+				return undefined;
+			},
+		};
+		const stream = agentLoop([createUserMessage("run")], context, config, controller.signal, () => {
+			const response = new MockAssistantStream();
+			queueMicrotask(() =>
+				response.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "ok" }]),
+				}),
+			);
+			return response;
+		});
+
+		const result = stream.result();
+		await started.promise;
+		controller.abort();
+		let settled = false;
+		void result
+			.finally(() => {
+				settled = true;
+			})
+			.catch(() => {});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(settled).toBe(false);
+
+		release.resolve();
+		await expect(result).rejects.toThrow("This operation was aborted");
+	});
+
 	it("should stop after a tool batch when every tool result sets terminate=true", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -1424,6 +1585,99 @@ describe("agentLoopContinue with AgentMessage", () => {
 		const messageEndEvents = events.filter((e) => e.type === "message_end");
 		expect(messageEndEvents.length).toBe(1);
 		expect((messageEndEvents[0] as any).message.role).toBe("assistant");
+	});
+
+	it.each([
+		{
+			name: "message conversion",
+			configure: (config: AgentLoopConfig, error: Error) => {
+				config.convertToLlm = async () => {
+					throw error;
+				};
+			},
+			streamFn: () => {
+				throw new Error("provider must not be called");
+			},
+		},
+		{
+			name: "provider construction",
+			configure: (_config: AgentLoopConfig, _error: Error) => {},
+			streamFn: (_error: Error) => {
+				throw _error;
+			},
+		},
+		{
+			name: "admission callback",
+			configure: (config: AgentLoopConfig, error: Error) => {
+				config.onAdmitted = async () => {
+					throw error;
+				};
+			},
+			streamFn: () => new MockAssistantStream(),
+		},
+	])("rejects iteration and result for $name failures", async ({ name, configure, streamFn }) => {
+		const error = new Error(`${name} failed`);
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [createUserMessage("Hello")],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+		configure(config, error);
+		const stream = agentLoopContinue(context, config, undefined, () => streamFn(error));
+		const iteratorError = (async () => {
+			for await (const _event of stream) {
+				// Consume until the low-level failure reaches the iterator.
+			}
+		})();
+
+		await expect(iteratorError).rejects.toBe(error);
+		await expect(stream.result()).rejects.toBe(error);
+	});
+
+	it("rejects iteration and result when the event sink fails", async () => {
+		const error = new Error("event sink failed");
+		const stream = agentLoopContinue(
+			{
+				systemPrompt: "You are helpful.",
+				messages: [createUserMessage("Hello")],
+				tools: [],
+			},
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+			},
+			undefined,
+			() => {
+				const providerStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					providerStream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return providerStream;
+			},
+		);
+		const originalPush = stream.push.bind(stream);
+		let emitted = 0;
+		stream.push = (event) => {
+			emitted++;
+			if (emitted === 3) throw error;
+			originalPush(event);
+		};
+
+		const iteratorError = (async () => {
+			for await (const _event of stream) {
+				// Consume until the sink error reaches the iterator.
+			}
+		})();
+		await expect(iteratorError).rejects.toBe(error);
+		await expect(stream.result()).rejects.toBe(error);
 	});
 
 	it("should allow custom message types as last message (caller responsibility)", async () => {

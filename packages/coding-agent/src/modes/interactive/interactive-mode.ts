@@ -2826,6 +2826,11 @@ export class InteractiveMode {
 				await this.handleCompactCommand(customInstructions);
 				return;
 			}
+			if (text === "/retry") {
+				this.editor.setText("");
+				await this.handleRetryCommand();
+				return;
+			}
 			if (text === "/reload") {
 				this.editor.setText("");
 				await this.handleReloadCommand();
@@ -2862,6 +2867,13 @@ export class InteractiveMode {
 				const isExcluded = text.startsWith("!!");
 				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
 				if (command) {
+					try {
+						this.session.assertOperationAllowed("execute direct bash");
+					} catch (error) {
+						this.editor.setText(text);
+						this.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
 					if (this.session.isBashRunning) {
 						this.showWarning("A bash command is already running. Press Esc to cancel it first.");
 						this.editor.setText(text);
@@ -3629,12 +3641,20 @@ export class InteractiveMode {
 
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
+		try {
+			this.runtimeHost.assertOperationAllowed("dispose the runtime");
+		} catch (error) {
+			if (options?.fromSignal) throw error;
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
 		this.isShuttingDown = true;
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
 		// dispatch and re-sends the signal if only its own listeners remain.
 
 		if (options?.fromSignal) {
+			await this.runtimeHost.dispose();
 			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
 			// (session_shutdown) BEFORE touching the terminal. Extension teardown
 			// such as removing sockets does not write to the tty, so it must not be
@@ -3642,7 +3662,6 @@ export class InteractiveMode {
 			// terminal. If the terminal is gone, the restore writes below emit EIO,
 			// which the stdout/stderr error handler turns into emergencyTerminalExit;
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
-			await this.runtimeHost.dispose();
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
@@ -6101,6 +6120,14 @@ export class InteractiveMode {
 			await this.session.compact(customInstructions);
 		} catch {
 			// Ignore, will be emitted as an event
+		}
+	}
+
+	private async handleRetryCommand(): Promise<void> {
+		try {
+			await this.session.retry();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
 		}
 	}
 

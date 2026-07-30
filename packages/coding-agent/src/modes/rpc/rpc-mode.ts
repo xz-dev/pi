@@ -84,6 +84,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	// Shutdown request flag
 	let shutdownRequested = false;
 	let shuttingDown = false;
+	type PendingShutdownRequest = {
+		exitCode: number;
+		signal?: NodeJS.Signals;
+		session: typeof session;
+	};
+	let pendingShutdownRequest: PendingShutdownRequest | undefined;
 	const signalCleanupHandlers: Array<() => void> = [];
 
 	/** Helper for dialog methods with signal/timeout support */
@@ -354,7 +360,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		unsubscribe = session.subscribe((event) => {
 			output(event);
 			if (event.type === "agent_settled") {
-				void checkShutdownRequested();
+				void retryPendingShutdown()
+					.then(checkShutdownRequested)
+					.catch(() => {});
 			}
 		});
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
@@ -370,8 +378,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 		for (const signal of signals) {
 			const handler = () => {
-				killTrackedDetachedChildren();
-				void shutdown(signal === "SIGHUP" ? 129 : 143, signal);
+				void requestShutdown(signal === "SIGHUP" ? 129 : 143, signal);
 			};
 			process.on(signal, handler);
 			signalCleanupHandlers.push(() => process.off(signal, handler));
@@ -541,6 +548,23 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// Retry
 			// =================================================================
 
+			case "retry": {
+				let admitted = false;
+				void session
+					.retry({
+						onAdmitted: () => {
+							admitted = true;
+							output(success(id, "retry"));
+						},
+					})
+					.catch((cause) => {
+						if (!admitted) {
+							output(error(id, "retry", cause instanceof Error ? cause.message : String(cause)));
+						}
+					});
+				return undefined;
+			}
+
 			case "set_auto_retry": {
 				session.setAutoRetryEnabled(command.enabled);
 				return success(id, "set_auto_retry");
@@ -556,6 +580,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "bash": {
+				session.assertOperationAllowed("execute direct bash");
 				const eventResult = await session.extensionRunner.emitUserBash({
 					type: "user_bash",
 					command: command.command,
@@ -724,7 +749,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		if (shuttingDown) {
 			process.exit(exitCode);
 		}
+		// Reject before changing RPC observability or input state. In particular,
+		// a manual retry retains its lifecycle event stream until it settles.
+		runtimeHost.assertOperationAllowed("dispose the runtime");
 		shuttingDown = true;
+		pendingShutdownRequest = undefined;
+		killTrackedDetachedChildren();
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
@@ -737,6 +767,38 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			await flushRawStdout();
 		}
 		process.exit(exitCode);
+	}
+
+	async function requestShutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<void> {
+		if (shuttingDown || pendingShutdownRequest) return;
+		const request: PendingShutdownRequest = { exitCode, signal, session };
+		try {
+			await shutdown(exitCode, signal);
+		} catch (cause) {
+			if (
+				!shuttingDown &&
+				session === request.session &&
+				cause instanceof Error &&
+				cause.message.includes("manual retry is in progress")
+			) {
+				pendingShutdownRequest = request;
+				void request.session
+					.waitForIdle()
+					.then(retryPendingShutdown)
+					.catch(() => {});
+			}
+		}
+	}
+
+	async function retryPendingShutdown(): Promise<void> {
+		const request = pendingShutdownRequest;
+		if (!request || shuttingDown) return;
+		if (session !== request.session) {
+			pendingShutdownRequest = undefined;
+			return;
+		}
+		pendingShutdownRequest = undefined;
+		await requestShutdown(request.exitCode, request.signal);
 	}
 
 	async function checkShutdownRequested(): Promise<void> {
@@ -797,7 +859,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	};
 
 	const onInputEnd = () => {
-		void shutdown();
+		void requestShutdown();
 	};
 	process.stdin.on("end", onInputEnd);
 
