@@ -30,7 +30,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream https://github.com/earendil-works/pi.git
           git fetch upstream main
-          git fetch origin ci patch/dependency-audit patch/esc-abort patch/tui-synchronized-cursor patch/changelog-prerelease patch/skill-overrides
+          git fetch origin ci patch/dependency-audit patch/esc-abort-and-manual-retry patch/tui-synchronized-cursor patch/changelog-prerelease patch/skill-overrides
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -52,8 +52,8 @@ jobs:
           git merge --squash origin/patch/dependency-audit
           git commit -m "merge patch/dependency-audit branch"
 
-          git merge --squash origin/patch/esc-abort
-          git commit -m "merge patch/esc-abort branch"
+          git merge --squash origin/patch/esc-abort-and-manual-retry
+          git commit -m "merge patch/esc-abort-and-manual-retry branch"
 
           git merge --squash origin/patch/tui-synchronized-cursor
           git commit -m "merge patch/tui-synchronized-cursor branch"
@@ -82,9 +82,35 @@ jobs:
             packages/coding-agent/test/extensions-discovery.test.ts \
             --testNamePattern 'loads the coding-agent entrypoint without rewriting pi-ai provider subpaths' \
             --testTimeout 15000
-          npx vitest run \
-            packages/coding-agent/test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
-            packages/coding-agent/test/interactive-mode-queue-tui.test.ts
+          (
+            cd packages/ai
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/event-stream.test.ts
+          )
+          (
+            cd packages/agent
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/agent-loop.test.ts \
+              test/agent.test.ts
+          )
+          (
+            cd packages/coding-agent
+            node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
+              test/agent-session-retry.test.ts \
+              test/agent-session-runtime-events.test.ts \
+              test/agent-session-concurrent.test.ts \
+              test/rpc-prompt-response-semantics.test.ts \
+              test/rpc-client-clone.test.ts \
+              test/interactive-mode-clone-command.test.ts \
+              test/interactive-mode-startup-input.test.ts \
+              test/interactive-mode-queue-tui.test.ts \
+              test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts
+          )
+          node --test --test-reporter=dot \
+            packages/tui/test/tui-render.test.ts \
+            packages/tui/test/tui-transport.test.ts
+          PI_TUI_TMUX_E2E=1 node --test --test-reporter=spec \
+            packages/tui/test/tui-tmux.e2e.ts
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate

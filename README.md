@@ -13,13 +13,15 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ### Features
 
+- Retry the current terminal error or aborted response with `/retry` or RPC `retry`, preserving the failed attempt as history while creating a new sibling attempt from the same context with the current model and thinking settings.
+  - Patch branch: [`patch/esc-abort-and-manual-retry`](https://github.com/xz-dev/pi/tree/patch/esc-abort-and-manual-retry)
 - Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
   - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
 
 ### Fixes
 
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
-  - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
+  - Patch branch: [`patch/esc-abort-and-manual-retry`](https://github.com/xz-dev/pi/tree/patch/esc-abort-and-manual-retry)
 - Keep TUI hardware cursor positioning and visibility inside DECSET 2026 synchronized-output frames, preventing transient cursor jumps over slow terminals or SSH connections.
   - Patch branch: [`patch/tui-synchronized-cursor`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor)
 

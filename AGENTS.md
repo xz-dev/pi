@@ -9,7 +9,7 @@ This repository is the `xz-dev/pi` downstream distribution fork of `earendil-wor
 Branch placement rules:
 
 - Put fork CI, publishing, packaging, release automation, GitHub Actions, and sync workflow changes on `ci`.
-- Put downstream code fixes or behavior patches on a dedicated patch branch such as `patch/esc-abort`.
+- Put downstream code fixes or behavior patches on a dedicated patch branch such as `patch/esc-abort-and-manual-retry`.
 - If a new downstream branch is introduced, update `.github/workflows/upstream-sync.yml` in the persistent workflow branch (`ci`) so the sync job fetches that branch, squash-merges it in the correct order, and uses an explicit commit message such as `merge <branch> branch`.
 - After changing any persistent downstream branch that participates in sync, rebuild `main` from the upstream sync base and recreate the squash merge commits. Do not leave the only copy of the change as a standalone `main` commit.
 - When reviewing or resolving conflicts, preserve the correct development history of each downstream branch. A patch branch should include the upstream/mainline commits it was developed on before its downstream patch commits, not just the patch commits cherry-picked onto an older base.
