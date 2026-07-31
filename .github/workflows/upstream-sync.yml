@@ -30,7 +30,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream https://github.com/earendil-works/pi.git
           git fetch upstream main
-          git fetch origin ci patch/dependency-audit patch/esc-abort-and-manual-retry patch/tui-synchronized-cursor patch/changelog-prerelease patch/skill-overrides
+          git fetch origin ci patch/model-refresh-consistency patch/dependency-audit patch/esc-abort-and-manual-retry patch/tui-synchronized-cursor patch/changelog-prerelease patch/skill-overrides
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -48,6 +48,9 @@ jobs:
             exit 1
           fi
           git commit -m "merge ci branch"
+
+          git merge --squash origin/patch/model-refresh-consistency
+          git commit -m "merge patch/model-refresh-consistency branch"
 
           git merge --squash origin/patch/dependency-audit
           git commit -m "merge patch/dependency-audit branch"
@@ -85,7 +88,8 @@ jobs:
           (
             cd packages/ai
             node ../../node_modules/vitest/dist/cli.js --run \
-              test/event-stream.test.ts
+              test/event-stream.test.ts \
+              test/providers.test.ts
           )
           (
             cd packages/agent
@@ -99,12 +103,20 @@ jobs:
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
               test/agent-session-concurrent.test.ts \
+              test/model-runtime-concurrency.test.ts \
+              test/model-runtime-modify-models-compat.test.ts \
+              test/remote-catalog-provider.test.ts \
+              test/selector-ownership.test.ts \
+              test/interactive-mode-selector-dispose.test.ts \
+              test/scoped-models-refresh.test.ts \
               test/rpc-prompt-response-semantics.test.ts \
               test/rpc-client-clone.test.ts \
               test/interactive-mode-clone-command.test.ts \
               test/interactive-mode-startup-input.test.ts \
               test/interactive-mode-queue-tui.test.ts \
-              test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts
+              test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
+              test/suite/regressions/6949-unavailable-scoped-model.test.ts \
+              test/suite/regressions/7209-model-selector-filter-resets-selection.test.ts
           )
           node --test --test-reporter=dot \
             packages/tui/test/tui-render.test.ts \
