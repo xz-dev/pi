@@ -20,6 +20,8 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ### Fixes
 
+- Keep provider catalog refreshes transactional across concurrent runtime refreshes, selector replacement, and scoped-model editing without losing the user's current query or selection.
+  - Patch branch: [`patch/model-refresh-consistency`](https://github.com/xz-dev/pi/tree/patch/model-refresh-consistency)
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
   - Patch branch: [`patch/esc-abort-and-manual-retry`](https://github.com/xz-dev/pi/tree/patch/esc-abort-and-manual-retry)
 - Keep TUI hardware cursor positioning and visibility inside DECSET 2026 synchronized-output frames, preventing transient cursor jumps over slow terminals or SSH connections.
