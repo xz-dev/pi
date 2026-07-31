@@ -30,7 +30,14 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream https://github.com/earendil-works/pi.git
           git fetch upstream main
-          git fetch origin ci patch/model-refresh-consistency patch/dependency-audit patch/esc-abort-and-manual-retry patch/tui-synchronized-cursor patch/changelog-prerelease patch/skill-overrides
+          git fetch origin \
+            +refs/heads/ci:refs/remotes/origin/ci \
+            +refs/heads/patch/model-refresh-consistency:refs/remotes/origin/patch/model-refresh-consistency \
+            +refs/heads/patch/dependency-audit:refs/remotes/origin/patch/dependency-audit \
+            +refs/heads/patch/esc-abort-and-manual-retry:refs/remotes/origin/patch/esc-abort-and-manual-retry \
+            +refs/heads/patch/tui-synchronized-cursor:refs/remotes/origin/patch/tui-synchronized-cursor \
+            +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
+            +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -123,6 +130,22 @@ jobs:
             packages/tui/test/tui-transport.test.ts
           PI_TUI_TMUX_E2E=1 node --test --test-reporter=spec \
             packages/tui/test/tui-tmux.e2e.ts
+
+      - name: Smoke test packed npm release
+        run: |
+          release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-packed-release.XXXXXX")
+          trap 'rm -rf -- "$release_dir"' EXIT
+          node scripts/local-release.mjs \
+            --out "$release_dir" \
+            --force \
+            --skip-check \
+            --skip-test \
+            --skip-binary \
+            --skip-bun-install
+          (
+            cd "$RUNNER_TEMP"
+            "$release_dir/node/pi" --version
+          )
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate
