@@ -16,10 +16,13 @@ concurrency:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout generated main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
@@ -50,14 +53,42 @@ jobs:
       - name: Prepare GitHub Packages tarballs
         run: node scripts/prepare-github-packages.mjs --out /tmp/pi-github-packages
 
-      - name: Publish packages
+      - name: Verify prepared release locally
+        run: node scripts/verify-github-packages.mjs local /tmp/pi-github-packages/release-manifest.json
+
+      - name: Publish support packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/publish-github-packages.mjs support /tmp/pi-github-packages/release-manifest.json
+
+      - name: Verify coding-agent install from GitHub Packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          while IFS= read -r tarball; do
-            [ -n "$tarball" ] || continue
-            npm publish "$tarball" --registry=https://npm.pkg.github.com --access public
-          done < /tmp/pi-github-packages/publish-order.txt
+          for attempt in {1..10}; do
+            if node scripts/verify-github-packages.mjs support-registry /tmp/pi-github-packages/release-manifest.json; then
+              exit 0
+            fi
+            [ "$attempt" -lt 10 ] || exit 1
+            sleep 3
+          done
+
+      - name: Publish coding-agent
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/publish-github-packages.mjs entry /tmp/pi-github-packages/release-manifest.json
+
+      - name: Verify published coding-agent
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in {1..10}; do
+            if node scripts/verify-github-packages.mjs registry /tmp/pi-github-packages/release-manifest.json; then
+              exit 0
+            fi
+            [ "$attempt" -lt 10 ] || exit 1
+            sleep 3
+          done
 
       - name: Upload tarballs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

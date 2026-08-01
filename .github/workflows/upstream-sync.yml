@@ -143,6 +143,13 @@ jobs:
             "$release_dir/node/pi" --version
           )
 
+      - name: Verify GitHub Packages release candidate
+        run: |
+          release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-github-release.XXXXXX")
+          trap 'rm -rf -- "$release_dir"' EXIT
+          node scripts/prepare-github-packages.mjs --out "$release_dir"
+          node scripts/verify-github-packages.mjs local "$release_dir/release-manifest.json"
+
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate
 

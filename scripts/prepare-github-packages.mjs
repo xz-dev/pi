@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+import { globSync } from "glob";
 
-const packages = [
-	{ directory: "packages/ai", sourceName: "@earendil-works/pi-ai", publishName: "@xz-dev/pi-ai" },
-	{ directory: "packages/tui", sourceName: "@earendil-works/pi-tui", publishName: "@xz-dev/pi-tui" },
-	{ directory: "packages/agent", sourceName: "@earendil-works/pi-agent-core", publishName: "@xz-dev/pi-agent-core" },
-	{ directory: "packages/coding-agent", sourceName: "@earendil-works/pi-coding-agent", publishName: "@xz-dev/pi-coding-agent" },
-];
+const SOURCE_SCOPE = "@earendil-works/";
+const INTERNAL_PACKAGE_PREFIX = `${SOURCE_SCOPE}pi-`;
+const PUBLISH_SCOPE = "@xz-dev/";
+const ENTRY_PACKAGE = "@earendil-works/pi-coding-agent";
 
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, {
@@ -31,6 +30,71 @@ function writeJson(path, value) {
 	writeFileSync(path, `${JSON.stringify(value, undefined, "\t")}\n`);
 }
 
+function discoverWorkspacePackages(repoRoot, workspacePatterns) {
+	const packageJsonPaths = globSync(
+		workspacePatterns.map((pattern) => `${pattern}/package.json`),
+		{ absolute: true, cwd: repoRoot, nodir: true },
+	).sort();
+	const discovered = new Map();
+	for (const packageJsonPath of packageJsonPaths) {
+		const packageJson = readJson(packageJsonPath);
+		if (typeof packageJson.name !== "string") continue;
+		if (discovered.has(packageJson.name)) {
+			throw new Error(`Duplicate workspace package ${packageJson.name}`);
+		}
+		discovered.set(packageJson.name, {
+			directory: relative(repoRoot, dirname(packageJsonPath)),
+			packageJson,
+		});
+	}
+	return discovered;
+}
+
+function packageDependencies(packageJson) {
+	return [
+		...Object.keys(packageJson.dependencies ?? {}),
+		...Object.keys(packageJson.peerDependencies ?? {}),
+		...Object.keys(packageJson.optionalDependencies ?? {}),
+	].sort();
+}
+
+function resolvePublishedPackages(repoRoot, workspacePatterns) {
+	const discovered = discoverWorkspacePackages(repoRoot, workspacePatterns);
+	const resolved = [];
+	const resolving = new Set();
+	const resolvedNames = new Set();
+
+	const visit = (sourceName) => {
+		if (resolvedNames.has(sourceName)) return;
+		if (resolving.has(sourceName)) {
+			throw new Error(`Circular internal package dependency involving ${sourceName}`);
+		}
+		const discoveredPackage = discovered.get(sourceName);
+		if (!discoveredPackage || discoveredPackage.packageJson.private) {
+			throw new Error(`${sourceName} is required but is not a publishable workspace package`);
+		}
+
+		resolving.add(sourceName);
+		for (const dependencyName of packageDependencies(discoveredPackage.packageJson)) {
+			if (discovered.has(dependencyName)) {
+				visit(dependencyName);
+			} else if (dependencyName.startsWith(INTERNAL_PACKAGE_PREFIX)) {
+				throw new Error(`${sourceName} depends on unresolved internal package ${dependencyName}`);
+			}
+		}
+		resolving.delete(sourceName);
+		resolvedNames.add(sourceName);
+		resolved.push({
+			directory: discoveredPackage.directory,
+			sourceName,
+			publishName: `${PUBLISH_SCOPE}${sourceName.slice(SOURCE_SCOPE.length)}`,
+		});
+	};
+
+	visit(ENTRY_PACKAGE);
+	return resolved;
+}
+
 function parseArgs() {
 	const args = process.argv.slice(2);
 	let outDir;
@@ -50,26 +114,34 @@ function parseArgs() {
 
 function forkVersion(baseVersion) {
 	const runNumber = process.env.GITHUB_RUN_NUMBER ?? "0";
-	const runAttempt = process.env.GITHUB_RUN_ATTEMPT ?? "1";
 	let sha = process.env.GITHUB_SHA;
 	if (!sha) {
 		sha = run("git", ["rev-parse", "HEAD"], { capture: true }).trim();
 	}
-	return `${baseVersion}-xz.${runNumber}.${runAttempt}.g${sha.slice(0, 8)}`;
+	return `${baseVersion}-xz.${runNumber}.1.g${sha.slice(0, 8)}`;
 }
 
-function rewriteInternalDependencies(dependencies, version) {
+function rewriteInternalDependencies(dependencies, version, packageIndex, sourceName, packages, packageIndexes) {
 	if (!dependencies) return dependencies;
 	const rewritten = { ...dependencies };
-	for (const pkg of packages) {
-		if (rewritten[pkg.sourceName]) {
-			rewritten[pkg.sourceName] = `npm:${pkg.publishName}@${version}`;
+	for (const dependencyName of Object.keys(rewritten)) {
+		const dependencyIndex = packageIndexes.get(dependencyName);
+		if (dependencyIndex === undefined) {
+			if (dependencyName.startsWith(INTERNAL_PACKAGE_PREFIX)) {
+				throw new Error(`${sourceName} depends on unpublished internal package ${dependencyName}`);
+			}
+			continue;
 		}
+		const dependencyPackage = packages[dependencyIndex];
+		if (dependencyIndex >= packageIndex) {
+			throw new Error(`${dependencyName} must be published before ${sourceName}`);
+		}
+		rewritten[dependencyName] = `npm:${dependencyPackage.publishName}@${version}`;
 	}
 	return rewritten;
 }
 
-function preparePackage(pkg, version, workDir) {
+function preparePackage(pkg, packageIndex, version, workDir, packages, packageIndexes) {
 	const packageDir = join(workDir, pkg.directory);
 	cpSync(pkg.directory, packageDir, {
 		recursive: true,
@@ -100,11 +172,32 @@ function preparePackage(pkg, version, workDir) {
 	packageJson.publishConfig = {
 		registry: "https://npm.pkg.github.com",
 	};
-	packageJson.dependencies = rewriteInternalDependencies(packageJson.dependencies, version);
-	packageJson.peerDependencies = rewriteInternalDependencies(packageJson.peerDependencies, version);
-	packageJson.optionalDependencies = rewriteInternalDependencies(packageJson.optionalDependencies, version);
+	packageJson.dependencies = rewriteInternalDependencies(
+		packageJson.dependencies,
+		version,
+		packageIndex,
+		pkg.sourceName,
+		packages,
+		packageIndexes,
+	);
+	packageJson.peerDependencies = rewriteInternalDependencies(
+		packageJson.peerDependencies,
+		version,
+		packageIndex,
+		pkg.sourceName,
+		packages,
+		packageIndexes,
+	);
+	packageJson.optionalDependencies = rewriteInternalDependencies(
+		packageJson.optionalDependencies,
+		version,
+		packageIndex,
+		pkg.sourceName,
+		packages,
+		packageIndexes,
+	);
 
-	if (pkg.sourceName === "@earendil-works/pi-coding-agent") {
+	if (pkg.sourceName === ENTRY_PACKAGE) {
 		packageJson.files = packageJson.files?.filter((file) => file !== "npm-shrinkwrap.json");
 		rmSync(join(packageDir, "npm-shrinkwrap.json"), { force: true });
 	}
@@ -119,7 +212,12 @@ const rootPackageJson = readJson(join(repoRoot, "package.json"));
 if (rootPackageJson.name !== "pi-monorepo") {
 	throw new Error("Run this script from the repository root");
 }
+if (!Array.isArray(rootPackageJson.workspaces)) {
+	throw new Error("Root package.json must declare workspaces");
+}
 
+const packages = resolvePublishedPackages(repoRoot, rootPackageJson.workspaces);
+const packageIndexes = new Map(packages.map((pkg, index) => [pkg.sourceName, index]));
 const baseVersion = readJson(join(repoRoot, "packages/coding-agent/package.json")).version;
 const version = forkVersion(baseVersion);
 const workDir = join(outDir, "work");
@@ -128,21 +226,34 @@ rmSync(outDir, { force: true, recursive: true });
 mkdirSync(workDir, { recursive: true });
 mkdirSync(tarballDir, { recursive: true });
 
-const tarballs = [];
-for (const pkg of packages) {
-	const packageDir = preparePackage(pkg, version, workDir);
+const releasePackages = [];
+for (const [packageIndex, pkg] of packages.entries()) {
+	const packageDir = preparePackage(pkg, packageIndex, version, workDir, packages, packageIndexes);
 	const output = run("npm", ["pack", "--json", "--pack-destination", tarballDir], { capture: true, cwd: packageDir });
 	const packResult = JSON.parse(output);
 	const packed = Array.isArray(packResult) ? packResult[0] : packResult[pkg.publishName];
-	if (!packed?.filename) {
-		throw new Error(`npm pack returned no result for ${pkg.publishName}`);
+	if (!packed?.filename || !packed.integrity) {
+		throw new Error(`npm pack returned incomplete metadata for ${pkg.publishName}`);
 	}
-	tarballs.push(join(tarballDir, packed.filename));
+	releasePackages.push({
+		sourceName: pkg.sourceName,
+		publishName: pkg.publishName,
+		version,
+		tarball: join(tarballDir, packed.filename),
+		integrity: packed.integrity,
+		entry: pkg.sourceName === ENTRY_PACKAGE,
+	});
 }
 
+const entryPackage = releasePackages.find((pkg) => pkg.entry);
+if (!entryPackage || releasePackages.at(-1) !== entryPackage) {
+	throw new Error("Coding-agent must be the final release package");
+}
 writeFileSync(join(outDir, "version"), `${version}\n`);
-writeFileSync(join(outDir, "publish-order.txt"), `${tarballs.join("\n")}\n`);
+writeFileSync(join(outDir, "publish-order.txt"), `${releasePackages.map((pkg) => pkg.tarball).join("\n")}\n`);
+writeFileSync(join(outDir, "entry-tarball"), `${entryPackage.tarball}\n`);
+writeJson(join(outDir, "release-manifest.json"), { version, packages: releasePackages });
 console.log(`Prepared GitHub Packages version ${version}`);
-for (const tarball of tarballs) {
-	console.log(tarball);
+for (const pkg of releasePackages) {
+	console.log(pkg.tarball);
 }
