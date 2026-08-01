@@ -31,8 +31,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
   - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
-- Carry current security updates in the dependency lockfiles, validated by production and full dependency audits.
-  - Patch branch: [`patch/dependency-audit`](https://github.com/xz-dev/pi/tree/patch/dependency-audit)
 
 ### Unsupported
 

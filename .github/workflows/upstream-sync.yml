@@ -33,7 +33,6 @@ jobs:
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
             +refs/heads/patch/model-refresh-consistency:refs/remotes/origin/patch/model-refresh-consistency \
-            +refs/heads/patch/dependency-audit:refs/remotes/origin/patch/dependency-audit \
             +refs/heads/patch/esc-abort-and-manual-retry:refs/remotes/origin/patch/esc-abort-and-manual-retry \
             +refs/heads/patch/tui-synchronized-cursor:refs/remotes/origin/patch/tui-synchronized-cursor \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
@@ -58,9 +57,6 @@ jobs:
 
           git merge --squash origin/patch/model-refresh-consistency
           git commit -m "merge patch/model-refresh-consistency branch"
-
-          git merge --squash origin/patch/dependency-audit
-          git commit -m "merge patch/dependency-audit branch"
 
           git merge --squash origin/patch/esc-abort-and-manual-retry
           git commit -m "merge patch/esc-abort-and-manual-retry branch"
