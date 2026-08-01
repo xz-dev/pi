@@ -327,6 +327,8 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 	/** UI layout mode. */
 	uiMode?: UiMode;
+	/** Terminal implementation used by the interactive TUI. */
+	terminal?: Terminal;
 }
 
 interface InteractiveTuiOptions {
@@ -489,6 +491,7 @@ export class InteractiveMode {
 			uiMode,
 			showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 			logDirectory: getAgentDir(),
+			terminal: options.terminal,
 		});
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
