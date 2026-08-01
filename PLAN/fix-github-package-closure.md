@@ -24,4 +24,4 @@ Restore clean installation of the downstream `@xz-dev/pi-coding-agent` package a
 - [x] GREEN: discover and rewrite the coding-agent workspace dependency closure in dependency order.
 - [x] Gate: add local transformed-artifact, support-registry, and post-publication exact-install gates.
 - [x] Verify: focused tests, fresh-upstream build/check, transformed-artifact install, and independent test review.
-- [ ] Release: integrate through `ci`, rebuild generated `main`, publish, and verify a clean registry install.
+- [x] Release: integrate through `ci`, rebuild generated `main`, publish, and verify a clean registry install.
