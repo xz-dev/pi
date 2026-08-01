@@ -29,6 +29,9 @@ jobs:
       - name: Generate model data
         run: npm run generate:models
 
+      - name: Build pi-ai
+        run: npm run build:offline --workspace=@earendil-works/pi-ai
+
       - name: Run esc abort focused regressions
         run: |
           npm test --workspace=@earendil-works/pi-agent-core -- test/agent.test.ts
