@@ -34,6 +34,7 @@ jobs:
             +refs/heads/ci:refs/remotes/origin/ci \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
+            +refs/heads/tmp/patch/esc-manual-retry-compat:refs/remotes/origin/tmp/patch/esc-manual-retry-compat \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns
@@ -62,8 +63,38 @@ jobs:
           git merge --squash origin/patch/esc-abort
           git commit -m "merge patch/esc-abort branch"
 
-          git merge --squash origin/patch/manual-retry
+          if ! git merge --squash origin/patch/manual-retry; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/agent/src/agent.ts ]]; then
+              printf '::error::Unexpected manual-retry squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+          fi
+          git checkout --theirs packages/agent/src/agent.ts
+          git add packages/agent/src/agent.ts
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying manual-retry conflict staging'
+            exit 1
+          fi
           git commit -m "merge patch/manual-retry branch"
+
+          if ! git merge --squash origin/tmp/patch/esc-manual-retry-compat; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/agent/src/agent.ts ]]; then
+              printf '::error::Unexpected compatibility squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+          fi
+          git restore --source=origin/tmp/patch/esc-manual-retry-compat --staged --worktree -- packages/agent/src/agent.ts
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying compatibility patch'
+            exit 1
+          fi
+          git commit -m "merge tmp/patch/esc-manual-retry-compat branch"
 
           git merge --squash origin/patch/changelog-prerelease
           git commit -m "merge patch/changelog-prerelease branch"
