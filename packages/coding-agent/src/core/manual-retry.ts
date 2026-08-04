@@ -7,7 +7,12 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
-import type { SessionEntry, SessionMessageEntry } from "./session-manager.ts";
+import {
+	buildContextEntries,
+	sessionEntryToContextMessages,
+	type SessionEntry,
+	type SessionMessageEntry,
+} from "./session-manager.ts";
 
 /** Exact neutral text for unresolved tool calls. */
 export const SYNTHETIC_TOOL_RESULT_TEXT =
@@ -55,6 +60,8 @@ export interface PlanContinuationInput {
 	branchEntries: readonly SessionEntry[];
 	/** Optional focus entry on the branch; defaults to the branch leaf. */
 	selectedEntryId?: string;
+	/** Timestamp applied to synthetic recovery messages. */
+	recoveryTimestamp: number;
 }
 
 function reject(code: ContinuationRejectionCode, message: string): never {
@@ -73,8 +80,44 @@ function isToolResultMessage(message: AgentMessage): message is ToolResultMessag
 	return message.role === "toolResult";
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function toolCallsOf(assistant: AssistantMessage): ToolCall[] {
-	return assistant.content.filter((part): part is ToolCall => part.type === "toolCall");
+	if (!Array.isArray(assistant.content)) {
+		reject("malformed_tool_call", "Assistant content must be an array.");
+	}
+	const calls: ToolCall[] = [];
+	for (const part of assistant.content as unknown[]) {
+		if (!isRecord(part) || typeof part.type !== "string") {
+			reject("malformed_tool_call", "Assistant content contains a malformed block.");
+		}
+		if (part.type === "toolCall") {
+			if (
+				typeof part.id !== "string" ||
+				part.id.trim().length === 0 ||
+				typeof part.name !== "string" ||
+				part.name.trim().length === 0 ||
+				!isRecord(part.arguments)
+			) {
+				reject("malformed_tool_call", "Assistant content contains a malformed tool call.");
+			}
+			calls.push(part as unknown as ToolCall);
+			continue;
+		}
+		if (part.type === "text" && typeof part.text === "string") {
+			continue;
+		}
+		if (part.type === "thinking" && typeof part.thinking === "string") {
+			continue;
+		}
+		reject("malformed_tool_call", `Assistant content contains an unsupported ${part.type} block.`);
+	}
+	if (calls.length > 0 && assistant.stopReason !== "toolUse") {
+		reject("malformed_tool_call", "Assistant tool calls require stopReason toolUse.");
+	}
+	return calls;
 }
 
 function createSyntheticToolResult(toolCallId: string, toolName: string, timestamp: number): ToolResultMessage {
@@ -89,16 +132,12 @@ function createSyntheticToolResult(toolCallId: string, toolName: string, timesta
 }
 
 function contextThrough(entries: readonly SessionEntry[], endEntryId: string): AgentMessage[] {
-	const messages: AgentMessage[] = [];
-	for (const entry of entries) {
-		if (isMessageEntry(entry)) {
-			messages.push(entry.message);
-		}
-		if (entry.id === endEntryId) {
-			return messages;
-		}
+	const endIndex = entries.findIndex((entry) => entry.id === endEntryId);
+	if (endIndex < 0) {
+		reject("invalid_anchor", `Continuation boundary ${endEntryId} is not on the provided branch.`);
 	}
-	reject("invalid_anchor", `Continuation boundary ${endEntryId} is not on the provided branch.`);
+	const boundedEntries = entries.slice(0, endIndex + 1);
+	return buildContextEntries([...boundedEntries], endEntryId).flatMap(sessionEntryToContextMessages);
 }
 
 function findEntryIndex(entries: readonly SessionEntry[], entryId: string): number {
@@ -134,6 +173,7 @@ interface ValidatedToolBatch {
 function validateToolBatch(
 	entries: readonly SessionEntry[],
 	assistantIndex: number,
+	endIndex: number,
 	timestamp: number,
 ): ValidatedToolBatch {
 	const assistantEntry = entries[assistantIndex];
@@ -149,12 +189,6 @@ function validateToolBatch(
 
 	const seenCallIds = new Set<string>();
 	for (const call of toolCalls) {
-		if (typeof call.id !== "string" || call.id.length === 0) {
-			reject("malformed_tool_call", "Assistant tool batch contains a tool call with an empty id.");
-		}
-		if (typeof call.name !== "string" || call.name.length === 0) {
-			reject("malformed_tool_call", `Tool call ${call.id} has an empty name.`);
-		}
 		if (seenCallIds.has(call.id)) {
 			reject("duplicate_tool_call", `Assistant tool batch has duplicate tool call id ${call.id}.`);
 		}
@@ -168,36 +202,45 @@ function validateToolBatch(
 	// Consume the whole batch as a contiguous toolResult run. Missing calls are
 	// synthesized after the run. Non-results before completion are interleaved.
 	// Extra results after completion for the same batch are duplicate/orphan.
-	for (let i = assistantIndex + 1; i < entries.length; i++) {
+	for (let i = assistantIndex + 1; i <= endIndex; i++) {
 		const entry = entries[i]!;
-		const batchComplete = resultByCallId.size === toolCalls.length;
-
 		if (!isMessageEntry(entry)) {
-			if (batchComplete) {
-				break;
+			if (sessionEntryToContextMessages(entry).length === 0) {
+				continue;
 			}
 			reject(
 				"interleaved_tool_batch",
-				"Tool batch is interleaved with non-message entries before the batch completes.",
+				"Tool batch is interleaved with model-visible context before the selected boundary.",
 			);
 		}
 
 		const message = entry.message;
 		if (!isToolResultMessage(message)) {
-			if (batchComplete) {
-				break;
-			}
 			reject(
 				"interleaved_tool_batch",
-				"Tool batch is interleaved with a non-toolResult message before all calls are resolved.",
+				"Tool batch is interleaved with a non-toolResult message before the selected boundary.",
 			);
 		}
 
-		if (typeof message.toolCallId !== "string" || message.toolCallId.length === 0) {
+		if (typeof message.toolCallId !== "string" || message.toolCallId.trim().length === 0) {
 			reject("malformed_tool_result", "Tool result is missing a toolCallId.");
 		}
-		if (typeof message.toolName !== "string" || message.toolName.length === 0) {
+		if (typeof message.toolName !== "string" || message.toolName.trim().length === 0) {
 			reject("malformed_tool_result", `Tool result ${message.toolCallId} is missing a toolName.`);
+		}
+		if (!Array.isArray(message.content)) {
+			reject("malformed_tool_result", `Tool result ${message.toolCallId} content must be an array.`);
+		}
+		for (const part of message.content as unknown[]) {
+			if (!isRecord(part)) {
+				reject("malformed_tool_result", `Tool result ${message.toolCallId} contains malformed content.`);
+			}
+			const validText = part.type === "text" && typeof part.text === "string";
+			const validImage =
+				part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string";
+			if (!validText && !validImage) {
+				reject("malformed_tool_result", `Tool result ${message.toolCallId} contains malformed content.`);
+			}
 		}
 
 		const call = callById.get(message.toolCallId);
@@ -246,27 +289,16 @@ function planTerminalAssistant(
 		reject("missing_anchor", "Terminal assistant has no parent entry to continue from.");
 	}
 
-	let anchorId: string | undefined;
-	let contextEndId: string | undefined;
-	for (let i = failedIndex - 1; i >= 0; i--) {
-		const candidate = entries[i]!;
-		if (anchorId === undefined) {
-			anchorId = candidate.id;
-		}
-		if (isMessageEntry(candidate)) {
-			contextEndId = candidate.id;
-			break;
-		}
-	}
-	if (!anchorId) {
+	const anchor = entries[failedIndex - 1];
+	if (!anchor) {
 		reject("missing_anchor", "Terminal assistant has no parent entry to continue from.");
 	}
 
 	return {
 		kind: "terminal_assistant",
-		anchorEntryId: anchorId,
+		anchorEntryId: anchor.id,
 		expectedLeafId,
-		contextMessages: contextEndId ? contextThrough(entries, contextEndId) : [],
+		contextMessages: contextThrough(entries, anchor.id),
 		recoveryMessages: [],
 	};
 }
@@ -274,10 +306,11 @@ function planTerminalAssistant(
 function planToolBatch(
 	entries: readonly SessionEntry[],
 	assistantIndex: number,
+	endIndex: number,
 	expectedLeafId: string,
 	timestamp: number,
 ): ContinuationPlan {
-	const batch = validateToolBatch(entries, assistantIndex, timestamp);
+	const batch = validateToolBatch(entries, assistantIndex, endIndex, timestamp);
 	return {
 		kind: "tool_batch",
 		anchorEntryId: batch.anchorEntryId,
@@ -311,7 +344,7 @@ export function planContinuation(input: PlanContinuationInput): ContinuationPlan
 	}
 
 	const focusMessage = focusEntry.message;
-	const now = Date.now();
+	const now = input.recoveryTimestamp;
 
 	if (focusMessage.role === "user") {
 		return {
@@ -329,7 +362,15 @@ export function planContinuation(input: PlanContinuationInput): ContinuationPlan
 		}
 
 		if (toolCallsOf(focusMessage).length > 0) {
-			return planToolBatch(branchEntries, focusIndex, expectedLeafId, now);
+			let batchEndIndex = focusIndex;
+			for (let i = focusIndex + 1; i < branchEntries.length; i++) {
+				const candidate = branchEntries[i]!;
+				if (!isMessageEntry(candidate) || !isToolResultMessage(candidate.message)) {
+					break;
+				}
+				batchEndIndex = i;
+			}
+			return planToolBatch(branchEntries, focusIndex, batchEndIndex, expectedLeafId, now);
 		}
 
 		reject("nothing_to_continue", "Nothing to continue: assistant response already completed.");
@@ -340,7 +381,7 @@ export function planContinuation(input: PlanContinuationInput): ContinuationPlan
 			reject("malformed_tool_result", "Tool result is missing a toolCallId.");
 		}
 		const assistantIndex = findOwningToolAssistantIndex(branchEntries, focusIndex);
-		return planToolBatch(branchEntries, assistantIndex, expectedLeafId, now);
+		return planToolBatch(branchEntries, assistantIndex, focusIndex, expectedLeafId, now);
 	}
 
 	reject("nothing_to_continue", "Nothing to continue from the selected message role.");
