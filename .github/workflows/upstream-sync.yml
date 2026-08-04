@@ -32,7 +32,6 @@ jobs:
           git fetch upstream main
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
-            +refs/heads/patch/model-refresh-consistency:refs/remotes/origin/patch/model-refresh-consistency \
             +refs/heads/patch/esc-abort-and-manual-retry:refs/remotes/origin/patch/esc-abort-and-manual-retry \
             +refs/heads/patch/tui-synchronized-cursor:refs/remotes/origin/patch/tui-synchronized-cursor \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
@@ -55,9 +54,6 @@ jobs:
             exit 1
           fi
           git commit -m "merge ci branch"
-
-          git merge --squash origin/patch/model-refresh-consistency
-          git commit -m "merge patch/model-refresh-consistency branch"
 
           git merge --squash origin/patch/esc-abort-and-manual-retry
           git commit -m "merge patch/esc-abort-and-manual-retry branch"
@@ -112,12 +108,9 @@ jobs:
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
               test/agent-session-concurrent.test.ts \
-              test/model-runtime-concurrency.test.ts \
               test/model-runtime-modify-models-compat.test.ts \
               test/remote-catalog-provider.test.ts \
-              test/selector-ownership.test.ts \
               test/interactive-mode-selector-dispose.test.ts \
-              test/scoped-models-refresh.test.ts \
               test/rpc-prompt-response-semantics.test.ts \
               test/rpc-client-clone.test.ts \
               test/interactive-mode-clone-command.test.ts \
