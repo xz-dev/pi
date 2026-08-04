@@ -13,24 +13,21 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ### Features
 
-- Retry the current terminal error or aborted response with `/retry` or RPC `retry`, preserving the failed attempt as history while creating a new sibling attempt from the same context with the current model and thinking settings.
-  - Patch branch: [`patch/esc-abort-and-manual-retry`](https://github.com/xz-dev/pi/tree/patch/esc-abort-and-manual-retry)
 - Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
   - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
 - Allow `settings.retry.nonRetryableErrorPatterns` to fail-fast on gateway-specific terminal quota/limit error messages without expanding the built-in retry classifier.
   - Patch branch: [`patch/retry-non-retryable-patterns`](https://github.com/xz-dev/pi/tree/patch/retry-non-retryable-patterns)
 
-### Fixes
-
-- [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
-  - Patch branch: [`patch/esc-abort-and-manual-retry`](https://github.com/xz-dev/pi/tree/patch/esc-abort-and-manual-retry)
-- Keep TUI hardware cursor positioning and visibility inside DECSET 2026 synchronized-output frames, preventing transient cursor jumps over slow terminals or SSH connections.
-  - Patch branch: [`patch/tui-synchronized-cursor`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor)
-
 ### Temporarily disabled
 
-- Provider catalog refresh consistency is not currently squash-merged into rebuilt `main`. The branch needs an upstream rebase before re-enable.
+These branches still exist but are not squash-merged into rebuilt `main` until they are rebased onto current upstream:
+
+- Provider catalog refresh consistency
   - Patch branch: [`patch/model-refresh-consistency`](https://github.com/xz-dev/pi/tree/patch/model-refresh-consistency)
+- Esc abort recovery and manual `/retry`
+  - Patch branch: [`patch/esc-abort-and-manual-retry`](https://github.com/xz-dev/pi/tree/patch/esc-abort-and-manual-retry)
+- TUI synchronized-output hardware cursor positioning
+  - Patch branch: [`patch/tui-synchronized-cursor`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor)
 
 ### Maintenance
 
