@@ -36,7 +36,8 @@ jobs:
             +refs/heads/patch/esc-abort-and-manual-retry:refs/remotes/origin/patch/esc-abort-and-manual-retry \
             +refs/heads/patch/tui-synchronized-cursor:refs/remotes/origin/patch/tui-synchronized-cursor \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
-            +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides
+            +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
+            +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -70,6 +71,9 @@ jobs:
           git merge --squash origin/patch/skill-overrides
           git commit -m "merge patch/skill-overrides branch"
 
+          git merge --squash origin/patch/retry-non-retryable-patterns
+          git commit -m "merge patch/retry-non-retryable-patterns branch"
+
       - name: Install dependencies for pre-push gates
         run: npm ci --ignore-scripts
 
@@ -92,7 +96,8 @@ jobs:
             cd packages/ai
             node ../../node_modules/vitest/dist/cli.js --run \
               test/event-stream.test.ts \
-              test/providers.test.ts
+              test/providers.test.ts \
+              test/retry.test.ts
           )
           (
             cd packages/agent
@@ -103,6 +108,7 @@ jobs:
           (
             cd packages/coding-agent
             node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
+              test/settings-manager.test.ts \
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
               test/agent-session-concurrent.test.ts \

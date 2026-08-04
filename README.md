@@ -17,6 +17,8 @@ It tracks upstream `main` with a minimal downstream patch stack.
   - Patch branch: [`patch/esc-abort-and-manual-retry`](https://github.com/xz-dev/pi/tree/patch/esc-abort-and-manual-retry)
 - Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
   - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
+- Allow `settings.retry.nonRetryableErrorPatterns` to fail-fast on gateway-specific terminal quota/limit error messages without expanding the built-in retry classifier.
+  - Patch branch: [`patch/retry-non-retryable-patterns`](https://github.com/xz-dev/pi/tree/patch/retry-non-retryable-patterns)
 
 ### Fixes
 
