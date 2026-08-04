@@ -179,7 +179,10 @@ export async function createAgentSessionServices(
 		}
 	}
 	extensionsResult.runtime.pendingNativeProviderRegistrations = [];
-	await modelRuntime.refresh({ allowNetwork: false });
+	await modelRuntime.refreshAfterRegistrationConvergence({
+		allowNetwork: false,
+		signal: options.modelRuntimeSignal,
+	});
 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
 
 	return {
