@@ -325,6 +325,113 @@ describe("Agent", () => {
 		expect(agent.state.isStreaming).toBe(false);
 	});
 
+	for (const stuckEvent of ["message_end", "turn_end", "agent_end"] as const) {
+		it(`should terminalize once when aborting a stuck ${stuckEvent} listener`, async () => {
+			const agent = new Agent({
+				streamFn: () => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+					});
+					return stream;
+				},
+			});
+
+			const events: AgentEvent[] = [];
+			let stuckStarted = false;
+			agent.subscribe((event) => {
+				events.push(event);
+				if (event.type !== stuckEvent) {
+					return;
+				}
+				if (event.type === "message_end" && event.message.role !== "assistant") {
+					return;
+				}
+				stuckStarted = true;
+				return new Promise(() => {});
+			});
+
+			const promptPromise = agent.prompt("hello");
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(stuckStarted).toBe(true);
+			expect(agent.state.isStreaming).toBe(true);
+
+			agent.abort();
+			await promptPromise;
+			await agent.waitForIdle();
+			// Let any detached recovery listeners settle.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+
+			const assistantMessages = agent.state.messages.filter((message) => message.role === "assistant");
+			expect(assistantMessages).toHaveLength(1);
+			expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
+			expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+			expect(agent.state.isStreaming).toBe(false);
+			expect(agent.state.streamingMessage).toBeUndefined();
+			expect(agent.state.pendingToolCalls.size).toBe(0);
+		});
+	}
+
+	it("should swallow sync throw and async reject during aborted detached dispatch and keep notifying later listeners", async () => {
+		const unhandledRejections: unknown[] = [];
+		const onUnhandledRejection = (reason: unknown) => {
+			unhandledRejections.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandledRejection);
+
+		try {
+			const agent = new Agent({
+				streamFn: () => new MockAssistantStream(),
+			});
+
+			const recorded: string[] = [];
+			let recoveryAgentEnd = false;
+
+			agent.subscribe((event) => {
+				if (event.type === "agent_start") {
+					return new Promise(() => {});
+				}
+			});
+			agent.subscribe((_event, signal) => {
+				if (!signal.aborted) {
+					return;
+				}
+				throw new Error("sync detached boom");
+			});
+			agent.subscribe(async (_event, signal) => {
+				if (!signal.aborted) {
+					return;
+				}
+				throw new Error("async detached boom");
+			});
+			agent.subscribe((event, signal) => {
+				if (!signal.aborted) {
+					return;
+				}
+				recorded.push(event.type);
+				if (event.type === "agent_end") {
+					recoveryAgentEnd = true;
+				}
+			});
+
+			const promptPromise = agent.prompt("hello");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			agent.abort();
+			await promptPromise;
+			await agent.waitForIdle();
+			await new Promise((resolve) => setTimeout(resolve, 20));
+
+			expect(recoveryAgentEnd).toBe(true);
+			expect(recorded).toEqual(expect.arrayContaining(["message_start", "message_end", "turn_end", "agent_end"]));
+			expect(unhandledRejections).toEqual([]);
+			expect(agent.state.isStreaming).toBe(false);
+			expect(agent.state.streamingMessage).toBeUndefined();
+			expect(agent.state.pendingToolCalls.size).toBe(0);
+		} finally {
+			process.off("unhandledRejection", onUnhandledRejection);
+		}
+	});
+
 	it("should abort a stuck context transform before the provider request", async () => {
 		let providerCalled = false;
 		const agent = new Agent({

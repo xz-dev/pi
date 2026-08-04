@@ -225,6 +225,86 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(providerCalled).toBe(false);
 	});
 
+	for (const stuckEvent of ["message_end", "turn_end", "agent_end"] as const) {
+		it(`should keep single terminal assistant and session persistence when aborting stuck ${stuckEvent}`, async () => {
+			const model = getModel("anthropic", "claude-sonnet-4-5")!;
+			let stuckStarted = false;
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model,
+					systemPrompt: "Test",
+					tools: [],
+				},
+				streamFn: () => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+					});
+					return stream;
+				},
+			});
+			const sessionManager = SessionManager.inMemory();
+			const settingsManager = SettingsManager.create(tempDir, tempDir);
+			const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+			const modelRegistry = await createModelRegistry(authStorage, tempDir);
+			await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
+			const extensionsResult = await createTestExtensionsResult([
+				(pi) => {
+					const hang = async () => {
+						stuckStarted = true;
+						await new Promise(() => {});
+					};
+					if (stuckEvent === "message_end") {
+						pi.on("message_end", async (event) => {
+							if (event.message.role !== "assistant") {
+								return;
+							}
+							await hang();
+						});
+					} else if (stuckEvent === "turn_end") {
+						pi.on("turn_end", hang);
+					} else {
+						pi.on("agent_end", hang);
+					}
+				},
+			]);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settingsManager,
+				cwd: tempDir,
+				modelRuntime: getModelRuntime(modelRegistry),
+				resourceLoader: createTestResourceLoader({ extensionsResult }),
+			});
+
+			const promptPromise = session.prompt("hello");
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			expect(stuckStarted).toBe(true);
+			expect(session.isStreaming).toBe(true);
+
+			await session.abort();
+			await promptPromise;
+			await session.agent.waitForIdle();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+
+			const assistantMessages = session.messages.filter((message) => message.role === "assistant");
+			expect(assistantMessages).toHaveLength(1);
+			expect(session.isStreaming).toBe(false);
+			expect(session.agent.state.streamingMessage).toBeUndefined();
+			expect(session.agent.state.pendingToolCalls.size).toBe(0);
+
+			const persistedRoles = sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "message")
+				.map((entry) => entry.message.role);
+			const stateRoles = session.messages.map((message) => message.role);
+			expect(persistedRoles).toEqual(stateRoles);
+			expect(persistedRoles.filter((role) => role === "assistant")).toHaveLength(1);
+		});
+	}
+
 	it("should allow steer() while streaming", async () => {
 		await createSession();
 
