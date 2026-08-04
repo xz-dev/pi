@@ -372,6 +372,50 @@ describe("Agent", () => {
 		});
 	}
 
+	for (const interruptedEvent of ["message_end", "turn_end", "agent_end"] as const) {
+		it(`should deliver an abort-interrupted ${interruptedEvent} once to later listeners`, async () => {
+			const agent = new Agent({
+				streamFn: () => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+					});
+					return stream;
+				},
+			});
+			let stuckStarted = false;
+			agent.subscribe((event) => {
+				if (event.type !== interruptedEvent) {
+					return;
+				}
+				if (event.type === "message_end" && event.message.role !== "assistant") {
+					return;
+				}
+				stuckStarted = true;
+				return new Promise(() => {});
+			});
+			const laterListenerEvents: AgentEvent[] = [];
+			agent.subscribe((event) => {
+				laterListenerEvents.push(event);
+			});
+
+			const promptPromise = agent.prompt("hello");
+			await expect.poll(() => stuckStarted).toBe(true);
+			agent.abort();
+			await promptPromise;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+
+			const interruptedEvents = laterListenerEvents.filter((event) => {
+				if (event.type !== interruptedEvent) {
+					return false;
+				}
+				return event.type !== "message_end" || event.message.role === "assistant";
+			});
+			expect(interruptedEvents).toHaveLength(1);
+			expect(laterListenerEvents.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		});
+	}
+
 	for (const terminalEvent of ["message_end", "turn_end", "agent_end"] as const) {
 		for (const failureMode of ["sync throw", "async rejection"] as const) {
 			it(`should preserve a non-abort ${failureMode} from a ${terminalEvent} listener`, async () => {

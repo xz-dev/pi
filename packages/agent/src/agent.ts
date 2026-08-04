@@ -647,7 +647,9 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
-		for (const listener of this.listeners) {
+		const listeners = [...this.listeners];
+		for (let index = 0; index < listeners.length; index++) {
+			const listener = listeners[index]!;
 			if (signal.aborted) {
 				// Invoke inside a Promise callback so sync throws become rejections too.
 				void Promise.resolve()
@@ -655,7 +657,21 @@ export class Agent {
 					.catch(() => {});
 				continue;
 			}
-			await callAbortable(() => listener(event, signal), signal);
+			try {
+				await callAbortable(() => listener(event, signal), signal);
+			} catch (error) {
+				if (!signal.aborted) {
+					throw error;
+				}
+				// The current listener was already started. Deliver this event once to
+				// every later listener without waiting for abort-blocked cleanup.
+				for (const remainingListener of listeners.slice(index + 1)) {
+					void Promise.resolve()
+						.then(() => remainingListener(event, signal))
+						.catch(() => {});
+				}
+				return;
+			}
 		}
 	}
 }
