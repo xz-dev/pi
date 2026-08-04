@@ -532,23 +532,32 @@ export class Agent {
 	 * must not synthesize a second terminal assistant or duplicate turn/agent end events.
 	 */
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
+		const failureMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: this._state.model.api,
+			provider: this._state.model.provider,
+			model: this._state.model.id,
+			usage: EMPTY_USAGE,
+			stopReason: aborted ? "aborted" : "error",
+			errorMessage: error instanceof Error ? error.message : String(error),
+			timestamp: Date.now(),
+		} satisfies AgentMessage;
+
+		if (!aborted) {
+			await this.processEvents({ type: "message_start", message: failureMessage });
+			await this.processEvents({ type: "message_end", message: failureMessage });
+			await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
+			await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+			return;
+		}
+
 		if (this.runTerminalization.agentEndEmitted) {
 			return;
 		}
 
 		let terminalMessage = this.runTerminalization.lastAssistantMessage;
 		if (!this.runTerminalization.assistantMessageFinalized || !terminalMessage) {
-			const failureMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: "" }],
-				api: this._state.model.api,
-				provider: this._state.model.provider,
-				model: this._state.model.id,
-				usage: EMPTY_USAGE,
-				stopReason: aborted ? "aborted" : "error",
-				errorMessage: error instanceof Error ? error.message : String(error),
-				timestamp: Date.now(),
-			} satisfies AgentMessage;
 			await this.processEvents({ type: "message_start", message: failureMessage });
 			await this.processEvents({ type: "message_end", message: failureMessage });
 			terminalMessage = failureMessage;

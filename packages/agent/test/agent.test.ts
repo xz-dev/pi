@@ -372,6 +372,46 @@ describe("Agent", () => {
 		});
 	}
 
+	for (const terminalEvent of ["message_end", "turn_end", "agent_end"] as const) {
+		for (const failureMode of ["sync throw", "async rejection"] as const) {
+			it(`should preserve a non-abort ${failureMode} from a ${terminalEvent} listener`, async () => {
+				const agent = new Agent({
+					streamFn: () => {
+						const stream = new MockAssistantStream();
+						queueMicrotask(() => {
+							stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+						});
+						return stream;
+					},
+				});
+				let failed = false;
+				agent.subscribe((event) => {
+					if (failed || event.type !== terminalEvent) {
+						return;
+					}
+					if (event.type === "message_end" && event.message.role !== "assistant") {
+						return;
+					}
+					failed = true;
+					if (failureMode === "async rejection") {
+						return Promise.reject(new Error("terminal listener failed"));
+					}
+					throw new Error("terminal listener failed");
+				});
+
+				await agent.prompt("hello");
+
+				const errorMessages = agent.state.messages.filter(
+					(message): message is AssistantMessage => message.role === "assistant" && message.stopReason === "error",
+				);
+				expect(errorMessages).toHaveLength(1);
+				expect(errorMessages[0]?.errorMessage).toBe("terminal listener failed");
+				expect(agent.state.errorMessage).toBe("terminal listener failed");
+				expect(agent.state.isStreaming).toBe(false);
+			});
+		}
+	}
+
 	it("should swallow sync throw and async reject during aborted detached dispatch and keep notifying later listeners", async () => {
 		const unhandledRejections: unknown[] = [];
 		const onUnhandledRejection = (reason: unknown) => {
