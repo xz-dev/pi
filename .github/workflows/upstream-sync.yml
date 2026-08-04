@@ -32,6 +32,8 @@ jobs:
           git fetch upstream main
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
+            +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
+            +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns
@@ -55,8 +57,13 @@ jobs:
 
           # Paused until rebased onto current upstream/main:
           # - patch/model-refresh-consistency
-          # - patch/esc-abort-and-manual-retry
           # - patch/tui-synchronized-cursor
+
+          git merge --squash origin/patch/esc-abort
+          git commit -m "merge patch/esc-abort branch"
+
+          git merge --squash origin/patch/manual-retry
+          git commit -m "merge patch/manual-retry branch"
 
           git merge --squash origin/patch/changelog-prerelease
           git commit -m "merge patch/changelog-prerelease branch"
@@ -105,6 +112,11 @@ jobs:
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
               test/agent-session-concurrent.test.ts \
+              test/manual-retry-planner.test.ts \
+              test/manual-retry-commands.test.ts \
+              test/tree-selector.test.ts \
+              test/session-manager/custom-session-id.test.ts \
+              test/session-manager/tree-traversal.test.ts \
               test/model-runtime-modify-models-compat.test.ts \
               test/remote-catalog-provider.test.ts \
               test/interactive-mode-selector-dispose.test.ts \
@@ -113,6 +125,8 @@ jobs:
               test/interactive-mode-clone-command.test.ts \
               test/interactive-mode-startup-input.test.ts \
               test/interactive-mode-queue-tui.test.ts \
+              test/suite/manual-retry.test.ts \
+              test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
               test/suite/regressions/6949-unavailable-scoped-model.test.ts \
               test/suite/regressions/7209-model-selector-filter-resets-selection.test.ts
           )
