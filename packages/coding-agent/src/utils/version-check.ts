@@ -1,12 +1,7 @@
 import { compare, valid } from "semver";
-import { spawnProcess } from "./child-process.ts";
-import { killProcessTree } from "./shell.ts";
+import { getPiUserAgent } from "./pi-user-agent.ts";
 
-export const PACKAGE_SCOPE = "@xz-dev";
-export const PACKAGE_NAME = `${PACKAGE_SCOPE}/pi-coding-agent`;
-export const PACKAGE_REGISTRY = "https://npm.pkg.github.com";
-export const PACKAGE_PAGE_URL = "https://github.com/xz-dev/pi/pkgs/npm/pi-coding-agent";
-
+const LATEST_VERSION_URL = "https://pi.dev/api/latest-version";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
 export interface LatestPiRelease {
@@ -32,65 +27,36 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 	return candidateVersion.trim() !== currentVersion.trim();
 }
 
-function readLatestPackageVersion(timeoutMs: number): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const child = spawnProcess("npm", ["view", PACKAGE_NAME, "version", `--registry=${PACKAGE_REGISTRY}`], {
-			detached: process.platform !== "win32",
-			stdio: ["ignore", "pipe", "pipe"],
-			windowsHide: true,
-		});
-		const stdout: Buffer[] = [];
-		const stderr: Buffer[] = [];
-		let settled = false;
-		const finish = (callback: () => void): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			callback();
-		};
-		const timeout = setTimeout(() => {
-			if (child.pid) killProcessTree(child.pid);
-			child.stdout.destroy();
-			child.stderr.destroy();
-			finish(() => reject(new Error(`npm view timed out after ${timeoutMs}ms`)));
-		}, timeoutMs);
-		child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-		child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-		child.on("error", (error) => finish(() => reject(error)));
-		child.on("close", (code) => {
-			finish(() => {
-				if (code === 0) {
-					resolve(Buffer.concat(stdout).toString("utf8").trim());
-					return;
-				}
-				const reason = Buffer.concat(stderr).toString("utf8").trim() || `exit code ${code ?? "unknown"}`;
-				reject(new Error(reason));
-			});
-		});
-	});
-}
-
 export async function getLatestPiRelease(
-	_currentVersion: string,
+	currentVersion: string,
 	options: { timeoutMs?: number } = {},
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_OFFLINE) return undefined;
 
-	let version: string;
-	try {
-		version = await readLatestPackageVersion(options.timeoutMs ?? DEFAULT_VERSION_CHECK_TIMEOUT_MS);
-	} catch (error) {
-		const reason = error instanceof Error ? error.message : String(error);
-		throw new Error(
-			`Could not read ${PACKAGE_NAME} latest version from ${PACKAGE_PAGE_URL}: ${reason}. ` +
-				`Run npm login --scope=${PACKAGE_SCOPE} --auth-type=legacy --registry=${PACKAGE_REGISTRY}.`,
-			{ cause: error },
-		);
+	const response = await fetch(LATEST_VERSION_URL, {
+		headers: {
+			"User-Agent": getPiUserAgent(currentVersion),
+			accept: "application/json",
+		},
+		signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_VERSION_CHECK_TIMEOUT_MS),
+	});
+	if (!response.ok) return undefined;
+
+	const data = (await response.json()) as {
+		packageName?: unknown;
+		version?: unknown;
+		note?: unknown;
+	};
+	if (typeof data.version !== "string" || !data.version.trim()) {
+		return undefined;
 	}
-	if (!version) return undefined;
+	const packageName =
+		typeof data.packageName === "string" && data.packageName.trim() ? data.packageName.trim() : undefined;
+	const note = typeof data.note === "string" && data.note.trim() ? data.note.trim() : undefined;
 	return {
-		version,
-		packageName: PACKAGE_NAME,
+		version: data.version.trim(),
+		packageName,
+		...(note ? { note } : {}),
 	};
 }
 
@@ -109,8 +75,8 @@ export async function checkForNewPiVersion(currentVersion: string): Promise<Late
 		if (latestRelease && isNewerPackageVersion(latestRelease.version, currentVersion)) {
 			return latestRelease;
 		}
+		return undefined;
 	} catch {
-		// Silently ignore version check errors
+		return undefined;
 	}
-	return undefined;
 }

@@ -1,8 +1,8 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ENV_AGENT_DIR, PACKAGE_NAME, VERSION } from "../src/config.ts";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import type { ResolvedPaths } from "../src/core/package-manager.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
@@ -10,7 +10,6 @@ import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import { main } from "../src/main.ts";
 import { ConfigSelectorComponent } from "../src/modes/interactive/components/config-selector.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
-import { PACKAGE_NAME as UPDATE_PACKAGE_NAME } from "../src/utils/version-check.ts";
 import { allowNetwork } from "./test-network-env.ts";
 
 describe("package commands", () => {
@@ -24,24 +23,6 @@ describe("package commands", () => {
 	let originalPath: string | undefined;
 	let originalExitCode: typeof process.exitCode;
 	let originalExecPath: string;
-
-	function getNewerPatchVersion(): string {
-		const [major = "0", minor = "0", patch = "0"] = VERSION.split(".");
-		return `${major}.${minor}.${Number.parseInt(patch, 10) + 1}`;
-	}
-
-	function prependFakeNpmView(version: string): void {
-		const fakeBinDir = join(tempDir, `fake-npm-view-${Math.random().toString(36).slice(2)}`);
-		const fakeNpmPath = join(fakeBinDir, process.platform === "win32" ? "npm.cmd" : "npm");
-		mkdirSync(fakeBinDir, { recursive: true });
-		const script =
-			process.platform === "win32"
-				? `@echo off\r\nif "%1"=="view" if "%2"=="${UPDATE_PACKAGE_NAME}" if "%3"=="version" (echo ${version} & exit /b 0)\r\nexit /b 23\r\n`
-				: `#!/bin/sh\nif [ "$1" = "view" ] && [ "$2" = "${UPDATE_PACKAGE_NAME}" ] && [ "$3" = "version" ]; then\n\tprintf '%s\\n' '${version.replaceAll("'", "'\\''")}'\n\texit 0\nfi\nexit 23\n`;
-		writeFileSync(fakeNpmPath, script);
-		chmodSync(fakeNpmPath, 0o755);
-		process.env.PATH = `${fakeBinDir}${process.env.PATH ? `${delimiter}${process.env.PATH}` : ""}`;
-	}
 
 	async function runPackageCommandDirectly(args: string[]): Promise<void> {
 		expect(await handlePackageCommand(args)).toBe(true);
@@ -482,241 +463,6 @@ describe("package commands", () => {
 			expect(stderr).not.toContain("at ");
 			expect(process.exitCode).toBe(1);
 		} finally {
-			errorSpy.mockRestore();
-		}
-	});
-
-	it("uses the update check version for forced self updates even when current", async () => {
-		const globalPrefix = join(tempDir, "global-prefix");
-		const projectPrefix = join(tempDir, "project-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
-		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
-		const recordPath = join(tempDir, "self-update.json");
-		mkdirSync(selfPackageDir, { recursive: true });
-		mkdirSync(join(projectDir, ".pi"), { recursive: true });
-		writeFileSync(
-			fakeNpmPath,
-			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
-if(args.includes("root")) console.log(path.join(prefix,"lib","node_modules"));
-else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
-`,
-		);
-		writeFileSync(
-			join(agentDir, "settings.json"),
-			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
-		);
-		writeFileSync(
-			join(projectDir, ".pi", "settings.json"),
-			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", projectPrefix] }, null, 2),
-		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
-		Object.defineProperty(process, "execPath", {
-			value: join(selfPackageDir, "dist", "cli.js"),
-			configurable: true,
-		});
-		prependFakeNpmView(VERSION);
-
-		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		try {
-			await expect(runPackageCommandDirectly(["update", "--self", "--force"])).resolves.toBeUndefined();
-
-			expect(process.exitCode).toBeUndefined();
-			expect(errorSpy).not.toHaveBeenCalled();
-			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
-			expect(recordedArgs).toContain(globalPrefix);
-			expect(recordedArgs).toContain(`${UPDATE_PACKAGE_NAME}@${VERSION}`);
-			expect(recordedArgs).not.toContain(PACKAGE_NAME);
-			expect(recordedArgs).not.toContain(projectPrefix);
-			expect(stdout).toContain(`Updated pi from ${VERSION} to ${VERSION}`);
-		} finally {
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
-	});
-
-	it("uses the fork package name from GitHub Packages during self-update", async () => {
-		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "pi-coding-agent");
-		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
-		const recordPath = join(tempDir, "self-update.json");
-		mkdirSync(selfPackageDir, { recursive: true });
-		writeFileSync(
-			fakeNpmPath,
-			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
-if(args.includes("root")) console.log(path.join(prefix,"lib","node_modules"));
-else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
-`,
-		);
-		writeFileSync(
-			join(agentDir, "settings.json"),
-			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
-		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
-		Object.defineProperty(process, "execPath", {
-			value: join(selfPackageDir, "dist", "cli.js"),
-			configurable: true,
-		});
-		const targetVersion = getNewerPatchVersion();
-		prependFakeNpmView(targetVersion);
-
-		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		try {
-			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
-
-			expect(process.exitCode).toBeUndefined();
-			expect(errorSpy).not.toHaveBeenCalled();
-			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
-			expect(recordedArgs).toContain(`${UPDATE_PACKAGE_NAME}@${targetVersion}`);
-			expect(recordedArgs).not.toContain(PACKAGE_NAME);
-			expect(stdout).toContain(`Updated pi from ${VERSION} to ${targetVersion}`);
-		} finally {
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
-	});
-
-	it("installs the fork package name during self-update", async () => {
-		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "pi-coding-agent");
-		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
-		const recordPath = join(tempDir, "self-update.json");
-		mkdirSync(selfPackageDir, { recursive: true });
-		writeFileSync(
-			fakeNpmPath,
-			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
-if(args.includes("root")) console.log(path.join(prefix,"lib","node_modules"));
-else {
-	const records=fs.existsSync(${JSON.stringify(recordPath)})?JSON.parse(fs.readFileSync(${JSON.stringify(recordPath)},"utf-8")):[];
-	records.push(args);
-	fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(records));
-}
-`,
-		);
-		writeFileSync(
-			join(agentDir, "settings.json"),
-			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
-		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
-		Object.defineProperty(process, "execPath", {
-			value: join(selfPackageDir, "dist", "cli.js"),
-			configurable: true,
-		});
-		prependFakeNpmView("0.73.0");
-
-		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		try {
-			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
-
-			expect(process.exitCode).toBeUndefined();
-			expect(errorSpy).not.toHaveBeenCalled();
-			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
-			expect(recordedCalls).toEqual([
-				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-				expect.arrayContaining(["install", "-g", `${UPDATE_PACKAGE_NAME}@0.73.0`]),
-			]);
-		} finally {
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
-	});
-
-	it("prints a pnpm metadata hint when self-update fails", async () => {
-		const globalRoot = join(tempDir, "pnpm", "global", "v11");
-		const selfPackageDir = join(globalRoot, "node_modules", "@earendil-works", "pi-coding-agent");
-		const fakeBinDir = join(tempDir, "bin");
-		const fakePnpmPath = join(fakeBinDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm");
-		mkdirSync(selfPackageDir, { recursive: true });
-		mkdirSync(fakeBinDir, { recursive: true });
-		writeFileSync(join(selfPackageDir, "package.json"), JSON.stringify({ name: PACKAGE_NAME, version: VERSION }));
-		const fakePnpmScript =
-			process.platform === "win32"
-				? `@echo off\r\nif "%1"=="root" if "%2"=="-g" (echo ${globalRoot} & exit /b 0)\r\nexit /b 23\r\n`
-				: `#!/bin/sh\nif [ "$1" = "root" ] && [ "$2" = "-g" ]; then\n\tprintf '%s\\n' '${globalRoot.replaceAll("'", "'\\''")}'\n\texit 0\nfi\nexit 23\n`;
-		writeFileSync(fakePnpmPath, fakePnpmScript);
-		chmodSync(fakePnpmPath, 0o755);
-		process.env.PATH = `${fakeBinDir}${process.env.PATH ? `${delimiter}${process.env.PATH}` : ""}`;
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
-		Object.defineProperty(process, "execPath", {
-			value: join(tempDir, "pnpm", "bin", "node"),
-			configurable: true,
-		});
-		prependFakeNpmView(getNewerPatchVersion());
-
-		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		try {
-			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
-
-			expect(process.exitCode).toBe(1);
-			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stdout).not.toContain("Updated pi");
-			expect(stderr).toContain("exited with code 23");
-			expect(stderr).toContain("If pnpm reports missing package versions");
-			expect(stderr).toContain("Run `pnpm store prune` and retry `pi update --self`.");
-		} finally {
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
-	});
-
-	it("fails self-update when renamed npm package installation fails", async () => {
-		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "pi-coding-agent");
-		const fakeNpmPath = join(tempDir, "fake-npm-fail.cjs");
-		const recordPath = join(tempDir, "self-update-fail.json");
-		mkdirSync(selfPackageDir, { recursive: true });
-		writeFileSync(
-			fakeNpmPath,
-			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
-if(args.includes("root")) {
-	console.log(path.join(prefix,"lib","node_modules"));
-	process.exit(0);
-}
-const records=fs.existsSync(${JSON.stringify(recordPath)})?JSON.parse(fs.readFileSync(${JSON.stringify(recordPath)},"utf-8")):[];
-records.push(args);
-fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(records));
-if(args.includes("install")) process.exit(23);
-`,
-		);
-		writeFileSync(
-			join(agentDir, "settings.json"),
-			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
-		);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
-		Object.defineProperty(process, "execPath", {
-			value: join(selfPackageDir, "dist", "cli.js"),
-			configurable: true,
-		});
-		prependFakeNpmView("0.73.0");
-
-		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		try {
-			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
-
-			expect(process.exitCode).toBe(1);
-			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stdout).not.toContain(`Updated pi`);
-			expect(stderr).toContain("exited with code 23");
-			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
-			expect(recordedCalls).toEqual([
-				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-				expect.arrayContaining(["install", "-g", `${UPDATE_PACKAGE_NAME}@0.73.0`]),
-			]);
-		} finally {
-			logSpy.mockRestore();
 			errorSpy.mockRestore();
 		}
 	});

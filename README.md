@@ -51,30 +51,75 @@ These branches still exist but are not squash-merged into rebuilt `main` until t
 
 ## Installation
 
-GitHub Packages requires authentication for npm installs, including public packages. Create a GitHub classic token with `read:packages`, then log in:
+xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). It keeps the canonical `@earendil-works/pi-*` runtime and package names; no npm registry login or remote-tarball npm setting is required.
+
+### Linux and macOS
 
 ```bash
-npm login --scope=@xz-dev --auth-type=legacy --registry=https://npm.pkg.github.com
-```
-
-Install from GitHub Packages:
-
-```bash
-npm config set @xz-dev:registry https://npm.pkg.github.com
-npm install -g @xz-dev/pi-coding-agent
+curl -fsSL https://github.com/xz-dev/pi/releases/latest/download/install.sh | sh
 pi --version
 ```
 
-Successful generated-`main` publications create immutable downstream prerelease versions in GitHub Packages; GitHub Releases are not the installation channel.
+### Windows PowerShell
 
-> [!NOTE]
-> npm 12 disables remote tarball dependencies by default. This distribution uses GitHub Packages tarball URLs for its workspace packages, so installation or `pi update` may fail with `EALLOWREMOTE` and `Fetching packages of type "remote" have been disabled`. Enable them for your user configuration, then retry:
->
-> ```bash
-> npm config set allow-remote=all --location=user
-> pi update
-> pi update --extensions
-> ```
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest https://github.com/xz-dev/pi/releases/latest/download/install.ps1 -UseBasicParsing).Content))
+pi --version
+```
+
+The bootstrap is deliberately thin: it pins and verifies the exact Release manifest and authoritative `install.ts`, then runs it with Node 22.19+ or Bun. The transaction installer also requires the [GitHub CLI](https://cli.github.com/) (`gh`) so it can verify the artifact attestation before installing or executing package code. Public Release verification does not require signing in to GitHub. Release assets include `SHA256SUMS` and GitHub build-provenance attestations.
+
+### One-time migration from the old GitHub Packages distribution
+
+The old `@xz-dev/pi-coding-agent` updater never silently crosses package identities. Run the new installer once with `--migrate`; it replaces only the managed installation and preserves `~/.pi` user data.
+
+The migration installer requires the exact legacy npm global prefix. Confirm that the old package is present there before running it.
+
+Linux/macOS:
+
+```bash
+legacy_prefix="$(npm prefix -g)"
+test -f "$legacy_prefix/lib/node_modules/@xz-dev/pi-coding-agent/package.json"
+curl -fsSL https://github.com/xz-dev/pi/releases/latest/download/install.sh \
+  | PI_XZ_LEGACY_PREFIX="$legacy_prefix" sh -s -- --migrate
+```
+
+Windows PowerShell:
+
+```powershell
+$legacyPrefix = (npm prefix -g).Trim()
+if (-not (Test-Path (Join-Path $legacyPrefix 'node_modules/@xz-dev/pi-coding-agent/package.json'))) {
+  throw "@xz-dev/pi-coding-agent was not found under $legacyPrefix"
+}
+$env:PI_XZ_LEGACY_PREFIX = $legacyPrefix
+& ([scriptblock]::Create((Invoke-WebRequest https://github.com/xz-dev/pi/releases/latest/download/install.ps1 -UseBasicParsing).Content)) --migrate
+```
+
+`PI_XZ_LEGACY_PREFIX` is intentionally explicit; a plain `--migrate` does not search arbitrary global prefixes. Existing GitHub Packages users must perform this hard migration manually; installing or updating the old package alone will not migrate it.
+
+### Update and rollback
+
+A managed installation updates directly through the currently running Node/Bun runtime; it does not invoke a shell or PowerShell bootstrap:
+
+```bash
+pi update --self
+```
+
+Installed versions are retained under `${XDG_DATA_HOME:-$HOME/.local/share}/pi-xz/versions` on Linux/macOS and `%LOCALAPPDATA%\pi-xz\versions` on Windows. To reactivate one retained version, run the exact Release installer for that version with `--rollback <version>`:
+
+```bash
+version="0.82.1-xz.<run>.<attempt>.g<sha8>"
+curl -fsSL "https://github.com/xz-dev/pi/releases/download/xz-v${version}/install.sh" \
+  | sh -s -- --rollback "$version"
+```
+
+```powershell
+$version = '0.82.1-xz.<run>.<attempt>.g<sha8>'
+$script = "https://github.com/xz-dev/pi/releases/download/xz-v$version/install.ps1"
+& ([scriptblock]::Create((Invoke-WebRequest $script -UseBasicParsing).Content)) --rollback $version
+```
+
+Rollback accepts only a retained version whose Release receipt, tarball hashes, package identity, and installed tree integrity still verify. It does not download or restore an arbitrary version.
 
 ## Automation upstream sync
 
@@ -85,4 +130,4 @@ Twice daily, [Upstream Sync](https://github.com/xz-dev/pi/actions/workflows/upst
 - 01:28 Asia/Shanghai
 - 13:28 Asia/Shanghai
 
-Before a lease-protected update of `main`, the workflow installs dependencies, hydrates model data, builds, checks, runs focused integration regressions, and runs non-blocking production/development dependency audits and signature verification. Conflicts, empty integrations, failed required gates, or a changed remote lease leave `main` unchanged. A successful push triggers the full [CI](https://github.com/xz-dev/pi/actions/workflows/ci.yml), [Esc Abort Integration](https://github.com/xz-dev/pi/actions/workflows/esc-abort-integration.yml), and [Publish GitHub Packages](https://github.com/xz-dev/pi/actions/workflows/publish-github-packages.yml) workflows for the rebuilt commit.
+Before a lease-protected update of `main`, the workflow installs dependencies, hydrates model data, builds, checks, runs focused integration regressions, validates the exact GitHub Release candidate, audits production and development dependencies, and verifies production dependency signatures. Conflicts, empty integrations, failed gates, or a changed remote lease leave `main` unchanged. A successful push triggers the full [CI](https://github.com/xz-dev/pi/actions/workflows/ci.yml), [Esc Abort Integration](https://github.com/xz-dev/pi/actions/workflows/esc-abort-integration.yml), and [Publish GitHub Release](https://github.com/xz-dev/pi/actions/workflows/publish-github-release.yml) workflows for the rebuilt commit.
