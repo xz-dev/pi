@@ -24,7 +24,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, type Message } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -99,6 +99,7 @@ import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+import { planContinuation } from "./manual-retry.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -315,6 +316,17 @@ export class AgentSession {
 	private _isAgentRunActive = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
+	private _manualRetryActive = false;
+	private _manualRetryCommit:
+		| {
+				expectedSessionId: string;
+				expectedLeafId: string | null;
+				branchFromId: string;
+				recoveryMessages: Message[];
+				committed: boolean;
+			}
+		| undefined;
+	private _continuationAnchorId: string | undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -638,6 +650,18 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			let committedFirstRetryAssistant = false;
+			if (event.message.role === "assistant" && this._manualRetryCommit && !this._manualRetryCommit.committed) {
+				this.sessionManager.commitContinuation({
+					expectedSessionId: this._manualRetryCommit.expectedSessionId,
+					expectedLeafId: this._manualRetryCommit.expectedLeafId,
+					branchFromId: this._manualRetryCommit.branchFromId,
+					messages: [...this._manualRetryCommit.recoveryMessages, event.message],
+				});
+				this._manualRetryCommit.committed = true;
+				committedFirstRetryAssistant = true;
+			}
+
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
@@ -648,9 +672,10 @@ export class AgentSession {
 					event.message.details,
 				);
 			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
+				!committedFirstRetryAssistant &&
+				(event.message.role === "user" ||
+					event.message.role === "assistant" ||
+					event.message.role === "toolResult")
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
@@ -1061,6 +1086,7 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		this._continuationAnchorId = undefined;
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
@@ -1070,6 +1096,75 @@ export class AgentSession {
 		} finally {
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
+			await this._emitAgentSettled();
+		}
+	}
+
+	/** Normalize the active branch at the nearest safe boundary and continue it. */
+	async retry(): Promise<void> {
+		if (this._manualRetryActive || this._isAgentRunActive) {
+			throw new Error("Agent is already processing a retry.");
+		}
+		if (
+			this.isCompacting ||
+			this.isBashRunning ||
+			this._retryAbortController !== undefined ||
+			this._autoCompactionAbortController !== undefined
+		) {
+			throw new Error("Cannot retry while another session operation is in progress.");
+		}
+		if (this.pendingMessageCount > 0 || this.agent.hasQueuedMessages() || this._pendingNextTurnMessages.length > 0) {
+			throw new Error("Cannot retry while queued messages are pending.");
+		}
+		if (!this.model) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
+		const hasConfiguredAuth =
+			this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
+			(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+		if (!hasConfiguredAuth) {
+			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+		}
+
+		const expectedSessionId = this.sessionManager.getSessionId();
+		const expectedLeafId = this.sessionManager.getLeafId();
+		const branchEntries = this._continuationAnchorId
+			? this.sessionManager.getBranch(this._continuationAnchorId)
+			: this.sessionManager.getBranch();
+		const plan = planContinuation({
+			branchEntries,
+			selectedEntryId: this._continuationAnchorId,
+			recoveryTimestamp: Date.now(),
+		});
+		const previousMessages = this.agent.state.messages;
+		this._manualRetryActive = true;
+		this._isAgentRunActive = true;
+		this._lastAssistantMessage = undefined;
+		this._manualRetryCommit = {
+			expectedSessionId,
+			expectedLeafId,
+			branchFromId: plan.anchorEntryId,
+			recoveryMessages: plan.recoveryMessages,
+			committed: false,
+		};
+		this.agent.state.messages = [...plan.contextMessages, ...plan.recoveryMessages];
+		try {
+			await this.agent.continue();
+			while (await this._handlePostAgentRun()) {
+				await this.agent.continue();
+			}
+			if (!this._manualRetryCommit.committed) {
+				throw new Error("Retry continuation ended without an assistant response");
+			}
+			this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+			this._continuationAnchorId = undefined;
+		} finally {
+			if (!this._manualRetryCommit?.committed) {
+				this.agent.state.messages = previousMessages;
+			}
+			this._manualRetryCommit = undefined;
+			this._manualRetryActive = false;
+			this._systemPromptOverride = undefined;
 			await this._emitAgentSettled();
 		}
 	}
@@ -2906,6 +3001,7 @@ export class AgentSession {
 		}
 
 		const oldLeafId = this.sessionManager.getLeafId();
+		this._continuationAnchorId = undefined;
 
 		// No-op if already at target
 		if (targetId === oldLeafId) {
@@ -3025,9 +3121,10 @@ export class AgentSession {
 			let editorText: string | undefined;
 
 			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				// User message: leaf = parent (null if root), text goes to editor
+				// User message: leaf = parent for editing, while retry retains the exact selected entry.
 				newLeafId = targetEntry.parentId;
 				editorText = contentText(targetEntry.message.content, "");
+				this._continuationAnchorId = targetId;
 			} else if (targetEntry.type === "custom_message") {
 				// Custom message: leaf = parent (null if root), text goes to editor
 				newLeafId = targetEntry.parentId;
@@ -3035,6 +3132,9 @@ export class AgentSession {
 			} else {
 				// Non-user message: leaf = selected node
 				newLeafId = targetId;
+				if (targetEntry.type === "message") {
+					this._continuationAnchorId = targetId;
+				}
 			}
 
 			// Switch leaf (with or without summary)

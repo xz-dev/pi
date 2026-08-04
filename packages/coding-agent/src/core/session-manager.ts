@@ -171,6 +171,13 @@ export interface SessionContext {
 	model: { provider: string; modelId: string } | null;
 }
 
+export interface ContinuationCommit {
+	expectedSessionId: string;
+	expectedLeafId: string | null;
+	branchFromId: string | null;
+	messages: Message[];
+}
+
 export interface SessionInfo {
 	path: string;
 	id: string;
@@ -1046,6 +1053,67 @@ export class SessionManager {
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this._persist(entry);
+	}
+
+	/**
+	 * Atomically publish recovery messages and the first continued assistant as a
+	 * new append-only branch. Validation and persistence happen before in-memory
+	 * state changes, so a failed commit leaves the active branch unchanged.
+	 */
+	commitContinuation(commit: ContinuationCommit): string {
+		if (this.sessionId !== commit.expectedSessionId) {
+			throw new Error("Session changed before retry continuation could be committed");
+		}
+		if (this.leafId !== commit.expectedLeafId) {
+			throw new Error("Session branch changed before retry continuation could be committed");
+		}
+		if (commit.branchFromId !== null && !this.byId.has(commit.branchFromId)) {
+			throw new Error(`Entry ${commit.branchFromId} not found`);
+		}
+		if (commit.messages.length === 0) {
+			throw new Error("Retry continuation commit requires at least one message");
+		}
+
+		const entries: SessionMessageEntry[] = [];
+		let parentId = commit.branchFromId;
+		const reservedIds = new Map(this.byId);
+		for (const message of commit.messages) {
+			const entry: SessionMessageEntry = {
+				type: "message",
+				id: generateId(reservedIds),
+				parentId,
+				timestamp: new Date().toISOString(),
+				message,
+			};
+			entries.push(entry);
+			reservedIds.set(entry.id, entry);
+			parentId = entry.id;
+		}
+
+		if (this.persist && this.sessionFile) {
+			const serialized = entries.map((entry) => `${JSON.stringify(entry)}\n`).join("");
+			if (this.flushed) {
+				appendFileSync(this.sessionFile, serialized);
+			} else {
+				const fd = openSync(this.sessionFile, "wx");
+				try {
+					const completeFile = [...this.fileEntries, ...entries]
+						.map((entry) => `${JSON.stringify(entry)}\n`)
+						.join("");
+					writeFileSync(fd, completeFile);
+				} finally {
+					closeSync(fd);
+				}
+			}
+		}
+
+		for (const entry of entries) {
+			this.fileEntries.push(entry);
+			this.byId.set(entry.id, entry);
+		}
+		this.leafId = entries.at(-1)!.id;
+		this.flushed = this.persist ? true : this.flushed;
+		return this.leafId;
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
