@@ -321,9 +321,12 @@ export class AgentSession {
 		| {
 				expectedSessionId: string;
 				expectedLeafId: string | null;
+				expectedGeneration: number;
 				branchFromId: string;
 				recoveryMessages: Message[];
 				committed: boolean;
+				runFailedBeforeCommit: boolean;
+				runFailureMessage: string | undefined;
 		  }
 		| undefined;
 	private _continuationAnchorId: string | undefined;
@@ -648,13 +651,25 @@ export class AgentSession {
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 
+		if (event.type === "run_failure" && this._manualRetryCommit && !this._manualRetryCommit.committed) {
+			this._manualRetryCommit.runFailedBeforeCommit = true;
+			this._manualRetryCommit.runFailureMessage =
+				event.message.role === "assistant" ? event.message.errorMessage : undefined;
+		}
+
 		// Handle session persistence
 		if (event.type === "message_end") {
 			let committedFirstRetryAssistant = false;
-			if (event.message.role === "assistant" && this._manualRetryCommit && !this._manualRetryCommit.committed) {
+			if (
+				event.message.role === "assistant" &&
+				this._manualRetryCommit &&
+				!this._manualRetryCommit.committed &&
+				!this._manualRetryCommit.runFailedBeforeCommit
+			) {
 				this.sessionManager.commitContinuation({
 					expectedSessionId: this._manualRetryCommit.expectedSessionId,
 					expectedLeafId: this._manualRetryCommit.expectedLeafId,
+					expectedGeneration: this._manualRetryCommit.expectedGeneration,
 					branchFromId: this._manualRetryCommit.branchFromId,
 					messages: [...this._manualRetryCommit.recoveryMessages, event.message],
 				});
@@ -673,6 +688,11 @@ export class AgentSession {
 				);
 			} else if (
 				!committedFirstRetryAssistant &&
+				!(
+					event.message.role === "assistant" &&
+					this._manualRetryCommit?.runFailedBeforeCommit &&
+					!this._manualRetryCommit.committed
+				) &&
 				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
@@ -1100,6 +1120,8 @@ export class AgentSession {
 
 	/** Normalize the active branch at the nearest safe boundary and continue it. */
 	async retry(): Promise<void> {
+		const continuationAnchorId = this._continuationAnchorId;
+		this._continuationAnchorId = undefined;
 		if (this._manualRetryActive || this._isAgentRunActive) {
 			throw new Error("Agent is already processing a retry.");
 		}
@@ -1126,12 +1148,13 @@ export class AgentSession {
 
 		const expectedSessionId = this.sessionManager.getSessionId();
 		const expectedLeafId = this.sessionManager.getLeafId();
-		const branchEntries = this._continuationAnchorId
-			? this.sessionManager.getBranch(this._continuationAnchorId)
+		const expectedGeneration = this.sessionManager.getGeneration();
+		const branchEntries = continuationAnchorId
+			? this.sessionManager.getBranch(continuationAnchorId)
 			: this.sessionManager.getBranch();
 		const plan = planContinuation({
 			branchEntries,
-			selectedEntryId: this._continuationAnchorId,
+			selectedEntryId: continuationAnchorId,
 			recoveryTimestamp: Date.now(),
 		});
 		const previousMessages = this.agent.state.messages;
@@ -1141,9 +1164,12 @@ export class AgentSession {
 		this._manualRetryCommit = {
 			expectedSessionId,
 			expectedLeafId,
+			expectedGeneration,
 			branchFromId: plan.anchorEntryId,
 			recoveryMessages: plan.recoveryMessages,
 			committed: false,
+			runFailedBeforeCommit: false,
+			runFailureMessage: undefined,
 		};
 		this.agent.state.messages = [...plan.contextMessages, ...plan.recoveryMessages];
 		try {
@@ -1152,10 +1178,11 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 			if (!this._manualRetryCommit.committed) {
-				throw new Error("Retry continuation ended without an assistant response");
+				throw new Error(
+					this._manualRetryCommit.runFailureMessage ?? "Retry continuation ended without an assistant response",
+				);
 			}
 			this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
-			this._continuationAnchorId = undefined;
 		} finally {
 			if (!this._manualRetryCommit?.committed) {
 				this.agent.state.messages = previousMessages;

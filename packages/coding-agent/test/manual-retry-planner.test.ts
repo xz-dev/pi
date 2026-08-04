@@ -443,6 +443,35 @@ describe("planContinuation", () => {
 		);
 	});
 
+	test.each(["", "   \n"])("rejects blank user content %j", (text) => {
+		const branch = [userMessage("user-1", null, text)];
+		expectRejection("invalid_anchor", () => planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }));
+	});
+
+	const blankToolResultContentCases = [
+		{ content: [] },
+		{ content: [{ type: "text", text: "  " }] },
+		{ content: [{ type: "image", data: "", mimeType: "image/png" }] },
+		{ content: [{ type: "image", data: "abc", mimeType: " " }] },
+	] satisfies { content: ToolResultMessage["content"] }[];
+
+	test.each(blankToolResultContentCases)("rejects blank tool result content %#", ({ content }) => {
+		const result = toolResultEntry("result-1", "assistant-1", "call-1", "read", "ok");
+		(result.message as ToolResultMessage).content = content;
+		const branch = [
+			userMessage("user-1", null, "bad"),
+			assistantEntry(
+				"assistant-1",
+				"user-1",
+				fauxAssistantMessage([fauxToolCall("read", {}, { id: "call-1" })], { stopReason: "toolUse" }),
+			),
+			result,
+		];
+		expectRejection("malformed_tool_result", () =>
+			planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }),
+		);
+	});
+
 	test("is deterministic for identical explicit inputs", () => {
 		const branch = [
 			userMessage("user-1", null, "attempt"),

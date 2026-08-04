@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	type Context,
@@ -280,6 +281,86 @@ describe("manual /retry continuation", () => {
 
 		await expect(created.session.retry()).rejects.toThrow(/Nothing to continue/);
 		expect(created.faux.state.callCount).toBe(0);
+	});
+
+	it("rolls back when the provider throws before producing an assistant", async () => {
+		const created = await harness();
+		setBranch(created, [
+			userMessage("retry once"),
+			fauxAssistantMessage("failed", { stopReason: "error", errorMessage: "failed" }),
+		]);
+		const beforeLeaf = created.sessionManager.getLeafId();
+		const beforeEntries = structuredClone(created.sessionManager.getEntries());
+		const beforeMessages = created.session.agent.state.messages;
+		created.session.agent.streamFunction = async () => {
+			throw new Error("provider failed before assistant");
+		};
+
+		await expect(created.session.retry()).rejects.toThrow(/provider failed before assistant/);
+
+		expect(created.sessionManager.getLeafId()).toBe(beforeLeaf);
+		expect(created.sessionManager.getEntries()).toEqual(beforeEntries);
+		expect(created.session.agent.state.messages).toEqual(beforeMessages);
+	});
+
+	it("rejects a stale continuation after branch-away and branch-back mutation", async () => {
+		const created = await harness();
+		const [userId] = setBranch(created, [
+			userMessage("retry once"),
+			fauxAssistantMessage("failed", { stopReason: "error", errorMessage: "failed" }),
+		]);
+		const originalLeaf = created.sessionManager.getLeafId()!;
+		created.setResponses([
+			async () => {
+				created.sessionManager.branch(userId!);
+				created.sessionManager.branch(originalLeaf);
+				return fauxAssistantMessage("stale");
+			},
+		]);
+
+		await expect(created.session.retry()).rejects.toThrow(/Session changed/);
+		expect(created.sessionManager.getLeafId()).toBe(originalLeaf);
+		expect(getAssistantTexts(created)).toEqual(["failed"]);
+	});
+
+	it("leaves durable and in-memory state unchanged when atomic publication fails", async () => {
+		const created = await createHarness({
+			settings: { retry: { enabled: false } },
+			sessionManagerFactory: (tempDir) =>
+				SessionManager.create(tempDir, tempDir, { id: "manual-retry-atomic-failure" }),
+		});
+		harnesses.push(created);
+		const userId = created.sessionManager.appendMessage(userMessage("persist me"));
+		const failureId = created.sessionManager.appendMessage(
+			fauxAssistantMessage("old failure", { stopReason: "error", errorMessage: "failed" }),
+		);
+		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
+		const file = created.sessionManager.getSessionFile()!;
+		const beforeFile = readFileSync(file);
+		const beforeEntries = structuredClone(created.sessionManager.getEntries());
+		const beforeGeneration = created.sessionManager.getGeneration();
+		expect(() =>
+			created.sessionManager.commitContinuation(
+				{
+					expectedSessionId: created.sessionManager.getSessionId(),
+					expectedLeafId: failureId,
+					expectedGeneration: beforeGeneration,
+					branchFromId: userId,
+					messages: [fauxAssistantMessage("must not publish")],
+				},
+				() => {
+					throw new Error("injected publication failure");
+				},
+			),
+		).toThrow(/injected publication failure/);
+
+		expect(readFileSync(file)).toEqual(beforeFile);
+		expect(created.sessionManager.getEntries()).toEqual(beforeEntries);
+		expect(created.sessionManager.getGeneration()).toBe(beforeGeneration);
+		expect(created.sessionManager.getLeafId()).toBe(failureId);
+		const reopened = SessionManager.open(file, created.tempDir);
+		expect(reopened.getLeafId()).toBe(failureId);
+		expect(reopened.getChildren(userId).map((entry) => entry.id)).toEqual([failureId]);
 	});
 
 	it("refuses a concurrent retry without consuming queued work or mutating the tree", async () => {

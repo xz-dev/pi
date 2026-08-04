@@ -516,6 +516,7 @@ export class Agent {
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
+		await this.processEvents({ type: "run_failure", message: failureMessage });
 		await this.processEvents({ type: "message_start", message: failureMessage });
 		await this.processEvents({ type: "message_end", message: failureMessage });
 		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
@@ -574,6 +575,9 @@ export class Agent {
 
 			case "agent_end":
 				this._state.streamingMessage = undefined;
+				break;
+
+			case "run_failure":
 				break;
 		}
 

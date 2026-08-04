@@ -84,6 +84,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isNonblankString(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasUsableUserContent(message: AgentMessage): boolean {
+	if (message.role !== "user") return false;
+	if (typeof message.content === "string") return isNonblankString(message.content);
+	if (!Array.isArray(message.content) || message.content.length === 0) return false;
+	return message.content.some(
+		(part) =>
+			(part.type === "text" && isNonblankString(part.text)) ||
+			(part.type === "image" && isNonblankString(part.data) && isNonblankString(part.mimeType)),
+	);
+}
+
 function toolCallsOf(assistant: AssistantMessage): ToolCall[] {
 	if (!Array.isArray(assistant.content)) {
 		reject("malformed_tool_call", "Assistant content must be an array.");
@@ -231,14 +246,17 @@ function validateToolBatch(
 		if (!Array.isArray(message.content)) {
 			reject("malformed_tool_result", `Tool result ${message.toolCallId} content must be an array.`);
 		}
+		if (message.content.length === 0) {
+			reject("malformed_tool_result", `Tool result ${message.toolCallId} has no usable content.`);
+		}
 		for (const part of message.content as unknown[]) {
 			if (!isRecord(part)) {
 				reject("malformed_tool_result", `Tool result ${message.toolCallId} contains malformed content.`);
 			}
-			const validText = part.type === "text" && typeof part.text === "string";
-			const validImage = part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string";
+			const validText = part.type === "text" && isNonblankString(part.text);
+			const validImage = part.type === "image" && isNonblankString(part.data) && isNonblankString(part.mimeType);
 			if (!validText && !validImage) {
-				reject("malformed_tool_result", `Tool result ${message.toolCallId} contains malformed content.`);
+				reject("malformed_tool_result", `Tool result ${message.toolCallId} contains blank or malformed content.`);
 			}
 		}
 
@@ -346,6 +364,9 @@ export function planContinuation(input: PlanContinuationInput): ContinuationPlan
 	const now = input.recoveryTimestamp;
 
 	if (focusMessage.role === "user") {
+		if (!hasUsableUserContent(focusMessage)) {
+			reject("invalid_anchor", "Selected user message has no usable content.");
+		}
 		return {
 			kind: "user_anchor",
 			anchorEntryId: focusEntry.id,
