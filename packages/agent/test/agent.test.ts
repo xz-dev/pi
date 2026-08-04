@@ -224,7 +224,9 @@ describe("Agent", () => {
 		};
 		Reflect.set(agent, "runTerminalization", terminalization);
 		const events: AgentEvent[] = [];
-		agent.subscribe((event) => events.push(event));
+		agent.subscribe((event) => {
+			events.push(event);
+		});
 		const abortController = new AbortController();
 		Reflect.set(agent, "activeRun", {
 			promise: Promise.resolve(),
