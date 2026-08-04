@@ -32,6 +32,7 @@ jobs:
           git fetch upstream main
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
+            +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
             +refs/heads/tmp/patch/esc-manual-retry-compat:refs/remotes/origin/tmp/patch/esc-manual-retry-compat \
@@ -55,6 +56,9 @@ jobs:
             exit 1
           fi
           git commit -m "merge ci branch"
+
+          git merge --squash origin/patch/model-startup-refresh-barrier
+          git commit -m "merge patch/model-startup-refresh-barrier branch"
 
           # Paused until rebased onto current upstream/main:
           # - patch/model-refresh-consistency
