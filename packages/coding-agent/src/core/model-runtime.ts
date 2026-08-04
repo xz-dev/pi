@@ -149,7 +149,7 @@ export class ModelRuntime implements Models {
 	private availabilityError: string | undefined;
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
 	/** Rejection-neutral tail of registration-triggered refresh convergence. */
-	private registrationConvergence: Promise<void> = Promise.resolve();
+	private registrationConvergence: Promise<void> | undefined;
 
 	private constructor(
 		credentials: RuntimeCredentials,
@@ -729,18 +729,25 @@ export class ModelRuntime implements Models {
 	 * Caller-local cancellation only abandons the wait/refresh request; registration work continues.
 	 */
 	async refreshAfterRegistrationConvergence(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
-		await raceWithAbortSignal(this.registrationConvergence, options.signal);
+		const pending = this.registrationConvergence;
+		if (pending) await raceWithAbortSignal(pending, options.signal);
 		return this.refresh(options);
 	}
 
 	/** Queue a full offline refresh after a registration mutation; keep the tail rejection-neutral. */
 	private queueRegistrationConvergence(): void {
 		const previous = this.registrationConvergence;
-		const operation = (async () => {
-			await previous.catch(() => {});
-			await this.refresh({ allowNetwork: false });
-		})();
-		this.registrationConvergence = operation.catch(() => {});
+		const operation = previous
+			? previous.then(() => this.refresh({ allowNetwork: false }))
+			: this.refresh({ allowNetwork: false });
+		const tail = operation.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.registrationConvergence = tail;
+		void tail.then(() => {
+			if (this.registrationConvergence === tail) this.registrationConvergence = undefined;
+		});
 	}
 
 	registerNativeProvider(provider: Provider): void {
