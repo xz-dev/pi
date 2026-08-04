@@ -666,13 +666,19 @@ export class AgentSession {
 				!this._manualRetryCommit.committed &&
 				!this._manualRetryCommit.runFailedBeforeCommit
 			) {
-				this.sessionManager.commitContinuation({
-					expectedSessionId: this._manualRetryCommit.expectedSessionId,
-					expectedLeafId: this._manualRetryCommit.expectedLeafId,
-					expectedGeneration: this._manualRetryCommit.expectedGeneration,
-					branchFromId: this._manualRetryCommit.branchFromId,
-					messages: [...this._manualRetryCommit.recoveryMessages, event.message],
-				});
+				try {
+					this.sessionManager.commitContinuation({
+						expectedSessionId: this._manualRetryCommit.expectedSessionId,
+						expectedLeafId: this._manualRetryCommit.expectedLeafId,
+						expectedGeneration: this._manualRetryCommit.expectedGeneration,
+						branchFromId: this._manualRetryCommit.branchFromId,
+						messages: [...this._manualRetryCommit.recoveryMessages, event.message],
+					});
+				} catch (error) {
+					this._manualRetryCommit.runFailedBeforeCommit = true;
+					this._manualRetryCommit.runFailureMessage = error instanceof Error ? error.message : String(error);
+					throw error;
+				}
 				this._manualRetryCommit.committed = true;
 				committedFirstRetryAssistant = true;
 			}
@@ -1174,13 +1180,20 @@ export class AgentSession {
 		this.agent.state.messages = [...plan.contextMessages, ...plan.recoveryMessages];
 		try {
 			await this.agent.continue();
+			if (this._manualRetryCommit.runFailureMessage) {
+				throw new Error(this._manualRetryCommit.runFailureMessage);
+			}
 			while (await this._handlePostAgentRun()) {
 				await this.agent.continue();
+				if (this._manualRetryCommit.runFailureMessage) {
+					throw new Error(this._manualRetryCommit.runFailureMessage);
+				}
+			}
+			if (this._manualRetryCommit.runFailureMessage) {
+				throw new Error(this._manualRetryCommit.runFailureMessage);
 			}
 			if (!this._manualRetryCommit.committed) {
-				throw new Error(
-					this._manualRetryCommit.runFailureMessage ?? "Retry continuation ended without an assistant response",
-				);
+				throw new Error("Retry continuation ended without an assistant response");
 			}
 			this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		} finally {

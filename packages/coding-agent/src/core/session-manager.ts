@@ -6,6 +6,7 @@ import {
 	closeSync,
 	createReadStream,
 	existsSync,
+	fsyncSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -17,7 +18,7 @@ import {
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
-import { join, resolve } from "path";
+import { dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -182,11 +183,31 @@ export interface ContinuationCommit {
 	messages: Message[];
 }
 
-type ContinuationFileWriter = (temporaryFile: string, destinationFile: string, contents: Buffer) => void;
+export type ContinuationFileWriter = (temporaryFile: string, destinationFile: string, contents: Buffer) => void;
 
 const writeContinuationFile: ContinuationFileWriter = (temporaryFile, destinationFile, contents) => {
-	writeFileSync(temporaryFile, contents, { flag: "wx" });
+	const mode = existsSync(destinationFile) ? statSync(destinationFile).mode & 0o777 : 0o600;
+	const fileDescriptor = openSync(temporaryFile, "wx", mode);
+	try {
+		writeFileSync(fileDescriptor, contents);
+		fsyncSync(fileDescriptor);
+	} finally {
+		closeSync(fileDescriptor);
+	}
+	// Atomic replacement requires source and destination to share a directory.
 	renameSync(temporaryFile, destinationFile);
+	if (process.platform !== "win32") {
+		let directoryDescriptor: number | undefined;
+		try {
+			directoryDescriptor = openSync(dirname(destinationFile), "r");
+			fsyncSync(directoryDescriptor);
+		} catch {
+			// Some filesystems do not support directory fsync. The atomic rename
+			// has already succeeded, so this durability reinforcement is best-effort.
+		} finally {
+			if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
+		}
+	}
 };
 
 export interface SessionInfo {
@@ -883,6 +904,8 @@ export class SessionManager {
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
 	private generation = 0;
+	/** @internal Fault-injection seam for continuation publication tests. */
+	continuationFileWriter: ContinuationFileWriter = writeContinuationFile;
 
 	private constructor(
 		cwd: string,
@@ -938,6 +961,7 @@ export class SessionManager {
 			}
 
 			this._buildIndex();
+			this.generation++;
 			this.flushed = true;
 		} else {
 			const explicitPath = this.sessionFile;
@@ -1078,7 +1102,7 @@ export class SessionManager {
 	 * new append-only branch. Validation and persistence happen before in-memory
 	 * state changes, so a failed commit leaves the active branch unchanged.
 	 */
-	commitContinuation(commit: ContinuationCommit, writeFile: ContinuationFileWriter = writeContinuationFile): string {
+	commitContinuation(commit: ContinuationCommit): string {
 		if (this.sessionId !== commit.expectedSessionId) {
 			throw new Error("Session changed before retry continuation could be committed");
 		}
@@ -1118,7 +1142,7 @@ export class SessionManager {
 				: Buffer.from([...this.fileEntries, ...entries].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
 			const temporaryFile = `${this.sessionFile}.continuation-${process.pid}-${randomUUID()}.tmp`;
 			try {
-				writeFile(temporaryFile, this.sessionFile, completeFile);
+				this.continuationFileWriter(temporaryFile, this.sessionFile, completeFile);
 			} catch (error) {
 				rmSync(temporaryFile, { force: true });
 				throw error;
@@ -1563,6 +1587,7 @@ export class SessionManager {
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
+			this.generation++;
 
 			// Only write the file now if it contains an assistant message.
 			// Otherwise defer to _persist(), which creates the file on the
@@ -1598,6 +1623,7 @@ export class SessionManager {
 		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 		this.sessionId = newSessionId;
 		this._buildIndex();
+		this.generation++;
 		return undefined;
 	}
 

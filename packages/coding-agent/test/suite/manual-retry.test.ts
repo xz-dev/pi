@@ -323,6 +323,47 @@ describe("manual /retry continuation", () => {
 		expect(getAssistantTexts(created)).toEqual(["failed"]);
 	});
 
+	it("prevents first-assistant tool execution when publication fails", async () => {
+		let executions = 0;
+		const tool: AgentTool = {
+			name: "side_effect",
+			label: "Side effect",
+			description: "Must not run before retry publication",
+			parameters: Type.Object({}),
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "executed" }], details: undefined };
+			},
+		};
+		const created = await createHarness({
+			tools: [tool],
+			initialActiveToolNames: ["side_effect"],
+			settings: { retry: { enabled: false } },
+			sessionManagerFactory: (tempDir) =>
+				SessionManager.create(tempDir, tempDir, { id: "manual-retry-tool-publication-failure" }),
+		});
+		harnesses.push(created);
+		setBranch(created, [
+			userMessage("retry once"),
+			fauxAssistantMessage("failed", { stopReason: "error", errorMessage: "failed" }),
+		]);
+		const beforeLeaf = created.sessionManager.getLeafId();
+		const beforeEntries = structuredClone(created.sessionManager.getEntries());
+		created.sessionManager.continuationFileWriter = () => {
+			throw new Error("injected publication failure");
+		};
+		created.setResponses([
+			fauxAssistantMessage([fauxToolCall("side_effect", {}, { id: "new-call" })], { stopReason: "toolUse" }),
+		]);
+		expect(created.sessionManager.continuationFileWriter).toBeTypeOf("function");
+		expect(created.session.agent.state.tools.map((activeTool) => activeTool.name)).toContain("side_effect");
+		await expect(created.session.retry()).rejects.toThrow(/injected publication failure/);
+
+		expect(executions).toBe(0);
+		expect(created.sessionManager.getLeafId()).toBe(beforeLeaf);
+		expect(created.sessionManager.getEntries()).toEqual(beforeEntries);
+	});
+
 	it("leaves durable and in-memory state unchanged when atomic publication fails", async () => {
 		const created = await createHarness({
 			settings: { retry: { enabled: false } },
@@ -339,20 +380,12 @@ describe("manual /retry continuation", () => {
 		const beforeFile = readFileSync(file);
 		const beforeEntries = structuredClone(created.sessionManager.getEntries());
 		const beforeGeneration = created.sessionManager.getGeneration();
-		expect(() =>
-			created.sessionManager.commitContinuation(
-				{
-					expectedSessionId: created.sessionManager.getSessionId(),
-					expectedLeafId: failureId,
-					expectedGeneration: beforeGeneration,
-					branchFromId: userId,
-					messages: [fauxAssistantMessage("must not publish")],
-				},
-				() => {
-					throw new Error("injected publication failure");
-				},
-			),
-		).toThrow(/injected publication failure/);
+		created.sessionManager.continuationFileWriter = () => {
+			throw new Error("injected publication failure");
+		};
+		created.setResponses([fauxAssistantMessage("must not publish")]);
+
+		await expect(created.session.retry()).rejects.toThrow(/injected publication failure/);
 
 		expect(readFileSync(file)).toEqual(beforeFile);
 		expect(created.sessionManager.getEntries()).toEqual(beforeEntries);
