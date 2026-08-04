@@ -94,12 +94,12 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { planContinuation } from "./manual-retry.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import { planContinuation } from "./manual-retry.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -324,7 +324,7 @@ export class AgentSession {
 				branchFromId: string;
 				recoveryMessages: Message[];
 				committed: boolean;
-			}
+		  }
 		| undefined;
 	private _continuationAnchorId: string | undefined;
 
@@ -673,9 +673,7 @@ export class AgentSession {
 				);
 			} else if (
 				!committedFirstRetryAssistant &&
-				(event.message.role === "user" ||
-					event.message.role === "assistant" ||
-					event.message.role === "toolResult")
+				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);

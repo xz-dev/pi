@@ -1,16 +1,12 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
+	type AssistantMessage,
 	fauxAssistantMessage,
 	fauxToolCall,
-	type AssistantMessage,
 	type ToolResultMessage,
 } from "@earendil-works/pi-ai/compat";
 import { describe, expect, test } from "vitest";
-import {
-	ContinuationPlanError,
-	planContinuation,
-	SYNTHETIC_TOOL_RESULT_TEXT,
-} from "../src/core/manual-retry.ts";
+import { ContinuationPlanError, planContinuation, SYNTHETIC_TOOL_RESULT_TEXT } from "../src/core/manual-retry.ts";
 import type { SessionEntry, SessionMessageEntry } from "../src/core/session-manager.ts";
 
 function userMessage(id: string, parentId: string | null, text: string): SessionMessageEntry {
@@ -27,11 +23,7 @@ function userMessage(id: string, parentId: string | null, text: string): Session
 	};
 }
 
-function assistantEntry(
-	id: string,
-	parentId: string | null,
-	message: AssistantMessage,
-): SessionMessageEntry {
+function assistantEntry(id: string, parentId: string | null, message: AssistantMessage): SessionMessageEntry {
 	return {
 		type: "message",
 		id,
@@ -150,11 +142,7 @@ describe("planContinuation", () => {
 		expect(plan.anchorEntryId).toBe("result-1");
 		expect(plan.expectedLeafId).toBe("result-1");
 		expect(plan.recoveryMessages).toEqual([]);
-		expect(plan.contextMessages.map((message) => message.role)).toEqual([
-			"user",
-			"assistant",
-			"toolResult",
-		]);
+		expect(plan.contextMessages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
 		const result = plan.contextMessages[2] as ToolResultMessage;
 		expect(result.toolCallId).toBe("call-1");
 		expect(result.isError).toBe(false);
@@ -185,9 +173,7 @@ describe("planContinuation", () => {
 			toolName: "side_effect",
 			isError: true,
 		});
-		expect(plan.recoveryMessages[0]?.content).toEqual([
-			{ type: "text", text: SYNTHETIC_TOOL_RESULT_TEXT },
-		]);
+		expect(plan.recoveryMessages[0]?.content).toEqual([{ type: "text", text: SYNTHETIC_TOOL_RESULT_TEXT }]);
 		expect(typeof plan.recoveryMessages[0]?.timestamp).toBe("number");
 	});
 
@@ -214,11 +200,7 @@ describe("planContinuation", () => {
 			toolName: "second",
 			isError: true,
 		});
-		expect(plan.contextMessages.map((message) => message.role)).toEqual([
-			"user",
-			"assistant",
-			"toolResult",
-		]);
+		expect(plan.contextMessages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
 		expect((plan.contextMessages[2] as ToolResultMessage).toolCallId).toBe("call-1");
 	});
 
@@ -235,12 +217,20 @@ describe("planContinuation", () => {
 			toolResultEntry("result-1", "assistant-1", "tree-call", "lookup", "tree result"),
 		];
 
-		const fromCall = planContinuation({ branchEntries: branch, recoveryTimestamp: 123, selectedEntryId: "assistant-1" });
+		const fromCall = planContinuation({
+			branchEntries: branch,
+			recoveryTimestamp: 123,
+			selectedEntryId: "assistant-1",
+		});
 		expect(fromCall.kind).toBe("tool_batch");
 		expect(fromCall.anchorEntryId).toBe("result-1");
 		expect(fromCall.recoveryMessages).toEqual([]);
 
-		const fromResult = planContinuation({ branchEntries: branch, recoveryTimestamp: 123, selectedEntryId: "result-1" });
+		const fromResult = planContinuation({
+			branchEntries: branch,
+			recoveryTimestamp: 123,
+			selectedEntryId: "result-1",
+		});
 		expect(fromResult.kind).toBe("tool_batch");
 		expect(fromResult.anchorEntryId).toBe("result-1");
 		expect(fromResult.contextMessages.at(-1)).toMatchObject({
@@ -293,7 +283,9 @@ describe("planContinuation", () => {
 			toolResultEntry("result-1", "assistant-1", "call-1", "first", "one"),
 			toolResultEntry("result-2", "result-1", "call-1", "first", "two"),
 		];
-		expectRejection("duplicate_tool_result", () => planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }));
+		expectRejection("duplicate_tool_result", () =>
+			planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }),
+		);
 	});
 
 	test("rejects tool name mismatch between call and result", () => {
@@ -333,7 +325,9 @@ describe("planContinuation", () => {
 		});
 		expect(plan.anchorEntryId).toBe("result-1");
 		expect(plan.recoveryMessages.map((message) => message.toolCallId)).toEqual(["call-2"]);
-		expect(plan.contextMessages.some((message) => message.role === "user" && message !== branch[0]!.message)).toBe(false);
+		expect(plan.contextMessages.some((message) => message.role === "user" && message !== branch[0]!.message)).toBe(
+			false,
+		);
 	});
 
 	test("rejects malformed empty tool call ids", () => {
@@ -364,10 +358,7 @@ describe("planContinuation", () => {
 	});
 
 	test("rejects non-message selected anchors with nothing_to_continue", () => {
-		const branch = [
-			userMessage("user-1", null, "hello"),
-			modelChange("model-1", "user-1"),
-		];
+		const branch = [userMessage("user-1", null, "hello"), modelChange("model-1", "user-1")];
 		expectRejection("nothing_to_continue", () =>
 			planContinuation({ branchEntries: branch, recoveryTimestamp: 123, selectedEntryId: "model-1" }),
 		);
@@ -432,9 +423,7 @@ describe("planContinuation", () => {
 			...patch,
 		} as unknown as AssistantMessage;
 		const branch = [userMessage("user-1", null, "bad"), assistantEntry("assistant-1", "user-1", malformed)];
-		expectRejection("malformed_tool_call", () =>
-			planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }),
-		);
+		expectRejection("malformed_tool_call", () => planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }));
 	});
 
 	test("rejects malformed tool result content", () => {
@@ -484,8 +473,6 @@ describe("planContinuation", () => {
 		const plan = planContinuation({ branchEntries: branch, recoveryTimestamp: 123 });
 		expect(plan.recoveryMessages).toHaveLength(1);
 		expect(branch).toEqual(before);
-		expect(plan.contextMessages.every((message: AgentMessage) => message.role !== "toolResult")).toBe(
-			true,
-		);
+		expect(plan.contextMessages.every((message: AgentMessage) => message.role !== "toolResult")).toBe(true);
 	});
 });

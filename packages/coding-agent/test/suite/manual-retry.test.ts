@@ -1,9 +1,9 @@
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
+	type Context,
 	fauxAssistantMessage,
 	fauxToolCall,
-	type AssistantMessage,
-	type Context,
+	type Message,
 	type ToolResultMessage,
 } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
@@ -14,7 +14,7 @@ import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "./
 const SYNTHETIC_RESULT_PATTERN =
 	/no usable result was recorded.*executed or produced side effects is unknown.*not assume it is safe to repeat/is;
 
-function userMessage(text: string): AgentMessage {
+function userMessage(text: string): Message {
 	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
 
@@ -29,14 +29,14 @@ function toolResult(toolCallId: string, toolName: string, text: string): ToolRes
 	};
 }
 
-function setBranch(harness: Harness, messages: AgentMessage[]): string[] {
+function setBranch(harness: Harness, messages: Message[]): string[] {
 	const ids = messages.map((message) => harness.sessionManager.appendMessage(message));
 	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 	return ids;
 }
 
-function providerMessages(context: Context): AgentMessage[] {
-	return context.messages as AgentMessage[];
+function providerMessages(context: Context): Message[] {
+	return context.messages;
 }
 
 describe("manual /retry continuation", () => {
@@ -58,7 +58,10 @@ describe("manual /retry continuation", () => {
 			const created = await harness();
 			const requestId = created.sessionManager.appendMessage(userMessage("original request"));
 			const failureId = created.sessionManager.appendMessage(
-				fauxAssistantMessage("failed tail", { stopReason, errorMessage: stopReason === "error" ? "boom" : undefined }),
+				fauxAssistantMessage("failed tail", {
+					stopReason,
+					errorMessage: stopReason === "error" ? "boom" : undefined,
+				}),
 			);
 			created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
 			created.setResponses([fauxAssistantMessage("recovered")]);
@@ -160,10 +163,7 @@ describe("manual /retry continuation", () => {
 		setBranch(created, [
 			userMessage("two calls"),
 			fauxAssistantMessage(
-				[
-					fauxToolCall("first", {}, { id: "call-1" }),
-					fauxToolCall("second", {}, { id: "call-2" }),
-				],
+				[fauxToolCall("first", {}, { id: "call-1" }), fauxToolCall("second", {}, { id: "call-2" })],
 				{ stopReason: "toolUse" },
 			),
 			toolResult("call-1", "first", "kept"),
@@ -220,14 +220,16 @@ describe("manual /retry continuation", () => {
 	});
 
 	it("survives JSONL reopen with both the failed side branch and new active branch", async () => {
-		const created = await harness();
-		const persisted = SessionManager.create(created.tempDir, created.tempDir, { id: "manual-retry-persisted" });
+		const created = await createHarness({
+			settings: { retry: { enabled: false } },
+			sessionManagerFactory: (tempDir) => SessionManager.create(tempDir, tempDir, { id: "manual-retry-persisted" }),
+		});
+		harnesses.push(created);
+		const persisted = created.sessionManager;
 		const userId = persisted.appendMessage(userMessage("persist me"));
 		const failureId = persisted.appendMessage(
 			fauxAssistantMessage("old failure", { stopReason: "error", errorMessage: "failed" }),
 		);
-		created.sessionManager = persisted;
-		created.session.sessionManager = persisted;
 		created.session.agent.state.messages = persisted.buildSessionContext().messages;
 		created.setResponses([fauxAssistantMessage("new success")]);
 

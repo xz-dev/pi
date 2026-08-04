@@ -9,9 +9,9 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import {
 	buildContextEntries,
-	sessionEntryToContextMessages,
 	type SessionEntry,
 	type SessionMessageEntry,
+	sessionEntryToContextMessages,
 } from "./session-manager.ts";
 
 /** Exact neutral text for unresolved tool calls. */
@@ -236,8 +236,7 @@ function validateToolBatch(
 				reject("malformed_tool_result", `Tool result ${message.toolCallId} contains malformed content.`);
 			}
 			const validText = part.type === "text" && typeof part.text === "string";
-			const validImage =
-				part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string";
+			const validImage = part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string";
 			if (!validText && !validImage) {
 				reject("malformed_tool_result", `Tool result ${message.toolCallId} contains malformed content.`);
 			}
