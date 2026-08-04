@@ -30,6 +30,8 @@ export interface RetrySettings {
 	enabled?: boolean; // default: true
 	maxRetries?: number; // default: 3
 	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
+	/** Additional case-insensitive errorMessage substrings that skip auto-retry. */
+	nonRetryableErrorPatterns?: string[];
 	provider?: ProviderRetrySettings;
 }
 
@@ -173,6 +175,15 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
 	}
 	return undefined;
+}
+
+function normalizeNonRetryableErrorPatterns(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const patterns = value
+		.filter((entry): entry is string => typeof entry === "string")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0);
+	return patterns.length > 0 ? patterns : undefined;
 }
 
 export type SettingsScope = "global" | "project";
@@ -815,11 +826,20 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
+	getRetrySettings(): {
+		enabled: boolean;
+		maxRetries: number;
+		baseDelayMs: number;
+		nonRetryableErrorPatterns?: string[];
+	} {
+		const nonRetryableErrorPatterns = normalizeNonRetryableErrorPatterns(
+			this.settings.retry?.nonRetryableErrorPatterns,
+		);
 		return {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
+			...(nonRetryableErrorPatterns ? { nonRetryableErrorPatterns } : {}),
 		};
 	}
 

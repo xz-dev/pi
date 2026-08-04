@@ -100,6 +100,16 @@ export interface RetryPolicy {
 	maxRetries: number;
 	/** Base delay in ms. Per-attempt delay is `baseDelayMs * 2^(attempt-1)` before jitter. */
 	baseDelayMs: number;
+	/**
+	 * Additional case-insensitive substrings that make an error non-retryable.
+	 * Matched against `AssistantMessage.errorMessage` after the built-in limit patterns.
+	 */
+	nonRetryableErrorPatterns?: readonly string[];
+}
+
+export interface RetryClassificationOptions {
+	/** Additional case-insensitive substrings that make an error non-retryable. */
+	nonRetryableErrorPatterns?: readonly string[];
 }
 
 /** Optional callbacks emitted by {@link retryAssistantCall} around each retry. */
@@ -185,7 +195,12 @@ export async function retryAssistantCall(
 		}
 
 		// Non-retryable, or budget exhausted: return the final error message.
-		if (attempt >= maxAttempts || !isRetryableAssistantError(response)) {
+		if (
+			attempt >= maxAttempts ||
+			!isRetryableAssistantError(response, {
+				nonRetryableErrorPatterns: policy?.nonRetryableErrorPatterns,
+			})
+		) {
 			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt, response.errorMessage);
 			return response;
 		}
@@ -219,9 +234,27 @@ export async function retryAssistantCall(
  * overflow separately, then apply their own retry budget, backoff, and reporting
  * before restarting the assistant turn.
  */
-export function isRetryableAssistantError(message: AssistantMessage): boolean {
+function matchesNonRetryableErrorPatterns(
+	errorMessage: string,
+	patterns: readonly string[] | undefined,
+): boolean {
+	if (!patterns || patterns.length === 0) return false;
+	const haystack = errorMessage.toLowerCase();
+	for (const pattern of patterns) {
+		if (typeof pattern !== "string") continue;
+		const needle = pattern.trim().toLowerCase();
+		if (needle.length > 0 && haystack.includes(needle)) return true;
+	}
+	return false;
+}
+
+export function isRetryableAssistantError(
+	message: AssistantMessage,
+	options?: RetryClassificationOptions,
+): boolean {
 	if (message.stopReason !== "error" || !message.errorMessage) return false;
 	const errorMessage = message.errorMessage;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
+	if (matchesNonRetryableErrorPatterns(errorMessage, options?.nonRetryableErrorPatterns)) return false;
 	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
 }
