@@ -65,6 +65,8 @@ npm install -g @xz-dev/pi-coding-agent
 pi --version
 ```
 
+Successful generated-`main` publications create immutable downstream prerelease versions in GitHub Packages; GitHub Releases are not the installation channel.
+
 > [!NOTE]
 > npm 12 disables remote tarball dependencies by default. This distribution uses GitHub Packages tarball URLs for its workspace packages, so installation or `pi update` may fail with `EALLOWREMOTE` and `Fetching packages of type "remote" have been disabled`. Enable them for your user configuration, then retry:
 >
@@ -83,4 +85,4 @@ Twice daily, [Upstream Sync](https://github.com/xz-dev/pi/actions/workflows/upst
 - 01:28 Asia/Shanghai
 - 13:28 Asia/Shanghai
 
-Before a lease-protected update of `main`, the workflow installs dependencies, hydrates model data, builds, checks, runs focused integration regressions, audits production and development dependencies, and verifies production dependency signatures. Conflicts, empty integrations, failed gates, or a changed remote lease leave `main` unchanged. A successful push triggers the full [CI](https://github.com/xz-dev/pi/actions/workflows/ci.yml), [Esc Abort Integration](https://github.com/xz-dev/pi/actions/workflows/esc-abort-integration.yml), and [Publish GitHub Packages](https://github.com/xz-dev/pi/actions/workflows/publish-github-packages.yml) workflows for the rebuilt commit.
+Before a lease-protected update of `main`, the workflow installs dependencies, hydrates model data, builds, checks, runs focused integration regressions, and runs non-blocking production/development dependency audits and signature verification. Conflicts, empty integrations, failed required gates, or a changed remote lease leave `main` unchanged. A successful push triggers the full [CI](https://github.com/xz-dev/pi/actions/workflows/ci.yml), [Esc Abort Integration](https://github.com/xz-dev/pi/actions/workflows/esc-abort-integration.yml), and [Publish GitHub Packages](https://github.com/xz-dev/pi/actions/workflows/publish-github-packages.yml) workflows for the rebuilt commit.
