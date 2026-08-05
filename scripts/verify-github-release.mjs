@@ -419,7 +419,10 @@ function inspectInstalledPackage(installRoot, distributionVersion) {
 }
 
 function runPi(executable, args, cwd) {
-	const result = spawnSync(executable, args, {
+	const directCli = process.platform === "win32" ? executable.replace(/\.cmd$/i, "") : undefined;
+	const command = directCli && existsSync(directCli) ? process.execPath : executable;
+	const commandArgs = directCli && existsSync(directCli) ? [directCli, ...args] : args;
+	const result = spawnSync(command, commandArgs, {
 		cwd,
 		encoding: "utf8",
 		env: {
@@ -430,7 +433,7 @@ function runPi(executable, args, cwd) {
 	});
 	if (result.status !== 0) {
 		throw new Error(
-			`Command failed: ${executable} ${args.join(" ")}\n${result.stdout ?? ""}${result.stderr ?? ""}`,
+			`Command failed: ${command} ${commandArgs.join(" ")}\n${result.error?.message ?? ""}\n${result.stdout ?? ""}${result.stderr ?? ""}`,
 		);
 	}
 	return (result.stdout ?? "").trim();
