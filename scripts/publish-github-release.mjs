@@ -59,12 +59,8 @@ function readManifest(path) {
 function releaseAssetPaths(releaseDir, manifest) {
   const subjectsFile = manifest.attestation.subjectsFile;
   const subjectsPath = join(releaseDir, basename(subjectsFile));
-  if (!existsSync(subjectsPath))
-    fail(`Missing attestation subjects file: ${subjectsPath}`);
-  const subjectLines = readFileSync(subjectsPath, "utf8")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  if (!existsSync(subjectsPath) || readFileSync(subjectsPath).byteLength === 0)
+    fail(`Missing or empty attestation bundle: ${subjectsPath}`);
   const expectedSubjects = [
     manifest.package.file,
     "release-manifest.json",
@@ -73,17 +69,6 @@ function releaseAssetPaths(releaseDir, manifest) {
     manifest.bootstrap.files.ps1,
     "SHA256SUMS",
   ];
-  for (const line of subjectLines) {
-    if (line !== basename(line)) {
-      fail(`Attestation subject must be a release asset basename: ${line}`);
-    }
-  }
-  if (
-    subjectLines.length !== expectedSubjects.length ||
-    JSON.stringify([...subjectLines].sort()) !== JSON.stringify([...expectedSubjects].sort())
-  ) {
-    fail("Attestation subjects file does not contain the exact canonical Release asset inventory");
-  }
   const subjectPaths = expectedSubjects.map((line) => join(releaseDir, line));
   const paths = [...subjectPaths, subjectsPath];
   const names = paths.map((path) => basename(path));

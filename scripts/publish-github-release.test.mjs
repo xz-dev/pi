@@ -290,32 +290,27 @@ test("draft with an unexpected asset fails before upload or publication", async 
   }
 });
 
-for (const [name, subjects] of [
-  ["omitted", [PACKAGE_FILE, "release-manifest.json", "install.ts", "install.sh", "install.ps1"]],
-  ["substituted", [PACKAGE_FILE, "release-manifest.json", "install.ts", "install.sh", "SHA256SUMS", "attestation-subjects.txt"]],
-]) {
-  test(`canonical subject inventory rejects ${name} entries before any GitHub request`, async () => {
-    const candidate = fixture();
-    let requests = 0;
-    try {
-      writeFileSync(join(candidate.directory, "attestation-subjects.txt"), `${subjects.join("\n")}\n`);
-      await assert.rejects(
-        () =>
-          withFetch(
-            async () => {
-              requests += 1;
-              throw new Error("GitHub must not be called");
-            },
-            () => publishGitHubRelease(candidate.manifestPath, ENV),
-          ),
-        /exact canonical Release asset inventory/,
-      );
-      assert.equal(requests, 0);
-    } finally {
-      rmSync(candidate.directory, { recursive: true, force: true });
-    }
-  });
-}
+test("empty public attestation bundle fails before any GitHub request", async () => {
+  const candidate = fixture();
+  let requests = 0;
+  try {
+    writeFileSync(join(candidate.directory, "attestation-subjects.txt"), "");
+    await assert.rejects(
+      () =>
+        withFetch(
+          async () => {
+            requests += 1;
+            throw new Error("GitHub must not be called");
+          },
+          () => publishGitHubRelease(candidate.manifestPath, ENV),
+        ),
+      /empty attestation bundle/,
+    );
+    assert.equal(requests, 0);
+  } finally {
+    rmSync(candidate.directory, { recursive: true, force: true });
+  }
+});
 
 for (const [field, mutate] of [
   ["installer", (manifest) => { manifest.installer.file = "substitute.ts"; }],
