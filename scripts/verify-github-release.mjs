@@ -525,11 +525,7 @@ function verifyWithNpm(packagePath, manifest) {
 		);
 		const packageDir = inspectInstalledPackage(prefix, manifest.distributionVersion);
 		assertTargetExternalResolution(output, packageDir, manifest.package);
-		const executable = join(
-			prefix,
-			"bin",
-			process.platform === "win32" ? "pi.cmd" : "pi",
-		);
+		const executable = process.platform === "win32" ? join(prefix, "pi.cmd") : join(prefix, "bin", "pi");
 		if (!existsSync(executable)) {
 			throw new Error(`npm global install did not create ${executable}`);
 		}
