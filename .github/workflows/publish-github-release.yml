@@ -78,7 +78,12 @@ jobs:
           node scripts/prepare-github-release.mjs --out "$RUNNER_TEMP/pi-github-release"
           node scripts/verify-github-release.mjs node "$RUNNER_TEMP/pi-github-release/release-manifest.json"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          status=$(git status --porcelain=v1 --untracked-files=all)
+          if [[ -n "$status" ]]; then
+            echo "::error::Release preparation or verification modified the exact source checkout"
+            printf '%s\n' "$status"
+            exit 1
+          fi
 
       - name: Upload exact Release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
