@@ -652,19 +652,14 @@ export function verifyExternalOptionalRuntime(packageDir, policy) {
 	} catch {
 		throw new Error(`Expected native package ${nativeName} is missing from target install`);
 	}
-	let clipboard;
 	try {
-		clipboard = requireFromPackage("@mariozechner/clipboard");
-	} catch (error) {
-		throw new Error(
-			`Portable clipboard failed to load target native package ${nativeName}: ${error instanceof Error ? error.message : String(error)}`,
-		);
+		requireFromPackage.resolve("@mariozechner/clipboard");
+	} catch {
+		throw new Error("Portable clipboard parent is missing from target install");
 	}
-	if (typeof clipboard.hasText !== "function") {
-		throw new Error("Portable clipboard loaded without the non-destructive hasText capability");
-	}
-	// Loading the module proves the target native binding resolves. Do not invoke
-	// clipboard access in headless CI, where a valid Linux binding requires DISPLAY.
+	// Loading the native module can keep its binary mapped/locked until process
+	// exit (notably Windows). Resolution proves target selection; the later
+	// isolated `pi --version`/`--help` smokes exercise package startup.
 }
 
 /**
