@@ -523,7 +523,13 @@ describe("GitHub Release preparation", () => {
 
 		const manifest = JSON.parse(readFileSync(join(output, "release-manifest.json"), "utf8")) as {
 			distributionVersion: string;
-			attestation: { repository: string; signerWorkflow: string; signerRef: string; denySelfHostedRunners: boolean };
+			attestation: {
+				repository: string;
+				signerWorkflow: string;
+				signerRef: string;
+				denySelfHostedRunners: boolean;
+				subjectsFile: string;
+			};
 			package: {
 				file: string;
 				sha256: string;

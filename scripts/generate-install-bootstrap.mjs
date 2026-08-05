@@ -19,6 +19,7 @@ export const INSTALL_TS_FILENAME = "install.ts";
 export const INSTALL_SH_FILENAME = "install.sh";
 export const INSTALL_PS1_FILENAME = "install.ps1";
 export const RELEASE_MANIFEST_FILENAME = "release-manifest.json";
+export const ATTESTATION_BUNDLE_FILENAME = "attestation-subjects.txt";
 
 /**
  * Canonical per-tag download base URL for a published GitHub Release.
@@ -90,7 +91,7 @@ function shellSingleQuote(value) {
 }
 
 /**
- * POSIX sh bootstrap. Uses curl only for the two release downloads.
+ * POSIX sh bootstrap. Uses curl only for pinned Release asset downloads.
  */
 export function generateInstallSh(options) {
 	const pins = assertBootstrapPins(options);
@@ -102,6 +103,7 @@ export function generateInstallSh(options) {
 	const minNodeQ = shellSingleQuote(pins.minimumNodeVersion);
 	const manifestNameQ = shellSingleQuote(RELEASE_MANIFEST_FILENAME);
 	const installNameQ = shellSingleQuote(INSTALL_TS_FILENAME);
+	const bundleNameQ = shellSingleQuote(ATTESTATION_BUNDLE_FILENAME);
 
 	return `#!/bin/sh
 # Thin Pi GitHub Release bootstrap. Not the installer.
@@ -117,6 +119,7 @@ INSTALL_TS_BYTES=${installBytes}
 MINIMUM_NODE_VERSION=${minNodeQ}
 MANIFEST_NAME=${manifestNameQ}
 INSTALL_TS_NAME=${installNameQ}
+BUNDLE_NAME=${bundleNameQ}
 
 if ! command -v curl >/dev/null 2>&1; then
 	echo "pi bootstrap: curl is required" >&2
@@ -140,9 +143,11 @@ trap cleanup EXIT INT TERM
 
 MANIFEST_PATH="\$WORKDIR/\$MANIFEST_NAME"
 INSTALL_TS_PATH="\$WORKDIR/\$INSTALL_TS_NAME"
+BUNDLE_PATH="\$WORKDIR/\$BUNDLE_NAME"
 
 curl -fsSL "\$BASE_URL\$MANIFEST_NAME" -o "\$MANIFEST_PATH"
 curl -fsSL "\$BASE_URL\$INSTALL_TS_NAME" -o "\$INSTALL_TS_PATH"
+curl -fsSL "\$BASE_URL\$BUNDLE_NAME" -o "\$BUNDLE_PATH"
 
 hex_sha256() {
 	# Portable SHA-256: "hash  -" or "hash *-" depending on openssl build.
@@ -182,6 +187,25 @@ if [ "\$actual_install_bytes" != "\$INSTALL_TS_BYTES" ]; then
 	echo "pi bootstrap: install.ts size mismatch" >&2
 	echo "  expected: \$INSTALL_TS_BYTES bytes" >&2
 	echo "  actual:   \$actual_install_bytes bytes" >&2
+	exit 1
+fi
+
+manifest_commit=\$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\\([0-9a-f]*\\)".*/\\1/p' "\$MANIFEST_PATH" | head -n 1)
+case "\$manifest_commit" in
+	""|*[!0-9a-f]*) echo "pi bootstrap: verified manifest has an invalid commit" >&2; exit 1 ;;
+esac
+if [ "\${#manifest_commit}" -ne 40 ]; then
+	echo "pi bootstrap: verified manifest has an invalid commit" >&2
+	exit 1
+fi
+if ! gh attestation verify "\$INSTALL_TS_PATH" \
+	--bundle "\$BUNDLE_PATH" \
+	--repo xz-dev/pi \
+	--signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml \
+	--source-ref refs/heads/main \
+	--source-digest "\$manifest_commit" \
+	--deny-self-hosted-runners >/dev/null; then
+	echo "pi bootstrap: install.ts provenance verification failed" >&2
 	exit 1
 fi
 
@@ -241,7 +265,7 @@ exec "\$RUNTIME" "\$INSTALL_TS_PATH" "\$@"
 }
 
 /**
- * Windows PowerShell bootstrap. Uses Invoke-WebRequest only for the two downloads.
+ * Windows PowerShell bootstrap. Uses Invoke-WebRequest only for pinned Release asset downloads.
  */
 export function generateInstallPs1(options) {
 	const pins = assertBootstrapPins(options);
@@ -261,6 +285,7 @@ $InstallTsBytes = ${pins.installTsBytes}
 $MinimumNodeVersion = [version]${q(pins.minimumNodeVersion)}
 $ManifestName = ${q(RELEASE_MANIFEST_FILENAME)}
 $InstallTsName = ${q(INSTALL_TS_FILENAME)}
+$BundleName = ${q(ATTESTATION_BUNDLE_FILENAME)}
 
 $ghCmd = Get-Command gh -ErrorAction SilentlyContinue
 if ($null -eq $ghCmd) {
@@ -272,9 +297,11 @@ New-Item -ItemType Directory -Path $workDir | Out-Null
 try {
 	$manifestPath = Join-Path $workDir $ManifestName
 	$installTsPath = Join-Path $workDir $InstallTsName
+	$bundlePath = Join-Path $workDir $BundleName
 
 	Invoke-WebRequest -Uri ($BaseUrl + $ManifestName) -OutFile $manifestPath -UseBasicParsing
 	Invoke-WebRequest -Uri ($BaseUrl + $InstallTsName) -OutFile $installTsPath -UseBasicParsing
+	Invoke-WebRequest -Uri ($BaseUrl + $BundleName) -OutFile $bundlePath -UseBasicParsing
 
 	function Get-Sha256Hex([string] $Path) {
 		$hash = Get-FileHash -Algorithm SHA256 -Path $Path
@@ -302,6 +329,20 @@ try {
 	}
 	if ($manifestJson.tag -ne $Tag) {
 		throw "pi bootstrap: manifest tag $($manifestJson.tag) does not match pinned tag $Tag"
+	}
+	if ($manifestJson.commit -notmatch '^[0-9a-f]{40}$') {
+		throw "pi bootstrap: verified manifest has an invalid commit"
+	}
+
+	& $ghCmd.Source attestation verify $installTsPath ${"`"}
+		--bundle $bundlePath ${"`"}
+		--repo xz-dev/pi ${"`"}
+		--signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml ${"`"}
+		--source-ref refs/heads/main ${"`"}
+		--source-digest $manifestJson.commit ${"`"}
+		--deny-self-hosted-runners | Out-Null
+	if ($LASTEXITCODE -ne 0) {
+		throw "pi bootstrap: install.ts provenance verification failed"
 	}
 
 	$runtime = $null

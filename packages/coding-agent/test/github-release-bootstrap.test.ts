@@ -187,6 +187,7 @@ writeFileSync(
 			schemaVersion: 1,
 			tag,
 			distributionVersion: "0.0.0-xz.1.1.g11111111",
+			commit: "1".repeat(40),
 			installer: {
 				file: "install.ts",
 				bytes: installTsBytes,
@@ -196,7 +197,15 @@ writeFileSync(
 		const manifestBody = `${JSON.stringify(manifest, undefined, "\t")}\n`;
 		const manifestPath = join(releaseDir, "release-manifest.json");
 		writeFileSync(manifestPath, manifestBody);
+		writeFileSync(join(releaseDir, "attestation-subjects.txt"), '{"fixture":"bundle"}\n');
 		const manifestSha256 = sha256(manifestBody);
+		const fakeBin = join(tempDir, "bin");
+		mkdirSync(fakeBin);
+		writeFileSync(
+			join(fakeBin, "gh"),
+			`#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(join(tempDir, "gh-args.txt"))}\n`,
+			{ mode: 0o755 },
+		);
 
 		const fixtureServer = await startStaticServer(releaseDir);
 		try {
@@ -214,6 +223,7 @@ writeFileSync(
 			const probeOut = join(tempDir, "probe.json");
 			const result = await runCommand("sh", [written.sh.path, "--migrate", "--extra"], {
 				...process.env,
+				PATH: `${fakeBin}:${process.env.PATH}`,
 				PI_BOOTSTRAP_PROBE_OUT: probeOut,
 			});
 			expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -228,6 +238,10 @@ writeFileSync(
 			expect(probe.baseUrl).toBe(fixtureServer.baseUrl);
 			expect(probe.exactBaseUrl).toBe(fixtureServer.baseUrl);
 			expect(probe.manifestSha256).toBe(manifestSha256);
+			const ghArgs = readFileSync(join(tempDir, "gh-args.txt"), "utf8").split(/\r?\n/);
+			expect(ghArgs).toEqual(
+				expect.arrayContaining(["--bundle", "--source-digest", "1".repeat(40), "--deny-self-hosted-runners"]),
+			);
 		} finally {
 			await fixtureServer.close();
 			server = undefined;
@@ -244,6 +258,7 @@ writeFileSync(
 		const invalidDigestTag = "xz-v0.0.0-xz.2.1.g22222222";
 		const manifestBody = `${JSON.stringify({ tag: invalidDigestTag, schemaVersion: 1 }, undefined, "\t")}\n`;
 		writeFileSync(join(releaseDir, "release-manifest.json"), manifestBody);
+		writeFileSync(join(releaseDir, "attestation-subjects.txt"), '{"fixture":"bundle"}\n');
 
 		const fixtureServer = await startStaticServer(releaseDir);
 		try {

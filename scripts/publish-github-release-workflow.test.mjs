@@ -85,7 +85,7 @@ test("publication attests final subjects before draft publication and keeps audi
   );
   const attestIndex = workflowText.indexOf("Attest exact Release subjects");
   const verifyIndex = workflowText.indexOf(
-    "Verify stored artifact attestations before publication",
+    "Stage and verify public attestation bundle",
   );
   const publishIndex = workflowText.indexOf("Publish immutable GitHub Release");
   assert.ok(
@@ -107,7 +107,11 @@ test("publication attests final subjects before draft publication and keeps audi
   }
   const attestationBlock = workflowText.slice(attestIndex, verifyIndex);
   assert.doesNotMatch(attestationBlock, /attestation-subjects\.txt/);
+  assert.match(workflowText, /steps\.attest\.outputs\.bundle-path/);
+  assert.match(workflowText, /cp "\$BUNDLE_PATH" "\$subjects"/);
+  assert.match(workflowText, /GH_CONFIG_DIR="\$empty_gh_config" GH_TOKEN= GITHUB_TOKEN=/);
   assert.match(workflowText, /gh attestation verify/);
+  assert.match(workflowText, /--bundle "\$subjects"/);
   assert.match(workflowText, /--source-digest "\$GITHUB_SHA"/);
   assert.match(publisher, /\.\.\.subjectPaths, subjectsPath/);
 });

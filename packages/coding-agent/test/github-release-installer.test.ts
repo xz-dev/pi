@@ -146,6 +146,7 @@ function makeRelease(
 		},
 	};
 	writeFileSync(join(directory, "release-manifest.json"), `${JSON.stringify(manifest, undefined, 2)}\n`);
+	writeFileSync(join(directory, "attestation-subjects.txt"), '{"fixture":"attestation bundle"}\n');
 	return { directory, manifest, packageFile };
 }
 
@@ -884,6 +885,9 @@ describe("GitHub Release installer external behavior", () => {
 			const args = JSON.parse(readFileSync(marker, "utf8")) as string[];
 			expect(args.slice(0, 2)).toEqual(["attestation", "verify"]);
 			expect(args[2]).toMatch(new RegExp(`${release1.packageFile.replaceAll(".", "\\.")}$`));
+			const bundleIndex = args.indexOf("--bundle");
+			expect(bundleIndex).toBeGreaterThan(2);
+			expect(args[bundleIndex + 1]).toMatch(/attestation-subjects\.txt$/);
 			expect(args).toEqual(
 				expect.arrayContaining([
 					"--repo",

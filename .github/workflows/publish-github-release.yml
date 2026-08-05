@@ -197,6 +197,7 @@ jobs:
           node scripts/verify-github-release.mjs node "$candidate/release-manifest.json"
 
       - name: Attest exact Release subjects
+        id: attest
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: |
@@ -207,29 +208,41 @@ jobs:
             ${{ runner.temp }}/pi-github-release/install.ps1
             ${{ runner.temp }}/pi-github-release/SHA256SUMS
 
-      - name: Verify stored artifact attestations before publication
+      - name: Stage and verify public attestation bundle
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
         run: |
           set -euo pipefail
           candidate="$RUNNER_TEMP/pi-github-release"
-          while IFS= read -r subject; do
+          subjects="$candidate/attestation-subjects.txt"
+          test -s "$BUNDLE_PATH"
+          mapfile -t subject_names < "$subjects"
+          test "${#subject_names[@]}" -eq 6
+          for subject in "${subject_names[@]}"; do
             test "$subject" = "$(basename "$subject")"
-            asset="$candidate/$subject"
-            for attempt in 1 2 3 4 5; do
-              if gh attestation verify "$asset" \
-                --repo xz-dev/pi \
-                --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml \
-                --source-ref refs/heads/main \
-                --source-digest "$GITHUB_SHA" \
-                --deny-self-hosted-runners; then
-                break
-              fi
-              test "$attempt" -lt 5 || exit 1
-              sleep 3
-            done
-          done < "$candidate/attestation-subjects.txt"
+          done
+          cp "$BUNDLE_PATH" "$subjects"
+          for subject in "${subject_names[@]}"; do
+            gh attestation verify "$candidate/$subject" \
+              --bundle "$subjects" \
+              --repo xz-dev/pi \
+              --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml \
+              --source-ref refs/heads/main \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+          empty_gh_config="$RUNNER_TEMP/empty-gh-config"
+          mkdir "$empty_gh_config"
+          GH_CONFIG_DIR="$empty_gh_config" GH_TOKEN= GITHUB_TOKEN= gh attestation verify "$candidate/${subject_names[0]}" \
+            --bundle "$subjects" \
+            --repo xz-dev/pi \
+            --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml \
+            --source-ref refs/heads/main \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners \
+            --format json > "$RUNNER_TEMP/public-attestation-verification.json"
+          test -s "$RUNNER_TEMP/public-attestation-verification.json"
 
       - name: Publish immutable GitHub Release
         env:

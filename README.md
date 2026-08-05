@@ -67,7 +67,7 @@ pi --version
 pi --version
 ```
 
-The bootstrap is deliberately thin: it pins and verifies the exact Release manifest and authoritative `install.ts`, then runs it with Node 22.19+ or Bun. The transaction installer also requires the [GitHub CLI](https://cli.github.com/) (`gh`) so it can verify the artifact attestation before installing or executing package code. Public Release verification does not require signing in to GitHub. Release assets include `SHA256SUMS` and GitHub build-provenance attestations.
+The bootstrap is deliberately thin: it pins and verifies the exact Release manifest and authoritative `install.ts`, then runs it with Node 22.19+ or Bun. The transaction installer also requires the [GitHub CLI](https://cli.github.com/) (`gh`) so it can verify the Release-hosted artifact attestation bundle before installing or executing package code. Public Release verification does not require signing in to GitHub; it may contact Sigstore's TUF service for current trusted-root material. Release assets include `SHA256SUMS` and GitHub build-provenance attestations.
 
 ### One-time migration from the old GitHub Packages distribution
 

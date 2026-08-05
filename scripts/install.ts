@@ -28,6 +28,7 @@ const ENTRY_PACKAGE = "@earendil-works/pi-coding-agent";
 const LEGACY_PACKAGE = "@xz-dev/pi-coding-agent";
 const REPOSITORY = "xz-dev/pi";
 const MANIFEST_MAX_BYTES = 1024 * 1024;
+const ATTESTATION_BUNDLE_MAX_BYTES = 1024 * 1024;
 const PACKAGE_MAX_BYTES = 1024 * 1024 * 1024;
 
 type Manifest = {
@@ -464,7 +465,7 @@ function run(command: string, args: string[], options: { cwd?: string; env?: Nod
 	if (result.status !== 0) return fail(`${command} ${args.join(" ")} exited with ${result.status ?? "unknown"}`);
 }
 
-function verifyAttestation(tarball: string, manifest: Manifest, discovery: URL): void {
+function verifyAttestation(tarball: string, bundle: string, manifest: Manifest, discovery: URL): void {
 	if (process.env.PI_XZ_SKIP_ATTESTATION === "1") {
 		const local = discovery.hostname === "127.0.0.1" || discovery.hostname === "localhost" || discovery.hostname === "[::1]";
 		if (process.env.CI || !local) return fail("Attestation bypass is allowed only for local non-CI tests");
@@ -476,6 +477,8 @@ function verifyAttestation(tarball: string, manifest: Manifest, discovery: URL):
 		"attestation",
 		"verify",
 		tarball,
+		"--bundle",
+		bundle,
 		"--repo",
 		manifest.attestation.repository,
 		"--signer-workflow",
@@ -1075,7 +1078,9 @@ async function installSelected(options: Options): Promise<void> {
 		await download(packageUrl, tarball, manifest.package.bytes, manifest.package.bytes);
 		if (sha(tarball, "sha256") !== manifest.package.sha256) return fail("Package sha256 mismatch");
 		if (`sha512-${sha(tarball, "sha512")}` !== manifest.package.integrity) return fail("Package integrity mismatch");
-		verifyAttestation(tarball, manifest, discovery);
+		const bundle = containedPath(operationCache, manifest.attestation.subjectsFile);
+		await download(new URL(manifest.attestation.subjectsFile, exact), bundle, undefined, ATTESTATION_BUNDLE_MAX_BYTES);
+		verifyAttestation(tarball, bundle, manifest, discovery);
 
 		const version = safeComponent(manifest.distributionVersion, "distribution version");
 		const versionsDir = managedPath("versions");

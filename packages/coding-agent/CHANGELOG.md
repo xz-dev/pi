@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed xz-dev GitHub Release installation to verify public provenance bundles without requiring a GitHub login.
+
 ## [0.82.1] - 2026-07-25
 
 ### New Features
