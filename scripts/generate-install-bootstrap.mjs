@@ -143,7 +143,7 @@ trap cleanup EXIT INT TERM
 
 MANIFEST_PATH="\$WORKDIR/\$MANIFEST_NAME"
 INSTALL_TS_PATH="\$WORKDIR/\$INSTALL_TS_NAME"
-BUNDLE_PATH="\$WORKDIR/\$BUNDLE_NAME"
+BUNDLE_PATH="\$WORKDIR/attestation-bundle.jsonl"
 
 curl -fsSL "\$BASE_URL\$MANIFEST_NAME" -o "\$MANIFEST_PATH"
 curl -fsSL "\$BASE_URL\$INSTALL_TS_NAME" -o "\$INSTALL_TS_PATH"
@@ -297,7 +297,7 @@ New-Item -ItemType Directory -Path $workDir | Out-Null
 try {
 	$manifestPath = Join-Path $workDir $ManifestName
 	$installTsPath = Join-Path $workDir $InstallTsName
-	$bundlePath = Join-Path $workDir $BundleName
+	$bundlePath = Join-Path $workDir 'attestation-bundle.jsonl'
 
 	Invoke-WebRequest -Uri ($BaseUrl + $ManifestName) -OutFile $manifestPath -UseBasicParsing
 	Invoke-WebRequest -Uri ($BaseUrl + $InstallTsName) -OutFile $installTsPath -UseBasicParsing

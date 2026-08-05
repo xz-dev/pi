@@ -108,10 +108,11 @@ test("publication attests final subjects before draft publication and keeps audi
   const attestationBlock = workflowText.slice(attestIndex, verifyIndex);
   assert.doesNotMatch(attestationBlock, /attestation-subjects\.txt/);
   assert.match(workflowText, /steps\.attest\.outputs\.bundle-path/);
-  assert.match(workflowText, /cp "\$BUNDLE_PATH" "\$subjects"/);
+  assert.match(workflowText, /cp "\$BUNDLE_PATH" "\$bundle"/);
+  assert.match(workflowText, /cp "\$bundle" "\$subjects"/);
   assert.match(workflowText, /GH_CONFIG_DIR="\$empty_gh_config" GH_TOKEN= GITHUB_TOKEN=/);
   assert.match(workflowText, /gh attestation verify/);
-  assert.match(workflowText, /--bundle "\$subjects"/);
+  assert.match(workflowText, /--bundle "\$bundle"/);
   assert.match(workflowText, /--source-digest "\$GITHUB_SHA"/);
   assert.match(publisher, /\.\.\.subjectPaths, subjectsPath/);
 });

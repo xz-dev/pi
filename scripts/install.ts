@@ -1078,7 +1078,7 @@ async function installSelected(options: Options): Promise<void> {
 		await download(packageUrl, tarball, manifest.package.bytes, manifest.package.bytes);
 		if (sha(tarball, "sha256") !== manifest.package.sha256) return fail("Package sha256 mismatch");
 		if (`sha512-${sha(tarball, "sha512")}` !== manifest.package.integrity) return fail("Package integrity mismatch");
-		const bundle = containedPath(operationCache, manifest.attestation.subjectsFile);
+		const bundle = containedPath(operationCache, "attestation-bundle.jsonl");
 		await download(new URL(manifest.attestation.subjectsFile, exact), bundle, undefined, ATTESTATION_BUNDLE_MAX_BYTES);
 		verifyAttestation(tarball, bundle, manifest, discovery);
 

@@ -216,16 +216,17 @@ jobs:
           set -euo pipefail
           candidate="$RUNNER_TEMP/pi-github-release"
           subjects="$candidate/attestation-subjects.txt"
+          bundle="$RUNNER_TEMP/public-attestation-bundle.jsonl"
           test -s "$BUNDLE_PATH"
           mapfile -t subject_names < "$subjects"
           test "${#subject_names[@]}" -eq 6
           for subject in "${subject_names[@]}"; do
             test "$subject" = "$(basename "$subject")"
           done
-          cp "$BUNDLE_PATH" "$subjects"
+          cp "$BUNDLE_PATH" "$bundle"
           for subject in "${subject_names[@]}"; do
             gh attestation verify "$candidate/$subject" \
-              --bundle "$subjects" \
+              --bundle "$bundle" \
               --repo xz-dev/pi \
               --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml \
               --source-ref refs/heads/main \
@@ -235,7 +236,7 @@ jobs:
           empty_gh_config="$RUNNER_TEMP/empty-gh-config"
           mkdir "$empty_gh_config"
           GH_CONFIG_DIR="$empty_gh_config" GH_TOKEN= GITHUB_TOKEN= gh attestation verify "$candidate/${subject_names[0]}" \
-            --bundle "$subjects" \
+            --bundle "$bundle" \
             --repo xz-dev/pi \
             --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml \
             --source-ref refs/heads/main \
@@ -243,6 +244,7 @@ jobs:
             --deny-self-hosted-runners \
             --format json > "$RUNNER_TEMP/public-attestation-verification.json"
           test -s "$RUNNER_TEMP/public-attestation-verification.json"
+          cp "$bundle" "$subjects"
 
       - name: Publish immutable GitHub Release
         env:
