@@ -4,6 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getLatestXzRelease, runXzSelfUpdate } from "../src/utils/xz-release-update.ts";
 import { allowNetwork } from "./test-network-env.ts";
 
+const { execFileSyncMock } = vi.hoisted(() => ({ execFileSyncMock: vi.fn() }));
+vi.mock("node:child_process", async (importOriginal) => {
+	const original = await importOriginal<typeof import("node:child_process")>();
+	return { ...original, execFileSync: execFileSyncMock };
+});
+
 const VERSION = "0.83.0-xz.41.1.g11111111";
 const NEW_VERSION = "0.83.0-xz.42.1.g22222222";
 const TAG = `xz-v${NEW_VERSION}`;
@@ -96,10 +102,82 @@ function stubReleaseFetch(
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.unstubAllEnvs();
+	execFileSyncMock.mockReset();
 	vi.restoreAllMocks();
 });
 
 describe("xz-dev GitHub Release updates", () => {
+	it("uses the logged-in GitHub CLI token when update token variables are absent", async () => {
+		allowNetwork();
+		vi.stubEnv("GH_TOKEN", "");
+		vi.stubEnv("GITHUB_TOKEN", "");
+		const execFileMock = execFileSyncMock.mockReturnValue("gh-cli-token\n");
+		const fetchMock = stubReleaseFetch();
+
+		await getLatestXzRelease(VERSION);
+
+		expect(execFileMock).toHaveBeenCalledWith(
+			"gh",
+			["auth", "token", "--hostname", "github.com"],
+			expect.objectContaining({ encoding: "utf8", shell: false, timeout: 10000 }),
+		);
+		expect(fetchMock).toHaveBeenNthCalledWith(
+			1,
+			RELEASE_API,
+			expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer gh-cli-token" }) }),
+		);
+	});
+
+	it("prefers explicit update token variables and does not invoke GitHub CLI", async () => {
+		allowNetwork();
+		vi.stubEnv("GH_TOKEN", "explicit-token");
+		vi.stubEnv("GITHUB_TOKEN", "secondary-token");
+		const execFileMock = execFileSyncMock;
+		const fetchMock = stubReleaseFetch();
+
+		await getLatestXzRelease(VERSION);
+
+		expect(execFileMock).not.toHaveBeenCalled();
+		expect(fetchMock).toHaveBeenNthCalledWith(
+			1,
+			RELEASE_API,
+			expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer explicit-token" }) }),
+		);
+	});
+
+	it("uses GITHUB_TOKEN when GH_TOKEN is absent and does not invoke GitHub CLI", async () => {
+		allowNetwork();
+		vi.stubEnv("GH_TOKEN", "");
+		vi.stubEnv("GITHUB_TOKEN", "secondary-token");
+		const execFileMock = execFileSyncMock;
+		const fetchMock = stubReleaseFetch();
+
+		await getLatestXzRelease(VERSION);
+
+		expect(execFileMock).not.toHaveBeenCalled();
+		expect(fetchMock).toHaveBeenNthCalledWith(
+			1,
+			RELEASE_API,
+			expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer secondary-token" }) }),
+		);
+	});
+
+	it("falls back to anonymous Release discovery when GitHub CLI has no token", async () => {
+		allowNetwork();
+		vi.stubEnv("GH_TOKEN", "");
+		vi.stubEnv("GITHUB_TOKEN", "");
+		execFileSyncMock.mockImplementation(() => {
+			throw new Error("gh is unavailable or logged out");
+		});
+		const fetchMock = stubReleaseFetch();
+
+		await getLatestXzRelease(VERSION);
+
+		const firstCall = fetchMock.mock.calls[0];
+		expect(firstCall?.[1]?.headers).not.toHaveProperty("Authorization");
+	});
+
 	it("discovers a published non-prerelease latest Release and validates its exact manifest", async () => {
 		allowNetwork();
 		const fetchMock = stubReleaseFetch();

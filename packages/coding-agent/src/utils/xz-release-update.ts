@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, mkdtempSync, openSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -317,13 +317,32 @@ function parseManifest(value: unknown, expectedTag: string): XzReleaseManifest {
 	};
 }
 
+function githubToken(): string | undefined {
+	const configured = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || "").trim();
+	if (configured) return configured;
+	try {
+		return (
+			execFileSync("gh", ["auth", "token", "--hostname", "github.com"], {
+				encoding: "utf8",
+				shell: false,
+				stdio: ["ignore", "pipe", "ignore"],
+				timeout: DEFAULT_TIMEOUT_MS,
+			}).trim() || undefined
+		);
+	} catch {
+		return undefined;
+	}
+}
+
 function fetchHeaders(currentVersion: string, accept: string, includeAuthorization: boolean): Record<string, string> {
 	const headers: Record<string, string> = {
 		"User-Agent": getPiUserAgent(currentVersion),
 		accept,
 	};
-	const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-	if (includeAuthorization && token) headers.Authorization = `Bearer ${token}`;
+	if (includeAuthorization) {
+		const token = githubToken();
+		if (token) headers.Authorization = `Bearer ${token}`;
+	}
 	return headers;
 }
 
