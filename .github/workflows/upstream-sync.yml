@@ -104,7 +104,32 @@ jobs:
           fi
           git commit -m "merge tmp/patch/esc-manual-retry-compat branch"
 
-          git merge --squash origin/patch/changelog-prerelease
+          if ! git merge --squash origin/patch/changelog-prerelease; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/src/config.ts ]]; then
+              printf '::error::Unexpected changelog-prerelease squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            git checkout --ours -- packages/coding-agent/src/config.ts
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path("packages/coding-agent/src/config.ts")
+          text = path.read_text()
+          text = text.replace("\t\tdistribution?: string;\n", "\t\tdistribution?: string;\n\t\tchangelogVersion?: string;\n")
+          text = text.replace(
+              "export const VERSION: string = pkg.version || \"0.0.0\";\n",
+              "export const VERSION: string = pkg.version || \"0.0.0\";\nexport const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;\n",
+          )
+          path.write_text(text)
+          PY
+            git add packages/coding-agent/src/config.ts
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying changelog-prerelease conflict staging'
+            exit 1
+          fi
           git commit -m "merge patch/changelog-prerelease branch"
 
           git merge --squash origin/patch/skill-overrides
