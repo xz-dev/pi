@@ -7,6 +7,7 @@ import type {
 	ThinkingBudgets,
 	Transport,
 } from "@earendil-works/pi-ai";
+import { callAbortable } from "./abort.ts";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
@@ -170,6 +171,24 @@ type ActiveRun = {
  * `Agent` owns the current transcript, emits lifecycle events, executes tools,
  * and exposes queueing APIs for steering and follow-up messages.
  */
+type RunTerminalization = {
+	agentEndEmitted: boolean;
+	turnEndEmitted: boolean;
+	assistantMessageFinalized: boolean;
+	lastAssistantMessage?: AgentMessage;
+	runMessages: AgentMessage[];
+};
+
+function createRunTerminalization(): RunTerminalization {
+	return {
+		agentEndEmitted: false,
+		turnEndEmitted: false,
+		assistantMessageFinalized: false,
+		lastAssistantMessage: undefined,
+		runMessages: [],
+	};
+}
+
 export class Agent {
 	private _state: MutableAgentState;
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
@@ -202,6 +221,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	/** Tracks which terminal lifecycle events already reduced so abort recovery stays idempotent. */
+	private runTerminalization: RunTerminalization = createRunTerminalization();
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -490,6 +511,7 @@ export class Agent {
 			resolvePromise = resolve;
 		});
 		this.activeRun = { promise, resolve: resolvePromise, abortController };
+		this.runTerminalization = createRunTerminalization();
 
 		this._state.isStreaming = true;
 		this._state.streamingMessage = undefined;
@@ -504,6 +526,11 @@ export class Agent {
 		}
 	}
 
+	/**
+	 * Emit only the terminal lifecycle events still missing after a thrown run failure.
+	 * State is reduced before listeners, so an abort mid-message_end/turn_end/agent_end
+	 * must not synthesize a second terminal assistant or duplicate turn/agent end events.
+	 */
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
 		const failureMessage = {
 			role: "assistant",
@@ -517,10 +544,41 @@ export class Agent {
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
 		await this.processEvents({ type: "run_failure", message: failureMessage });
-		await this.processEvents({ type: "message_start", message: failureMessage });
-		await this.processEvents({ type: "message_end", message: failureMessage });
-		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
-		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+
+		if (!aborted) {
+			await this.processEvents({ type: "message_start", message: failureMessage });
+			await this.processEvents({ type: "message_end", message: failureMessage });
+			await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
+			await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+			return;
+		}
+
+		if (this.runTerminalization.agentEndEmitted) {
+			return;
+		}
+
+		let terminalMessage = this.runTerminalization.lastAssistantMessage;
+		const lastRunMessage = this.runTerminalization.runMessages.at(-1);
+		if (
+			!this.runTerminalization.assistantMessageFinalized ||
+			!terminalMessage ||
+			lastRunMessage?.role === "toolResult"
+		) {
+			await this.processEvents({ type: "message_start", message: failureMessage });
+			await this.processEvents({ type: "message_end", message: failureMessage });
+			terminalMessage = failureMessage;
+		}
+
+		if (!this.runTerminalization.turnEndEmitted) {
+			await this.processEvents({ type: "turn_end", message: terminalMessage, toolResults: [] });
+		}
+
+		if (!this.runTerminalization.agentEndEmitted) {
+			await this.processEvents({
+				type: "agent_end",
+				messages: this.runTerminalization.runMessages.slice(),
+			});
+		}
 	}
 
 	private finishRun(): void {
@@ -540,6 +598,12 @@ export class Agent {
 	 */
 	private async processEvents(event: AgentEvent): Promise<void> {
 		switch (event.type) {
+			case "turn_start":
+				this.runTerminalization.turnEndEmitted = false;
+				this.runTerminalization.assistantMessageFinalized = false;
+				this.runTerminalization.lastAssistantMessage = undefined;
+				break;
+
 			case "message_start":
 				this._state.streamingMessage = event.message;
 				break;
@@ -551,6 +615,11 @@ export class Agent {
 			case "message_end":
 				this._state.streamingMessage = undefined;
 				this._state.messages.push(event.message);
+				this.runTerminalization.runMessages.push(event.message);
+				if (event.message.role === "assistant") {
+					this.runTerminalization.assistantMessageFinalized = true;
+					this.runTerminalization.lastAssistantMessage = event.message;
+				}
 				break;
 
 			case "tool_execution_start": {
@@ -568,12 +637,14 @@ export class Agent {
 			}
 
 			case "turn_end":
+				this.runTerminalization.turnEndEmitted = true;
 				if (event.message.role === "assistant" && event.message.errorMessage) {
 					this._state.errorMessage = event.message.errorMessage;
 				}
 				break;
 
 			case "agent_end":
+				this.runTerminalization.agentEndEmitted = true;
 				this._state.streamingMessage = undefined;
 				break;
 
@@ -585,8 +656,31 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
-		for (const listener of this.listeners) {
-			await listener(event, signal);
+		const listeners = [...this.listeners];
+		for (let index = 0; index < listeners.length; index++) {
+			const listener = listeners[index]!;
+			if (signal.aborted) {
+				// Invoke inside a Promise callback so sync throws become rejections too.
+				void Promise.resolve()
+					.then(() => listener(event, signal))
+					.catch(() => {});
+				continue;
+			}
+			try {
+				await callAbortable(() => listener(event, signal), signal);
+			} catch (error) {
+				if (!signal.aborted) {
+					throw error;
+				}
+				// The current listener was already started. Deliver this event once to
+				// every later listener without waiting for abort-blocked cleanup.
+				for (const remainingListener of listeners.slice(index + 1)) {
+					void Promise.resolve()
+						.then(() => remainingListener(event, signal))
+						.catch(() => {});
+				}
+				return;
+			}
 		}
 	}
 }
