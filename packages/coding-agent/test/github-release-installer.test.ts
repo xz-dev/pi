@@ -887,7 +887,7 @@ describe("GitHub Release installer external behavior", () => {
 			expect(args[2]).toMatch(new RegExp(`${release1.packageFile.replaceAll(".", "\\.")}$`));
 			const bundleIndex = args.indexOf("--bundle");
 			expect(bundleIndex).toBeGreaterThan(2);
-			expect(args[bundleIndex + 1]).toMatch(/attestation-subjects\.txt$/);
+			expect(args[bundleIndex + 1]).toMatch(/attestation-bundle\.jsonl$/);
 			expect(args).toEqual(
 				expect.arrayContaining([
 					"--repo",
