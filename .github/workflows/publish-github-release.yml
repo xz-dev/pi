@@ -231,6 +231,15 @@ jobs:
             done
           done < "$candidate/attestation-subjects.txt"
 
+      - name: Require repository Release immutability
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true || {
+            echo "::error::Repository Release immutability must be enabled before publication"
+            exit 1
+          }
+
       - name: Publish immutable GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

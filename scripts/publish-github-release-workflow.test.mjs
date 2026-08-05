@@ -112,6 +112,11 @@ test("publication attests final subjects before draft publication and keeps audi
   assert.match(publisher, /\.\.\.subjectPaths, subjectsPath/);
 });
 
+test("publication requires repository Release immutability", () => {
+  assert.match(workflowText, /repos\/\$GITHUB_REPOSITORY\/immutable-releases/);
+  assert.match(workflowText, /Repository Release immutability must be enabled before publication/);
+});
+
 test("publisher stages a resumable immutable draft and rechecks main before final latest decision", () => {
   const publisher = readFileSync(
     join(ROOT, "scripts", "publish-github-release.mjs"),
