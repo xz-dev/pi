@@ -473,16 +473,26 @@ function assertTargetExternalResolution(output, packageDir, packagePolicy, optio
 	verifyExternalOptionalRuntime(packageDir, packagePolicy);
 }
 
-function verifyWithNpm(packagePath, manifest) {
+function npmInvocation() {
+	if (process.platform === "win32") {
+		const npmCli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+		if (existsSync(npmCli)) return { command: process.execPath, prefixArgs: [npmCli] };
+	}
 	const npm = resolveExecutable("npm");
 	if (!npm) throw new Error("npm is not available on PATH");
+	return { command: npm, prefixArgs: [] };
+}
+
+function verifyWithNpm(packagePath, manifest) {
+	const npm = npmInvocation();
 	const prefix = mkdtempSync(join(tmpdir(), "pi-github-release-npm-prefix-"));
 	const cache = mkdtempSync(join(tmpdir(), "pi-github-release-npm-cache-"));
 	const home = mkdtempSync(join(tmpdir(), "pi-github-release-npm-home-"));
 	try {
 		const output = captureRun(
-			npm,
+			npm.command,
 			[
+				...npm.prefixArgs,
 				"install",
 				"-g",
 				"--prefix",
