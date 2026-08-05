@@ -44,7 +44,9 @@ jobs:
 
           if ! git merge --squash origin/ci; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != README.md ]]; then
+            if (( ${#conflicts[@]} != 2 )) ||
+              [[ ${conflicts[0]} != README.md ]] ||
+              [[ ${conflicts[1]} != packages/coding-agent/CHANGELOG.md ]]; then
               printf '::error::Unexpected ci squash conflicts:'
               printf ' %q' "${conflicts[@]}"
               printf '\n'
@@ -52,8 +54,20 @@ jobs:
             fi
           fi
           git restore --source=origin/ci --staged --worktree -- README.md
+          git checkout --ours -- packages/coding-agent/CHANGELOG.md
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("packages/coding-agent/CHANGELOG.md")
+          text = path.read_text()
+          marker = "## [Unreleased]\n"
+          entry = "\n### Fixed\n\n- Fixed xz-dev GitHub Release installation to verify public provenance bundles without requiring a GitHub login.\n"
+          if entry.strip() not in text:
+              text = text.replace(marker, marker + entry, 1)
+          path.write_text(text)
+          PY
+          git add packages/coding-agent/CHANGELOG.md
           if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after replacing README.md'
+            echo '::error::Unresolved conflicts remain after replacing ci conflict files'
             exit 1
           fi
           git commit -m "merge ci branch"
