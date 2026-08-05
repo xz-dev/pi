@@ -207,6 +207,8 @@ function installerEnvironment(
 		PI_XZ_RELEASE_EXACT_BASE_URL: `${baseUrl}releases/download/{tag}/`,
 		PI_XZ_SKIP_ATTESTATION: "1",
 		PI_XZ_LEGACY_PREFIX: sandbox.legacyPrefix,
+		CI: undefined,
+		GITHUB_ACTIONS: undefined,
 		...overrides,
 	};
 }
