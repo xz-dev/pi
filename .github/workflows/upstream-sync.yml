@@ -44,18 +44,22 @@ jobs:
 
           if ! git merge --squash origin/ci; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 2 )) ||
-              [[ ${conflicts[0]} != README.md ]] ||
-              [[ ${conflicts[1]} != packages/coding-agent/CHANGELOG.md ]]; then
-              printf '::error::Unexpected ci squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
+            for conflict in "${conflicts[@]}"; do
+              case "$conflict" in
+                README.md|packages/coding-agent/CHANGELOG.md) ;;
+                *)
+                  printf '::error::Unexpected ci squash conflicts:'
+                  printf ' %q' "${conflicts[@]}"
+                  printf '\n'
+                  exit 1
+                  ;;
+              esac
+            done
           fi
           git restore --source=origin/ci --staged --worktree -- README.md
-          git checkout --ours -- packages/coding-agent/CHANGELOG.md
-          python3 - <<'PY'
+          if git diff --name-only --diff-filter=U -- packages/coding-agent/CHANGELOG.md | grep -qx packages/coding-agent/CHANGELOG.md; then
+            git checkout --ours -- packages/coding-agent/CHANGELOG.md
+            python3 - <<'PY'
           from pathlib import Path
           path = Path("packages/coding-agent/CHANGELOG.md")
           text = path.read_text()
@@ -65,7 +69,8 @@ jobs:
               text = text.replace(marker, marker + entry, 1)
           path.write_text(text)
           PY
-          git add packages/coding-agent/CHANGELOG.md
+            git add packages/coding-agent/CHANGELOG.md
+          fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after replacing ci conflict files'
             exit 1
