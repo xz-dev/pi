@@ -444,6 +444,9 @@ function captureRun(command, args, options = {}) {
 		maxBuffer: options.maxBuffer ?? 16 * 1024 * 1024,
 	});
 	const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+	if (result.error) {
+		throw new Error(`Command failed to start: ${[command, ...args].join(" ")}\n${result.error.message}`);
+	}
 	if (result.status !== 0) {
 		throw new Error(`Command failed: ${[command, ...args].join(" ")}\n${output}`);
 	}
@@ -471,12 +474,14 @@ function assertTargetExternalResolution(output, packageDir, packagePolicy, optio
 }
 
 function verifyWithNpm(packagePath, manifest) {
+	const npm = resolveExecutable("npm");
+	if (!npm) throw new Error("npm is not available on PATH");
 	const prefix = mkdtempSync(join(tmpdir(), "pi-github-release-npm-prefix-"));
 	const cache = mkdtempSync(join(tmpdir(), "pi-github-release-npm-cache-"));
 	const home = mkdtempSync(join(tmpdir(), "pi-github-release-npm-home-"));
 	try {
 		const output = captureRun(
-			"npm",
+			npm,
 			[
 				"install",
 				"-g",
