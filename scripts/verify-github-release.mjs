@@ -418,10 +418,9 @@ function inspectInstalledPackage(installRoot, distributionVersion) {
 	return packageDir;
 }
 
-function runPi(executable, args, cwd) {
-	const directCli = process.platform === "win32" ? executable.replace(/\.cmd$/i, "") : undefined;
-	const command = directCli && existsSync(directCli) ? process.execPath : executable;
-	const commandArgs = directCli && existsSync(directCli) ? [directCli, ...args] : args;
+function runPi(executable, args, cwd, directCli) {
+	const command = directCli ? process.execPath : executable;
+	const commandArgs = directCli ? [directCli, ...args] : args;
 	const result = spawnSync(command, commandArgs, {
 		cwd,
 		encoding: "utf8",
@@ -532,11 +531,12 @@ function verifyWithNpm(packagePath, manifest) {
 		if (!existsSync(executable)) {
 			throw new Error(`npm global install did not create ${executable}`);
 		}
-		const version = runPi(executable, ["--version"], home);
+		const directCli = process.platform === "win32" ? join(packageDir, "dist", "cli.js") : undefined;
+		const version = runPi(executable, ["--version"], home, directCli);
 		if (version !== manifest.distributionVersion) {
 			throw new Error(`npm global pi --version returned ${version}`);
 		}
-		runPi(executable, ["--help"], home);
+		runPi(executable, ["--help"], home, directCli);
 		console.log(`npm global verify ok: ${version}`);
 	} finally {
 		rmSync(prefix, { force: true, recursive: true });
