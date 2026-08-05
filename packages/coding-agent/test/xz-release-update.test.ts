@@ -45,7 +45,6 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
 			signerRef: "refs/heads/main",
 			denySelfHostedRunners: true,
 			subjectsFile: "attestation-subjects.txt",
-			bundleFile: `sha256-${"3".repeat(64)}.jsonl`,
 		},
 		bootstrap: {
 			tag: TAG,
@@ -70,7 +69,6 @@ function githubRelease(overrides: Record<string, unknown> = {}): Record<string, 
 			"install.ps1",
 			"SHA256SUMS",
 			"attestation-subjects.txt",
-			`sha256-${"3".repeat(64)}.jsonl`,
 		].map((name) => ({ name, browser_download_url: `${EXACT_BASE}${name}` })),
 		...overrides,
 	};
@@ -151,7 +149,6 @@ describe("xz-dev GitHub Release updates", () => {
 					signerRef: "refs/heads/main",
 					denySelfHostedRunners: true,
 					subjectsFile: "attestation-subjects.txt",
-					bundleFile: `sha256-${"3".repeat(64)}.jsonl`,
 				},
 			}),
 		);
