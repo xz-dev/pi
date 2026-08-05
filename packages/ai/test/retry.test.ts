@@ -65,6 +65,24 @@ describe("provider retry classification", () => {
 		).toBe(false);
 	});
 
+	it("treats custom nonRetryableErrorPatterns as fail-fast substrings", () => {
+		const omniRouteQuota =
+			'Error: OpenAI API error (429): {"message":"[codex/gpt-5.6-sol] All codex accounts reached configured quota threshold (reset after 96h 21m 18s)"}';
+		expect(
+			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: omniRouteQuota })),
+		).toBe(true);
+		expect(
+			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: omniRouteQuota }), {
+				nonRetryableErrorPatterns: ["  QUOTA THRESHOLD  ", ""],
+			}),
+		).toBe(false);
+		expect(
+			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit" }), {
+				nonRetryableErrorPatterns: ["quota threshold"],
+			}),
+		).toBe(true);
+	});
+
 	it("classifies assistant error messages", () => {
 		expect(
 			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })),
@@ -109,6 +127,26 @@ describe("retryAssistantCall", () => {
 		expect(produce).toHaveBeenCalledTimes(1);
 		expect(onRetryScheduled).not.toHaveBeenCalled();
 		expect(onRetryFinished).not.toHaveBeenCalled();
+	});
+
+	it("does not retry errors matched by policy nonRetryableErrorPatterns", async () => {
+		const produce = vi.fn(async () =>
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "OpenAI API error (429): All codex accounts reached configured quota threshold",
+			}),
+		);
+		const onRetryScheduled = vi.fn();
+		const policy: RetryPolicy = {
+			enabled: true,
+			maxRetries: 3,
+			baseDelayMs: 0,
+			nonRetryableErrorPatterns: ["quota threshold"],
+		};
+		const res = await retryAssistantCall(produce, policy, undefined, { onRetryScheduled });
+		expect(res.stopReason).toBe("error");
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(onRetryScheduled).not.toHaveBeenCalled();
 	});
 
 	it("retries a transient error up to maxRetries then returns the final error", async () => {
