@@ -250,6 +250,7 @@ describe("GitHub Release preparation", () => {
 			return;
 		}
 
+		const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).stdout.trim();
 		const result = spawnSync("node", [PREPARE_SCRIPT, "--out", tempDir], {
 			cwd: REPO_ROOT,
 			encoding: "utf8",
@@ -257,7 +258,7 @@ describe("GitHub Release preparation", () => {
 				...process.env,
 				GITHUB_RUN_NUMBER: "129",
 				GITHUB_RUN_ATTEMPT: "1",
-				GITHUB_SHA: "c1aeac76aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				GITHUB_SHA: head,
 			},
 		});
 		expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -266,7 +267,7 @@ describe("GitHub Release preparation", () => {
 		const basePackageJson = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")) as {
 			version: string;
 		};
-		const version = `${basePackageJson.version}-xz.129.1.gc1aeac76`;
+		const version = `${basePackageJson.version}-xz.129.1.g${head.slice(0, 8)}`;
 		const packageFile = `earendil-works-pi-coding-agent-${version}.tgz`;
 		expect(existsSync(join(tempDir, packageFile))).toBe(true);
 		expect(existsSync(join(tempDir, "release-manifest.json"))).toBe(true);
@@ -474,6 +475,8 @@ describe("GitHub Release preparation", () => {
 				GITHUB_RUN_NUMBER: "29",
 				GITHUB_RUN_ATTEMPT: "2",
 				GITHUB_SHA: "4dea8cc9046547a59e2dd1e05688eed91290c67e",
+				CI: undefined,
+				GITHUB_ACTIONS: undefined,
 			},
 		});
 		expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -563,6 +566,8 @@ describe("GitHub Release preparation", () => {
 				...process.env,
 				GITHUB_RUN_NUMBER: "29",
 				GITHUB_SHA: "4dea8cc9046547a59e2dd1e05688eed91290c67e",
+				CI: undefined,
+				GITHUB_ACTIONS: undefined,
 			},
 		});
 		expect(missing.status).not.toBe(0);
@@ -621,6 +626,8 @@ describe("GitHub Release preparation", () => {
 				...process.env,
 				GITHUB_RUN_NUMBER: "7",
 				GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				CI: undefined,
+				GITHUB_ACTIONS: undefined,
 			},
 		});
 		expect(result.status).not.toBe(0);
