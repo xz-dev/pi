@@ -61,6 +61,7 @@ export interface XzReleaseManifest {
 		signerRef: typeof ATTESTATION_SIGNER_REF;
 		denySelfHostedRunners: true;
 		subjectsFile: "attestation-subjects.txt";
+		bundleFile: string;
 	};
 	bootstrap: {
 		tag: string;
@@ -263,7 +264,8 @@ function parseManifest(value: unknown, expectedTag: string): XzReleaseManifest {
 		value.attestation.signerWorkflow !== ATTESTATION_SIGNER_WORKFLOW ||
 		value.attestation.signerRef !== ATTESTATION_SIGNER_REF ||
 		value.attestation.denySelfHostedRunners !== true ||
-		value.attestation.subjectsFile !== "attestation-subjects.txt"
+		value.attestation.subjectsFile !== "attestation-subjects.txt" ||
+		value.attestation.bundleFile !== `sha256-${packageSha256}.jsonl`
 	) {
 		return fail("Invalid or missing release attestation policy");
 	}
@@ -307,6 +309,7 @@ function parseManifest(value: unknown, expectedTag: string): XzReleaseManifest {
 			signerRef: ATTESTATION_SIGNER_REF,
 			denySelfHostedRunners: true,
 			subjectsFile: "attestation-subjects.txt",
+			bundleFile: `sha256-${packageSha256}.jsonl`,
 		},
 		bootstrap: {
 			tag,
@@ -426,6 +429,7 @@ export async function getLatestXzRelease(
 		"install.ps1",
 		"SHA256SUMS",
 		manifest.attestation.subjectsFile,
+		manifest.attestation.bundleFile,
 	].sort();
 	const actualAssets = release.assets.map((asset) => asset.name).sort();
 	if (JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {

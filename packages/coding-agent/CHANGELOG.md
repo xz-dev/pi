@@ -84,6 +84,7 @@
 
 ### Fixed
 
+- Fixed xz-dev GitHub Release self-updates to validate the public attestation bundle in the exact immutable asset inventory.
 - Fixed project-level nested provider retry settings replacing unmodified global provider retry settings ([#7572](https://github.com/earendil-works/pi/issues/7572)).
 - Fixed inherited GitHub Copilot Grok 4.5 requests to use the supported Responses API ([#7560](https://github.com/earendil-works/pi/issues/7560)).
 - Fixed fullscreen shutdown leaking terminal capability-query replies into the parent shell prompt.
