@@ -663,7 +663,8 @@ export function verifyExternalOptionalRuntime(packageDir, policy) {
 	if (typeof clipboard.hasText !== "function") {
 		throw new Error("Portable clipboard loaded without the non-destructive hasText capability");
 	}
-	clipboard.hasText();
+	// Loading the module proves the target native binding resolves. Do not invoke
+	// clipboard access in headless CI, where a valid Linux binding requires DISPLAY.
 }
 
 /**
