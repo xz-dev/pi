@@ -234,10 +234,7 @@ export async function retryAssistantCall(
  * overflow separately, then apply their own retry budget, backoff, and reporting
  * before restarting the assistant turn.
  */
-function matchesNonRetryableErrorPatterns(
-	errorMessage: string,
-	patterns: readonly string[] | undefined,
-): boolean {
+function matchesNonRetryableErrorPatterns(errorMessage: string, patterns: readonly string[] | undefined): boolean {
 	if (!patterns || patterns.length === 0) return false;
 	const haystack = errorMessage.toLowerCase();
 	for (const pattern of patterns) {
@@ -248,10 +245,7 @@ function matchesNonRetryableErrorPatterns(
 	return false;
 }
 
-export function isRetryableAssistantError(
-	message: AssistantMessage,
-	options?: RetryClassificationOptions,
-): boolean {
+export function isRetryableAssistantError(message: AssistantMessage, options?: RetryClassificationOptions): boolean {
 	if (message.stopReason !== "error" || !message.errorMessage) return false;
 	const errorMessage = message.errorMessage;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;

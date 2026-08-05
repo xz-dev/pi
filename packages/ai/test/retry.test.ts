@@ -68,19 +68,18 @@ describe("provider retry classification", () => {
 	it("treats custom nonRetryableErrorPatterns as fail-fast substrings", () => {
 		const omniRouteQuota =
 			'Error: OpenAI API error (429): {"message":"[codex/gpt-5.6-sol] All codex accounts reached configured quota threshold (reset after 96h 21m 18s)"}';
-		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: omniRouteQuota }))).toBe(
-			true,
-		);
+		expect(
+			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: omniRouteQuota })),
+		).toBe(true);
 		expect(
 			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: omniRouteQuota }), {
 				nonRetryableErrorPatterns: ["  QUOTA THRESHOLD  ", ""],
 			}),
 		).toBe(false);
 		expect(
-			isRetryableAssistantError(
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit" }),
-				{ nonRetryableErrorPatterns: ["quota threshold"] },
-			),
+			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit" }), {
+				nonRetryableErrorPatterns: ["quota threshold"],
+			}),
 		).toBe(true);
 	});
 
