@@ -644,6 +644,9 @@ describe("GitHub Release verifier gates", () => {
 		const packageHash = createHash("sha256");
 		packageHash.update(readFileSync(emptyTgz));
 		const sha = packageHash.digest("hex");
+		const packageIntegrityHash = createHash("sha512");
+		packageIntegrityHash.update(readFileSync(emptyTgz));
+		const packageIntegrity = `sha512-${packageIntegrityHash.digest("base64")}`;
 		const installTs = join(tempDir, "install.ts");
 		writeFileSync(
 			installTs,
@@ -678,7 +681,7 @@ describe("GitHub Release verifier gates", () => {
 				file: `earendil-works-pi-coding-agent-${distributionVersion}.tgz`,
 				bytes: readFileSync(emptyTgz).byteLength,
 				sha256: sha,
-				integrity: `sha512-${createHash("sha512").update(readFileSync(emptyTgz)).digest("base64")}`,
+				integrity: packageIntegrity,
 				bundled: true,
 				packaging: "hybrid",
 				networkPolicy: "external-optional-only",
