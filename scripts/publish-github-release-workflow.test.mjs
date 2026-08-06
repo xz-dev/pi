@@ -11,12 +11,6 @@ const WORKFLOW_PATH = join(
   "workflows",
   "publish-github-release.yml",
 );
-const OLD_WORKFLOW_PATH = join(
-  ROOT,
-  ".github",
-  "workflows",
-  "publish-github-packages.yml",
-);
 const workflowText = readFileSync(WORKFLOW_PATH, "utf8");
 const workflow = parse(workflowText);
 const syncWorkflowText = readFileSync(join(ROOT, ".github", "workflows", "upstream-sync.yml"), "utf8");
@@ -59,10 +53,20 @@ test("Release publication workflow has trusted triggers, exact checkout, and lea
     assert.match(uses, /@[0-9a-f]{40}$/, `action must be SHA-pinned: ${uses}`);
   }
   assert.doesNotMatch(workflowText, /npm\.pkg\.github\.com|packages:\s*write/);
-  assert.throws(() => readFileSync(OLD_WORKFLOW_PATH, "utf8"), /ENOENT/);
+  // build-binaries.yml is persistently removed from generated main.
+  assert.throws(() => readFileSync(join(ROOT, ".github", "workflows", "build-binaries.yml"), "utf8"), /ENOENT/);
 });
 
-test("acceptance matrix verifies the one candidate with Node 22 and Bun 1.3.14 on all target OSes", () => {
+test("build-release-candidate builds and verifies all six platform bundles", () => {
+  const job = workflow.jobs["build-release-candidate"];
+  assert.match(workflowText, /oven-sh\/setup-bun@[0-9a-f]{40}/);
+  assert.match(workflowText, /node scripts\/prepare-github-release\.mjs --out/);
+  assert.match(workflowText, /verify-github-release\.mjs all/);
+  assert.match(workflowText, /\*\.tar\.gz/);
+  assert.match(workflowText, /\*\.zip/);
+});
+
+test("acceptance matrix verifies the one candidate on all target OSes and runs host-native smoke", () => {
   const job = workflow.jobs["accept-release-candidate"];
   assert.deepEqual(job.strategy.matrix.os, [
     "ubuntu-latest",
@@ -70,7 +74,6 @@ test("acceptance matrix verifies the one candidate with Node 22 and Bun 1.3.14 o
     "windows-latest",
   ]);
   assert.match(workflowText, /node-version: ["']22["']/);
-  assert.match(workflowText, /bun-version: 1\.3\.14/);
   assert.match(workflowText, /verify-github-release\.mjs all/);
   assert.match(
     workflowText,
@@ -93,9 +96,9 @@ test("publication attests final subjects before draft publication and keeps audi
   );
   assert.match(workflowText, /actions\/attest-build-provenance@[0-9a-f]{40}/);
   for (const subject of [
-    "*.tgz",
+    "*.tar.gz",
+    "*.zip",
     "release-manifest.json",
-    "install.ts",
     "install.sh",
     "install.ps1",
     "SHA256SUMS",
@@ -133,4 +136,10 @@ test("publisher stages a resumable immutable draft and rechecks main before fina
       publisher.indexOf("publishDraft(api, token"),
   );
   assert.doesNotMatch(publisher, /clobber|DELETE/);
+});
+
+test("upstream sync gate verifies the binary Release candidate with Bun", () => {
+  assert.match(syncWorkflowText, /oven-sh\/setup-bun@[0-9a-f]{40}/);
+  assert.match(syncWorkflowText, /prepare-github-release\.mjs --out/);
+  assert.match(syncWorkflowText, /verify-github-release\.mjs local/);
 });

@@ -4,15 +4,18 @@
 # Mirrors .github/workflows/build-binaries.yml
 #
 # Usage:
-#   ./scripts/build-binaries.sh [--skip-install] [--skip-deps] [--skip-build] [--offline-model-data] [--platform <platform>] [--out <dir>]
+#   ./scripts/build-binaries.sh [--skip-install] [--skip-deps] [--skip-build] [--offline-model-data] [--platform <platform>] [--out <dir>] [--distribution-version <ver>]
 #
 # Options:
-#   --skip-install       Skip npm ci
-#   --skip-deps          Skip installing cross-platform dependencies
-#   --skip-build         Skip the package build
-#   --offline-model-data Build with bundled model data instead of refreshing it
-#   --platform <name>    Build only for specified platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64)
-#   --out <dir>          Output directory (default: packages/coding-agent/binaries)
+#   --skip-install           Skip npm ci
+#   --skip-deps              Skip installing cross-platform dependencies
+#   --skip-build             Skip the package build
+#   --offline-model-data     Build with bundled model data instead of refreshing it
+#   --platform <name>        Build only for specified platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64)
+#   --out <dir>              Output directory (default: packages/coding-agent/binaries)
+#   --distribution-version   Downstream distribution version (e.g. 0.82.1-xz.123.1.g<sha8>). When set, the
+#                            packaged package.json version and piConfig.distribution=xz-dev are stamped into
+#                            every bundle so `pi --version` and release verification see the canonical identity.
 #
 # Output:
 #   packages/coding-agent/binaries/
@@ -31,8 +34,9 @@ SKIP_INSTALL=false
 SKIP_DEPS=false
 SKIP_BUILD=false
 OFFLINE_MODEL_DATA=false
-PLATFORM=""
+PLATFORMS_REQUESTED=()
 OUTPUT_DIR=""
+DISTRIBUTION_VERSION=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -53,11 +57,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --platform)
-            PLATFORM="$2"
+            PLATFORMS_REQUESTED+=("$2")
             shift 2
             ;;
         --out)
             OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --distribution-version)
+            DISTRIBUTION_VERSION="$2"
             shift 2
             ;;
         *)
@@ -67,18 +75,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate platform if specified
-if [[ -n "$PLATFORM" ]]; then
-    case "$PLATFORM" in
+# Validate requested platforms.
+for platform in "${PLATFORMS_REQUESTED[@]}"; do
+    case "$platform" in
         darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64|windows-arm64)
             ;;
         *)
-            echo "Invalid platform: $PLATFORM"
+            echo "Invalid platform: $platform"
             echo "Valid platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64"
             exit 1
             ;;
     esac
-fi
+done
 
 if [[ -z "$OUTPUT_DIR" ]]; then
     OUTPUT_DIR="packages/coding-agent/binaries"
@@ -132,9 +140,9 @@ cd packages/coding-agent
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64,windows-arm64}
 
-# Determine which platforms to build
-if [[ -n "$PLATFORM" ]]; then
-    PLATFORMS=("$PLATFORM")
+# Determine which platforms to build. --platform may be repeated.
+if [[ ${#PLATFORMS_REQUESTED[@]} -gt 0 ]]; then
+    PLATFORMS=("${PLATFORMS_REQUESTED[@]}")
 else
     PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 windows-arm64)
 fi
@@ -156,6 +164,20 @@ echo "==> Creating release archives..."
 # Copy shared files to each platform directory
 for platform in "${PLATFORMS[@]}"; do
     cp package.json "$OUTPUT_DIR/$platform/"
+    if [[ -n "$DISTRIBUTION_VERSION" ]]; then
+        # Stamp downstream identity into the bundled package.json so the release
+        # manifest, verifier, and `pi --version` all agree. CHANGELOG_VERSION stays
+        # the upstream baseline (the changelog-prerelease patch's changelogVersion).
+        node -e "
+            const fs = require('node:fs');
+            const path = '$OUTPUT_DIR/$platform/package.json';
+            const p = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const baseVersion = p.version;
+            p.version = process.argv[1];
+            p.piConfig = { ...(p.piConfig ?? {}), distribution: 'xz-dev', changelogVersion: p.piConfig?.changelogVersion ?? baseVersion };
+            fs.writeFileSync(path, JSON.stringify(p, null, 2) + '\n');
+        " "$DISTRIBUTION_VERSION"
+    fi
     cp README.md "$OUTPUT_DIR/$platform/"
     cp CHANGELOG.md "$OUTPUT_DIR/$platform/"
     cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm "$OUTPUT_DIR/$platform/"

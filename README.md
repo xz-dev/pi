@@ -51,7 +51,7 @@ These branches still exist but are not squash-merged into rebuilt `main` until t
 
 ## Installation
 
-xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). It keeps the canonical `@earendil-works/pi-*` runtime and package names; no npm registry login or remote-tarball npm setting is required.
+xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships six prebuilt Bun-compiled platform bundles (`pi-darwin-arm64.tar.gz`, `pi-darwin-x64.tar.gz`, `pi-linux-arm64.tar.gz`, `pi-linux-x64.tar.gz`, `pi-windows-arm64.zip`, `pi-windows-x64.zip`). A standalone install requires no Node.js, Bun, npm, or package manager at runtime; the executable and its adjacent native modules, WASM, themes, assets, HTML export templates, docs, and examples travel together as one version-matched archive. Installation keeps only the current, previous, and staging bundles needed for safe switching and Windows cleanup.
 
 ### Linux and macOS
 
@@ -67,59 +67,40 @@ pi --version
 pi --version
 ```
 
-The bootstrap is deliberately thin: it pins and verifies the exact Release manifest and authoritative `install.ts`, then runs it with Node 22.19+ or Bun. The transaction installer also requires the [GitHub CLI](https://cli.github.com/) (`gh`) so it can verify the Release-hosted artifact attestation bundle before installing or executing package code. Public Release verification does not require signing in to GitHub; it may contact Sigstore's TUF service for current trusted-root material. Release assets include `SHA256SUMS` and GitHub build-provenance attestations.
+### Exact Release installation
 
-### One-time migration from the old GitHub Packages distribution
-
-The old `@xz-dev/pi-coding-agent` updater never silently crosses package identities. Run the new installer once with `--migrate`; it replaces only the managed installation and preserves `~/.pi` user data.
-
-The migration installer requires the exact legacy npm global prefix. Confirm that the old package is present there before running it.
-
-Linux/macOS:
+An installer downloaded from `/releases/download/xz-v<VERSION>/install.sh` installs only that exact Release; it never performs latest discovery and never requires a version argument:
 
 ```bash
-legacy_prefix="$(npm prefix -g)"
-test -f "$legacy_prefix/lib/node_modules/@xz-dev/pi-coding-agent/package.json"
-curl -fsSL https://github.com/xz-dev/pi/releases/latest/download/install.sh \
-  | PI_XZ_LEGACY_PREFIX="$legacy_prefix" sh -s -- --migrate
+curl -fsSL https://github.com/xz-dev/pi/releases/download/xz-v<VERSION>/install.sh | sh
 ```
 
-Windows PowerShell:
+The generated native installers are standalone and verify the exact Release manifest and bundle/checksum metadata without Node.js, Bun, npm, or a package manager. They also require the [GitHub CLI](https://cli.github.com/) (`gh`) so it can verify the Release-hosted artifact attestation bundle before extracting or executing any bundle code. Public Release verification does not require signing in to GitHub; it may contact Sigstore's TUF service for current trusted-root material. Release assets include `SHA256SUMS` and GitHub build-provenance attestations.
 
-```powershell
-$legacyPrefix = (npm prefix -g).Trim()
-if (-not (Test-Path (Join-Path $legacyPrefix 'node_modules/@xz-dev/pi-coding-agent/package.json'))) {
-  throw "@xz-dev/pi-coding-agent was not found under $legacyPrefix"
-}
-$env:PI_XZ_LEGACY_PREFIX = $legacyPrefix
-& ([scriptblock]::Create((Invoke-WebRequest https://github.com/xz-dev/pi/releases/latest/download/install.ps1 -UseBasicParsing).Content)) --migrate
-```
+### Update
 
-`PI_XZ_LEGACY_PREFIX` is intentionally explicit; a plain `--migrate` does not search arbitrary global prefixes. Existing GitHub Packages users must perform this hard migration manually; installing or updating the old package alone will not migrate it.
-
-### Update and rollback
-
-A managed installation updates directly through the currently running Node/Bun runtime; it does not invoke a shell or PowerShell bootstrap:
+A managed binary installation updates through the same installer implementation used for fresh installation:
 
 ```bash
 pi update --self
 ```
 
-Installed versions are retained under `${XDG_DATA_HOME:-$HOME/.local/share}/pi-xz/versions` on Linux/macOS and `%LOCALAPPDATA%\pi-xz\versions` on Windows. To reactivate one retained version, run the exact Release installer for that version with `--rollback <version>`:
+On POSIX, activation creates `current.new` pointing at the new complete bundle and atomically renames it over `current`; `previous` is updated afterward as non-authoritative cleanup metadata. On Windows, a stable launcher reads a small `current` pointer file and never overwrites the running `pi.exe`; locked old bundles are deferred for cleanup. A new Pi invocation uses the new bundle. There is no public rollback or arbitrary retained-version catalog.
+
+### Source checkout
+
+A documented source installation uses the xz-dev checkout and is user-managed:
 
 ```bash
-version="0.82.1-xz.<run>.<attempt>.g<sha8>"
-curl -fsSL "https://github.com/xz-dev/pi/releases/download/xz-v${version}/install.sh" \
-  | sh -s -- --rollback "$version"
+git clone https://github.com/xz-dev/pi.git
+cd pi
+npm ci --ignore-scripts
+npm run build
+cd packages/coding-agent
+npm link
 ```
 
-```powershell
-$version = '0.82.1-xz.<run>.<attempt>.g<sha8>'
-$script = "https://github.com/xz-dev/pi/releases/download/xz-v$version/install.ps1"
-& ([scriptblock]::Create((Invoke-WebRequest $script -UseBasicParsing).Content)) --rollback $version
-```
-
-Rollback accepts only a retained version whose Release receipt, tarball hashes, package identity, and installed tree integrity still verify. It does not download or restore an arbitrary version.
+For this installation, `pi update --self` never runs a package-manager update and never queries official upstream Release/update sources; it prints xz-dev source-checkout update instructions that you run yourself.
 
 ## Automation upstream sync
 

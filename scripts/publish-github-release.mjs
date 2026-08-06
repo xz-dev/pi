@@ -34,22 +34,30 @@ function readManifest(path) {
   }
   const manifest = JSON.parse(readFileSync(path, "utf8"));
   if (
-    manifest.schemaVersion !== 1 ||
+    manifest.schemaVersion !== 3 ||
     manifest.repository !== EXPECTED_REPOSITORY ||
     typeof manifest.distributionVersion !== "string" ||
     typeof manifest.tag !== "string" ||
     manifest.tag !== `xz-v${manifest.distributionVersion}` ||
-    typeof manifest.package?.file !== "string" ||
-    manifest.package.file !== basename(manifest.package.file) ||
-    manifest.package.file !== `earendil-works-pi-coding-agent-${manifest.distributionVersion}.tgz` ||
-    manifest.installer?.file !== "install.ts" ||
+    manifest.packaging !== "binary" ||
+    manifest.layoutVersion !== 1 ||
+    typeof manifest.bundles !== "object" ||
+    manifest.bundles === null ||
+    Array.isArray(manifest.bundles) ||
+    !["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"].every(
+      (platform) =>
+        manifest.bundles[platform]?.file ===
+        `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`,
+    ) ||
+    manifest.installer?.posix?.file !== "install.sh" ||
+    manifest.installer?.windows?.file !== "install.ps1" ||
+    manifest.installer?.checksums?.file !== "SHA256SUMS" ||
+    manifest.installer?.checksums?.algorithm !== "sha256" ||
     manifest.attestation?.subjectsFile !== "attestation-subjects.txt" ||
-    manifest.bootstrap?.tag !== manifest.tag ||
-    manifest.bootstrap?.baseUrl !==
-      `https://github.com/${EXPECTED_REPOSITORY}/releases/download/${manifest.tag}/` ||
-    manifest.bootstrap?.minimumNodeVersion !== manifest.minimumNodeVersion ||
-    manifest.bootstrap?.files?.sh !== "install.sh" ||
-    manifest.bootstrap?.files?.ps1 !== "install.ps1"
+    manifest.attestation?.repository !== EXPECTED_REPOSITORY ||
+    manifest.attestation?.signerWorkflow !== `${EXPECTED_REPOSITORY}/.github/workflows/publish-github-release.yml` ||
+    manifest.attestation?.signerRef !== EXPECTED_REF ||
+    manifest.attestation?.denySelfHostedRunners !== true
   ) {
     fail("Invalid GitHub Release manifest");
   }
@@ -62,11 +70,10 @@ function releaseAssetPaths(releaseDir, manifest) {
   if (!existsSync(subjectsPath) || readFileSync(subjectsPath).byteLength === 0)
     fail(`Missing or empty attestation bundle: ${subjectsPath}`);
   const expectedSubjects = [
-    manifest.package.file,
+    ...Object.values(manifest.bundles).map((bundle) => bundle.file),
     "release-manifest.json",
-    manifest.installer.file,
-    manifest.bootstrap.files.sh,
-    manifest.bootstrap.files.ps1,
+    manifest.installer.posix.file,
+    manifest.installer.windows.file,
     "SHA256SUMS",
   ];
   const subjectPaths = expectedSubjects.map((line) => join(releaseDir, line));

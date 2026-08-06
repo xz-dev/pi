@@ -9,7 +9,18 @@ import { publishGitHubRelease } from "./publish-github-release.mjs";
 const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const VERSION = "0.82.1-xz.123.1.gaaaaaaaa";
 const TAG = `xz-v${VERSION}`;
-const PACKAGE_FILE = `earendil-works-pi-coding-agent-${VERSION}.tgz`;
+const PLATFORMS = [
+  "darwin-arm64",
+  "darwin-x64",
+  "linux-arm64",
+  "linux-x64",
+  "windows-arm64",
+  "windows-x64",
+];
+function bundleFile(platform) {
+  return `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`;
+}
+const BUNDLE_FILES = PLATFORMS.map(bundleFile);
 const ENV = {
   GITHUB_REPOSITORY: "xz-dev/pi",
   GITHUB_REF: "refs/heads/main",
@@ -27,23 +38,43 @@ function digest(body) {
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "pi-release-publisher-"));
   const files = new Map([
-    [PACKAGE_FILE, Buffer.from("package")],
+    ...BUNDLE_FILES.map((file) => [file, Buffer.from(`bundle:${file}`)]),
     ["release-manifest.json", Buffer.from("")],
-    ["install.ts", Buffer.from("installer")],
     ["install.sh", Buffer.from("sh")],
     ["install.ps1", Buffer.from("ps1")],
     ["SHA256SUMS", Buffer.from("sums")],
   ]);
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 3,
     repository: "xz-dev/pi",
     tag: TAG,
     distributionVersion: VERSION,
     commit: SHA,
     minimumNodeVersion: "22.19.0",
-    package: { file: PACKAGE_FILE },
-    installer: { file: "install.ts" },
-    attestation: { subjectsFile: "attestation-subjects.txt" },
+    packaging: "binary",
+    layoutVersion: 1,
+    bundles: Object.fromEntries(
+      PLATFORMS.map((platform) => [
+        platform,
+        {
+          file: bundleFile(platform),
+          bytes: files.get(bundleFile(platform)).byteLength,
+          sha256: digest(files.get(bundleFile(platform))),
+        },
+      ]),
+    ),
+    installer: {
+      posix: { file: "install.sh" },
+      windows: { file: "install.ps1" },
+      checksums: { file: "SHA256SUMS", algorithm: "sha256" },
+    },
+    attestation: {
+      repository: "xz-dev/pi",
+      signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
+      signerRef: "refs/heads/main",
+      denySelfHostedRunners: true,
+      subjectsFile: "attestation-subjects.txt",
+    },
     bootstrap: {
       tag: TAG,
       baseUrl: `https://github.com/xz-dev/pi/releases/download/${TAG}/`,
@@ -109,7 +140,7 @@ async function withFetch(mock, body) {
   }
 }
 
-test("creates a draft, uploads every asset including the subject list, then publishes after latest ref recheck", async () => {
+test("creates a draft, uploads every bundle asset plus subjects, then publishes after latest ref recheck", async () => {
   const candidate = fixture();
   const assets = new Map();
   let currentRelease;
@@ -174,6 +205,9 @@ test("creates a draft, uploads every asset including the subject list, then publ
       [...assets.keys()].sort(),
       [...candidate.assetBodies.keys()].sort(),
     );
+    for (const file of BUNDLE_FILES) {
+      assert.ok(assets.has(file), `missing uploaded bundle ${file}`);
+    }
     assert.ok(events.indexOf("latest-ref-recheck") < events.indexOf("publish"));
     assert.ok(events.indexOf("upload:attestation-subjects.txt") < events.indexOf("latest-ref-recheck"));
   } finally {
@@ -313,9 +347,10 @@ test("empty public attestation bundle fails before any GitHub request", async ()
 });
 
 for (const [field, mutate] of [
-  ["installer", (manifest) => { manifest.installer.file = "substitute.ts"; }],
-  ["shell bootstrap", (manifest) => { manifest.bootstrap.files.sh = "substitute.sh"; }],
-  ["PowerShell bootstrap", (manifest) => { manifest.bootstrap.files.ps1 = "substitute.ps1"; }],
+  ["installer", (manifest) => { manifest.installer.posix.file = "substitute.sh"; }],
+  ["attestation workflow", (manifest) => { manifest.attestation.signerWorkflow = "evil/workflow.yml"; }],
+  ["checksum metadata", (manifest) => { manifest.installer.checksums.algorithm = "sha512"; }],
+  ["bundles", (manifest) => { delete manifest.bundles["windows-arm64"]; }],
 ]) {
   test(`manifest ${field} substitution fails before any GitHub request`, async () => {
     const candidate = fixture();
