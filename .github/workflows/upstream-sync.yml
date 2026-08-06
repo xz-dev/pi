@@ -76,7 +76,33 @@ jobs:
           git merge --squash origin/patch/model-startup-refresh-barrier
           git commit -m "merge patch/model-startup-refresh-barrier branch"
 
-          git merge --squash origin/patch/release-self-update
+          if ! git merge --squash origin/patch/release-self-update; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/CHANGELOG.md ]]; then
+              printf '::error::Unexpected release-self-update squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            git checkout --ours -- packages/coding-agent/CHANGELOG.md
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path("packages/coding-agent/CHANGELOG.md")
+          text = path.read_text()
+          entry = "- Routed xz-dev binary self-updates exclusively through attested `xz-dev/pi` GitHub Releases and made xz-dev source checkouts print user-managed update guidance without invoking package-manager or upstream updates.\n"
+          marker = "## [Unreleased]\n"
+          if entry not in text:
+              if marker not in text:
+                  raise SystemExit("missing Unreleased changelog section")
+              text = text.replace(marker, f"{marker}\n### Fixed\n\n{entry}", 1)
+          path.write_text(text)
+          PY
+            git add packages/coding-agent/CHANGELOG.md
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying release-self-update conflict staging'
+            exit 1
+          fi
           git commit -m "merge patch/release-self-update branch"
 
           # Paused until rebased onto current upstream/main:
@@ -241,7 +267,9 @@ jobs:
             GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" \
             GITHUB_SHA="$(git rev-parse HEAD)" \
             node scripts/prepare-github-release.mjs --out "$release_dir" \
-              --skip-deps --skip-build --platform linux-x64
+              --skip-deps --skip-build \
+              --platform darwin-arm64 --platform darwin-x64 \
+              --platform linux-arm64 --platform linux-x64
           node scripts/verify-github-release.mjs local "$release_dir/release-manifest.json"
 
       # Temporary soft gate: current upstream transitive advisories (brace-expansion,
