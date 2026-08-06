@@ -1,5 +1,5 @@
 import { compare, valid } from "semver";
-import { DISTRIBUTION, PACKAGE_NAME } from "../config.ts";
+import { DISTRIBUTION, detectInstallMethod, PACKAGE_NAME } from "../config.ts";
 import { fetchWithRetry } from "./management-http.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 import { getLatestXzRelease } from "./xz-release-update.ts";
@@ -56,6 +56,12 @@ export async function getLatestPiRelease(
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_OFFLINE) return undefined;
 	if (DISTRIBUTION === "xz-dev" && PACKAGE_NAME === "@earendil-works/pi-coding-agent") {
+		// Only a compiled xz-dev binary has a downstream xz distribution version and
+		// should check the xz-dev latest Release. An xz-dev source/non-binary build
+		// must not be routed to the upstream pi.dev version source.
+		if (detectInstallMethod() !== "bun-binary") {
+			return undefined;
+		}
 		const release = await getLatestXzRelease(currentVersion, options);
 		return release ? { version: release.version } : undefined;
 	}

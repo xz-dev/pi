@@ -1,72 +1,98 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, mkdtempSync, openSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { satisfies } from "semver";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 
 const REPOSITORY = "xz-dev/pi";
-const PACKAGE_NAME = "@earendil-works/pi-coding-agent";
-const LATEST_RELEASE_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
+const LATEST_MANIFEST_URL = `https://github.com/${REPOSITORY}/releases/latest/download/release-manifest.json`;
 const RELEASE_DOWNLOAD_ORIGIN = "https://github.com";
-const MANIFEST_FILE = "release-manifest.json";
-const MANIFEST_MAX_BYTES = 1024 * 1024;
-const INSTALLER_MAX_BYTES = 1024 * 1024;
-const DEFAULT_TIMEOUT_MS = 10000;
+const RELEASE_ASSET_CDN_HOST = "release-assets.githubusercontent.com";
+const SHA256SUMS_FILE = "SHA256SUMS";
+const INSTALL_SH_FILE = "install.sh";
+const INSTALL_PS1_FILE = "install.ps1";
+const ATTESTATION_SUBJECTS_FILE = "attestation-subjects.txt";
 const ATTESTATION_SIGNER_WORKFLOW = `${REPOSITORY}/.github/workflows/publish-github-release.yml`;
 const ATTESTATION_SIGNER_REF = "refs/heads/main";
+const MANIFEST_MAX_BYTES = 1024 * 1024;
+const SHA256SUMS_MAX_BYTES = 1024 * 1024;
+const INSTALLER_MAX_BYTES = 1024 * 1024;
+const BUNDLE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const DEFAULT_TIMEOUT_MS = 10000;
 
-interface GitHubReleaseAsset {
-	name: string;
-	browser_download_url: string;
+const BINARY_PLATFORMS = Object.freeze([
+	"darwin-arm64",
+	"darwin-x64",
+	"linux-arm64",
+	"linux-x64",
+	"windows-arm64",
+	"windows-x64",
+]);
+
+function canonicalRequiredPaths(platform: string): string[] {
+	const common = [
+		platform.startsWith("windows-") ? "pi.exe" : "pi",
+		"package.json",
+		"README.md",
+		"CHANGELOG.md",
+		"photon_rs_bg.wasm",
+		"theme",
+		"theme/dark.json",
+		"theme/light.json",
+		"theme/theme-schema.json",
+		"assets",
+		"export-html",
+		"docs",
+		"examples",
+		"node_modules/@mariozechner/clipboard",
+	];
+	const native = {
+		"darwin-arm64": ["clipboard-darwin-arm64", "clipboard.darwin-arm64.node", "native/darwin/prebuilds/darwin-arm64", "darwin-modifiers.node"],
+		"darwin-x64": ["clipboard-darwin-x64", "clipboard.darwin-x64.node", "native/darwin/prebuilds/darwin-x64", "darwin-modifiers.node"],
+		"linux-arm64": ["clipboard-linux-arm64-gnu", "clipboard.linux-arm64-gnu.node"],
+		"linux-x64": ["clipboard-linux-x64-gnu", "clipboard.linux-x64-gnu.node"],
+		"windows-arm64": ["clipboard-win32-arm64-msvc", "clipboard.win32-arm64-msvc.node", "native/win32/prebuilds/win32-arm64", "win32-console-mode.node"],
+		"windows-x64": ["clipboard-win32-x64-msvc", "clipboard.win32-x64-msvc.node", "native/win32/prebuilds/win32-x64", "win32-console-mode.node"],
+	}[platform];
+	if (!native) return fail(`Unknown binary platform: ${platform}`);
+	const [packageName, nativeFile, helperDir, helperFile] = native;
+	common.push(`node_modules/@mariozechner/${packageName}`);
+	common.push(`node_modules/@mariozechner/clipboard/${nativeFile}`);
+	if (helperDir && helperFile) {
+		common.push(helperDir, `${helperDir}/${helperFile}`);
+	}
+	return common;
 }
 
-interface GitHubLatestRelease {
-	tag_name: string;
-	draft: boolean;
-	prerelease: boolean;
-	assets: GitHubReleaseAsset[];
+interface XzBundle {
+	file: string;
+	bytes: number;
+	sha256: string;
 }
 
 export interface XzReleaseManifest {
-	schemaVersion: 1;
+	schemaVersion: 3;
 	repository: typeof REPOSITORY;
 	tag: string;
 	distributionVersion: string;
 	apiVersion: string;
 	commit: string;
-	minimumNodeVersion: string;
-	package: {
-		name: typeof PACKAGE_NAME;
-		file: string;
-		bytes: number;
-		sha256: string;
-		integrity: string;
-		bundled: true;
-		packaging: "hybrid";
-		networkPolicy: "external-optional-only";
-		externalOptionalDependencies: Record<string, string>;
-		allowedNetworkPackages: string[];
-		allowedNetworkPackagePrefixes: string[];
-	};
+	packaging: "binary";
+	layoutVersion: 1;
+	bundles: Record<string, XzBundle>;
+	requiredPaths: Record<string, string[]>;
 	installer: {
-		file: "install.ts";
-		bytes: number;
-		sha256: string;
+		posix: { file: typeof INSTALL_SH_FILE };
+		windows: { file: typeof INSTALL_PS1_FILE };
+		checksums: { file: typeof SHA256SUMS_FILE; algorithm: "sha256" };
 	};
 	attestation: {
 		repository: typeof REPOSITORY;
 		signerWorkflow: typeof ATTESTATION_SIGNER_WORKFLOW;
 		signerRef: typeof ATTESTATION_SIGNER_REF;
 		denySelfHostedRunners: true;
-		subjectsFile: "attestation-subjects.txt";
-	};
-	bootstrap: {
-		tag: string;
-		baseUrl: string;
-		minimumNodeVersion: string;
-		files: { sh: "install.sh"; ps1: "install.ps1" };
+		subjectsFile: typeof ATTESTATION_SUBJECTS_FILE;
 	};
 }
 
@@ -74,8 +100,9 @@ export interface XzLatestRelease {
 	version: string;
 	manifest: XzReleaseManifest;
 	manifestSha256: string;
-	discoveryBaseUrl: string;
 	exactBaseUrl: string;
+	installerName: typeof INSTALL_SH_FILE | typeof INSTALL_PS1_FILE;
+	installerSha256: string;
 	installerUrl: string;
 }
 
@@ -120,55 +147,17 @@ function requireSha256(value: unknown, label: string): string {
 	return value;
 }
 
-function requireReleaseUrl(value: unknown, label: string): URL {
-	const raw = requireString(value, label);
-	let url: URL;
-	try {
-		url = new URL(raw);
-	} catch {
-		return fail(`Invalid ${label}`);
-	}
-	if (
-		url.protocol !== "https:" ||
-		url.origin !== RELEASE_DOWNLOAD_ORIGIN ||
-		url.username ||
-		url.password ||
-		url.search ||
-		url.hash
-	) {
-		return fail(`Invalid ${label}`);
-	}
-	return url;
+function exactBaseUrl(tag: string): string {
+	return `${RELEASE_DOWNLOAD_ORIGIN}/${REPOSITORY}/releases/download/${encodeURIComponent(tag)}/`;
 }
 
-function parseLatestRelease(value: unknown): GitHubLatestRelease {
-	if (!isRecord(value)) return fail("Invalid GitHub latest Release response");
-	const tagName = requireSafeAssetName(value.tag_name, "GitHub Release tag");
-	if (value.draft !== false || value.prerelease !== false) {
-		return fail("Latest GitHub Release must be published and non-prerelease");
-	}
-	if (!Array.isArray(value.assets)) return fail("Latest GitHub Release has no assets");
-	const assetNames = new Set<string>();
-	const assets: GitHubReleaseAsset[] = value.assets.map((asset) => {
-		if (!isRecord(asset)) return fail("Invalid GitHub Release asset");
-		const name = requireSafeAssetName(asset.name, "GitHub Release asset name");
-		if (assetNames.has(name)) return fail(`Duplicate GitHub Release asset: ${name}`);
-		assetNames.add(name);
-		return {
-			name,
-			browser_download_url: requireReleaseUrl(asset.browser_download_url, "GitHub Release asset URL").href,
-		};
-	});
-	return { tag_name: tagName, draft: false, prerelease: false, assets };
+function parseDistributionVersion(value: string): { api: string; run: number; attempt: number; commit: string } {
+	const match = /^(\d+\.\d+\.\d+)-xz\.(\d+)\.(\d+)\.g([0-9a-f]{8})$/.exec(value);
+	if (!match) return fail("Invalid xz-dev distribution version");
+	return { api: match[1], run: Number(match[2]), attempt: Number(match[3]), commit: match[4] };
 }
 
-function requireExactAssetUrl(url: URL, tag: string, file: string): URL {
-	const expectedPath = `/${REPOSITORY}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(file)}`;
-	if (url.pathname !== expectedPath) return fail(`${file} URL is not exact-tag pinned`);
-	return url;
-}
-
-function parseManifest(value: unknown, expectedTag: string): XzReleaseManifest {
+function parseManifest(value: unknown): XzReleaseManifest {
 	if (!isRecord(value)) return fail("Invalid release manifest");
 	const allowedKeys = new Set([
 		"schemaVersion",
@@ -177,173 +166,132 @@ function parseManifest(value: unknown, expectedTag: string): XzReleaseManifest {
 		"distributionVersion",
 		"apiVersion",
 		"commit",
-		"minimumNodeVersion",
-		"package",
+		"packaging",
+		"layoutVersion",
+		"bundles",
+		"requiredPaths",
 		"installer",
 		"attestation",
-		"bootstrap",
 	]);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key))) return fail("Invalid release manifest schema");
-	if (value.schemaVersion !== 1 || value.repository !== REPOSITORY) return fail("Invalid release manifest identity");
-	const tag = requireSafeAssetName(value.tag, "release tag");
-	const version = requireSafeAssetName(value.distributionVersion, "distribution version");
-	const versionMatch = /^(\d+\.\d+\.\d+)-xz\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.g([0-9a-f]{8})$/.exec(version);
-	if (!versionMatch) return fail("Invalid xz-dev distribution version");
-	if (tag !== expectedTag || tag !== `xz-v${version}`) return fail("Release tag/version mismatch");
-	const apiVersion = requireString(value.apiVersion, "API version");
-	if (apiVersion !== versionMatch[1]) return fail("Release API/version mismatch");
-	const commit = requireString(value.commit, "release commit");
-	const commitPrefix = versionMatch[4];
-	if (!commitPrefix || !commit.startsWith(commitPrefix)) return fail("Release commit/version mismatch");
-	if (!/^[0-9a-f]{40}$/.test(commit)) return fail("Invalid release commit");
-	const minimumNodeVersion = requireString(value.minimumNodeVersion, "minimum Node version");
-	if (!/^\d+\.\d+\.\d+$/.test(minimumNodeVersion)) return fail("Invalid minimum Node version");
-	if (!satisfies(process.versions.node, `>=${minimumNodeVersion}`)) {
-		return fail(`This Release requires Node-compatible runtime ${minimumNodeVersion} or newer`);
-	}
-
-	if (!isRecord(value.package)) return fail("Invalid canonical package metadata");
-	const packageFile = requireSafeAssetName(value.package.file, "package filename");
 	if (
-		value.package.name !== PACKAGE_NAME ||
-		value.package.bundled !== true ||
-		value.package.packaging !== "hybrid" ||
-		value.package.networkPolicy !== "external-optional-only" ||
-		!packageFile.endsWith(".tgz")
+		value.schemaVersion !== 3 ||
+		value.repository !== REPOSITORY ||
+		value.packaging !== "binary" ||
+		value.layoutVersion !== 1
 	) {
-		return fail("Invalid canonical package metadata");
+		return fail("Invalid release manifest identity");
 	}
+	const version = requireSafeAssetName(value.distributionVersion, "distribution version");
+	const parsedVersion = parseDistributionVersion(version);
+	const apiVersion = requireString(value.apiVersion, "API version");
+	if (apiVersion !== parsedVersion.api) return fail("Release API/version mismatch");
+	const tag = requireSafeAssetName(value.tag, "release tag");
+	if (tag !== `xz-v${version}`) return fail("Release tag/version mismatch");
+	const commit = requireString(value.commit, "release commit");
+	if (!/^[0-9a-f]{40}$/.test(commit)) return fail("Invalid release commit");
+	if (!commit.startsWith(parsedVersion.commit)) return fail("Release commit/version mismatch");
+
+	if (!isRecord(value.bundles) || Array.isArray(value.bundles))
+		return fail("Manifest bundles must be a per-platform object");
+	const bundles: Record<string, XzBundle> = {};
+	const bundlePlatforms = Object.keys(value.bundles).sort();
+	if (JSON.stringify(bundlePlatforms) !== JSON.stringify([...BINARY_PLATFORMS].sort())) {
+		return fail("Manifest bundles must cover exactly the six canonical platforms");
+	}
+	for (const platform of BINARY_PLATFORMS) {
+		const bundle = value.bundles[platform];
+		if (!isRecord(bundle) || Object.keys(bundle).some((key) => !["file", "bytes", "sha256"].includes(key))) {
+			return fail(`Invalid bundle metadata for ${platform}`);
+		}
+		const file = requireSafeAssetName(bundle.file, "bundle filename");
+		const expectedName = `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`;
+		if (file !== expectedName) return fail(`Invalid bundle metadata for ${platform}`);
+		bundles[platform] = {
+			file,
+			bytes: requirePositiveSize(bundle.bytes, BUNDLE_MAX_BYTES, "bundle size"),
+			sha256: requireSha256(bundle.sha256, "bundle sha256"),
+		};
+	}
+
+	if (!isRecord(value.requiredPaths)) return fail("Manifest requiredPaths is required");
+	if (JSON.stringify(Object.keys(value.requiredPaths).sort()) !== JSON.stringify([...BINARY_PLATFORMS].sort())) {
+		return fail("Manifest requiredPaths must cover exactly the six canonical platforms");
+	}
+	const requiredPaths: Record<string, string[]> = {};
+	for (const platform of BINARY_PLATFORMS) {
+		if (!Array.isArray(value.requiredPaths[platform]) || value.requiredPaths[platform].length === 0) {
+			return fail(`Manifest requiredPaths missing for ${platform}`);
+		}
+		const paths = value.requiredPaths[platform];
+		const expectedPaths = canonicalRequiredPaths(platform);
+		if (JSON.stringify(paths) !== JSON.stringify(expectedPaths)) {
+			return fail(`Manifest requiredPaths for ${platform} does not match canonical inventory`);
+		}
+		requiredPaths[platform] = expectedPaths;
+	}
+
 	if (
-		!isRecord(value.package.externalOptionalDependencies) ||
-		!Array.isArray(value.package.allowedNetworkPackages) ||
-		!value.package.allowedNetworkPackages.every(
-			(name) => typeof name === "string" && /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name),
-		) ||
-		!Array.isArray(value.package.allowedNetworkPackagePrefixes) ||
-		!value.package.allowedNetworkPackagePrefixes.every((prefix) => typeof prefix === "string") ||
-		JSON.stringify(Object.keys(value.package.externalOptionalDependencies).sort()) !==
-			JSON.stringify([...value.package.allowedNetworkPackages].sort()) ||
-		new Set(value.package.allowedNetworkPackages).size !== value.package.allowedNetworkPackages.length ||
-		JSON.stringify([...value.package.allowedNetworkPackagePrefixes].sort()) !==
-			JSON.stringify(value.package.allowedNetworkPackages.map((name) => `${name}-`).sort())
-	)
-		return fail("Invalid external optional dependency policy");
-	const externalOptionalDependencies = Object.fromEntries(
-		Object.entries(value.package.externalOptionalDependencies).map(([name, version]) => {
-			const specifier = requireString(version, "external optional dependency version");
-			if (
-				specifier.startsWith("file:") ||
-				specifier.startsWith("link:") ||
-				specifier.startsWith("workspace:") ||
-				specifier.startsWith("git+") ||
-				specifier.startsWith("github:") ||
-				specifier.includes("npm.pkg.github.com") ||
-				specifier.includes("@xz-dev/")
-			)
-				return fail("Invalid external optional dependency version");
-			return [requireString(name, "external optional dependency name"), specifier];
-		}),
-	);
-	const packageBytes = requirePositiveSize(value.package.bytes, 1024 * 1024 * 1024, "package size");
-	const packageSha256 = requireSha256(value.package.sha256, "package sha256");
-	const packageIntegrity = requireString(value.package.integrity, "package integrity");
-	if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(packageIntegrity)) return fail("Invalid package integrity");
-
-	const expectedPackageFile = `earendil-works-pi-coding-agent-${version}.tgz`;
-	if (packageFile !== expectedPackageFile) return fail("Release package/version mismatch");
-
-	if (!isRecord(value.installer)) return fail("Invalid installer metadata");
-	if (value.installer.file !== "install.ts") return fail("Invalid installer filename");
-	const installerBytes = requirePositiveSize(value.installer.bytes, INSTALLER_MAX_BYTES, "installer size");
-	const installerSha256 = requireSha256(value.installer.sha256, "installer sha256");
+		!isRecord(value.installer) ||
+		!isRecord(value.installer.posix) ||
+		value.installer.posix.file !== INSTALL_SH_FILE ||
+		Object.keys(value.installer.posix).length !== 1 ||
+		!isRecord(value.installer.windows) ||
+		value.installer.windows.file !== INSTALL_PS1_FILE ||
+		Object.keys(value.installer.windows).length !== 1 ||
+		!isRecord(value.installer.checksums) ||
+		value.installer.checksums.file !== SHA256SUMS_FILE ||
+		value.installer.checksums.algorithm !== "sha256" ||
+		Object.keys(value.installer.checksums).length !== 2 ||
+		Object.keys(value.installer).length !== 3
+	) {
+		return fail("Invalid installer metadata");
+	}
 
 	if (
 		!isRecord(value.attestation) ||
+		Object.keys(value.attestation).some(
+			(key) => !["repository", "signerWorkflow", "signerRef", "denySelfHostedRunners", "subjectsFile"].includes(key),
+		) ||
 		value.attestation.repository !== REPOSITORY ||
 		value.attestation.signerWorkflow !== ATTESTATION_SIGNER_WORKFLOW ||
 		value.attestation.signerRef !== ATTESTATION_SIGNER_REF ||
 		value.attestation.denySelfHostedRunners !== true ||
-		value.attestation.subjectsFile !== "attestation-subjects.txt"
+		value.attestation.subjectsFile !== ATTESTATION_SUBJECTS_FILE
 	) {
 		return fail("Invalid or missing release attestation policy");
 	}
-	if (
-		!isRecord(value.bootstrap) ||
-		value.bootstrap.tag !== tag ||
-		value.bootstrap.baseUrl !== exactBaseUrl(tag) ||
-		value.bootstrap.minimumNodeVersion !== minimumNodeVersion ||
-		!isRecord(value.bootstrap.files) ||
-		value.bootstrap.files.sh !== "install.sh" ||
-		value.bootstrap.files.ps1 !== "install.ps1"
-	) {
-		return fail("Invalid bootstrap metadata");
-	}
-
 	return {
-		schemaVersion: 1,
+		schemaVersion: 3,
 		repository: REPOSITORY,
 		tag,
 		distributionVersion: version,
 		apiVersion,
 		commit,
-		minimumNodeVersion,
-		package: {
-			name: PACKAGE_NAME,
-			file: packageFile,
-			bytes: packageBytes,
-			sha256: packageSha256,
-			integrity: packageIntegrity,
-			bundled: true,
-			packaging: "hybrid",
-			networkPolicy: "external-optional-only",
-			externalOptionalDependencies,
-			allowedNetworkPackages: [...value.package.allowedNetworkPackages] as string[],
-			allowedNetworkPackagePrefixes: [...value.package.allowedNetworkPackagePrefixes] as string[],
+		packaging: "binary",
+		layoutVersion: 1,
+		bundles,
+		requiredPaths,
+		installer: {
+			posix: { file: INSTALL_SH_FILE },
+			windows: { file: INSTALL_PS1_FILE },
+			checksums: { file: SHA256SUMS_FILE, algorithm: "sha256" },
 		},
-		installer: { file: "install.ts", bytes: installerBytes, sha256: installerSha256 },
 		attestation: {
 			repository: REPOSITORY,
 			signerWorkflow: ATTESTATION_SIGNER_WORKFLOW,
 			signerRef: ATTESTATION_SIGNER_REF,
 			denySelfHostedRunners: true,
-			subjectsFile: "attestation-subjects.txt",
-		},
-		bootstrap: {
-			tag,
-			baseUrl: exactBaseUrl(tag),
-			minimumNodeVersion,
-			files: { sh: "install.sh", ps1: "install.ps1" },
+			subjectsFile: ATTESTATION_SUBJECTS_FILE,
 		},
 	};
 }
 
-function githubToken(): string | undefined {
-	const configured = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || "").trim();
-	if (configured) return configured;
-	try {
-		return (
-			execFileSync("gh", ["auth", "token", "--hostname", "github.com"], {
-				encoding: "utf8",
-				shell: false,
-				stdio: ["ignore", "pipe", "ignore"],
-				timeout: DEFAULT_TIMEOUT_MS,
-			}).trim() || undefined
-		);
-	} catch {
-		return undefined;
-	}
-}
-
-function fetchHeaders(currentVersion: string, accept: string, includeAuthorization: boolean): Record<string, string> {
-	const headers: Record<string, string> = {
+function fetchHeaders(currentVersion: string, accept: string): Record<string, string> {
+	return {
 		"User-Agent": getPiUserAgent(currentVersion),
 		accept,
 	};
-	if (includeAuthorization) {
-		const token = githubToken();
-		if (token) headers.Authorization = `Bearer ${token}`;
-	}
-	return headers;
 }
 
 async function fetchResponse(
@@ -352,21 +300,18 @@ async function fetchResponse(
 	timeoutMs: number,
 	accept: string,
 ): Promise<Response> {
-	const requested = new URL(url);
-	const response = await fetch(requested.href, {
-		headers: fetchHeaders(currentVersion, accept, requested.origin === "https://api.github.com"),
+	const response = await fetch(new URL(url).href, {
+		headers: fetchHeaders(currentVersion, accept),
 		signal: AbortSignal.timeout(timeoutMs),
 	});
-	if (requested.origin !== "https://api.github.com" && response.redirected) {
+	if (response.redirected) {
 		const destination = new URL(response.url);
-		if (destination.protocol !== "https:" || destination.hostname !== "release-assets.githubusercontent.com") {
+		if (destination.protocol !== "https:" || destination.hostname !== RELEASE_ASSET_CDN_HOST) {
 			return fail("GitHub Release asset redirected outside the trusted GitHub asset CDN");
 		}
 	}
 	if (!response.ok) {
-		const rateLimit = response.status === 403 || response.status === 429;
-		const detail = rateLimit ? " (GitHub API rate limit may have been exceeded; retry later)" : "";
-		return fail(`GitHub Release request failed: HTTP ${response.status}${detail}`);
+		return fail(`GitHub Release request failed: HTTP ${response.status}`);
 	}
 	return response;
 }
@@ -401,8 +346,22 @@ async function readBoundedResponse(response: Response, maximumBytes: number, lab
 	return body;
 }
 
-function exactBaseUrl(tag: string): string {
-	return `${RELEASE_DOWNLOAD_ORIGIN}/${REPOSITORY}/releases/download/${encodeURIComponent(tag)}/`;
+/** Exact installer asset name for the host platform (POSIX vs PowerShell). */
+function hostInstallerName(): typeof INSTALL_SH_FILE | typeof INSTALL_PS1_FILE {
+	return process.platform === "win32" ? INSTALL_PS1_FILE : INSTALL_SH_FILE;
+}
+
+function parseSha256Sums(text: string): Map<string, string> {
+	const entries = new Map<string, string>();
+	for (const line of text.split(/\r?\n/)) {
+		if (!line.trim()) continue;
+		const match = /^([0-9a-f]{64}) {2}(.+)$/.exec(line);
+		if (!match) return fail("Invalid SHA256SUMS entry");
+		if (entries.has(match[2])) return fail(`Duplicate SHA256SUMS entry: ${match[2]}`);
+		entries.set(match[2], match[1]);
+	}
+	if (entries.size === 0) return fail("Empty SHA256SUMS");
+	return entries;
 }
 
 export async function getLatestXzRelease(
@@ -414,21 +373,11 @@ export async function getLatestXzRelease(
 		return fail("xz-dev Release update requires an installed xz-dev distribution version");
 	}
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	const releaseResponse = await fetchResponse(
-		LATEST_RELEASE_URL,
-		currentVersion,
-		timeoutMs,
-		"application/vnd.github+json",
-	);
-	const release = parseLatestRelease(await releaseResponse.json());
-	const manifestAsset = release.assets.find((asset) => asset.name === MANIFEST_FILE);
-	if (!manifestAsset) return fail("Latest GitHub Release is missing release-manifest.json");
-	const manifestUrl = requireExactAssetUrl(
-		new URL(manifestAsset.browser_download_url),
-		release.tag_name,
-		MANIFEST_FILE,
-	);
-	const manifestResponse = await fetchResponse(manifestUrl, currentVersion, timeoutMs, "application/json");
+
+	// Prefer the public latest release-manifest.json asset to avoid the GitHub
+	// REST API rate-limit dependence entirely. The manifest pins the exact tag,
+	// commit, and download base URL; a redirect is only trusted to GitHub's CDN.
+	const manifestResponse = await fetchResponse(LATEST_MANIFEST_URL, currentVersion, timeoutMs, "application/json");
 	const manifestBytes = await readBoundedResponse(manifestResponse, MANIFEST_MAX_BYTES, "release manifest");
 	let manifestValue: unknown;
 	try {
@@ -436,50 +385,61 @@ export async function getLatestXzRelease(
 	} catch {
 		return fail("Invalid release manifest JSON");
 	}
-	const manifest = parseManifest(manifestValue, release.tag_name);
-	const expectedAssets = [
-		manifest.package.file,
-		MANIFEST_FILE,
-		manifest.installer.file,
-		"install.sh",
-		"install.ps1",
-		"SHA256SUMS",
-		manifest.attestation.subjectsFile,
+	const manifest = parseManifest(manifestValue);
+	const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
+
+	const exactBase = exactBaseUrl(manifest.tag);
+	const sumsResponse = await fetchResponse(`${exactBase}${SHA256SUMS_FILE}`, currentVersion, timeoutMs, "text/plain");
+	const sumsBytes = await readBoundedResponse(sumsResponse, SHA256SUMS_MAX_BYTES, "SHA256SUMS");
+	const sums = parseSha256Sums(new TextDecoder().decode(sumsBytes));
+	const expectedChecksums = [
+		...Object.values(manifest.bundles).map((bundle) => bundle.file),
+		"release-manifest.json",
+		INSTALL_SH_FILE,
+		INSTALL_PS1_FILE,
 	].sort();
-	const actualAssets = release.assets.map((asset) => asset.name).sort();
-	if (JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
-		return fail("Latest GitHub Release does not contain the exact canonical asset inventory");
+	if (JSON.stringify([...sums.keys()].sort()) !== JSON.stringify(expectedChecksums)) {
+		return fail("SHA256SUMS does not contain the exact canonical release asset inventory");
 	}
-	for (const asset of release.assets) {
-		requireExactAssetUrl(new URL(asset.browser_download_url), manifest.tag, asset.name);
+	if (sums.get("release-manifest.json") !== manifestSha256) {
+		return fail("release-manifest.json sha256 mismatch in exact-tag SHA256SUMS");
 	}
-	const installerAsset = release.assets.find((asset) => asset.name === manifest.installer.file)!;
-	const installerUrl = requireExactAssetUrl(
-		new URL(installerAsset.browser_download_url),
-		manifest.tag,
-		manifest.installer.file,
-	);
+
+	const installerName = hostInstallerName();
+	const installerSha256 = sums.get(installerName);
+	if (!installerSha256) return fail(`${installerName} is missing from SHA256SUMS`);
+	const installerUrl = new URL(installerName, exactBase);
+	if (installerUrl.pathname !== `${new URL(exactBase).pathname}${encodeURIComponent(installerName)}`) {
+		return fail(`${installerName} URL is not exact-tag pinned`);
+	}
+
 	return {
 		version: manifest.distributionVersion,
 		manifest,
-		manifestSha256: createHash("sha256").update(manifestBytes).digest("hex"),
-		discoveryBaseUrl: exactBaseUrl(manifest.tag),
-		exactBaseUrl: exactBaseUrl(manifest.tag),
+		manifestSha256,
+		exactBaseUrl: exactBase,
+		installerName,
+		installerSha256,
 		installerUrl: installerUrl.href,
 	};
 }
 
 async function downloadInstaller(release: XzLatestRelease, currentVersion: string, destination: string): Promise<void> {
-	const installerUrl = requireExactAssetUrl(
-		new URL(release.installerUrl),
-		release.manifest.tag,
-		release.manifest.installer.file,
-	);
-	const response = await fetchResponse(installerUrl, currentVersion, DEFAULT_TIMEOUT_MS, "application/octet-stream");
-	const bytes = await readBoundedResponse(response, release.manifest.installer.bytes, "install.ts");
-	if (bytes.byteLength !== release.manifest.installer.bytes) return fail("install.ts has an invalid size");
+	const expectedName = hostInstallerName();
+	const expectedBase = exactBaseUrl(release.manifest.tag);
+	const expectedUrl = `${expectedBase}${expectedName}`;
+	if (
+		release.manifest.repository !== REPOSITORY ||
+		release.exactBaseUrl !== expectedBase ||
+		release.installerName !== expectedName ||
+		release.installerUrl !== expectedUrl
+	) {
+		return fail("Release installer URL is not the exact xz-dev tag asset");
+	}
+	const response = await fetchResponse(expectedUrl, currentVersion, DEFAULT_TIMEOUT_MS, "application/octet-stream");
+	const bytes = await readBoundedResponse(response, INSTALLER_MAX_BYTES, release.installerName);
 	const digest = createHash("sha256").update(bytes).digest("hex");
-	if (digest !== release.manifest.installer.sha256) return fail("install.ts sha256 mismatch");
+	if (digest !== release.installerSha256) return fail(`${release.installerName} sha256 mismatch`);
 	const descriptor = openSync(destination, "wx", 0o600);
 	try {
 		writeSync(descriptor, bytes);
@@ -491,18 +451,28 @@ async function downloadInstaller(release: XzLatestRelease, currentVersion: strin
 export async function runXzSelfUpdate(
 	release: XzLatestRelease,
 	currentVersion: string,
+	force = false,
 	options: SpawnOptions = {},
 ): Promise<void> {
 	const directory = mkdtempSync(join(tmpdir(), "pi-xz-self-update-"));
-	const installer = join(directory, "install.ts");
+	const installer = join(directory, release.installerName);
 	try {
 		await downloadInstaller(release, currentVersion, installer);
 		const spawnRuntime = options.spawn ?? spawn;
+		// Invoke the exact platform installer (install.sh / install.ps1) with the
+		// internal update flag. The native installer re-verifies its pinned manifest
+		// and bundle, validates provenance, stages the binary, and activates it.
+		const command = release.installerName === INSTALL_PS1_FILE ? "powershell" : "sh";
+		const installerArgs = ["--update", ...(force ? ["--force"] : [])];
+		const args =
+			release.installerName === INSTALL_PS1_FILE
+				? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, ...installerArgs]
+				: [installer, ...installerArgs];
 		await new Promise<void>((resolve, reject) => {
-			const child = spawnRuntime(process.execPath, [installer, "--update"], {
+			const child = spawnRuntime(command, args, {
 				env: {
 					...process.env,
-					PI_XZ_RELEASE_BASE_URL: release.discoveryBaseUrl,
+					PI_XZ_RELEASE_BASE_URL: release.exactBaseUrl,
 					PI_XZ_RELEASE_EXACT_BASE_URL: release.exactBaseUrl,
 					PI_XZ_RELEASE_MANIFEST_SHA256: release.manifestSha256,
 				},
@@ -512,8 +482,8 @@ export async function runXzSelfUpdate(
 			child.once("error", reject);
 			child.once("close", (code, signal) => {
 				if (code === 0) resolve();
-				else if (signal) reject(new Error(`install.ts terminated by signal ${signal}`));
-				else reject(new Error(`install.ts exited with code ${code ?? "unknown"}`));
+				else if (signal) reject(new Error(`${release.installerName} terminated by signal ${signal}`));
+				else reject(new Error(`${release.installerName} exited with code ${code ?? "unknown"}`));
 			});
 		});
 	} finally {

@@ -333,7 +333,9 @@ export function getSelfUpdateUnavailableInstruction(
 	const method = detectInstallMethod();
 	const target = normalizeSelfUpdatePackageTarget(updatePackageTarget);
 	if (method === "bun-binary") {
-		return `Download from: https://github.com/earendil-works/pi-mono/releases/latest`;
+		return DISTRIBUTION === "xz-dev"
+			? `Download from: https://github.com/xz-dev/pi/releases/latest`
+			: `Download from: https://github.com/earendil-works/pi-mono/releases/latest`;
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, target, npmCommand);
 	if (command) {
@@ -352,6 +354,24 @@ export function getUpdateInstruction(packageName: string): string {
 		return `Run: ${command.display}`;
 	}
 	return getSelfUpdateUnavailableInstruction(packageName);
+}
+
+/**
+ * Downstream source-checkout self-update guidance for xz-dev distributions.
+ * An xz-dev source checkout is user-managed: `pi update --self` never runs an
+ * upstream package-manager @latest update, never queries official Release/update
+ * sources, and never mutates the checkout. Pi only prints these instructions.
+ */
+export function getXzDevSourceUpdateGuidance(): string {
+	return [
+		`This xz-dev installation is a source checkout and is user-managed.`,
+		`Run the following to update it (Pi does not run these for you):`,
+		``,
+		`git -C <xz-dev-pi-checkout> pull --ff-only`,
+		`cd <xz-dev-pi-checkout>`,
+		`npm ci --ignore-scripts`,
+		`npm run build`,
+	].join("\n");
 }
 
 // =============================================================================
