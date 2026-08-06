@@ -30,6 +30,25 @@ test("upstream sync fetches and merges the persistent Release self-update patch"
   assert.match(syncWorkflowText, /git commit -m "merge patch\/release-self-update branch"/);
 });
 
+test("upstream sync preserves the ci-owned binary build script on squash conflict", () => {
+  assert.match(
+    syncWorkflowText,
+    /README\.md\|scripts\/build-binaries\.sh\|packages\/coding-agent\/CHANGELOG\.md\|packages\/coding-agent\/test\/package-command-paths\.test\.ts\) ;;/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /git restore --source=origin\/ci --staged --worktree -- README\.md scripts\/build-binaries\.sh/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /git checkout --ours -- packages\/coding-agent\/test\/package-command-paths\.test\.ts/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /git checkout --ours -- packages\/coding-agent\/CHANGELOG\.md/,
+  );
+});
+
 test("Release publication workflow has trusted triggers, exact checkout, and least-privilege jobs", () => {
   assert.ok(workflow.on.push.branches.includes("main"));
   assert.ok(Object.hasOwn(workflow.on, "workflow_dispatch"));
