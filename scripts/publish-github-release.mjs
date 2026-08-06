@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { BUN_TARGET_IDS, binaryArchiveName } from "./lib/bun-targets.mjs";
 
 const EXPECTED_REPOSITORY = "xz-dev/pi";
 const EXPECTED_REF = "refs/heads/main";
@@ -34,7 +35,7 @@ function readManifest(path) {
   }
   const manifest = JSON.parse(readFileSync(path, "utf8"));
   if (
-    manifest.schemaVersion !== 3 ||
+    manifest.schemaVersion !== 4 ||
     manifest.repository !== EXPECTED_REPOSITORY ||
     typeof manifest.distributionVersion !== "string" ||
     typeof manifest.tag !== "string" ||
@@ -44,15 +45,14 @@ function readManifest(path) {
     typeof manifest.bundles !== "object" ||
     manifest.bundles === null ||
     Array.isArray(manifest.bundles) ||
-    !["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"].every(
-      (platform) =>
-        manifest.bundles[platform]?.file ===
-        `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`,
-    ) ||
+    Object.keys(manifest.bundles).length !== BUN_TARGET_IDS.length ||
+    !BUN_TARGET_IDS.every((target) => manifest.bundles[target]?.file === binaryArchiveName(target)) ||
     manifest.installer?.posix?.file !== "install.sh" ||
     manifest.installer?.windows?.file !== "install.ps1" ||
     manifest.installer?.checksums?.file !== "SHA256SUMS" ||
     manifest.installer?.checksums?.algorithm !== "sha256" ||
+    manifest.acceptance?.file !== "binary-acceptance.json" ||
+    manifest.acceptance?.targetCount !== BUN_TARGET_IDS.length ||
     manifest.attestation?.subjectsFile !== "attestation-subjects.txt" ||
     manifest.attestation?.repository !== EXPECTED_REPOSITORY ||
     manifest.attestation?.signerWorkflow !== `${EXPECTED_REPOSITORY}/.github/workflows/publish-github-release.yml` ||
@@ -74,6 +74,7 @@ function releaseAssetPaths(releaseDir, manifest) {
     "release-manifest.json",
     manifest.installer.posix.file,
     manifest.installer.windows.file,
+    "binary-acceptance.json",
     "SHA256SUMS",
   ];
   const subjectPaths = expectedSubjects.map((line) => join(releaseDir, line));

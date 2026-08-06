@@ -4,21 +4,15 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { BUN_TARGET_IDS, binaryArchiveName } from "./lib/bun-targets.mjs";
 import { publishGitHubRelease } from "./publish-github-release.mjs";
 
 const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const VERSION = "0.82.1-xz.123.1.gaaaaaaaa";
 const TAG = `xz-v${VERSION}`;
-const PLATFORMS = [
-  "darwin-arm64",
-  "darwin-x64",
-  "linux-arm64",
-  "linux-x64",
-  "windows-arm64",
-  "windows-x64",
-];
+const PLATFORMS = BUN_TARGET_IDS;
 function bundleFile(platform) {
-  return `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`;
+  return binaryArchiveName(platform);
 }
 const BUNDLE_FILES = PLATFORMS.map(bundleFile);
 const ENV = {
@@ -43,9 +37,10 @@ function fixture() {
     ["install.sh", Buffer.from("sh")],
     ["install.ps1", Buffer.from("ps1")],
     ["SHA256SUMS", Buffer.from("sums")],
+    ["binary-acceptance.json", Buffer.from("acceptance")],
   ]);
   const manifest = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     repository: "xz-dev/pi",
     tag: TAG,
     distributionVersion: VERSION,
@@ -68,6 +63,7 @@ function fixture() {
       windows: { file: "install.ps1" },
       checksums: { file: "SHA256SUMS", algorithm: "sha256" },
     },
+    acceptance: { file: "binary-acceptance.json", targetCount: 12 },
     attestation: {
       repository: "xz-dev/pi",
       signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",

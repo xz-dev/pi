@@ -23,16 +23,14 @@ function sha256(content: string): string {
 
 function bundles(): Record<string, { file: string; bytes: number; sha256: string }> {
 	return Object.fromEntries(
-		["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"].map(
-			(platform) => [
-				platform,
-				{
-					file: `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`,
-					bytes: 42,
-					sha256: sha256(platform),
-				},
-			],
-		),
+		["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"].map((platform) => [
+			platform,
+			{
+				file: `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`,
+				bytes: 42,
+				sha256: sha256(platform),
+			},
+		]),
 	);
 }
 
@@ -91,9 +89,9 @@ describe("GitHub Release native installer generator", () => {
 
 	test("rejects mutable or malformed release identity", async () => {
 		const generator = await loadGenerator();
-		expect(() => generator.generateInstallSh({ ...pins(), baseUrl: "https://github.com/xz-dev/pi/releases/latest/download/" })).toThrow(
-			/exact xz-dev\/pi Release tag URL/,
-		);
+		expect(() =>
+			generator.generateInstallSh({ ...pins(), baseUrl: "https://github.com/xz-dev/pi/releases/latest/download/" }),
+		).toThrow(/exact xz-dev\/pi Release tag URL/);
 		expect(() => generator.generateInstallSh({ ...pins(), commit: "not-a-commit" })).toThrow(/40-hex commit/);
 		expect(() => generator.generateInstallSh({ ...pins(), manifestSha256: "not-hex" })).toThrow(/manifestSha256/);
 	});

@@ -5,7 +5,7 @@
  * Plain ESM (.mjs) so it runs directly under Node without a build step.
  *
  * Binary packaging contract:
- * - each Release ships exactly six Bun-compiled platform bundles
+ * - each Release ships exactly twelve Bun-compiled target bundles
  * - the manifest freezes the exact tag, full commit, downstream/upstream API
  *   versions, per-platform archive metadata, bundle layout version, required
  *   paths, installer digests, and attestation policy
@@ -17,85 +17,28 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { inflateRawSync } from "node:zlib";
 import { readFileSync } from "node:fs";
+import { BUN_TARGET_IDS, binaryArchiveName as targetArchiveName, bunTarget } from "./bun-targets.mjs";
 
 export const ENTRY_PACKAGE = "@earendil-works/pi-coding-agent";
 export const DISTRIBUTION = "xz-dev";
 export const REPOSITORY = "xz-dev/pi";
-export const MANIFEST_SCHEMA_VERSION = 3;
+export const MANIFEST_SCHEMA_VERSION = 4;
 export const ATTESTATION_SIGNER_WORKFLOW = ".github/workflows/publish-github-release.yml";
 export const ATTESTATION_SIGNER_REF = "refs/heads/main";
 export const ATTESTATION_SUBJECTS_FILENAME = "attestation-subjects.txt";
 export const PACKAGING_BINARY = "binary";
 export const BUNDLE_LAYOUT_VERSION = 1;
 
-/** The six canonical Bun-compiled platform bundles shipped by each Release. */
-export const BINARY_PLATFORMS = Object.freeze([
-	"darwin-arm64",
-	"darwin-x64",
-	"linux-arm64",
-	"linux-x64",
-	"windows-arm64",
-	"windows-x64",
-]);
+/** The canonical Bun-compiled target bundles shipped by each Release. */
+export const BINARY_PLATFORMS = BUN_TARGET_IDS;
 
-export function binaryArchiveName(platform, distributionVersion) {
-	return `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`;
+export function binaryArchiveName(targetId) {
+	return targetArchiveName(targetId);
 }
 
-/**
- * Per-platform native inventory derived from scripts/build-binaries.sh.
- * Kept synchronized with that script: any layout change must be reflected here
- * and in the verifier's required-path inventory.
- */
-export function platformNativeInfo(platform) {
-	switch (platform) {
-		case "darwin-arm64":
-			return {
-				executable: "pi",
-				clipboardNativePackage: "clipboard-darwin-arm64",
-				clipboardNativeFile: "clipboard.darwin-arm64.node",
-				nativeHelperDir: "native/darwin/prebuilds/darwin-arm64",
-				nativeHelperFile: "darwin-modifiers.node",
-			};
-		case "darwin-x64":
-			return {
-				executable: "pi",
-				clipboardNativePackage: "clipboard-darwin-x64",
-				clipboardNativeFile: "clipboard.darwin-x64.node",
-				nativeHelperDir: "native/darwin/prebuilds/darwin-x64",
-				nativeHelperFile: "darwin-modifiers.node",
-			};
-		case "linux-arm64":
-			return {
-				executable: "pi",
-				clipboardNativePackage: "clipboard-linux-arm64-gnu",
-				clipboardNativeFile: "clipboard.linux-arm64-gnu.node",
-			};
-		case "linux-x64":
-			return {
-				executable: "pi",
-				clipboardNativePackage: "clipboard-linux-x64-gnu",
-				clipboardNativeFile: "clipboard.linux-x64-gnu.node",
-			};
-		case "windows-arm64":
-			return {
-				executable: "pi.exe",
-				clipboardNativePackage: "clipboard-win32-arm64-msvc",
-				clipboardNativeFile: "clipboard.win32-arm64-msvc.node",
-				nativeHelperDir: "native/win32/prebuilds/win32-arm64",
-				nativeHelperFile: "win32-console-mode.node",
-			};
-		case "windows-x64":
-			return {
-				executable: "pi.exe",
-				clipboardNativePackage: "clipboard-win32-x64-msvc",
-				clipboardNativeFile: "clipboard.win32-x64-msvc.node",
-				nativeHelperDir: "native/win32/prebuilds/win32-x64",
-				nativeHelperFile: "win32-console-mode.node",
-			};
-		default:
-			throw new Error(`Unknown platform: ${platform}`);
-	}
+/** Native inventory for a canonical Bun target. */
+export function platformNativeInfo(targetId) {
+	return bunTarget(targetId);
 }
 
 /**
@@ -112,6 +55,7 @@ export function binaryRequiredPaths(platform) {
 		"package.json",
 		"README.md",
 		"CHANGELOG.md",
+		"THIRD_PARTY_NOTICES.md",
 		"photon_rs_bg.wasm",
 		"theme",
 		"theme/dark.json",
@@ -125,6 +69,10 @@ export function binaryRequiredPaths(platform) {
 		`node_modules/@mariozechner/${info.clipboardNativePackage}`,
 		`${clipboardParent}/${info.clipboardNativeFile}`,
 	];
+	if (info.libc === "musl") {
+		paths.push("clipboard-native-provenance.json");
+		paths.push(`node_modules/@mariozechner/${info.clipboardNativePackage}/LICENSE`);
+	}
 	if (info.nativeHelperDir) {
 		paths.push(info.nativeHelperDir);
 		paths.push(`${info.nativeHelperDir}/${info.nativeHelperFile}`);
@@ -139,6 +87,7 @@ export const ALLOWED_BUNDLE_TOP_LEVEL = Object.freeze([
 	"package.json",
 	"README.md",
 	"CHANGELOG.md",
+	"THIRD_PARTY_NOTICES.md",
 	"photon_rs_bg.wasm",
 	"theme",
 	"assets",
@@ -147,6 +96,7 @@ export const ALLOWED_BUNDLE_TOP_LEVEL = Object.freeze([
 	"examples",
 	"node_modules",
 	"native",
+	"clipboard-native-provenance.json",
 ]);
 
 function normalizeArchiveEntry(entry) {
@@ -343,7 +293,7 @@ export function listZipBundleEntries(zipPath) {
  * the normalized entry set.
  */
 export function assertBinaryBundleInventory(archivePath, platform) {
-	const entries = platform.startsWith("windows-")
+	const entries = platformNativeInfo(platform).os === "windows"
 		? listZipBundleEntries(archivePath)
 		: listTarBundleEntries(archivePath);
 	const entrySet = new Set(entries);
@@ -378,7 +328,7 @@ export function readZipFile(zipPath, archivePath) {
 
 /** Read package.json out of a platform bundle archive. */
 export function readBundlePackageJson(archivePath, platform) {
-	const contents = platform.startsWith("windows-")
+	const contents = platformNativeInfo(platform).os === "windows"
 		? readZipFile(archivePath, "package.json")
 		: readTarFile(archivePath, "pi/package.json");
 	return JSON.parse(contents);

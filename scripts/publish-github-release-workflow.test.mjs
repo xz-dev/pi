@@ -34,9 +34,10 @@ test("Release publication workflow has trusted triggers, exact checkout, and lea
   assert.ok(workflow.on.push.branches.includes("main"));
   assert.ok(Object.hasOwn(workflow.on, "workflow_dispatch"));
   assert.deepEqual(workflow.permissions, {});
-  assert.deepEqual(workflow.jobs["build-release-candidate"].permissions, {
-    contents: "read",
-  });
+  assert.deepEqual(workflow.jobs["release-matrix"].permissions, { contents: "read" });
+  assert.deepEqual(workflow.jobs["validate-source"].permissions, { contents: "read" });
+  assert.deepEqual(workflow.jobs["build-target"].permissions, { contents: "read" });
+  assert.deepEqual(workflow.jobs["aggregate-release-candidate"].permissions, { contents: "read" });
   assert.deepEqual(workflow.jobs["accept-release-candidate"].permissions, {
     contents: "read",
   });
@@ -57,28 +58,39 @@ test("Release publication workflow has trusted triggers, exact checkout, and lea
   assert.throws(() => readFileSync(join(ROOT, ".github", "workflows", "build-binaries.yml"), "utf8"), /ENOENT/);
 });
 
-test("build-release-candidate builds and verifies all six platform bundles", () => {
-  const job = workflow.jobs["build-release-candidate"];
-  assert.match(workflowText, /oven-sh\/setup-bun@[0-9a-f]{40}/);
-  assert.match(workflowText, /node scripts\/prepare-github-release\.mjs --out/);
-  assert.match(workflowText, /verify-github-release\.mjs all/);
-  assert.match(workflowText, /\*\.tar\.gz/);
-  assert.match(workflowText, /\*\.zip/);
+test("workflow generates the authoritative matrix and parallel-builds one artifact per target", () => {
+  assert.match(workflowText, /bun-targets\.mjs --matrix/);
+  assert.match(workflowText, /fromJSON\(needs\.release-matrix\.outputs\.matrix\)/);
+  assert.match(workflowText, /--platform '\$\{\{ matrix\.id \}\}'/);
+  assert.match(workflowText, /github-release-target-\$\{\{ github\.sha \}\}-\$\{\{ matrix\.id \}\}/);
+  assert.match(workflowText, /--prebuilt/);
+  assert.match(workflowText, /-eq 12/);
+  assert.doesNotMatch(workflowText, /macos-13/);
+  assert.match(workflowText, /macos-15-intel|bun-targets\.mjs --matrix/);
 });
 
-test("acceptance matrix verifies the one candidate on all target OSes and runs host-native smoke", () => {
-  const job = workflow.jobs["accept-release-candidate"];
-  assert.deepEqual(job.strategy.matrix.os, [
-    "ubuntu-latest",
-    "macos-latest",
-    "windows-latest",
-  ]);
-  assert.match(workflowText, /node-version: ["']22["']/);
+test("acceptance matrix is generated from explicit per-target smoke descriptors", () => {
+  assert.match(workflowText, /bun-targets\.mjs --smoke-matrix/);
+  assert.match(workflowText, /fromJSON\(needs\.release-matrix\.outputs\.smoke-matrix\)/);
+  assert.match(workflowText, /runs-on: \$\{\{ matrix\.runner \}\}/);
+  assert.match(workflowText, /matrix\.executor == 'native'/);
+  assert.match(workflowText, /matrix\.executor == 'pinned-musl-container'/);
+  assert.match(workflowText, /smoke-binary-release\.mjs/);
+  assert.match(workflowText, /PI_XZ_VERIFY_TARGET/);
   assert.match(workflowText, /verify-github-release\.mjs all/);
-  assert.match(
-    workflowText,
-    /github-release-candidate-\$\{\{ github\.sha \}\}/,
-  );
+  assert.match(workflowText, /smoke-unix-tui\.py/);
+  assert.doesNotMatch(workflowText, /AppActivate|SendKeys|Docker allocated TTY|fabricated/);
+});
+
+test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.3.14", () => {
+  assert.match(workflowText, /build-musl-clipboard\.sh/);
+  assert.match(workflowText, /--clipboard-musl-dir/);
+  assert.match(workflowText, /bun-version: ["']?1\.3\.14/);
+  assert.match(workflowText, /NODE_ENV: production/);
+  const builder = readFileSync(join(ROOT, "scripts", "build-musl-clipboard.sh"), "utf8");
+  assert.doesNotMatch(builder, /curl|apk add --no-cache|apk update/);
+  assert.match(builder, /--network none/);
+  assert.match(builder, /tar -xzf \/inputs\/musl-dev\.apk/);
 });
 
 test("publication attests final subjects before draft publication and keeps audit list separate", () => {

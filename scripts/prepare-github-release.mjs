@@ -36,15 +36,17 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 const MANIFEST_FILENAME = "release-manifest.json";
 const SUMS_FILENAME = "SHA256SUMS";
+const ACCEPTANCE_FILENAME = "binary-acceptance.json";
 
 function usage() {
 	return [
-		"Usage: node scripts/prepare-github-release.mjs --out <dir> [--skip-deps] [--skip-build] [--platform <platform>]",
+		"Usage: node scripts/prepare-github-release.mjs --out <dir> [--prebuilt <dir>] [--skip-deps] [--skip-build] [--platform <target>]",
 		"",
 		"  --out <dir>         external temporary output directory (required)",
 		"  --skip-deps         skip installing cross-platform native bindings (local speed; CI builds all)",
 		"  --skip-build        skip the npm package build (use when dist/ is already built)",
-		"  --platform <name>   build only one platform (default: all six canonical platforms)",
+		`  --platform <name>   build only one target (default: all ${BINARY_PLATFORMS.length} canonical targets)`,
+		"  --prebuilt <dir>    assemble an exact full candidate from matrix-built archives",
 	].join("\n");
 }
 
@@ -53,13 +55,15 @@ function parseArgs(argv) {
 	let outDir;
 	let skipDeps = false;
 	let skipBuild = false;
+	let prebuiltDir;
 	const platforms = [];
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
-		if (arg === "--out" || arg === "--platform") {
+		if (arg === "--out" || arg === "--platform" || arg === "--prebuilt") {
 			const value = args[index + 1];
 			if (!value || value.startsWith("--")) throw new Error(`Missing value for ${arg}\n${usage()}`);
 			if (arg === "--out") outDir = value;
+			else if (arg === "--prebuilt") prebuiltDir = resolve(value);
 			else platforms.push(value);
 			index += 1;
 		} else if (arg === "--skip-deps") skipDeps = true;
@@ -82,7 +86,8 @@ function parseArgs(argv) {
 			throw new Error(`Invalid platform ${platform}; expected one of ${BINARY_PLATFORMS.join(", ")}`);
 		}
 	}
-	return { outDir: resolved, skipDeps, skipBuild, platforms: selected };
+	if (prebuiltDir && platforms.length > 0) throw new Error("--prebuilt cannot be combined with --platform");
+	return { outDir: resolved, skipDeps, skipBuild, platforms: selected, prebuiltDir };
 }
 
 function writeJson(path, value) {
@@ -90,7 +95,7 @@ function writeJson(path, value) {
 }
 
 function main() {
-	const { outDir, skipDeps, skipBuild, platforms } = parseArgs(process.argv);
+	const { outDir, skipDeps, skipBuild, platforms, prebuiltDir } = parseArgs(process.argv);
 	const rootPackageJson = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
 	if (rootPackageJson.name !== "pi-monorepo") throw new Error("Run this script from the repository root");
 	const entryPackageJson = JSON.parse(readFileSync(join(REPO_ROOT, "packages", "coding-agent", "package.json"), "utf8"));
@@ -101,8 +106,8 @@ function main() {
 
 	rmSync(outDir, { force: true, recursive: true });
 	mkdirSync(outDir, { recursive: true });
-	const workDir = join(outDir, "work");
-	mkdirSync(workDir, { recursive: true });
+	const workDir = prebuiltDir ?? join(outDir, "work");
+	if (!prebuiltDir) mkdirSync(workDir, { recursive: true });
 	const buildArgs = [
 		"scripts/build-binaries.sh",
 		"--skip-install",
@@ -114,7 +119,7 @@ function main() {
 		distributionVersion,
 	];
 	for (const platform of platforms) buildArgs.push("--platform", platform);
-	run("bash", buildArgs, { cwd: REPO_ROOT });
+	if (!prebuiltDir) run("bash", buildArgs, { cwd: REPO_ROOT });
 
 	const bundles = {};
 	const requiredPaths = {};
@@ -156,6 +161,7 @@ function main() {
 			windows: { file: INSTALL_PS1_FILENAME },
 			checksums: { file: SUMS_FILENAME, algorithm: "sha256" },
 		},
+		acceptance: { file: ACCEPTANCE_FILENAME, targetCount: BINARY_PLATFORMS.length },
 		attestation: {
 			repository: REPOSITORY,
 			signerWorkflow: `${REPOSITORY}/${ATTESTATION_SIGNER_WORKFLOW}`,

@@ -1,0 +1,57 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, BUN_VERSION, GITHUB_HOSTED_RUNNERS, binaryArchiveName, githubBuildMatrix, githubSmokeMatrix } from "./lib/bun-targets.mjs";
+
+const EXPECTED = [
+	"darwin-x64-baseline", "darwin-x64-modern", "darwin-arm64",
+	"linux-x64-gnu-baseline", "linux-x64-gnu-modern", "linux-arm64-gnu",
+	"linux-x64-musl-baseline", "linux-x64-musl-modern", "linux-arm64-musl",
+	"windows-x64-baseline", "windows-x64-modern", "windows-arm64",
+];
+
+test("authoritative Bun target descriptors contain the exact supported matrix", () => {
+	assert.deepEqual(BUN_TARGET_IDS, EXPECTED);
+	assert.equal(new Set(BUN_TARGET_IDS).size, 12);
+	const matrix = githubBuildMatrix();
+	assert.deepEqual(matrix.include.map(({ id }) => id), EXPECTED);
+	assert.ok(matrix.include.every(({ id, runner, arch }) => id && runner && arch));
+	assert.equal(BUN_TARGETS.find(({ id }) => id === "darwin-x64-baseline").runner, "macos-15-intel");
+	assert.deepEqual(new Set(BUN_TARGETS.filter(({ os, arch }) => os === "darwin" && arch === "x64").map(({ runner }) => runner)), new Set(["macos-15-intel"]));
+	assert.ok(BUN_TARGETS.every(({ runner }) => GITHUB_HOSTED_RUNNERS.includes(runner)));
+	assert.ok(BUN_TARGETS.every(({ runner }) => !["macos-10.15", "macos-11", "macos-12", "macos-13"].includes(runner)));
+	const bunTargetFor = (os, arch, cpu, libc = "") => {
+		const modern = cpu === "modern" ? "" : cpu === "baseline" ? "-baseline" : "";
+		const libcSuffix = libc === "musl" ? "-musl" : "";
+		return `bun-${os}-${arch}${libcSuffix}${modern}`;
+	};
+	for (const target of BUN_TARGETS) {
+		const os = target.os;
+		const base = os === "darwin" ? "darwin" : os === "windows" ? "windows" : "linux";
+		assert.equal(target.bunTarget, bunTargetFor(base, target.arch, target.cpu, target.libc ?? ""));
+		assert.equal(binaryArchiveName(target.id), `pi-${target.id}.${target.archive}`);
+		assert.match(target.clipboardNativePackage, target.libc ? new RegExp(`${target.libc}$`) : /clipboard-/);
+	}
+});
+
+test("release compiler settings and smoke descriptors cover every target", () => {
+	assert.equal(BUN_VERSION, "1.3.14");
+	assert.deepEqual(BUN_BUILD_FLAGS, ["--minify"]);
+	const smoke = githubSmokeMatrix().include;
+	assert.deepEqual(smoke.map(({ target }) => target), EXPECTED);
+	assert.ok(smoke.every(({ runner, executor }) => runner && ["native", "pinned-musl-container"].includes(executor)));
+	for (const target of BUN_TARGETS) {
+		assert.ok(target.runnerOs && target.runnerArch && target.requiredCommands.length > 0);
+		assert.deepEqual(target.executor, target.libc === "musl" ? "pinned-musl-container" : "native");
+	}
+	assert.deepEqual(smoke.filter(({ executor }) => executor === "pinned-musl-container").map(({ target }) => target), [
+		"linux-x64-musl-baseline", "linux-x64-musl-modern", "linux-arm64-musl",
+	]);
+});
+
+test("Linux descriptors include GNU and musl native clipboard packages for both architectures", () => {
+	const packages = BUN_TARGETS.filter((target) => target.os === "linux").map((target) => target.clipboardNativePackage);
+	for (const name of [
+		"clipboard-linux-x64-gnu", "clipboard-linux-arm64-gnu",
+		"clipboard-linux-x64-musl", "clipboard-linux-arm64-musl",
+	]) assert.ok(packages.includes(name), name);
+});

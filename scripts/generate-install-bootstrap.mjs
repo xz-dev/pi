@@ -21,6 +21,7 @@
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BUN_TARGETS, binaryArchiveName, bunTarget } from "./lib/bun-targets.mjs";
 import { REPOSITORY } from "./lib/github-release.mjs";
 
 export const INSTALL_SH_FILENAME = "install.sh";
@@ -28,10 +29,10 @@ export const INSTALL_PS1_FILENAME = "install.ps1";
 export const RELEASE_MANIFEST_FILENAME = "release-manifest.json";
 export const ATTESTATION_BUNDLE_FILENAME = "attestation-subjects.txt";
 
-/** POSIX-family platforms (tar.gz bundles). */
-export const POSIX_PLATFORMS = Object.freeze(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
-/** Windows-family platforms (zip bundles). */
-export const WINDOWS_PLATFORMS = Object.freeze(["windows-arm64", "windows-x64"]);
+/** POSIX-family canonical target IDs (tar.gz bundles). */
+export const POSIX_PLATFORMS = Object.freeze(BUN_TARGETS.filter((target) => target.os !== "windows").map((target) => target.id));
+/** Windows-family canonical target IDs (zip bundles). */
+export const WINDOWS_PLATFORMS = Object.freeze(BUN_TARGETS.filter((target) => target.os === "windows").map((target) => target.id));
 
 /**
  * Canonical per-tag download base URL for a published GitHub Release.
@@ -83,7 +84,8 @@ function assertBootstrapPins(options) {
 	}
 	for (const platform of Object.keys(bundles)) {
 		const bundle = bundles[platform];
-		const expectedName = `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`;
+		const expectedName = binaryArchiveName(platform);
+		bunTarget(platform);
 		if (
 			!bundle ||
 			bundle.file !== expectedName ||
@@ -134,7 +136,7 @@ export function generateInstallSh(options) {
 		Object.entries(pins.bundles).filter(([platform]) => POSIX_PLATFORMS.includes(platform)),
 	);
 	if (Object.keys(posixBundles).length !== POSIX_PLATFORMS.length) {
-		throw new Error("install.sh requires the four canonical POSIX platform bundles");
+		throw new Error(`install.sh requires the ${POSIX_PLATFORMS.length} canonical POSIX target bundles`);
 	}
 	const tagQ = shellSingleQuote(pins.tag);
 	const baseUrlQ = shellSingleQuote(pins.baseUrl);
@@ -210,28 +212,43 @@ file_bytes() {
 \twc -c < "$1" | tr -d '[:space:]'
 }
 
+has_avx2() {
+\tcase "\${PI_XZ_TARGET_CPU:-}" in
+\t\tmodern) return 0 ;;
+\t\tbaseline) return 1 ;;
+\t\t"") ;;
+\t\t*) echo "pi installer: PI_XZ_TARGET_CPU must be modern or baseline" >&2; exit 1 ;;
+\tesac
+\tcase "$(uname -s)" in
+\t\tDarwin) sysctl -n machdep.cpu.leaf7_features 2>/dev/null | grep -Eiq '(^|[[:space:]])AVX2([[:space:]]|$)' ;;
+\t\tLinux) grep -Eiq '(^|[[:space:]])avx2([[:space:]]|$)' /proc/cpuinfo 2>/dev/null ;;
+\t\t*) return 1 ;;
+\tesac
+}
+
+linux_libc() {
+\tcase "\${PI_XZ_TARGET_LIBC:-}" in
+\t\tgnu|musl) printf '%s\\n' "$PI_XZ_TARGET_LIBC"; return ;;
+\t\t"") ;;
+\t\t*) echo "pi installer: PI_XZ_TARGET_LIBC must be gnu or musl" >&2; exit 1 ;;
+\tesac
+\tif command -v getconf >/dev/null 2>&1 && getconf GNU_LIBC_VERSION >/dev/null 2>&1; then echo gnu; return; fi
+\tif ldd --version 2>&1 | grep -qi musl || ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; return; fi
+\techo "pi installer: cannot reliably detect Linux libc (set PI_XZ_TARGET_LIBC=gnu or musl)" >&2
+\texit 1
+}
+
 host_platform() {
 \tos=$(uname -s)
 \tmachine=$(uname -m)
-\tcase "$os" in
-\t\tDarwin)
-\t\t\tcase "$machine" in
-\t\t\t\tarm64|aarch64) echo "darwin-arm64" ;;
-\t\t\t\tx86_64|amd64) echo "darwin-x64" ;;
-\t\t\t\t*) echo "pi installer: unsupported Darwin arch $machine" >&2; exit 1 ;;
-\t\t\tesac
-\t\t\t;;
-\t\tLinux)
-\t\t\tcase "$machine" in
-\t\t\t\tarm64|aarch64) echo "linux-arm64" ;;
-\t\t\t\tx86_64|amd64) echo "linux-x64" ;;
-\t\t\t\t*) echo "pi installer: unsupported Linux arch $machine" >&2; exit 1 ;;
-\t\t\tesac
-\t\t\t;;
-\t\t*)
-\t\t\techo "pi installer: unsupported OS $os" >&2
-\t\t\texit 1
-\t\t\t;;
+\tcase "$os:$machine" in
+\t\tDarwin:arm64|Darwin:aarch64) echo darwin-arm64 ;;
+\t\tDarwin:x86_64|Darwin:amd64) if has_avx2; then echo darwin-x64-modern; else echo darwin-x64-baseline; fi ;;
+\t\tLinux:arm64|Linux:aarch64) echo "linux-arm64-$(linux_libc)" ;;
+\t\tLinux:x86_64|Linux:amd64)
+\t\t\tlibc=$(linux_libc)
+\t\t\tif has_avx2; then echo "linux-x64-$libc-modern"; else echo "linux-x64-$libc-baseline"; fi ;;
+\t\t*) echo "pi installer: unsupported host $os/$machine" >&2; exit 1 ;;
 \tesac
 }
 
@@ -482,7 +499,7 @@ export function generateInstallPs1(options) {
 		Object.entries(pins.bundles).filter(([platform]) => WINDOWS_PLATFORMS.includes(platform)),
 	);
 	if (Object.keys(windowsBundles).length !== WINDOWS_PLATFORMS.length) {
-		throw new Error("install.ps1 requires the two canonical Windows platform bundles");
+		throw new Error(`install.ps1 requires the ${WINDOWS_PLATFORMS.length} canonical Windows target bundles`);
 	}
 	const q = (value) => `'${String(value).replaceAll("'", "''")}'`;
 
@@ -523,10 +540,27 @@ function Get-Sha256Hex([string] $Path) {
 	return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
 }
 
+function Test-Avx2 {
+	if ($env:PI_XZ_TARGET_CPU -eq 'modern') { return $true }
+	if ($env:PI_XZ_TARGET_CPU -eq 'baseline') { return $false }
+	if ($env:PI_XZ_TARGET_CPU) { throw 'pi installer: PI_XZ_TARGET_CPU must be modern or baseline' }
+	# IsProcessorFeaturePresent(40) is PF_AVX2_INSTRUCTIONS_AVAILABLE.
+	try {
+		Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class PiCpu { [DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(uint feature); }'
+		return [PiCpu]::IsProcessorFeaturePresent(40)
+	} catch {
+		# Reliable detection is unavailable: choose the compatible baseline.
+		return $false
+	}
+}
+
 function Get-HostPlatform {
 	$archText = $env:PROCESSOR_ARCHITECTURE
+	if ($env:PI_XZ_TARGET_ARCH) { $archText = $env:PI_XZ_TARGET_ARCH }
 	if ($archText -match 'ARM64') { return 'windows-arm64' }
-	return 'windows-x64'
+	if ($archText -notmatch 'AMD64|x64') { throw "pi installer: unsupported Windows architecture $archText" }
+	if (Test-Avx2) { return 'windows-x64-modern' }
+	return 'windows-x64-baseline'
 }
 
 function Select-Bundle {

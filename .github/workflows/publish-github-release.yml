@@ -3,207 +3,166 @@ name: Publish GitHub Release
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions: {}
-
 concurrency:
   group: publish-github-release-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
-  build-release-candidate:
-    if: >-
-      github.repository == 'xz-dev/pi' &&
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+  release-matrix:
+    if: github.repository == 'xz-dev/pi' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+      smoke-matrix: ${{ steps.targets.outputs.smoke-matrix }}
     steps:
-      - name: Checkout exact generated main commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify trusted GitHub context and clean input
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
+      - id: targets
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = 'xz-dev/pi'
-          test "$GITHUB_REF" = 'refs/heads/main'
-          case "$GITHUB_EVENT_NAME" in
-            push|workflow_dispatch) ;;
-            *) echo "::error::Refusing event $GITHUB_EVENT_NAME"; exit 1 ;;
-          esac
+          test "$GITHUB_REPOSITORY" = xz-dev/pi && test "$GITHUB_REF" = refs/heads/main
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          echo "matrix=$(node scripts/lib/bun-targets.mjs --matrix)" >> "$GITHUB_OUTPUT"
+          echo "smoke-matrix=$(node scripts/lib/bun-targets.mjs --smoke-matrix)" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
-          cache: npm
+  validate-source:
+    needs: release-matrix
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22", cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: sudo apt-get update && sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep tmux
+      - run: sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
+      - run: npm run hydrate:model-data && npm run build && npm run check
+      - run: ./test.sh
+      - run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA" && test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.3.14
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Install system dependencies
+  build-target:
+    needs: release-matrix
+    strategy: { fail-fast: false, matrix: "${{ fromJSON(needs.release-matrix.outputs.matrix) }}" }
+    runs-on: ${{ matrix.runner }}
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22", cache: npm }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with: { bun-version: "1.3.14" }
+      - run: npm ci --ignore-scripts
+      - run: npm run hydrate:model-data && npm run build
+      - name: Build architecture-matched downstream musl clipboard addon
+        if: contains(matrix.id, '-musl')
         shell: bash
+        run: scripts/build-musl-clipboard.sh "$RUNNER_TEMP/clipboard-musl" '${{ matrix.arch }}'
+      - name: Build one canonical production target
+        shell: bash
+        env: { NODE_ENV: production }
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep tmux
-          sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
+          version=$(node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.GITHUB_SHA.slice(0, 8)')
+          args=(--skip-install --skip-build --platform '${{ matrix.id }}' --out "$RUNNER_TEMP/target" --distribution-version "$version")
+          if [[ '${{ matrix.id }}' == *-musl ]]; then args+=(--clipboard-musl-dir "$RUNNER_TEMP/clipboard-musl"); fi
+          scripts/build-binaries.sh "${args[@]}"
+          test "$(find "$RUNNER_TEMP/target" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "github-release-target-${{ github.sha }}-${{ matrix.id }}", path: "${{ runner.temp }}/target/pi-*", if-no-files-found: error, retention-days: 14 }
 
-      - name: Hydrate model data
-        run: npm run hydrate:model-data
-
-      - name: Build packages
-        run: npm run build
-
-      - name: Check
-        run: npm run check
-
-      - name: Install cross-platform native bindings for Release tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          clipboard_version=$(node -p "require('./packages/coding-agent/package.json').optionalDependencies['@mariozechner/clipboard']")
-          npm install --include=optional --no-save --package-lock=false --force --ignore-scripts \
-            "@mariozechner/clipboard@$clipboard_version" \
-            "@mariozechner/clipboard-darwin-arm64@$clipboard_version" \
-            "@mariozechner/clipboard-darwin-x64@$clipboard_version" \
-            "@mariozechner/clipboard-linux-x64-gnu@$clipboard_version" \
-            "@mariozechner/clipboard-linux-arm64-gnu@$clipboard_version" \
-            "@mariozechner/clipboard-win32-x64-msvc@$clipboard_version" \
-            "@mariozechner/clipboard-win32-arm64-msvc@$clipboard_version"
-
-      - name: Test
-        run: ./test.sh
-
-      - name: Prepare immutable GitHub Release candidate (six platform bundles)
-        shell: bash
-        run: |
-          set -euo pipefail
-          node scripts/prepare-github-release.mjs --out "$RUNNER_TEMP/pi-github-release"
-          node scripts/verify-github-release.mjs all "$RUNNER_TEMP/pi-github-release/release-manifest.json"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          status=$(git status --porcelain=v1 --untracked-files=all)
-          if [[ -n "$status" ]]; then
-            echo "::error::Release preparation or verification modified the exact source checkout"
-            printf '%s\n' "$status"
-            exit 1
-          fi
-
-      - name: Upload exact Release candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: github-release-candidate-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/pi-github-release/*.tar.gz
-            ${{ runner.temp }}/pi-github-release/*.zip
-            ${{ runner.temp }}/pi-github-release/release-manifest.json
-            ${{ runner.temp }}/pi-github-release/install.sh
-            ${{ runner.temp }}/pi-github-release/install.ps1
-            ${{ runner.temp }}/pi-github-release/SHA256SUMS
-            ${{ runner.temp }}/pi-github-release/attestation-subjects.txt
-            ${{ runner.temp }}/pi-github-release/version
-            ${{ runner.temp }}/pi-github-release/tag
-          if-no-files-found: error
-          retention-days: 14
+  aggregate-release-candidate:
+    needs: [release-matrix, validate-source, build-target]
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22" }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { pattern: "github-release-target-${{ github.sha }}-*", path: "${{ runner.temp }}/prebuilt", merge-multiple: true }
+      - run: |
+          node scripts/prepare-github-release.mjs --out "$RUNNER_TEMP/pi-github-release" --prebuilt "$RUNNER_TEMP/prebuilt"
+          test "$(find "$RUNNER_TEMP/prebuilt" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 12
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release", if-no-files-found: error, retention-days: 14 }
 
   accept-release-candidate:
-    needs: build-release-candidate
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
+    needs: [release-matrix, aggregate-release-candidate]
+    strategy: { fail-fast: false, matrix: "${{ fromJSON(needs.release-matrix.outputs.smoke-matrix) }}" }
+    runs-on: ${{ matrix.runner }}
+    permissions: { contents: read }
     steps:
-      - name: Checkout exact verifier source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
-
-      - name: Download exact Release candidate
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: github-release-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/pi-github-release
-
-      - name: Verify all bundles and run host-native smoke
-        run: node scripts/verify-github-release.mjs all "${{ runner.temp }}/pi-github-release/release-manifest.json"
-
-  publish-release:
-    needs:
-      - build-release-candidate
-      - accept-release-candidate
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    steps:
-      - name: Checkout exact publisher source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
-
-      - name: Download exact Release candidate
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: github-release-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/pi-github-release
-
-      - name: Verify exact candidate and publication context
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22" }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with: { bun-version: "1.3.14" }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
+      - name: Execute final native archive
+        if: matrix.executor == 'native'
         shell: bash
+        env: { PI_XZ_EXECUTOR: native }
+        run: |
+          candidate="$RUNNER_TEMP/pi-github-release"; version=$(node -p 'require(process.argv[1]).distributionVersion' "$candidate/release-manifest.json")
+          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
+          mkdir -p "$RUNNER_TEMP/smoke-record"; node scripts/smoke-binary-release.mjs "$candidate/$archive" '${{ matrix.target }}' "$version" "$RUNNER_TEMP/smoke-record/${{ matrix.target }}.json"
+      - name: Execute final archive in immutable native musl userspace
+        if: matrix.executor == 'pinned-musl-container'
+        shell: bash
+        env: { PI_XZ_CONTAINER_IMAGE: "${{ matrix.containerImage }}" }
         run: |
           set -euo pipefail
-          candidate="$RUNNER_TEMP/pi-github-release"
-          test "$GITHUB_REPOSITORY" = 'xz-dev/pi'
-          test "$GITHUB_REF" = 'refs/heads/main'
-          case "$GITHUB_EVENT_NAME" in
-            push|workflow_dispatch) ;;
-            *) echo "::error::Refusing event $GITHUB_EVENT_NAME"; exit 1 ;;
-          esac
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test -z "$(git status --porcelain=v1 --untracked-files=all)"
-          test "$(<"$candidate/tag")" = "xz-v$(<"$candidate/version")"
-          test "$(node -e 'const fs=require("node:fs");const p=process.argv[1];const m=JSON.parse(fs.readFileSync(p,"utf8"));process.stdout.write(m.commit)' "$candidate/release-manifest.json")" = "$GITHUB_SHA"
-          while IFS= read -r subject; do
-            test "$subject" = "$(basename "$subject")"
-            test -f "$candidate/$subject"
-          done < "$candidate/attestation-subjects.txt"
-          node scripts/verify-github-release.mjs all "$candidate/release-manifest.json"
+          candidate="$RUNNER_TEMP/pi-github-release"; version=$(node -p 'require(process.argv[1]).distributionVersion' "$candidate/release-manifest.json")
+          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
+          mkdir -p "$RUNNER_TEMP/smoke-record" "$RUNNER_TEMP/musl-tui" "$RUNNER_TEMP/musl-extracted"
+          tar -xzf "$candidate/$archive" -C "$RUNNER_TEMP/musl-extracted"
+          docker run --rm --network none -e TERM=xterm-256color -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/musl-extracted:/extracted:ro" -v "$RUNNER_TEMP/musl-tui:/evidence" -w /repo '${{ matrix.containerImage }}' python3 scripts/smoke-unix-tui.py /extracted/pi/pi > "$RUNNER_TEMP/musl-tui/tui.json"
+          docker run --rm --network none -e PI_XZ_EXECUTOR=pinned-musl-container -e PI_XZ_CONTAINER_DIGEST='${{ matrix.containerImage }}' -e PI_XZ_TUI_EVIDENCE=/evidence/tui.json -e RUNNER_NAME -e RUNNER_OS -e RUNNER_ARCH -e ImageOS -e ImageVersion -v "$PWD:/repo:ro" -v "$candidate:/release:ro" -v "$RUNNER_TEMP/smoke-record:/record" -v "$RUNNER_TEMP/musl-tui:/evidence:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-binary-release.mjs "/release/$archive" '${{ matrix.target }}' "$version" "/record/${{ matrix.target }}.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "github-release-smoke-${{ github.sha }}-${{ matrix.target }}", path: "${{ runner.temp }}/smoke-record/${{ matrix.target }}.json", if-no-files-found: error, retention-days: 14 }
 
+  acceptance-record:
+    needs: [release-matrix, aggregate-release-candidate, accept-release-candidate]
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22" }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { pattern: "github-release-smoke-${{ github.sha }}-*", path: "${{ runner.temp }}/smoke-records" }
+      - run: |
+          candidate="$RUNNER_TEMP/pi-github-release"
+          node scripts/aggregate-binary-acceptance.mjs "$RUNNER_TEMP/smoke-records" "$candidate/release-manifest.json" "$candidate/binary-acceptance.json"
+          PI_XZ_VERIFY_TARGET=linux-x64-gnu-modern node scripts/verify-github-release.mjs all "$candidate/release-manifest.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "github-release-accepted-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release", if-no-files-found: error, retention-days: 14 }
+
+  publish-release:
+    needs: acceptance-record
+    runs-on: ubuntu-24.04
+    permissions: { contents: write, id-token: write, attestations: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22" }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: "github-release-accepted-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
+      - run: node scripts/verify-github-release.mjs all "$RUNNER_TEMP/pi-github-release/release-manifest.json"
       - name: Attest exact Release subjects
         id: attest
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
@@ -214,47 +173,17 @@ jobs:
             ${{ runner.temp }}/pi-github-release/release-manifest.json
             ${{ runner.temp }}/pi-github-release/install.sh
             ${{ runner.temp }}/pi-github-release/install.ps1
+            ${{ runner.temp }}/pi-github-release/binary-acceptance.json
             ${{ runner.temp }}/pi-github-release/SHA256SUMS
-
       - name: Stage and verify public attestation bundle
-        shell: bash
-        env:
-          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        env: { BUNDLE_PATH: "${{ steps.attest.outputs.bundle-path }}" }
         run: |
           set -euo pipefail
-          candidate="$RUNNER_TEMP/pi-github-release"
-          subjects="$candidate/attestation-subjects.txt"
-          bundle="$RUNNER_TEMP/public-attestation-bundle.jsonl"
-          test -s "$BUNDLE_PATH"
-          mapfile -t subject_names < "$subjects"
-          test "${#subject_names[@]}" -eq 10
-          for subject in "${subject_names[@]}"; do
-            test "$subject" = "$(basename "$subject")"
-          done
-          cp "$BUNDLE_PATH" "$bundle"
-          for subject in "${subject_names[@]}"; do
-            gh attestation verify "$candidate/$subject" \
-              --bundle "$bundle" \
-              --repo xz-dev/pi \
-              --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml \
-              --source-ref refs/heads/main \
-              --source-digest "$GITHUB_SHA" \
-              --deny-self-hosted-runners
-          done
-          empty_gh_config="$RUNNER_TEMP/empty-gh-config"
-          mkdir "$empty_gh_config"
-          GH_CONFIG_DIR="$empty_gh_config" GH_TOKEN= GITHUB_TOKEN= gh attestation verify "$candidate/${subject_names[0]}" \
-            --bundle "$bundle" \
-            --repo xz-dev/pi \
-            --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml \
-            --source-ref refs/heads/main \
-            --source-digest "$GITHUB_SHA" \
-            --deny-self-hosted-runners \
-            --format json > "$RUNNER_TEMP/public-attestation-verification.json"
-          test -s "$RUNNER_TEMP/public-attestation-verification.json"
+          candidate="$RUNNER_TEMP/pi-github-release"; subjects="$candidate/attestation-subjects.txt"; bundle="$RUNNER_TEMP/public-attestation-bundle.jsonl"
+          test -s "$BUNDLE_PATH"; cp "$BUNDLE_PATH" "$bundle"; mapfile -t names < "$subjects"; test "${#names[@]}" -eq 17
+          for subject in "${names[@]}"; do gh attestation verify "$candidate/$subject" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners; done
+          empty_gh_config="$RUNNER_TEMP/empty-gh-config"; mkdir "$empty_gh_config"; GH_CONFIG_DIR="$empty_gh_config" GH_TOKEN= GITHUB_TOKEN= gh attestation verify "$candidate/binary-acceptance.json" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners --format json > "$RUNNER_TEMP/public-attestation-verification.json"
           cp "$bundle" "$subjects"
-
       - name: Publish immutable GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
         run: node scripts/publish-github-release.mjs "${{ runner.temp }}/pi-github-release/release-manifest.json"

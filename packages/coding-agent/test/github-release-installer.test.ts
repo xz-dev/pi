@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -24,8 +24,17 @@ beforeAll(async () => {
 	// layout); install.sh unwraps exactly that wrapper before the staging smoke.
 	const bundle = join(releaseDir, "pi");
 	mkdirSync(bundle, { recursive: true });
-	writeFileSync(join(bundle, "pi"), `#!/bin/sh\ncase "$1" in --version) echo ${VERSION};; --help) exit 0;; esac\n`, { mode: 0o755 });
-	writeFileSync(join(bundle, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: VERSION, piConfig: { distribution: "xz-dev" } }));
+	writeFileSync(join(bundle, "pi"), `#!/bin/sh\ncase "$1" in --version) echo ${VERSION};; --help) exit 0;; esac\n`, {
+		mode: 0o755,
+	});
+	writeFileSync(
+		join(bundle, "package.json"),
+		JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			version: VERSION,
+			piConfig: { distribution: "xz-dev" },
+		}),
+	);
 	writeFileSync(join(bundle, "README.md"), "fixture\n");
 	writeFileSync(join(bundle, "photon_rs_bg.wasm"), "wasm\n");
 	const archive = join(releaseDir, "pi-linux-x64.tar.gz");
@@ -47,27 +56,59 @@ beforeAll(async () => {
 	};
 	for (const file of Object.values(bundleFiles)) copyFileSync(archive, join(releaseDir, file));
 	const bundles = Object.fromEntries(
-		Object.entries(bundleFiles).map(([platform, file]) => [platform, { file, bytes: archiveBytes, sha256: archiveSha }]),
+		Object.entries(bundleFiles).map(([platform, file]) => [
+			platform,
+			{ file, bytes: archiveBytes, sha256: archiveSha },
+		]),
 	);
 	const manifest = {
-		schemaVersion: 3, repository: "xz-dev/pi", tag: TAG, distributionVersion: VERSION, apiVersion: "0.82.1", commit: COMMIT,
-		packaging: "binary", layoutVersion: 1,
+		schemaVersion: 3,
+		repository: "xz-dev/pi",
+		tag: TAG,
+		distributionVersion: VERSION,
+		apiVersion: "0.82.1",
+		commit: COMMIT,
+		packaging: "binary",
+		layoutVersion: 1,
 		bundles,
 		requiredPaths: Object.fromEntries(
-			Object.keys(bundles).map((platform) => [platform, ["pi", "pi/package.json", "pi/README.md", "pi/photon_rs_bg.wasm"]]),
+			Object.keys(bundles).map((platform) => [
+				platform,
+				["pi", "pi/package.json", "pi/README.md", "pi/photon_rs_bg.wasm"],
+			]),
 		),
-		installer: { posix: { file: "install.sh" }, windows: { file: "install.ps1" }, checksums: { file: "SHA256SUMS", algorithm: "sha256" } },
-		attestation: { repository: "xz-dev/pi", signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml", signerRef: "refs/heads/main", denySelfHostedRunners: true, subjectsFile: "attestation-subjects.txt" },
+		installer: {
+			posix: { file: "install.sh" },
+			windows: { file: "install.ps1" },
+			checksums: { file: "SHA256SUMS", algorithm: "sha256" },
+		},
+		attestation: {
+			repository: "xz-dev/pi",
+			signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
+			signerRef: "refs/heads/main",
+			denySelfHostedRunners: true,
+			subjectsFile: "attestation-subjects.txt",
+		},
 	};
 	writeFileSync(join(releaseDir, "release-manifest.json"), `${JSON.stringify(manifest)}\n`);
 	const manifestSha = sha(join(releaseDir, "release-manifest.json"));
 	const generator = await import(join(ROOT, "scripts", "generate-install-bootstrap.mjs"));
-	generator.writeInstallBootstrap(releaseDir, { tag: TAG, baseUrl: "http://127.0.0.1/", manifestSha256: manifestSha, commit: COMMIT, distributionVersion: VERSION, bundles: manifest.bundles, attestation: manifest.attestation });
+	generator.writeInstallBootstrap(releaseDir, {
+		tag: TAG,
+		baseUrl: "http://127.0.0.1/",
+		manifestSha256: manifestSha,
+		commit: COMMIT,
+		distributionVersion: VERSION,
+		bundles: manifest.bundles,
+		attestation: manifest.attestation,
+	});
 	writeFileSync(
 		join(releaseDir, "SHA256SUMS"),
 		`${manifestSha}  release-manifest.json\n${Object.values(bundleFiles)
 			.map((file) => `${archiveSha}  ${file}`)
-			.join("\n")}\n${sha(join(releaseDir, "install.sh"))}  install.sh\n${sha(join(releaseDir, "install.ps1"))}  install.ps1\n`,
+			.join(
+				"\n",
+			)}\n${sha(join(releaseDir, "install.sh"))}  install.sh\n${sha(join(releaseDir, "install.ps1"))}  install.ps1\n`,
 	);
 	writeFileSync(
 		join(releaseDir, "attestation-subjects.txt"),
@@ -75,7 +116,11 @@ beforeAll(async () => {
 	);
 	server = createServer((request, response) => {
 		const file = join(releaseDir, new URL(request.url ?? "/", baseUrl).pathname.slice(1));
-		try { response.end(readFileSync(file)); } catch { response.writeHead(404).end(); }
+		try {
+			response.end(readFileSync(file));
+		} catch {
+			response.writeHead(404).end();
+		}
 	});
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const address = server.address();
@@ -85,7 +130,10 @@ beforeAll(async () => {
 	writeFileSync(join(releaseDir, "install.sh"), script, { mode: 0o755 });
 });
 
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); rmSync(releaseDir, { recursive: true, force: true }); });
+afterAll(async () => {
+	await new Promise<void>((resolve) => server.close(() => resolve()));
+	rmSync(releaseDir, { recursive: true, force: true });
+});
 
 function runProcess(
 	command: string,
