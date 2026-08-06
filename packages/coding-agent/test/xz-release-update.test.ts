@@ -10,7 +10,20 @@ const TAG = `xz-v${NEW_VERSION}`;
 const EXACT_BASE = `https://github.com/xz-dev/pi/releases/download/${TAG}/`;
 const LATEST_MANIFEST = "https://github.com/xz-dev/pi/releases/latest/download/release-manifest.json";
 
-const BINARY_PLATFORMS = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
+const BINARY_PLATFORMS = [
+	"darwin-x64-baseline",
+	"darwin-x64-modern",
+	"darwin-arm64",
+	"linux-x64-gnu-baseline",
+	"linux-x64-gnu-modern",
+	"linux-arm64-gnu",
+	"linux-x64-musl-baseline",
+	"linux-x64-musl-modern",
+	"linux-arm64-musl",
+	"windows-x64-baseline",
+	"windows-x64-modern",
+	"windows-arm64",
+];
 const BUNDLE_NAMES = Object.fromEntries(
 	BINARY_PLATFORMS.map((platform) => [
 		platform,
@@ -24,6 +37,7 @@ function requiredPaths(platform: string): string[] {
 		"package.json",
 		"README.md",
 		"CHANGELOG.md",
+		"THIRD_PARTY_NOTICES.md",
 		"photon_rs_bg.wasm",
 		"theme",
 		"theme/dark.json",
@@ -36,15 +50,55 @@ function requiredPaths(platform: string): string[] {
 		"node_modules/@mariozechner/clipboard",
 	];
 	const native: Record<string, string[]> = {
-		"darwin-arm64": ["clipboard-darwin-arm64", "clipboard.darwin-arm64.node", "native/darwin/prebuilds/darwin-arm64", "darwin-modifiers.node"],
-		"darwin-x64": ["clipboard-darwin-x64", "clipboard.darwin-x64.node", "native/darwin/prebuilds/darwin-x64", "darwin-modifiers.node"],
-		"linux-arm64": ["clipboard-linux-arm64-gnu", "clipboard.linux-arm64-gnu.node"],
-		"linux-x64": ["clipboard-linux-x64-gnu", "clipboard.linux-x64-gnu.node"],
-		"windows-arm64": ["clipboard-win32-arm64-msvc", "clipboard.win32-arm64-msvc.node", "native/win32/prebuilds/win32-arm64", "win32-console-mode.node"],
-		"windows-x64": ["clipboard-win32-x64-msvc", "clipboard.win32-x64-msvc.node", "native/win32/prebuilds/win32-x64", "win32-console-mode.node"],
+		"darwin-x64-baseline": [
+			"clipboard-darwin-x64",
+			"clipboard.darwin-x64.node",
+			"native/darwin/prebuilds/darwin-x64",
+			"darwin-modifiers.node",
+		],
+		"darwin-x64-modern": [
+			"clipboard-darwin-x64",
+			"clipboard.darwin-x64.node",
+			"native/darwin/prebuilds/darwin-x64",
+			"darwin-modifiers.node",
+		],
+		"darwin-arm64": [
+			"clipboard-darwin-arm64",
+			"clipboard.darwin-arm64.node",
+			"native/darwin/prebuilds/darwin-arm64",
+			"darwin-modifiers.node",
+		],
+		"linux-x64-gnu-baseline": ["clipboard-linux-x64-gnu", "clipboard.linux-x64-gnu.node"],
+		"linux-x64-gnu-modern": ["clipboard-linux-x64-gnu", "clipboard.linux-x64-gnu.node"],
+		"linux-arm64-gnu": ["clipboard-linux-arm64-gnu", "clipboard.linux-arm64-gnu.node"],
+		"linux-x64-musl-baseline": ["clipboard-linux-x64-musl", "clipboard.linux-x64-musl.node"],
+		"linux-x64-musl-modern": ["clipboard-linux-x64-musl", "clipboard.linux-x64-musl.node"],
+		"linux-arm64-musl": ["clipboard-linux-arm64-musl", "clipboard.linux-arm64-musl.node"],
+		"windows-x64-baseline": [
+			"clipboard-win32-x64-msvc",
+			"clipboard.win32-x64-msvc.node",
+			"native/win32/prebuilds/win32-x64",
+			"win32-console-mode.node",
+		],
+		"windows-x64-modern": [
+			"clipboard-win32-x64-msvc",
+			"clipboard.win32-x64-msvc.node",
+			"native/win32/prebuilds/win32-x64",
+			"win32-console-mode.node",
+		],
+		"windows-arm64": [
+			"clipboard-win32-arm64-msvc",
+			"clipboard.win32-arm64-msvc.node",
+			"native/win32/prebuilds/win32-arm64",
+			"win32-console-mode.node",
+		],
 	};
 	const [packageName, nativeFile, helperDir, helperFile] = native[platform];
 	common.push(`node_modules/@mariozechner/${packageName}`, `node_modules/@mariozechner/clipboard/${nativeFile}`);
+	if (platform.includes("-musl")) {
+		common.push("clipboard-native-provenance.json");
+		common.push(`node_modules/@mariozechner/${packageName}/LICENSE`);
+	}
 	if (helperDir && helperFile) common.push(helperDir, `${helperDir}/${helperFile}`);
 	return common;
 }
@@ -57,7 +111,7 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
 		]),
 	);
 	return {
-		schemaVersion: 3,
+		schemaVersion: 4,
 		repository: "xz-dev/pi",
 		tag: TAG,
 		distributionVersion: NEW_VERSION,
@@ -127,7 +181,7 @@ describe("xz-dev GitHub Release binary updates", () => {
 		expect(release).toMatchObject({
 			version: NEW_VERSION,
 			exactBaseUrl: EXACT_BASE,
-			manifest: { tag: TAG, packaging: "binary", schemaVersion: 3 },
+			manifest: { tag: TAG, packaging: "binary", schemaVersion: 4 },
 		});
 		expect(release?.installerName).toBe(process.platform === "win32" ? "install.ps1" : "install.sh");
 		expect(release?.manifestSha256).toBe(createHash("sha256").update(JSON.stringify(manifest())).digest("hex"));
@@ -143,8 +197,11 @@ describe("xz-dev GitHub Release binary updates", () => {
 		);
 	});
 
-	it("rejects non-binary, malformed, wrong-repo, and wrong-attestation manifests", async () => {
+	it("rejects non-binary, malformed, wrong-repo, wrong-attestation, and legacy v3 manifests", async () => {
 		allowNetwork();
+		stubFetch(manifest({ schemaVersion: 3 }));
+		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/manifest identity/);
+
 		stubFetch(manifest({ schemaVersion: 2 }));
 		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/manifest identity/);
 
@@ -171,23 +228,43 @@ describe("xz-dev GitHub Release binary updates", () => {
 		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/attestation policy/);
 	});
 
-	it("rejects manifests that do not cover the exact six platform bundles", async () => {
+	it("rejects manifests that do not cover the exact twelve platform bundles", async () => {
 		allowNetwork();
 		const reduced = manifest();
 		delete (reduced as Record<string, unknown>).bundles;
 		(reduced as Record<string, unknown>).bundles = Object.fromEntries(
-			Object.entries(manifest().bundles as Record<string, unknown>).slice(0, 5),
+			Object.entries(manifest().bundles as Record<string, unknown>).slice(0, 11),
 		);
 		stubFetch(reduced);
-		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/six canonical platforms/);
+		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/twelve canonical platforms/);
 
 		const wrongName = manifest();
-		(wrongName.bundles as Record<string, Record<string, unknown>>)["linux-x64"] = {
-			...((wrongName.bundles as Record<string, Record<string, unknown>>)["linux-x64"] as object),
-			file: "pi-linux-x64.other",
+		(wrongName.bundles as Record<string, Record<string, unknown>>)["linux-x64-gnu-modern"] = {
+			...((wrongName.bundles as Record<string, Record<string, unknown>>)["linux-x64-gnu-modern"] as object),
+			file: "pi-linux-x64-gnu-modern.other",
 		};
 		stubFetch(wrongName);
 		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/Invalid bundle metadata/);
+	});
+
+	it("requires the exact v4 schemaVersion 12-target inventory with musl provenance", async () => {
+		allowNetwork();
+		stubFetch();
+		const release = await getLatestXzRelease(VERSION);
+		expect(release?.manifest.schemaVersion).toBe(4);
+		const platforms = Object.keys(release!.manifest.bundles).sort();
+		expect(platforms).toEqual([...BINARY_PLATFORMS].sort());
+		expect(platforms).toHaveLength(12);
+		// Each musl bundle must require the reproducible native provenance file
+		// and the musl clipboard package LICENSE.
+		for (const platform of BINARY_PLATFORMS) {
+			if (!platform.includes("-musl")) continue;
+			const muslPackage = platform.includes("arm64") ? "clipboard-linux-arm64-musl" : "clipboard-linux-x64-musl";
+			expect(release!.manifest.requiredPaths[platform]).toContain("clipboard-native-provenance.json");
+			expect(release!.manifest.requiredPaths[platform]).toContain(
+				`node_modules/@mariozechner/${muslPackage}/LICENSE`,
+			);
+		}
 	});
 
 	it("rejects manifests whose tag/commit/version disagree", async () => {
@@ -205,7 +282,7 @@ describe("xz-dev GitHub Release binary updates", () => {
 	it("requires a requiredPaths inventory for every platform", async () => {
 		allowNetwork();
 		const missingPaths = manifest();
-		delete (missingPaths.requiredPaths as Record<string, unknown>)["windows-x64"];
+		delete (missingPaths.requiredPaths as Record<string, unknown>)["windows-x64-modern"];
 		stubFetch(missingPaths);
 		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/requiredPaths must cover exactly/);
 	});
@@ -213,9 +290,9 @@ describe("xz-dev GitHub Release binary updates", () => {
 	it("rejects unsafe required paths", async () => {
 		allowNetwork();
 		const badPaths = manifest();
-		const linux = [...(badPaths.requiredPaths as Record<string, string[]>)["linux-x64"]];
+		const linux = [...(badPaths.requiredPaths as Record<string, string[]>)["linux-x64-gnu-modern"]];
 		linux.push("../escape");
-		(badPaths.requiredPaths as Record<string, string[]>)["linux-x64"] = linux;
+		(badPaths.requiredPaths as Record<string, string[]>)["linux-x64-gnu-modern"] = linux;
 		stubFetch(badPaths);
 		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/does not match canonical inventory/);
 	});

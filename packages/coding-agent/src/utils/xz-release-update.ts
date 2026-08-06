@@ -4,6 +4,7 @@ import { closeSync, mkdtempSync, openSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getPiUserAgent } from "./pi-user-agent.ts";
+import { XZ_RELEASE_BINARY_CONTRACT } from "./xz-release-targets.generated.ts";
 
 const REPOSITORY = "xz-dev/pi";
 const LATEST_MANIFEST_URL = `https://github.com/${REPOSITORY}/releases/latest/download/release-manifest.json`;
@@ -21,49 +22,14 @@ const INSTALLER_MAX_BYTES = 1024 * 1024;
 const BUNDLE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10000;
 
-const BINARY_PLATFORMS = Object.freeze([
-	"darwin-arm64",
-	"darwin-x64",
-	"linux-arm64",
-	"linux-x64",
-	"windows-arm64",
-	"windows-x64",
-]);
-
-function canonicalRequiredPaths(platform: string): string[] {
-	const common = [
-		platform.startsWith("windows-") ? "pi.exe" : "pi",
-		"package.json",
-		"README.md",
-		"CHANGELOG.md",
-		"photon_rs_bg.wasm",
-		"theme",
-		"theme/dark.json",
-		"theme/light.json",
-		"theme/theme-schema.json",
-		"assets",
-		"export-html",
-		"docs",
-		"examples",
-		"node_modules/@mariozechner/clipboard",
-	];
-	const native = {
-		"darwin-arm64": ["clipboard-darwin-arm64", "clipboard.darwin-arm64.node", "native/darwin/prebuilds/darwin-arm64", "darwin-modifiers.node"],
-		"darwin-x64": ["clipboard-darwin-x64", "clipboard.darwin-x64.node", "native/darwin/prebuilds/darwin-x64", "darwin-modifiers.node"],
-		"linux-arm64": ["clipboard-linux-arm64-gnu", "clipboard.linux-arm64-gnu.node"],
-		"linux-x64": ["clipboard-linux-x64-gnu", "clipboard.linux-x64-gnu.node"],
-		"windows-arm64": ["clipboard-win32-arm64-msvc", "clipboard.win32-arm64-msvc.node", "native/win32/prebuilds/win32-arm64", "win32-console-mode.node"],
-		"windows-x64": ["clipboard-win32-x64-msvc", "clipboard.win32-x64-msvc.node", "native/win32/prebuilds/win32-x64", "win32-console-mode.node"],
-	}[platform];
-	if (!native) return fail(`Unknown binary platform: ${platform}`);
-	const [packageName, nativeFile, helperDir, helperFile] = native;
-	common.push(`node_modules/@mariozechner/${packageName}`);
-	common.push(`node_modules/@mariozechner/clipboard/${nativeFile}`);
-	if (helperDir && helperFile) {
-		common.push(helperDir, `${helperDir}/${helperFile}`);
-	}
-	return common;
-}
+const BINARY_PLATFORMS = Object.freeze(XZ_RELEASE_BINARY_CONTRACT.targets.map((target) => target.platform));
+const ARCHIVE_NAMES = Object.freeze(
+	Object.fromEntries(XZ_RELEASE_BINARY_CONTRACT.targets.map((target) => [target.platform, target.archive])),
+);
+const REQUIRED_PATHS = Object.freeze(
+	Object.fromEntries(XZ_RELEASE_BINARY_CONTRACT.targets.map((target) => [target.platform, target.requiredPaths])),
+);
+const MANIFEST_SCHEMA_VERSION = XZ_RELEASE_BINARY_CONTRACT.schemaVersion;
 
 interface XzBundle {
 	file: string;
@@ -72,7 +38,7 @@ interface XzBundle {
 }
 
 export interface XzReleaseManifest {
-	schemaVersion: 3;
+	schemaVersion: typeof MANIFEST_SCHEMA_VERSION;
 	repository: typeof REPOSITORY;
 	tag: string;
 	distributionVersion: string;
@@ -81,7 +47,7 @@ export interface XzReleaseManifest {
 	packaging: "binary";
 	layoutVersion: 1;
 	bundles: Record<string, XzBundle>;
-	requiredPaths: Record<string, string[]>;
+	requiredPaths: Record<string, readonly string[]>;
 	installer: {
 		posix: { file: typeof INSTALL_SH_FILE };
 		windows: { file: typeof INSTALL_PS1_FILE };
@@ -175,7 +141,7 @@ function parseManifest(value: unknown): XzReleaseManifest {
 	]);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key))) return fail("Invalid release manifest schema");
 	if (
-		value.schemaVersion !== 3 ||
+		value.schemaVersion !== MANIFEST_SCHEMA_VERSION ||
 		value.repository !== REPOSITORY ||
 		value.packaging !== "binary" ||
 		value.layoutVersion !== 1
@@ -197,7 +163,7 @@ function parseManifest(value: unknown): XzReleaseManifest {
 	const bundles: Record<string, XzBundle> = {};
 	const bundlePlatforms = Object.keys(value.bundles).sort();
 	if (JSON.stringify(bundlePlatforms) !== JSON.stringify([...BINARY_PLATFORMS].sort())) {
-		return fail("Manifest bundles must cover exactly the six canonical platforms");
+		return fail("Manifest bundles must cover exactly the twelve canonical platforms");
 	}
 	for (const platform of BINARY_PLATFORMS) {
 		const bundle = value.bundles[platform];
@@ -205,7 +171,7 @@ function parseManifest(value: unknown): XzReleaseManifest {
 			return fail(`Invalid bundle metadata for ${platform}`);
 		}
 		const file = requireSafeAssetName(bundle.file, "bundle filename");
-		const expectedName = `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`;
+		const expectedName = ARCHIVE_NAMES[platform];
 		if (file !== expectedName) return fail(`Invalid bundle metadata for ${platform}`);
 		bundles[platform] = {
 			file,
@@ -216,15 +182,15 @@ function parseManifest(value: unknown): XzReleaseManifest {
 
 	if (!isRecord(value.requiredPaths)) return fail("Manifest requiredPaths is required");
 	if (JSON.stringify(Object.keys(value.requiredPaths).sort()) !== JSON.stringify([...BINARY_PLATFORMS].sort())) {
-		return fail("Manifest requiredPaths must cover exactly the six canonical platforms");
+		return fail("Manifest requiredPaths must cover exactly the twelve canonical platforms");
 	}
-	const requiredPaths: Record<string, string[]> = {};
+	const requiredPaths: Record<string, readonly string[]> = {};
 	for (const platform of BINARY_PLATFORMS) {
 		if (!Array.isArray(value.requiredPaths[platform]) || value.requiredPaths[platform].length === 0) {
 			return fail(`Manifest requiredPaths missing for ${platform}`);
 		}
 		const paths = value.requiredPaths[platform];
-		const expectedPaths = canonicalRequiredPaths(platform);
+		const expectedPaths = REQUIRED_PATHS[platform];
 		if (JSON.stringify(paths) !== JSON.stringify(expectedPaths)) {
 			return fail(`Manifest requiredPaths for ${platform} does not match canonical inventory`);
 		}
@@ -262,7 +228,7 @@ function parseManifest(value: unknown): XzReleaseManifest {
 		return fail("Invalid or missing release attestation policy");
 	}
 	return {
-		schemaVersion: 3,
+		schemaVersion: MANIFEST_SCHEMA_VERSION,
 		repository: REPOSITORY,
 		tag,
 		distributionVersion: version,
