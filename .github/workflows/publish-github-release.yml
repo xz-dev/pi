@@ -73,6 +73,20 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Install cross-platform native bindings for Release tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          clipboard_version=$(node -p "require('./packages/coding-agent/package.json').optionalDependencies['@mariozechner/clipboard']")
+          npm install --include=optional --no-save --package-lock=false --force --ignore-scripts \
+            "@mariozechner/clipboard@$clipboard_version" \
+            "@mariozechner/clipboard-darwin-arm64@$clipboard_version" \
+            "@mariozechner/clipboard-darwin-x64@$clipboard_version" \
+            "@mariozechner/clipboard-linux-x64-gnu@$clipboard_version" \
+            "@mariozechner/clipboard-linux-arm64-gnu@$clipboard_version" \
+            "@mariozechner/clipboard-win32-x64-msvc@$clipboard_version" \
+            "@mariozechner/clipboard-win32-arm64-msvc@$clipboard_version"
+
       - name: Test
         run: ./test.sh
 
