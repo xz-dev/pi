@@ -52,13 +52,25 @@ test("TUI benchmark harness observes output and waits for a clean self-exit with
 	const root = mkdtempSync(join(tmpdir(), "pi-tui-benchmark-"));
 	try {
 		const executable = join(root, "pi");
-		writeFileSync(executable, "#!/bin/sh\nprintf benchmark-output\n"); chmodSync(executable, 0o755);
+		writeFileSync(executable, "#!/bin/sh\nprintf 'benchmark-output__PI_STARTUP_'\nsleep 0.05\nprintf 'BENCHMARK_COMPLETE__\\n'\n"); chmodSync(executable, 0o755);
 		const result = execFileSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8", env: { ...process.env, PI_STARTUP_BENCHMARK: "1" } });
 		const evidence = JSON.parse(result.trim());
 		assert.equal(evidence.input, "startup-benchmark");
 		assert.equal(evidence.exitSent, false);
 		assert.equal(evidence.childExitCode, 0);
+		assert.equal(evidence.terminalClosed, true);
+		assert.ok(Number.isSafeInteger(evidence.terminalExitCode));
+		assert.equal(evidence.benchmarkCompleted, true);
 		assert.ok(evidence.outputBytes > 0);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("TUI benchmark harness rejects a clean exit without the completion marker", { skip: !bunAvailable && "Bun is not installed" }, () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-tui-incomplete-benchmark-"));
+	try {
+		const executable = join(root, "pi");
+		writeFileSync(executable, "#!/bin/sh\nprintf benchmark-output\n"); chmodSync(executable, 0o755);
+		assert.throws(() => execFileSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8", env: { ...process.env, PI_STARTUP_BENCHMARK: "1" } }), /TUI PTY acceptance failed/);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -78,7 +90,7 @@ test("external TUI evidence contributes the authoritative pseudoterminal command
 		assert.match(notices, /### LICENSE\nLicense SHA-256: [0-9a-f]{64}/);
 		const archive = join(root, "pi-linux-x64-gnu-baseline.tar.gz"); execFileSync("tar", ["-czf", archive, "-C", join(root, "stage"), "pi"]);
 		const bin = join(root, "bin"); mkdirSync(bin); const bun = join(bin, "bun"); writeFileSync(bun, "#!/bin/sh\nexit 0\n"); chmodSync(bun, 0o755);
-		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-c,ctrl-d", childExitCode: 0, observedOutput: true, exitSent: true, cleanExit: true }));
+		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: null, exitSent: true, cleanExit: true }));
 		const recordPath = join(root, "record.json");
 		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), archive, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_XZ_TUI_EVIDENCE: evidence, RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
 		const record = JSON.parse(readFileSync(recordPath, "utf8"));

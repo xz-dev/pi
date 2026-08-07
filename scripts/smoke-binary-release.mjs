@@ -58,7 +58,7 @@ try {
 	let tui;
 	if (process.env.PI_XZ_TUI_EVIDENCE) {
 		tui = JSON.parse(readFileSync(process.env.PI_XZ_TUI_EVIDENCE, "utf8"));
-		if (tui.harness !== "Bun.Terminal PTY" || !Number.isSafeInteger(tui.elapsedMs) || tui.elapsedMs < 0 || tui.elapsedMs > SMOKE_LIMITS.interactiveMs || !Number.isSafeInteger(tui.outputBytes) || tui.outputBytes <= 0 || tui.input !== "ctrl-c,ctrl-d" || tui.childExitCode !== 0 || !tui.observedOutput || !tui.exitSent || !tui.cleanExit) throw new Error("invalid external TUI evidence");
+		if (tui.harness !== "Bun.Terminal PTY" || !Number.isSafeInteger(tui.elapsedMs) || tui.elapsedMs < 0 || tui.elapsedMs > SMOKE_LIMITS.interactiveMs || !Number.isSafeInteger(tui.outputBytes) || tui.outputBytes <= 0 || tui.input !== "ctrl-c,ctrl-d" || tui.childExitCode !== 0 || !tui.terminalClosed || !Number.isSafeInteger(tui.terminalExitCode) || !tui.observedOutput || tui.benchmarkCompleted !== null || !tui.exitSent || !tui.cleanExit) throw new Error("invalid external TUI evidence");
 		commands.push({ name: "tui-pseudoterminal", command: `external:${process.env.PI_XZ_TUI_EVIDENCE}`, status: tui.childExitCode, elapsedMs: tui.elapsedMs });
 	} else {
 		const result = run(platform() === "win32" ? "tui-pseudoconsole" : "tui-pseudoterminal", "bun", [join(process.cwd(), "scripts", "smoke-bun-tui.mjs"), executable], { env, timeout: SMOKE_LIMITS.interactiveMs + 3000 });

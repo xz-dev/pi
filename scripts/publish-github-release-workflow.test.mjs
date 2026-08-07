@@ -31,6 +31,13 @@ test("upstream sync fetches and merges the persistent Release self-update patch"
   assert.match(syncWorkflowText, /git commit -m "merge patch\/release-self-update branch"/);
 });
 
+test("upstream sync carries and tests the bounded startup benchmark patch", () => {
+  assert.match(syncWorkflowText, /\+refs\/heads\/patch\/startup-benchmark-exit:refs\/remotes\/origin\/patch\/startup-benchmark-exit/);
+  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/startup-benchmark-exit/);
+  assert.match(syncWorkflowText, /git commit -m "merge patch\/startup-benchmark-exit branch"/);
+  assert.match(syncWorkflowText, /test\/startup-benchmark\.test\.ts/);
+});
+
 test("upstream sync retires the obsolete OpenCode completions fixture patch", () => {
   assert.doesNotMatch(syncWorkflowText, /patch\/opencode-completions-test-narrowing/);
 });
@@ -125,8 +132,14 @@ test("Windows ConPTY uses Bun 1.3.14's native Terminal implementation", () => {
   assert.match(smoke, /"bun", \[join\(process\.cwd\(\), "scripts", "smoke-bun-tui\.mjs"\), executable\]/);
   assert.doesNotMatch(smoke, /smoke-windows-tui\.ps1/);
   assert.match(harness, /process\.platform === "win32" \? "Bun\.Terminal ConPTY" : "Bun\.Terminal PTY"/);
-  assert.match(harness, /Promise\.race\(\[child\.exited, timedOut\.promise\]\)/);
+  assert.match(harness, /Promise\.all\(\[child\.exited, terminalClosure\.promise\]\)/);
+  assert.match(harness, /__PI_STARTUP_BENCHMARK_COMPLETE__/);
+  assert.match(harness, /decoder\.decode\(data, \{ stream: true \}\)/);
+  assert.match(harness, /slice\(-\(startupBenchmarkCompleteMarker\.length - 1\)\)/);
+  assert.doesNotMatch(harness, /outputText/);
+  assert.match(harness, /!benchmarkCompleted/);
   assert.doesNotMatch(harness, /onExit\(/);
+  assert.match(harness, /terminalClosed: true/);
   assert.match(harness, /if \(!startupBenchmark\)/);
 });
 

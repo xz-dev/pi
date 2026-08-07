@@ -33,6 +33,7 @@ jobs:
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
             +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
+            +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/release-self-update:refs/remotes/origin/patch/release-self-update \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
@@ -49,6 +50,9 @@ jobs:
 
           git merge --squash origin/patch/model-startup-refresh-barrier
           git commit -m "merge patch/model-startup-refresh-barrier branch"
+
+          git merge --squash origin/patch/startup-benchmark-exit
+          git commit -m "merge patch/startup-benchmark-exit branch"
 
           if ! git merge --squash origin/patch/release-self-update; then
             scripts/resolve-release-self-update-squash-conflicts.sh
@@ -181,6 +185,7 @@ jobs:
               test/rpc-client-clone.test.ts \
               test/interactive-mode-clone-command.test.ts \
               test/interactive-mode-startup-input.test.ts \
+              test/startup-benchmark.test.ts \
               test/interactive-mode-queue-tui.test.ts \
               test/suite/manual-retry.test.ts \
               test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \

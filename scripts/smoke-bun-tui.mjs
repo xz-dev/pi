@@ -5,7 +5,12 @@ if (!executable) throw new Error("Usage: smoke-bun-tui.mjs <executable>");
 
 const started = performance.now();
 const startupBenchmark = ["1", "true", "yes"].includes((process.env.PI_STARTUP_BENCHMARK ?? "").toLowerCase());
+const startupBenchmarkCompleteMarker = "__PI_STARTUP_BENCHMARK_COMPLETE__";
+const decoder = new TextDecoder();
 let outputBytes = 0;
+let outputTail = "";
+let benchmarkCompleted = startupBenchmark ? false : null;
+const terminalClosure = Promise.withResolvers();
 let observedOutput = false;
 let exitSent = false;
 let interruptTimer;
@@ -19,6 +24,11 @@ const child = Bun.spawn([executable], {
 		rows: 40,
 		data(terminal, data) {
 			outputBytes += data.byteLength;
+			if (startupBenchmark && !benchmarkCompleted) {
+				const decoded = outputTail + decoder.decode(data, { stream: true });
+				benchmarkCompleted = decoded.includes(startupBenchmarkCompleteMarker);
+				outputTail = decoded.slice(-(startupBenchmarkCompleteMarker.length - 1));
+			}
 			if (observedOutput) return;
 			observedOutput = true;
 			if (!startupBenchmark) {
@@ -31,21 +41,27 @@ const child = Bun.spawn([executable], {
 				}, 1000);
 			}
 		},
+		exit(_terminal, exitCode) {
+			terminalClosure.resolve(exitCode);
+		},
 	},
 });
 
 const timedOut = Promise.withResolvers();
 timeoutTimer = setTimeout(() => timedOut.reject(new Error(`TUI PTY timeout: exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput}`)), 7000);
 try {
-	const exitCode = await Promise.race([child.exited, timedOut.promise]);
-	if (!observedOutput || exitSent === startupBenchmark || exitCode !== 0) throw new Error(`TUI PTY acceptance failed: exit=${exitCode} output=${outputBytes} exitSent=${exitSent} benchmark=${startupBenchmark}`);
+	const [exitCode, terminalExitCode] = await Promise.race([Promise.all([child.exited, terminalClosure.promise]), timedOut.promise]);
+	if (!observedOutput || (startupBenchmark && !benchmarkCompleted) || exitSent === startupBenchmark || exitCode !== 0) throw new Error(`TUI PTY acceptance failed: exit=${exitCode} terminalExit=${terminalExitCode} output=${outputBytes} exitSent=${exitSent} benchmark=${startupBenchmark} benchmarkCompleted=${benchmarkCompleted}`);
 	console.log(JSON.stringify({
 		harness: process.platform === "win32" ? "Bun.Terminal ConPTY" : "Bun.Terminal PTY",
 		elapsedMs: Math.round(performance.now() - started),
 		outputBytes,
 		input: startupBenchmark ? "startup-benchmark" : "ctrl-c,ctrl-d",
 		childExitCode: exitCode,
+		terminalClosed: true,
+		terminalExitCode,
 		observedOutput,
+		benchmarkCompleted,
 		exitSent,
 		cleanExit: true,
 	}));
