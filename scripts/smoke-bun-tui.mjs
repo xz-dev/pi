@@ -6,9 +6,12 @@ if (!executable) throw new Error("Usage: smoke-bun-tui.mjs <executable>");
 const started = performance.now();
 const startupBenchmark = ["1", "true", "yes"].includes((process.env.PI_STARTUP_BENCHMARK ?? "").toLowerCase());
 const startupBenchmarkCompleteMarker = "__PI_STARTUP_BENCHMARK_COMPLETE__";
+const startupBenchmarkStagePattern = /__PI_STARTUP_BENCHMARK_STAGE__:(tui-started|theme-applied|session-rebound|providers-counted)/g;
+const outputTailLength = Math.max(startupBenchmarkCompleteMarker.length, "__PI_STARTUP_BENCHMARK_STAGE__:providers-counted".length) - 1;
 const decoder = new TextDecoder();
 let outputBytes = 0;
 let outputTail = "";
+let lastBenchmarkStage = null;
 let benchmarkCompleted = startupBenchmark ? false : null;
 const terminalClosure = Promise.withResolvers();
 let observedOutput = false;
@@ -27,7 +30,8 @@ const child = Bun.spawn([executable], {
 			if (startupBenchmark && !benchmarkCompleted) {
 				const decoded = outputTail + decoder.decode(data, { stream: true });
 				benchmarkCompleted = decoded.includes(startupBenchmarkCompleteMarker);
-				outputTail = decoded.slice(-(startupBenchmarkCompleteMarker.length - 1));
+				for (const match of decoded.matchAll(startupBenchmarkStagePattern)) lastBenchmarkStage = match[1];
+				outputTail = decoded.slice(-outputTailLength);
 			}
 			if (observedOutput) return;
 			observedOutput = true;
@@ -48,7 +52,7 @@ const child = Bun.spawn([executable], {
 });
 
 const timedOut = Promise.withResolvers();
-timeoutTimer = setTimeout(() => timedOut.reject(new Error(`TUI PTY timeout: exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput}`)), 7000);
+timeoutTimer = setTimeout(() => timedOut.reject(new Error(`TUI PTY timeout: exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput} lastStage=${lastBenchmarkStage}`)), 7000);
 try {
 	const [exitCode, terminalExitCode] = await Promise.race([Promise.all([child.exited, terminalClosure.promise]), timedOut.promise]);
 	if (!observedOutput || (startupBenchmark && !benchmarkCompleted) || exitSent === startupBenchmark || exitCode !== 0) throw new Error(`TUI PTY acceptance failed: exit=${exitCode} terminalExit=${terminalExitCode} output=${outputBytes} exitSent=${exitSent} benchmark=${startupBenchmark} benchmarkCompleted=${benchmarkCompleted}`);
@@ -62,6 +66,7 @@ try {
 		terminalExitCode,
 		observedOutput,
 		benchmarkCompleted,
+		lastBenchmarkStage,
 		exitSent,
 		cleanExit: true,
 	}));
