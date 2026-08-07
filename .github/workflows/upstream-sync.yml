@@ -66,21 +66,7 @@ jobs:
           git merge --squash origin/patch/esc-abort
           git commit -m "merge patch/esc-abort branch"
 
-          if ! git merge --squash origin/patch/manual-retry; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/agent/src/agent.ts ]]; then
-              printf '::error::Unexpected manual-retry squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-          fi
-          git checkout --theirs packages/agent/src/agent.ts
-          git add packages/agent/src/agent.ts
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying manual-retry conflict staging'
-            exit 1
-          fi
+          git merge --squash origin/patch/manual-retry
           git commit -m "merge patch/manual-retry branch"
 
           if ! git merge --squash origin/tmp/patch/esc-manual-retry-compat; then
@@ -91,8 +77,12 @@ jobs:
               printf '\n'
               exit 1
             fi
+            git checkout --ours packages/agent/src/agent.ts
+            git add packages/agent/src/agent.ts
+            git diff --binary origin/patch/manual-retry..origin/tmp/patch/esc-manual-retry-compat -- packages/agent/src/agent.ts |
+              git apply --index --3way
           fi
-          git restore --source=origin/tmp/patch/esc-manual-retry-compat --staged --worktree -- packages/agent/src/agent.ts
+          grep -Fq 'Agent is already processing. Wait for completion before resetting.' packages/agent/src/agent.ts
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying compatibility patch'
             exit 1
