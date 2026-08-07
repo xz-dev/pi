@@ -125,7 +125,7 @@ function fixtureManifest(): Record<string, unknown> {
 			signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
 			signerRef: "refs/heads/main",
 			denySelfHostedRunners: true,
-			subjectsFile: "attestation-subjects.txt",
+			subjectsFile: "attestation-subjects.jsonl",
 		},
 	};
 }

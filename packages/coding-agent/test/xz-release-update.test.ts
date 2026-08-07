@@ -131,7 +131,7 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
 			signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
 			signerRef: "refs/heads/main",
 			denySelfHostedRunners: true,
-			subjectsFile: "attestation-subjects.txt",
+			subjectsFile: "attestation-subjects.jsonl",
 		},
 		...overrides,
 	};
@@ -221,7 +221,7 @@ describe("xz-dev GitHub Release binary updates", () => {
 					signerWorkflow: "evil/workflow.yml",
 					signerRef: "refs/heads/main",
 					denySelfHostedRunners: true,
-					subjectsFile: "attestation-subjects.txt",
+					subjectsFile: "attestation-subjects.jsonl",
 				},
 			}),
 		);
