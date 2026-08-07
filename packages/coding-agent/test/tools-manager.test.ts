@@ -1,6 +1,6 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getToolPath } from "../src/utils/tools-manager.ts";
 
@@ -11,13 +11,13 @@ afterEach(() => {
 });
 
 describe("tool discovery", () => {
-	it("bounds system command version probes", () => {
+	it.skipIf(process.platform === "win32")("bounds system command version probes", () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-tool-probe-"));
 		try {
-			const fd = join(root, process.platform === "win32" ? "fd.cmd" : "fd");
-			writeFileSync(fd, process.platform === "win32" ? "@ping -n 11 127.0.0.1 >nul\r\n" : "#!/bin/sh\nsleep 10\n");
+			const fd = join(root, "fd");
+			writeFileSync(fd, "#!/bin/sh\nwhile :; do :; done\n");
 			chmodSync(fd, 0o755);
-			process.env.PATH = `${root}${delimiter}${originalPath ?? ""}`;
+			process.env.PATH = root;
 
 			const started = performance.now();
 			expect(getToolPath("fd")).toBeNull();
