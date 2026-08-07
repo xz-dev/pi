@@ -31,6 +31,15 @@ test("upstream sync fetches and merges the persistent Release self-update patch"
   assert.match(syncWorkflowText, /git commit -m "merge patch\/release-self-update branch"/);
 });
 
+test("upstream sync persists the OpenCode completions test narrowing patch", () => {
+  assert.match(
+    syncWorkflowText,
+    /\+refs\/heads\/patch\/opencode-completions-test-narrowing:refs\/remotes\/origin\/patch\/opencode-completions-test-narrowing/,
+  );
+  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/opencode-completions-test-narrowing/);
+  assert.match(syncWorkflowText, /git commit -m "merge patch\/opencode-completions-test-narrowing branch"/);
+});
+
 test("upstream sync delegates ci squash conflict handling to the tested resolver", () => {
   assert.match(
     syncWorkflowText,

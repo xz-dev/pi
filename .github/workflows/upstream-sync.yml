@@ -39,7 +39,8 @@ jobs:
             +refs/heads/tmp/patch/esc-manual-retry-compat:refs/remotes/origin/tmp/patch/esc-manual-retry-compat \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
-            +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns
+            +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
+            +refs/heads/patch/opencode-completions-test-narrowing:refs/remotes/origin/patch/opencode-completions-test-narrowing
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -130,6 +131,9 @@ jobs:
 
           git merge --squash origin/patch/retry-non-retryable-patterns
           git commit -m "merge patch/retry-non-retryable-patterns branch"
+
+          git merge --squash origin/patch/opencode-completions-test-narrowing
+          git commit -m "merge patch/opencode-completions-test-narrowing branch"
 
       - name: Install dependencies for pre-push gates
         run: npm ci --ignore-scripts
