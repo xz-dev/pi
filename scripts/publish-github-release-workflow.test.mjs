@@ -136,8 +136,10 @@ test("Windows ConPTY uses Bun 1.3.14's native Terminal implementation", () => {
   assert.match(harness, /Promise\.all\(\[child\.exited, terminalClosure\.promise\]\)/);
   assert.match(harness, /__PI_STARTUP_BENCHMARK_COMPLETE__/);
   assert.match(harness, /decoder\.decode\(data, \{ stream: true \}\)/);
-  assert.match(harness, /slice\(-outputTailLength\)/);
+  assert.match(harness, /diagnosticTailLength = 512/);
+  assert.match(harness, /slice\(-diagnosticTailLength\)/);
   assert.match(harness, /lastStage=\$\{lastBenchmarkStage\}/);
+  assert.match(harness, /tail=\$\{JSON\.stringify\(diagnosticTail\)\}/);
   assert.doesNotMatch(harness, /outputText/);
   assert.match(harness, /!benchmarkCompleted/);
   assert.doesNotMatch(harness, /onExit\(/);

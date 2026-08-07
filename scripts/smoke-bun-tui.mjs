@@ -6,11 +6,15 @@ if (!executable) throw new Error("Usage: smoke-bun-tui.mjs <executable>");
 const started = performance.now();
 const startupBenchmark = ["1", "true", "yes"].includes((process.env.PI_STARTUP_BENCHMARK ?? "").toLowerCase());
 const startupBenchmarkCompleteMarker = "__PI_STARTUP_BENCHMARK_COMPLETE__";
-const startupBenchmarkStagePattern = /__PI_STARTUP_BENCHMARK_STAGE__:(init-entered|tools-ready|tui-started|theme-applied|session-rebound|providers-counted)/g;
-const outputTailLength = Math.max(startupBenchmarkCompleteMarker.length, "__PI_STARTUP_BENCHMARK_STAGE__:providers-counted".length) - 1;
+const startupBenchmarkStagePattern = /__PI_STARTUP_BENCHMARK_STAGE__:(main-entered|session-manager-ready|runtime-ready|input-ready|interactive-created|init-entered|tools-ready|tui-started|theme-applied|session-rebound|providers-counted)/g;
+const markerTailLength = Math.max(startupBenchmarkCompleteMarker.length, "__PI_STARTUP_BENCHMARK_STAGE__:session-manager-ready".length) - 1;
+// JSON.stringify can expand one UTF-16 code unit to six ASCII characters (for example, ESC -> "\\u001b").
+// Keep the serialized tail below 3.1 KB so the complete Bun error remains below 5 KB.
+const diagnosticTailLength = 512;
 const decoder = new TextDecoder();
 let outputBytes = 0;
-let outputTail = "";
+let markerTail = "";
+let diagnosticTail = "";
 let lastBenchmarkStage = null;
 let benchmarkCompleted = startupBenchmark ? false : null;
 const terminalClosure = Promise.withResolvers();
@@ -27,11 +31,13 @@ const child = Bun.spawn([executable], {
 		rows: 40,
 		data(terminal, data) {
 			outputBytes += data.byteLength;
+			const decodedChunk = decoder.decode(data, { stream: true });
+			diagnosticTail = (diagnosticTail + decodedChunk).slice(-diagnosticTailLength);
 			if (startupBenchmark && !benchmarkCompleted) {
-				const decoded = outputTail + decoder.decode(data, { stream: true });
+				const decoded = markerTail + decodedChunk;
 				benchmarkCompleted = decoded.includes(startupBenchmarkCompleteMarker);
 				for (const match of decoded.matchAll(startupBenchmarkStagePattern)) lastBenchmarkStage = match[1];
-				outputTail = decoded.slice(-outputTailLength);
+				markerTail = decoded.slice(-markerTailLength);
 			}
 			if (observedOutput) return;
 			observedOutput = true;
@@ -52,7 +58,15 @@ const child = Bun.spawn([executable], {
 });
 
 const timedOut = Promise.withResolvers();
-timeoutTimer = setTimeout(() => timedOut.reject(new Error(`TUI PTY timeout: exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput} lastStage=${lastBenchmarkStage}`)), 7000);
+timeoutTimer = setTimeout(
+	() =>
+		timedOut.reject(
+			new Error(
+				`TUI PTY timeout: exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput} lastStage=${lastBenchmarkStage} tail=${JSON.stringify(diagnosticTail)}`,
+			),
+		),
+	7000,
+);
 try {
 	const [exitCode, terminalExitCode] = await Promise.race([Promise.all([child.exited, terminalClosure.promise]), timedOut.promise]);
 	if (!observedOutput || (startupBenchmark && !benchmarkCompleted) || exitSent === startupBenchmark || exitCode !== 0) throw new Error(`TUI PTY acceptance failed: exit=${exitCode} terminalExit=${terminalExitCode} output=${outputBytes} exitSent=${exitSent} benchmark=${startupBenchmark} benchmarkCompleted=${benchmarkCompleted}`);
