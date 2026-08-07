@@ -87,12 +87,10 @@ jobs:
               printf '\n'
               exit 1
             fi
-            git checkout --ours packages/agent/src/agent.ts
-            git add packages/agent/src/agent.ts
-            git diff --binary origin/patch/manual-retry..origin/tmp/patch/esc-manual-retry-compat -- packages/agent/src/agent.ts |
-              git apply --index --3way
+            git restore --source=origin/tmp/patch/esc-manual-retry-compat --staged --worktree -- packages/agent/src/agent.ts
           fi
           grep -Fq 'Agent is already processing. Wait for completion before resetting.' packages/agent/src/agent.ts
+          git diff --quiet origin/tmp/patch/esc-manual-retry-compat -- packages/agent/src/agent.ts
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying compatibility patch'
             exit 1
