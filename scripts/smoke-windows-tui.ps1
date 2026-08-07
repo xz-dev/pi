@@ -64,8 +64,10 @@ try {
   [Runtime.InteropServices.Marshal]::WriteIntPtr($pseudoValue, $pseudoConsole)
   try { [PiConPty.Native]::Check([PiConPty.Native]::UpdateProcThreadAttribute($attributeList, 0, [IntPtr][PiConPty.Native]::PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, $pseudoValue, [IntPtr][IntPtr]::Size, [IntPtr]::Zero, [IntPtr]::Zero), "UpdateProcThreadAttribute") }
   finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($pseudoValue) }
+  $startupInfo = New-Object PiConPty.Native+STARTUPINFO
+  $startupInfo.cb = [Runtime.InteropServices.Marshal]::SizeOf([type][PiConPty.Native+STARTUPINFOEX])
   $startup = New-Object PiConPty.Native+STARTUPINFOEX
-  $startup.StartupInfo.cb = [Runtime.InteropServices.Marshal]::SizeOf([type][PiConPty.Native+STARTUPINFOEX])
+  $startup.StartupInfo = $startupInfo
   $startup.lpAttributeList = $attributeList
   $commandLine = New-Object Text.StringBuilder
   [void]$commandLine.Append('"').Append($Executable).Append('"')
