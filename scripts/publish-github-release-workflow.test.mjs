@@ -113,6 +113,15 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.doesNotMatch(workflowText, /AppActivate|SendKeys|Docker allocated TTY|fabricated/);
 });
 
+test("Windows ConPTY uses the mutable CreateProcessW command-line contract", () => {
+  const harness = readFileSync(join(ROOT, "scripts", "smoke-windows-tui.ps1"), "utf8");
+  assert.match(harness, /using System\.Text;/);
+  assert.match(harness, /CreateProcessW\(string application, StringBuilder commandLine/);
+  assert.match(harness, /CreateProcessW\(\$null, \$commandLine/);
+  assert.match(harness, /failed with Win32 error/);
+  assert.doesNotMatch(harness, /CreateProcessW\(string application, string commandLine/);
+});
+
 test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.3.14", () => {
   assert.match(workflowText, /build-musl-clipboard\.sh/);
   assert.match(workflowText, /--clipboard-musl-dir/);

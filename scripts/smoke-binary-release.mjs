@@ -20,7 +20,7 @@ function run(name, command, args, options = {}) {
 	const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? 10_000, env: options.env });
 	const elapsedMs = Math.round(performance.now() - started);
 	commands.push({ name, command: [command, ...args].join(" "), status: result.status, elapsedMs });
-	if (result.status !== 0) throw new Error(`${name} failed (${result.status}): ${result.stdout ?? ""}${result.stderr ?? ""}`);
+	if (result.status !== 0) throw new Error(`${name} failed (${result.status ?? result.signal ?? result.error?.message ?? "unknown"}): ${result.stdout ?? ""}${result.stderr ?? ""}`);
 	if (options.maxMs && elapsedMs > options.maxMs) throw new Error(`${name} ${elapsedMs}ms exceeds ${options.maxMs}ms`);
 	return { stdout: result.stdout ?? "", elapsedMs };
 }
@@ -36,13 +36,13 @@ function cpuFeatures() {
 try {
 	const archiveBytes = statSync(archive).size;
 	if (archiveBytes > SMOKE_LIMITS.archiveBytes) throw new Error(`archive size ${archiveBytes} exceeds ${SMOKE_LIMITS.archiveBytes}`);
-	if (target.os === "windows") run("extract", "powershell", ["-NoProfile", "-Command", "Expand-Archive -LiteralPath $env:PI_XZ_ARCHIVE -DestinationPath $env:PI_XZ_EXTRACT_DIR -Force"], { env: { ...process.env, PI_XZ_ARCHIVE: archive, PI_XZ_EXTRACT_DIR: work } });
+	if (target.os === "windows") run("extract", "powershell", ["-NoProfile", "-Command", "Expand-Archive -LiteralPath $env:PI_XZ_ARCHIVE -DestinationPath $env:PI_XZ_EXTRACT_DIR -Force"], { env: { ...process.env, PI_XZ_ARCHIVE: archive, PI_XZ_EXTRACT_DIR: work }, timeout: 60_000 });
 	else run("extract", "tar", ["-xzf", archive, "-C", work]);
 	const root = target.os === "windows" ? work : join(work, "pi");
 	const extractedBytes = directoryBytes(root);
 	if (extractedBytes > SMOKE_LIMITS.extractedBytes) throw new Error(`extracted size ${extractedBytes} exceeds ${SMOKE_LIMITS.extractedBytes}`);
 	const executable = join(root, target.executable);
-	const env = { ...process.env, NODE_ENV: "production", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color" };
+	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color" };
 	const version = run("version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.versionMs });
 	if (version.stdout.trim() !== expectedVersion) throw new Error(`version mismatch: ${version.stdout.trim()}`);
 	const help = run("help", executable, ["--help"], { env, maxMs: SMOKE_LIMITS.helpMs });

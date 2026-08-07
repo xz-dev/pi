@@ -11,6 +11,7 @@ using System;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace PiConPty {
@@ -31,13 +32,13 @@ namespace PiConPty {
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
     [DllImport("kernel32.dll")] public static extern void DeleteProcThreadAttributeList(IntPtr list);
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool CreateProcessW(string application, string commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string currentDirectory, ref STARTUPINFOEX startup, out PROCESS_INFORMATION process);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool CreateProcessW(string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string currentDirectory, ref STARTUPINFOEX startup, out PROCESS_INFORMATION process);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool TerminateProcess(IntPtr process, uint exitCode);
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr handle);
 
-    public static void Check(bool result, string operation) { if (!result) throw new Win32Exception(Marshal.GetLastWin32Error(), operation); }
+    public static void Check(bool result, string operation) { if (!result) { int code = Marshal.GetLastWin32Error(); throw new Win32Exception(code, operation + " failed with Win32 error " + code); } }
   }
 }
 '@
@@ -66,8 +67,9 @@ try {
   $startup = New-Object PiConPty.Native+STARTUPINFOEX
   $startup.StartupInfo.cb = [Runtime.InteropServices.Marshal]::SizeOf([type][PiConPty.Native+STARTUPINFOEX])
   $startup.lpAttributeList = $attributeList
-  $commandLine = '"' + $Executable.Replace('"','\"') + '"'
-  [PiConPty.Native]::Check([PiConPty.Native]::CreateProcessW($Executable, $commandLine, [IntPtr]::Zero, [IntPtr]::Zero, $false, [PiConPty.Native]::EXTENDED_STARTUPINFO_PRESENT -bor [PiConPty.Native]::CREATE_UNICODE_ENVIRONMENT, [IntPtr]::Zero, (Split-Path $Executable), [ref]$startup, [ref]$process), "CreateProcessW")
+  $commandLine = New-Object Text.StringBuilder
+  [void]$commandLine.Append('"').Append($Executable).Append('"')
+  [PiConPty.Native]::Check([PiConPty.Native]::CreateProcessW($null, $commandLine, [IntPtr]::Zero, [IntPtr]::Zero, $false, [PiConPty.Native]::EXTENDED_STARTUPINFO_PRESENT -bor [PiConPty.Native]::CREATE_UNICODE_ENVIRONMENT, [IntPtr]::Zero, (Split-Path $Executable), [ref]$startup, [ref]$process), "CreateProcessW")
   [void][PiConPty.Native]::CloseHandle($process.hThread)
   $inputClient.Dispose(); $inputClient = $null; $outputClient.Dispose(); $outputClient = $null
   $firstByte = New-Object byte[] 1
