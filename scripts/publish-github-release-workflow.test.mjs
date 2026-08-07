@@ -30,14 +30,18 @@ test("upstream sync fetches and merges the persistent Release self-update patch"
   assert.match(syncWorkflowText, /git commit -m "merge patch\/release-self-update branch"/);
 });
 
-test("upstream sync preserves the ci-owned binary build script on squash conflict", () => {
+test("upstream sync preserves the ci-owned release workflow changes on squash conflict", () => {
   assert.match(
     syncWorkflowText,
-    /README\.md\|scripts\/build-binaries\.sh\|packages\/coding-agent\/CHANGELOG\.md\|packages\/coding-agent\/test\/package-command-paths\.test\.ts\) ;;/,
+    /\.github\/workflows\/build-binaries\.yml\|README\.md\|scripts\/build-binaries\.sh\|packages\/coding-agent\/CHANGELOG\.md\|packages\/coding-agent\/test\/package-command-paths\.test\.ts\) ;;/,
   );
   assert.match(
     syncWorkflowText,
     /git restore --source=origin\/ci --staged --worktree -- README\.md scripts\/build-binaries\.sh/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /git diff --name-only --diff-filter=U -- \.github\/workflows\/build-binaries\.yml[\s\S]*git rm -- \.github\/workflows\/build-binaries\.yml/,
   );
   assert.match(
     syncWorkflowText,
