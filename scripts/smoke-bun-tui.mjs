@@ -12,7 +12,6 @@ let interruptTimer;
 let exitTimer;
 let timeoutTimer;
 
-const processExited = Promise.withResolvers();
 const child = Bun.spawn([executable], {
 	env: process.env,
 	terminal: {
@@ -33,14 +32,12 @@ const child = Bun.spawn([executable], {
 			}
 		},
 	},
-	onExit(_subprocess, exitCode) {
-		processExited.resolve(exitCode);
-	},
 });
 
-timeoutTimer = setTimeout(() => processExited.reject(new Error("TUI PTY timeout")), 7000);
+const timedOut = Promise.withResolvers();
+timeoutTimer = setTimeout(() => timedOut.reject(new Error(`TUI PTY timeout: exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput}`)), 7000);
 try {
-	const exitCode = await processExited.promise;
+	const exitCode = await Promise.race([child.exited, timedOut.promise]);
 	if (!observedOutput || exitSent === startupBenchmark || exitCode !== 0) throw new Error(`TUI PTY acceptance failed: exit=${exitCode} output=${outputBytes} exitSent=${exitSent} benchmark=${startupBenchmark}`);
 	console.log(JSON.stringify({
 		harness: process.platform === "win32" ? "Bun.Terminal ConPTY" : "Bun.Terminal PTY",
