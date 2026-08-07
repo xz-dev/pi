@@ -7,13 +7,27 @@ const helperPath = fileURLToPath(new URL("../src/utils/startup-benchmark.ts", im
 
 describe("startup benchmark completion", () => {
 	it("writes stage markers only while benchmarking", () => {
-		const script = `import { markStartupBenchmarkStage } from ${JSON.stringify(helperPath)}; markStartupBenchmarkStage("tui-started");`;
+		const stages = [
+			"main-entered",
+			"session-manager-ready",
+			"runtime-ready",
+			"input-ready",
+			"interactive-created",
+			"init-entered",
+			"tools-ready",
+			"tui-started",
+			"theme-applied",
+			"session-rebound",
+			"providers-counted",
+		];
+		const script = `import { markStartupBenchmarkStage } from ${JSON.stringify(helperPath)}; for (const stage of ${JSON.stringify(stages)}) markStartupBenchmarkStage(stage);`;
+		const expected = stages.map((stage) => `__PI_STARTUP_BENCHMARK_STAGE__:${stage}\n`).join("");
 		expect(
 			execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "--eval", script], {
 				encoding: "utf8",
 				env: { ...process.env, PI_STARTUP_BENCHMARK: "1" },
 			}),
-		).toBe("__PI_STARTUP_BENCHMARK_STAGE__:tui-started\n");
+		).toBe(expected);
 		for (const value of ["", "0", "false", "no", "random"]) {
 			expect(
 				execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "--eval", script], {

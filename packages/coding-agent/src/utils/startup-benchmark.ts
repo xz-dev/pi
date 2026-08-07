@@ -3,6 +3,11 @@ import { writeSync } from "node:fs";
 export const STARTUP_BENCHMARK_COMPLETE_MARKER = "__PI_STARTUP_BENCHMARK_COMPLETE__";
 
 export type StartupBenchmarkStage =
+	| "main-entered"
+	| "session-manager-ready"
+	| "runtime-ready"
+	| "input-ready"
+	| "interactive-created"
 	| "init-entered"
 	| "tools-ready"
 	| "tui-started"
