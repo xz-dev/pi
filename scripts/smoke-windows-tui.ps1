@@ -4,6 +4,8 @@ param(
   [int]$TimeoutMilliseconds = 7000
 )
 $ErrorActionPreference = "Stop"
+$Executable = [IO.Path]::GetFullPath($Executable)
+if (-not [IO.File]::Exists($Executable)) { throw "ConPTY executable not found: $Executable" }
 
 if (-not ('PiConPty.Native' -as [type])) {
   Add-Type -TypeDefinition @'
@@ -71,7 +73,7 @@ try {
   $startup.lpAttributeList = $attributeList
   $commandLine = New-Object Text.StringBuilder
   [void]$commandLine.Append('"').Append($Executable).Append('"')
-  [PiConPty.Native]::Check([PiConPty.Native]::CreateProcessW($null, $commandLine, [IntPtr]::Zero, [IntPtr]::Zero, $false, [PiConPty.Native]::EXTENDED_STARTUPINFO_PRESENT -bor [PiConPty.Native]::CREATE_UNICODE_ENVIRONMENT, [IntPtr]::Zero, (Split-Path $Executable), [ref]$startup, [ref]$process), "CreateProcessW")
+  [PiConPty.Native]::Check([PiConPty.Native]::CreateProcessW($Executable, $commandLine, [IntPtr]::Zero, [IntPtr]::Zero, $false, [PiConPty.Native]::EXTENDED_STARTUPINFO_PRESENT -bor [PiConPty.Native]::CREATE_UNICODE_ENVIRONMENT, [IntPtr]::Zero, [IO.Path]::GetDirectoryName($Executable), [ref]$startup, [ref]$process), "CreateProcessW")
   [void][PiConPty.Native]::CloseHandle($process.hThread)
   $inputClient.Dispose(); $inputClient = $null; $outputClient.Dispose(); $outputClient = $null
   $firstByte = New-Object byte[] 1

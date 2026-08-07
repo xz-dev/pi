@@ -117,7 +117,10 @@ test("Windows ConPTY uses the mutable CreateProcessW command-line contract", () 
   const harness = readFileSync(join(ROOT, "scripts", "smoke-windows-tui.ps1"), "utf8");
   assert.match(harness, /using System\.Text;/);
   assert.match(harness, /CreateProcessW\(string application, StringBuilder commandLine/);
-  assert.match(harness, /CreateProcessW\(\$null, \$commandLine/);
+  assert.match(harness, /\$Executable = \[IO\.Path\]::GetFullPath\(\$Executable\)/);
+  assert.match(harness, /\[IO\.File\]::Exists\(\$Executable\)/);
+  assert.match(harness, /CreateProcessW\(\$Executable, \$commandLine/);
+  assert.doesNotMatch(harness, /CreateProcessW\(\$null, \$commandLine/);
   assert.match(harness, /\$startupInfo\.cb = \[Runtime\.InteropServices\.Marshal\]::SizeOf\(\[type\]\[PiConPty\.Native\+STARTUPINFOEX\]\)/);
   assert.match(harness, /\$startup\.StartupInfo = \$startupInfo/);
   assert.match(harness, /failed with Win32 error/);
