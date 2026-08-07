@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { cpus, platform, release, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { bunTarget, SMOKE_LIMITS } from "./lib/bun-targets.mjs";
+import { cpuFeatures } from "./lib/cpu-features.mjs";
 import { operatingSystemArchitecture } from "./lib/runtime-architecture.mjs";
 
 const [archiveArg, targetId, expectedVersion, recordArg] = process.argv.slice(2);
@@ -27,11 +28,6 @@ function run(name, command, args, options = {}) {
 function directoryBytes(root) {
 	const script = "const fs=require('node:fs'),p=require('node:path');let n=0;for(const d of fs.readdirSync(process.argv[1],{recursive:true,withFileTypes:true})){if(d.isFile())n+=fs.statSync(p.join(d.parentPath??d.path,d.name)).size}console.log(n)";
 	return Number(run("measure-extracted-size", process.execPath, ["-e", script, root]).stdout.trim());
-}
-function cpuFeatures() {
-	if (platform() === "linux") return readFileSync("/proc/cpuinfo", "utf8").match(/^Features\s*:.*|^flags\s*:.*$/m)?.[0] ?? "unknown";
-	if (platform() === "darwin") return spawnSync("sysctl", ["-n", "machdep.cpu.features", "machdep.cpu.leaf7_features"], { encoding: "utf8" }).stdout.trim();
-	return cpus()[0]?.model ?? "unknown";
 }
 try {
 	const archiveBytes = statSync(archive).size;
