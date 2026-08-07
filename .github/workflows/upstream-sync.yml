@@ -51,27 +51,7 @@ jobs:
           git commit -m "merge patch/model-startup-refresh-barrier branch"
 
           if ! git merge --squash origin/patch/release-self-update; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/CHANGELOG.md ]]; then
-              printf '::error::Unexpected release-self-update squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            git checkout --ours -- packages/coding-agent/CHANGELOG.md
-            python3 - <<'PY'
-          from pathlib import Path
-          path = Path("packages/coding-agent/CHANGELOG.md")
-          text = path.read_text()
-          entry = "- Routed xz-dev binary self-updates exclusively through attested `xz-dev/pi` GitHub Releases and made xz-dev source checkouts print user-managed update guidance without invoking package-manager or upstream updates.\n"
-          marker = "## [Unreleased]\n"
-          if entry not in text:
-              if marker not in text:
-                  raise SystemExit("missing Unreleased changelog section")
-              text = text.replace(marker, f"{marker}\n### Fixed\n\n{entry}", 1)
-          path.write_text(text)
-          PY
-            git add packages/coding-agent/CHANGELOG.md
+            scripts/resolve-release-self-update-squash-conflicts.sh
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying release-self-update conflict staging'
