@@ -211,15 +211,27 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Verify GitHub Release candidate
+      - name: Smoke test host binary packaging path
         run: |
-          release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-github-release.XXXXXX")
+          set -euo pipefail
+          release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-host-binary.XXXXXX")
           trap 'rm -rf -- "$release_dir"' EXIT
-          GITHUB_RUN_NUMBER="${GITHUB_RUN_NUMBER}" \
-            GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" \
-            GITHUB_SHA="$(git rev-parse HEAD)" \
-            node scripts/prepare-github-release.mjs --out "$release_dir" --skip-build
-          node scripts/verify-github-release.mjs local "$release_dir/release-manifest.json"
+          rebuilt_sha=$(git rev-parse HEAD)
+          version=$(REBUILT_SHA="$rebuilt_sha" node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.REBUILT_SHA.slice(0, 8)')
+          scripts/build-binaries.sh \
+            --skip-install \
+            --skip-deps \
+            --skip-build \
+            --platform linux-x64-gnu-modern \
+            --out "$release_dir" \
+            --distribution-version "$version"
+          archive="$release_dir/pi-linux-x64-gnu-modern.tar.gz"
+          test -s "$archive"
+          node scripts/smoke-binary-release.mjs \
+            "$archive" \
+            linux-x64-gnu-modern \
+            "$version" \
+            "$release_dir/linux-x64-gnu-modern-smoke.json"
 
       # Temporary soft gate: current upstream transitive advisories (brace-expansion,
       # undici) fail --audit-level=moderate and would block every main rebuild.

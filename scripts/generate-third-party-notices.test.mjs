@@ -21,8 +21,8 @@ test("notices deterministically cover exact runtime closure and packaged natives
 		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.bundle, value.output, value.lockPath]); const second = readFileSync(value.output);
 		assert.deepEqual(second, first); const text = first.toString();
 		for (const expected of ["## node_modules/alpha@1.0.0\nLicense: ISC", "## node_modules/beta@2.0.0\nLicense: MIT", "## node_modules/@mariozechner/clipboard@1.0.0\nLicense: MIT", "## node_modules/@mariozechner/clipboard-native@1.0.0\nLicense: MIT (packaged native)"]) assert.ok(text.includes(expected));
-		assert.match(text, /### LICENSE\.txt\nSHA-256: [0-9a-f]{64}\n\n```text\nfixture license\n```/);
-		assert.match(text, /### NOTICE\.md\nSHA-256: [0-9a-f]{64}\n\n```text\nfixture notice\n```/);
+		assert.match(text, /### LICENSE\.txt\nLicense SHA-256: [0-9a-f]{64}\n\n```text\nfixture license\n```/);
+		assert.match(text, /### NOTICE\.md\nLicense SHA-256: [0-9a-f]{64}\n\n```text\nfixture notice\n```/);
 		assert.ok(text.indexOf("### LICENSE.txt") < text.indexOf("### NOTICE.md"));
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });
@@ -33,7 +33,7 @@ test("real ignore dependency preserves LICENSE-MIT attribution instead of unrela
 		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), join(import.meta.dirname, "..", "packages", "coding-agent"), output]);
 		const text = readFileSync(output, "utf8");
 		const section = text.slice(text.indexOf("## node_modules/ignore@7.0.5"), text.indexOf("\n## ", text.indexOf("## node_modules/ignore@7.0.5") + 1));
-		assert.match(section, /### LICENSE-MIT\nSHA-256: 9c94db23dc4b1e9aaee5d195668b916afc71efed54af226b66cf0ccc4389c1c0/);
+		assert.match(section, /### LICENSE-MIT\nLicense SHA-256: 9c94db23dc4b1e9aaee5d195668b916afc71efed54af226b66cf0ccc4389c1c0/);
 		assert.match(section, /Copyright \(c\) 2013 Kael Zhang/);
 		assert.doesNotMatch(section, /Copyright 2023 Anthropic/);
 	} finally { rmSync(output, { force: true }); }

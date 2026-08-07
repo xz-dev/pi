@@ -78,7 +78,7 @@ const inventory = packages.map((entry) => {
 	const files = legalFiles(entry);
 	const sections = files.map(({ name, bytes }) => [
 		`### ${name}`,
-		`SHA-256: ${sha256(bytes)}`,
+		`License SHA-256: ${sha256(bytes)}`,
 		"",
 		"```text",
 		bytes.toString("utf8").trimEnd(),

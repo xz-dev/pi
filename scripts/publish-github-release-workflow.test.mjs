@@ -14,6 +14,7 @@ const WORKFLOW_PATH = join(
 const workflowText = readFileSync(WORKFLOW_PATH, "utf8");
 const workflow = parse(workflowText);
 const syncWorkflowText = readFileSync(join(ROOT, ".github", "workflows", "upstream-sync.yml"), "utf8");
+const syncWorkflow = parse(syncWorkflowText);
 
 function pinnedUses() {
   return Object.values(workflow.jobs).flatMap((job) =>
@@ -74,6 +75,20 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
   assert.match(workflowText, /-eq 12/);
   assert.doesNotMatch(workflowText, /macos-13/);
   assert.match(workflowText, /macos-15-intel|bun-targets\.mjs --matrix/);
+
+  const buildStep = workflow.jobs["build-target"].steps.find(
+    (step) => step.name === "Build one canonical production target",
+  );
+  assert.equal(buildStep.env.NODE_ENV, "production");
+  assert.match(
+    buildStep.run,
+    /args=\(--skip-install --skip-build --platform '\$\{\{ matrix\.id \}\}' --out "\$RUNNER_TEMP\/target" --distribution-version "\$version"\)/,
+  );
+  assert.match(
+    buildStep.run,
+    /if \[\[ '\$\{\{ matrix\.id \}\}' == \*-musl \]\]; then args\+\=\(--clipboard-musl-dir "\$RUNNER_TEMP\/clipboard-musl"\); fi/,
+  );
+  assert.doesNotMatch(buildStep.run, /--skip-deps/);
 });
 
 test("acceptance matrix is generated from explicit per-target smoke descriptors", () => {
@@ -157,8 +172,37 @@ test("publisher stages a resumable immutable draft and rechecks main before fina
   assert.doesNotMatch(publisher, /clobber|DELETE/);
 });
 
-test("upstream sync gate verifies the binary Release candidate with Bun", () => {
-  assert.match(syncWorkflowText, /oven-sh\/setup-bun@[0-9a-f]{40}/);
-  assert.match(syncWorkflowText, /prepare-github-release\.mjs --out/);
-  assert.match(syncWorkflowText, /verify-github-release\.mjs local/);
+test("upstream sync smoke packages and executes only the hydrated Linux host target", () => {
+  const syncSteps = syncWorkflow.jobs["sync-main-with-squash-branches"].steps;
+  assert.match(
+    syncSteps.find((step) => step.name === "Setup Bun").uses,
+    /oven-sh\/setup-bun@[0-9a-f]{40}/,
+  );
+  const smokeStep = syncSteps.find(
+    (step) => step.name === "Smoke test host binary packaging path",
+  );
+  assert.ok(smokeStep, "host packaging smoke step must exist");
+  assert.match(smokeStep.run, /rebuilt_sha=\$\(git rev-parse HEAD\)/);
+  assert.match(smokeStep.run, /REBUILT_SHA="\$rebuilt_sha"[\s\S]*process\.env\.REBUILT_SHA\.slice\(0, 8\)/);
+  assert.doesNotMatch(smokeStep.run, /process\.env\.GITHUB_SHA/);
+  assert.match(smokeStep.run, /scripts\/build-binaries\.sh/);
+  for (const argument of [
+    "--skip-install",
+    "--skip-deps",
+    "--skip-build",
+    "--platform linux-x64-gnu-modern",
+    '--out "$release_dir"',
+    '--distribution-version "$version"',
+  ]) {
+    assert.ok(smokeStep.run.includes(argument), `missing sync packaging argument: ${argument}`);
+  }
+  assert.equal((smokeStep.run.match(/--platform /g) ?? []).length, 1);
+  assert.match(smokeStep.run, /test -s "\$archive"/);
+  assert.match(
+    smokeStep.run,
+    /smoke-binary-release\.mjs[\s\S]*"\$archive"[\s\S]*linux-x64-gnu-modern[\s\S]*"\$version"/,
+  );
+  assert.doesNotMatch(smokeStep.run, /npm (ci|install)/);
+  assert.doesNotMatch(syncWorkflowText, /prepare-github-release\.mjs/);
+  assert.doesNotMatch(syncWorkflowText, /verify-github-release\.mjs local/);
 });

@@ -57,7 +57,7 @@ try {
 	let tui;
 	if (process.env.PI_XZ_TUI_EVIDENCE) {
 		tui = JSON.parse(readFileSync(process.env.PI_XZ_TUI_EVIDENCE, "utf8"));
-		if (tui.harness !== "Python standard-library PTY" || !Number.isSafeInteger(tui.elapsedMs) || tui.elapsedMs < 0 || tui.elapsedMs > SMOKE_LIMITS.interactiveMs || !Number.isSafeInteger(tui.outputBytes) || tui.outputBytes <= 0 || tui.input !== "/exit\\r" || tui.childExitCode !== 0 || !tui.observedOutput || !tui.exitSent || !tui.cleanExit) throw new Error("invalid external TUI evidence");
+		if (tui.harness !== "Python standard-library PTY" || !Number.isSafeInteger(tui.elapsedMs) || tui.elapsedMs < 0 || tui.elapsedMs > SMOKE_LIMITS.interactiveMs || !Number.isSafeInteger(tui.outputBytes) || tui.outputBytes <= 0 || tui.input !== "ctrl-c,ctrl-d" || tui.childExitCode !== 0 || !tui.observedOutput || !tui.exitSent || !tui.cleanExit) throw new Error("invalid external TUI evidence");
 		commands.push({ name: "tui-pseudoterminal", command: `external:${process.env.PI_XZ_TUI_EVIDENCE}`, status: tui.childExitCode, elapsedMs: tui.elapsedMs });
 	} else if (platform() === "win32") {
 		const tuiResult = run("tui-pseudoconsole", "powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(process.cwd(), "scripts", "smoke-windows-tui.ps1"), "-Executable", executable, "-Record", join(work, "windows-tui.json")], { env, timeout: SMOKE_LIMITS.interactiveMs + 3000 });
