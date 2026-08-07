@@ -73,6 +73,8 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
   assert.match(workflowText, /github-release-target-\$\{\{ github\.sha \}\}-\$\{\{ matrix\.id \}\}/);
   assert.match(workflowText, /--prebuilt/);
   assert.match(workflowText, /-eq 12/);
+  const aggregateRun = workflow.jobs["aggregate-release-candidate"].steps.find((step) => step.run)?.run;
+  assert.ok(aggregateRun.indexOf("-eq 12") < aggregateRun.indexOf("prepare-github-release.mjs"));
   assert.doesNotMatch(workflowText, /macos-13/);
   assert.match(workflowText, /macos-15-intel|bun-targets\.mjs --matrix/);
 
