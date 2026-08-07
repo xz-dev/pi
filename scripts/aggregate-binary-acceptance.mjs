@@ -43,7 +43,8 @@ for (const id of BUN_TARGET_IDS) {
 	assertLimit(id, "listModelsMs", record.timingsMs?.listModels, SMOKE_LIMITS.listModelsMs);
 	assertLimit(id, "interactiveMs", record.tui?.elapsedMs, SMOKE_LIMITS.interactiveMs);
 	if (JSON.stringify(record.limits) !== JSON.stringify(SMOKE_LIMITS)) throw new Error(`${id} self-reported limits do not equal authoritative limits`);
-	if (!Number.isSafeInteger(record.tui?.outputBytes) || record.tui.outputBytes <= 0 || record.tui.input !== "/exit\\r" || record.tui.childExitCode !== 0 || !record.tui.observedOutput || !record.tui.exitSent || !record.tui.cleanExit || !record.clipboard?.loadedAndCalled) throw new Error(`${id} missing bounded TUI or clipboard acceptance`);
+	const expectedTui = descriptor.os === "windows" ? { harness: "Win32 ConPTY API", input: "/exit\\r" } : { harness: "Bun.Terminal PTY", input: "ctrl-c,ctrl-d" };
+	if (!Number.isSafeInteger(record.tui?.outputBytes) || record.tui.outputBytes <= 0 || record.tui.harness !== expectedTui.harness || record.tui.input !== expectedTui.input || record.tui.childExitCode !== 0 || !record.tui.observedOutput || !record.tui.exitSent || !record.tui.cleanExit || !record.clipboard?.loadedAndCalled) throw new Error(`${id} missing bounded TUI or clipboard acceptance`);
 	if (record.thirdPartyNotices?.file !== "THIRD_PARTY_NOTICES.md" || !/^[0-9a-f]{64}$/.test(record.thirdPartyNotices?.sha256 ?? "") || !Number.isSafeInteger(record.thirdPartyNotices?.bytes) || record.thirdPartyNotices.bytes <= 0) throw new Error(`${id} missing third-party license closure evidence`);
 	const notice = archiveNotice(join(resolve(manifestPath, ".."), bundle.file), descriptor.os === "windows");
 	if (notice.sha256 !== record.thirdPartyNotices.sha256 || notice.bytes !== record.thirdPartyNotices.bytes) throw new Error(`${id} archived third-party notices do not match acceptance evidence`);
