@@ -36,6 +36,7 @@ test("upstream sync carries and tests the bounded startup benchmark patch", () =
   assert.match(syncWorkflowText, /git merge --squash origin\/patch\/startup-benchmark-exit/);
   assert.match(syncWorkflowText, /git commit -m "merge patch\/startup-benchmark-exit branch"/);
   assert.match(syncWorkflowText, /test\/startup-benchmark\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/tools-manager\.test\.ts/);
 });
 
 test("upstream sync retires the obsolete OpenCode completions fixture patch", () => {

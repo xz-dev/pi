@@ -6,7 +6,7 @@ if (!executable) throw new Error("Usage: smoke-bun-tui.mjs <executable>");
 const started = performance.now();
 const startupBenchmark = ["1", "true", "yes"].includes((process.env.PI_STARTUP_BENCHMARK ?? "").toLowerCase());
 const startupBenchmarkCompleteMarker = "__PI_STARTUP_BENCHMARK_COMPLETE__";
-const startupBenchmarkStagePattern = /__PI_STARTUP_BENCHMARK_STAGE__:(tui-started|theme-applied|session-rebound|providers-counted)/g;
+const startupBenchmarkStagePattern = /__PI_STARTUP_BENCHMARK_STAGE__:(init-entered|tools-ready|tui-started|theme-applied|session-rebound|providers-counted)/g;
 const outputTailLength = Math.max(startupBenchmarkCompleteMarker.length, "__PI_STARTUP_BENCHMARK_STAGE__:providers-counted".length) - 1;
 const decoder = new TextDecoder();
 let outputBytes = 0;
