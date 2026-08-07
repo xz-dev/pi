@@ -2,7 +2,13 @@ import { writeSync } from "node:fs";
 
 export const STARTUP_BENCHMARK_COMPLETE_MARKER = "__PI_STARTUP_BENCHMARK_COMPLETE__";
 
-export type StartupBenchmarkStage = "tui-started" | "theme-applied" | "session-rebound" | "providers-counted";
+export type StartupBenchmarkStage =
+	| "init-entered"
+	| "tools-ready"
+	| "tui-started"
+	| "theme-applied"
+	| "session-rebound"
+	| "providers-counted";
 
 export function isStartupBenchmarkEnabled(): boolean {
 	const value = process.env.PI_STARTUP_BENCHMARK?.toLowerCase();
