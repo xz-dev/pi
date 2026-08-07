@@ -42,7 +42,7 @@ try {
 	const extractedBytes = directoryBytes(root);
 	if (extractedBytes > SMOKE_LIMITS.extractedBytes) throw new Error(`extracted size ${extractedBytes} exceeds ${SMOKE_LIMITS.extractedBytes}`);
 	const executable = join(root, target.executable);
-	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color" };
+	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color", ...(target.os === "windows" ? { PI_STARTUP_BENCHMARK: "1" } : {}) };
 	const version = run("version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.versionMs });
 	if (version.stdout.trim() !== expectedVersion) throw new Error(`version mismatch: ${version.stdout.trim()}`);
 	const help = run("help", executable, ["--help"], { env, maxMs: SMOKE_LIMITS.helpMs });

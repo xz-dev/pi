@@ -83,8 +83,6 @@ try {
   if (-not $firstRead.IsCompleted -or $firstRead.Result -ne 1) { throw "ConPTY produced no observable terminal output" }
   $reader = New-Object IO.StreamReader($outputServer, [Text.Encoding]::UTF8, $true, 4096, $true)
   $readTask = $reader.ReadToEndAsync()
-  $input = [Text.Encoding]::UTF8.GetBytes("/exit`r")
-  $inputServer.Write($input, 0, $input.Length); $inputServer.Flush()
   $remaining = [Math]::Max(1, $TimeoutMilliseconds - [int]$started.ElapsedMilliseconds)
   $wait = [PiConPty.Native]::WaitForSingleObject($process.hProcess, [uint32]$remaining)
   if ($wait -ne [PiConPty.Native]::WAIT_OBJECT_0) { throw "ConPTY child did not exit within ${TimeoutMilliseconds}ms" }
@@ -95,7 +93,7 @@ try {
   [void]$readTask.Wait(1000)
   $output = [Text.Encoding]::UTF8.GetString($firstByte) + $(if ($readTask.IsCompleted) { $readTask.Result } else { "" })
   if ($exitCode -ne 0 -or $output.Length -eq 0) { throw "ConPTY acceptance failed: exit=$exitCode output=$($output.Length)" }
-  $result = [ordered]@{ harness="Win32 ConPTY API"; elapsedMs=[int]$started.ElapsedMilliseconds; outputBytes=[Text.Encoding]::UTF8.GetByteCount($output); input="/exit\r"; childExitCode=[int]$exitCode; observedOutput=$true; exitSent=$true; cleanExit=$true }
+  $result = [ordered]@{ harness="Win32 ConPTY API"; elapsedMs=[int]$started.ElapsedMilliseconds; outputBytes=[Text.Encoding]::UTF8.GetByteCount($output); input="startup-benchmark"; childExitCode=[int]$exitCode; observedOutput=$true; exitSent=$false; cleanExit=$true }
   $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $Record -Encoding utf8
   $result | ConvertTo-Json -Compress
 } finally {

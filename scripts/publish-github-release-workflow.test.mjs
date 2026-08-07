@@ -120,6 +120,8 @@ test("Windows ConPTY uses the mutable CreateProcessW command-line contract", () 
   assert.match(harness, /\$Executable = \[IO\.Path\]::GetFullPath\(\$Executable\)/);
   assert.match(harness, /\[IO\.File\]::Exists\(\$Executable\)/);
   assert.match(harness, /CreateProcessW\(\$Executable, \$commandLine/);
+  assert.match(harness, /input="startup-benchmark"/);
+  assert.doesNotMatch(harness, /GetBytes\("\/exit/);
   assert.doesNotMatch(harness, /CreateProcessW\(\$null, \$commandLine/);
   assert.match(harness, /\$startupInfo\.cb = \[Runtime\.InteropServices\.Marshal\]::SizeOf\(\[type\]\[PiConPty\.Native\+STARTUPINFOEX\]\)/);
   assert.match(harness, /\$startup\.StartupInfo = \$startupInfo/);

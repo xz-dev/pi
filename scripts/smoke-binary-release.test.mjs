@@ -16,8 +16,9 @@ test("Windows extraction passes absolute paths through environment variables wit
 	assert.doesNotMatch(smokeScript, /Expand-Archive[^\n]*\$args/);
 });
 
-test("native TUI smoke disables startup downloads", () => {
+test("native TUI smoke disables startup downloads and uses the Windows benchmark lifecycle", () => {
 	assert.match(smokeScript, /NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR/);
+	assert.match(smokeScript, /target\.os === "windows" \? \{ PI_STARTUP_BENCHMARK: "1" \} : \{\}/);
 });
 
 test("Unix TUI harness allows startup initialization to settle before sending exit", { skip: !bunAvailable && "Bun is not installed" }, () => {
