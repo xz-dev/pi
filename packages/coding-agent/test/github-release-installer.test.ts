@@ -19,7 +19,8 @@ function sha(path: string): string {
 }
 
 beforeAll(async () => {
-	releaseDir = mkdtempSync(join(tmpdir(), "pi-native-installer-release-"));
+	const fixtureDir = mkdtempSync(join(tmpdir(), "pi-native-installer-release-"));
+	releaseDir = fixtureDir;
 	// Real bundles wrap files under a top-level pi/ directory (build-binaries.sh
 	// layout); install.sh unwraps exactly that wrapper before the staging smoke.
 	const bundle = join(releaseDir, "pi");
@@ -120,16 +121,17 @@ beforeAll(async () => {
 		join(releaseDir, "attestation-subjects.txt"),
 		`${Object.values(bundleFiles).join("\n")}\nrelease-manifest.json\ninstall.sh\ninstall.ps1\nSHA256SUMS\n`,
 	);
-	server = createServer((request, response) => {
-		const file = join(releaseDir, new URL(request.url ?? "/", baseUrl).pathname.slice(1));
+	const fixtureServer = createServer((request, response) => {
+		const file = join(fixtureDir, new URL(request.url ?? "/", baseUrl).pathname.slice(1));
 		try {
 			response.end(readFileSync(file));
 		} catch {
 			response.writeHead(404).end();
 		}
 	});
-	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-	const address = server.address();
+	server = fixtureServer;
+	await new Promise<void>((resolve) => fixtureServer.listen(0, "127.0.0.1", resolve));
+	const address = fixtureServer.address();
 	if (!address || typeof address === "string") throw new Error("server did not bind");
 	baseUrl = `http://127.0.0.1:${address.port}/`;
 	const script = readFileSync(join(releaseDir, "install.sh"), "utf8").replaceAll("http://127.0.0.1/", baseUrl);
