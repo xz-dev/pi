@@ -133,6 +133,7 @@ test("Windows ConPTY uses Bun 1.3.14's native Terminal implementation", () => {
   assert.match(smoke, /"bun", \[join\(process\.cwd\(\), "scripts", "smoke-bun-tui\.mjs"\), executable\]/);
   assert.doesNotMatch(smoke, /smoke-windows-tui\.ps1/);
   assert.match(harness, /process\.platform === "win32" \? "Bun\.Terminal ConPTY" : "Bun\.Terminal PTY"/);
+  assert.match(harness, /cwd: dirname\(executable\)/);
   assert.match(harness, /Promise\.all\(\[child\.exited, terminalClosure\.promise\]\)/);
   assert.match(harness, /__PI_STARTUP_BENCHMARK_COMPLETE__/);
   assert.match(harness, /decoder\.decode\(data, \{ stream: true \}\)/);

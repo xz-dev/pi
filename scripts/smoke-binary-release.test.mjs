@@ -51,12 +51,15 @@ raise SystemExit(0 if b"\\x04" in received else 3)
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("TUI benchmark harness observes output and waits for a clean self-exit without input", { skip: !bunAvailable && "Bun is not installed" }, () => {
+test("TUI benchmark harness starts the binary from its isolated bundle directory", { skip: !bunAvailable && "Bun is not installed" }, () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-tui-benchmark-"));
 	try {
-		const executable = join(root, "pi");
-		writeFileSync(executable, "#!/bin/sh\nprintf 'benchmark-output__PI_STARTUP_'\nsleep 0.05\nprintf 'BENCHMARK_COMPLETE__\\n'\n"); chmodSync(executable, 0o755);
-		const result = execFileSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8", env: { ...process.env, PI_STARTUP_BENCHMARK: "1" } });
+		mkdirSync(join(root, ".pi", "skills"), { recursive: true });
+		const bundle = join(root, "bundle");
+		mkdirSync(bundle);
+		const executable = join(bundle, "pi");
+		writeFileSync(executable, "#!/bin/sh\n[ \"$PWD\" = \"$(dirname \"$0\")\" ] || exit 2\nprintf 'benchmark-output__PI_STARTUP_'\nsleep 0.05\nprintf 'BENCHMARK_COMPLETE__\\n'\n"); chmodSync(executable, 0o755);
+		const result = execFileSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8", cwd: root, env: { ...process.env, PI_STARTUP_BENCHMARK: "1" } });
 		const evidence = JSON.parse(result.trim());
 		assert.equal(evidence.input, "startup-benchmark");
 		assert.equal(evidence.exitSent, false);

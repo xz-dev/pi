@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { dirname } from "node:path";
+
 const [executable] = process.argv.slice(2);
 if (!executable) throw new Error("Usage: smoke-bun-tui.mjs <executable>");
 
@@ -25,6 +27,7 @@ let exitTimer;
 let timeoutTimer;
 
 const child = Bun.spawn([executable], {
+	cwd: dirname(executable),
 	env: process.env,
 	terminal: {
 		cols: 120,
