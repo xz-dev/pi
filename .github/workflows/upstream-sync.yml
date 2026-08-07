@@ -66,7 +66,17 @@ jobs:
           git merge --squash origin/patch/esc-abort
           git commit -m "merge patch/esc-abort branch"
 
-          git merge --squash origin/patch/manual-retry
+          if ! git merge --squash origin/patch/manual-retry; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/agent/src/agent.ts ]]; then
+              printf '::error::Unexpected manual-retry squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            git checkout --ours packages/agent/src/agent.ts
+            git add packages/agent/src/agent.ts
+          fi
           git commit -m "merge patch/manual-retry branch"
 
           if ! git merge --squash origin/tmp/patch/esc-manual-retry-compat; then
