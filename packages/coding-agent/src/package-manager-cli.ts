@@ -6,11 +6,13 @@ import { createProjectTrustContext } from "./cli/project-trust.ts";
 import {
 	APP_NAME,
 	CONFIG_DIR_NAME,
+	DISTRIBUTION,
 	detectInstallMethod,
 	getAgentDir,
 	getPackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
+	getXzDevSourceUpdateGuidance,
 	PACKAGE_NAME,
 	type SelfUpdateCommand,
 	type SelfUpdatePackageTarget,
@@ -29,6 +31,7 @@ import {
 	cleanupWindowsSelfUpdateQuarantine,
 	quarantineWindowsNativeDependencies,
 } from "./utils/windows-self-update.ts";
+import { getLatestXzRelease, runXzSelfUpdate } from "./utils/xz-release-update.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -834,6 +837,28 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
+					if (DISTRIBUTION === "xz-dev" && PACKAGE_NAME === "@earendil-works/pi-coding-agent") {
+						if (detectInstallMethod() === "bun-binary") {
+							// xz-dev Bun compiled binary: discover only xz-dev/pi via the latest
+							// release-manifest, then invoke the exact installer with update/force.
+							const latestRelease = await getLatestXzRelease(VERSION);
+							if (!latestRelease) {
+								throw new Error(`Could not determine latest ${APP_NAME} version.`);
+							}
+							if (!options.force && !isNewerPackageVersion(latestRelease.version, VERSION)) {
+								console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
+								return true;
+							}
+							console.log(chalk.dim(`Updating ${APP_NAME} with the xz-dev Release installer...`));
+							await runXzSelfUpdate(latestRelease, VERSION, options.force);
+							console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${latestRelease.version}`));
+							return true;
+						}
+						// xz-dev source/non-binary: user-managed checkout. Never call the generic
+						// package-manager self-update or construct @latest/upstream APIs.
+						console.log(chalk.dim(getXzDevSourceUpdateGuidance()));
+						return true;
+					}
 					const selfUpdatePlan = await getSelfUpdatePlan(options.force);
 					if (!selfUpdatePlan.shouldRun) {
 						return true;
