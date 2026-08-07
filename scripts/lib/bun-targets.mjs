@@ -15,6 +15,7 @@ export const RELEASE_BUILD = Object.freeze({
 export const SMOKE_LIMITS = Object.freeze({
 	archiveBytes: 100 * 1024 * 1024,
 	extractedBytes: 250 * 1024 * 1024,
+	coldVersionMs: 5000,
 	versionMs: 2500,
 	helpMs: 3000,
 	listModelsMs: 5000,
@@ -45,7 +46,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 		executor,
 		...(executor === "pinned-musl-container" ? { containerImage: MUSL_IMAGES[arch] } : {}),
 		requiredCpuFeatures: cpu === "modern" && arch === "x64" ? ["avx2"] : cpu === "baseline" && arch === "x64" ? ["sse2"] : [],
-		requiredCommands: ["extract", "measure-extracted-size", "version", "help", "list-models", "clipboard", ...(libc === "musl" ? ["musl-provenance"] : []), os === "windows" ? "tui-pseudoconsole" : "tui-pseudoterminal"],
+		requiredCommands: ["extract", "measure-extracted-size", "cold-version", "version", "help", "list-models", "clipboard", ...(libc === "musl" ? ["musl-provenance"] : []), os === "windows" ? "tui-pseudoconsole" : "tui-pseudoterminal"],
 		executable: os === "windows" ? "pi.exe" : "pi",
 		archive: os === "windows" ? "zip" : "tar.gz",
 		clipboardNativePackage,

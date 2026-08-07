@@ -10,7 +10,7 @@ import { BUN_TARGETS, SMOKE_LIMITS, binaryArchiveName } from "./lib/bun-targets.
 const digest = "a".repeat(64);
 const notice = "# Third-Party Notices\n\nLicense SHA-256: " + digest + "\n";
 function record(target, archive = { sha256: digest, bytes: 1 }) {
-	return { schemaVersion: 1, target: target.id, archive: { file: binaryArchiveName(target.id), sha256: archive.sha256, bytes: archive.bytes, extractedBytes: 1 }, runner: { os: target.runnerOs, arch: target.runnerArch, osArchitecture: target.arch, cpuFeatures: target.requiredCpuFeatures.join(" ") }, executor: { kind: target.executor, containerDigest: target.containerImage ?? null, emulated: false }, commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })), tui: { harness: target.os === "windows" ? "Bun.Terminal ConPTY" : "Bun.Terminal PTY", elapsedMs: 1, outputBytes: 1, input: target.os === "windows" ? "startup-benchmark" : "ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: target.os === "windows" ? true : null, exitSent: target.os !== "windows", cleanExit: true }, clipboard: { loadedAndCalled: true }, thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: createHash("sha256").update(notice).digest("hex"), bytes: Buffer.byteLength(notice) }, timingsMs: { version: 1, help: 1, listModels: 1, interactive: 1 }, limits: SMOKE_LIMITS };
+	return { schemaVersion: 1, target: target.id, archive: { file: binaryArchiveName(target.id), sha256: archive.sha256, bytes: archive.bytes, extractedBytes: 1 }, runner: { os: target.runnerOs, arch: target.runnerArch, osArchitecture: target.arch, cpuFeatures: target.requiredCpuFeatures.join(" ") }, executor: { kind: target.executor, containerDigest: target.containerImage ?? null, emulated: false }, commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })), tui: { harness: target.os === "windows" ? "Bun.Terminal ConPTY" : "Bun.Terminal PTY", elapsedMs: 1, outputBytes: 1, input: target.os === "windows" ? "startup-benchmark" : "ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: target.os === "windows" ? true : null, exitSent: target.os !== "windows", cleanExit: true }, clipboard: { loadedAndCalled: true }, thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: createHash("sha256").update(notice).digest("hex"), bytes: Buffer.byteLength(notice) }, timingsMs: { coldVersion: 1, version: 1, help: 1, listModels: 1, interactive: 1 }, limits: SMOKE_LIMITS };
 }
 function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "pi-acceptance-test-")); const records = join(root, "records"); mkdirSync(records);
@@ -44,6 +44,18 @@ test("aggregator rejects self-asserted emulation and runner mismatch", () => {
 		assert.notEqual(result.status, 0);
 		assert.match(result.stderr, /executor does not match authoritative descriptor/);
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("aggregator rejects cold and warm version timings above their separate limits", () => {
+	for (const [field, maximum] of [["coldVersion", SMOKE_LIMITS.coldVersionMs], ["version", SMOKE_LIMITS.versionMs]]) {
+		const value = fixture();
+		try {
+			const path = join(value.records, `${BUN_TARGETS[0].id}.json`); const changed = JSON.parse(readFileSync(path, "utf8")); changed.timingsMs[field] = maximum + 1; writeFileSync(path, JSON.stringify(changed));
+			const result = spawnSync(process.execPath, [join(import.meta.dirname, "aggregate-binary-acceptance.mjs"), value.records, value.manifest, value.output], { encoding: "utf8" });
+			assert.notEqual(result.status, 0);
+			assert.match(result.stderr, new RegExp(`${field}Ms.*exceeds authoritative limit`));
+		} finally { rmSync(value.root, { recursive: true, force: true }); }
+	}
 });
 
 test("aggregator rejects TUI evidence that does not match the target platform", () => {

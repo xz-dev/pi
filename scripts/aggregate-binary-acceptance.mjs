@@ -38,6 +38,7 @@ for (const id of BUN_TARGET_IDS) {
 	for (const command of commands) if (command.status !== 0 || !Number.isSafeInteger(command.elapsedMs) || command.elapsedMs < 0) throw new Error(`${id} invalid command evidence: ${command.name}`);
 	assertLimit(id, "archiveBytes", record.archive.bytes, SMOKE_LIMITS.archiveBytes);
 	assertLimit(id, "extractedBytes", record.archive.extractedBytes, SMOKE_LIMITS.extractedBytes);
+	assertLimit(id, "coldVersionMs", record.timingsMs?.coldVersion, SMOKE_LIMITS.coldVersionMs);
 	assertLimit(id, "versionMs", record.timingsMs?.version, SMOKE_LIMITS.versionMs);
 	assertLimit(id, "helpMs", record.timingsMs?.help, SMOKE_LIMITS.helpMs);
 	assertLimit(id, "listModelsMs", record.timingsMs?.listModels, SMOKE_LIMITS.listModelsMs);

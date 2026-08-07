@@ -18,7 +18,7 @@ const commands = [];
 const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 function run(name, command, args, options = {}) {
 	const started = performance.now();
-	const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? 10_000, env: options.env });
+	const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? options.maxMs ?? 10_000, env: options.env });
 	const elapsedMs = Math.round(performance.now() - started);
 	commands.push({ name, command: [command, ...args].join(" "), status: result.status, elapsedMs });
 	if (result.status !== 0) throw new Error(`${name} failed (${result.status ?? result.signal ?? result.error?.message ?? "unknown"}): ${result.stdout ?? ""}${result.stderr ?? ""}`);
@@ -40,6 +40,8 @@ try {
 	const executable = join(root, target.executable);
 	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color" };
 	const tuiEnv = target.os === "windows" ? { ...env, PI_STARTUP_BENCHMARK: "1" } : env;
+	const coldVersion = run("cold-version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.coldVersionMs });
+	if (coldVersion.stdout.trim() !== expectedVersion) throw new Error(`cold version mismatch: ${coldVersion.stdout.trim()}`);
 	const version = run("version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.versionMs });
 	if (version.stdout.trim() !== expectedVersion) throw new Error(`version mismatch: ${version.stdout.trim()}`);
 	const help = run("help", executable, ["--help"], { env, maxMs: SMOKE_LIMITS.helpMs });
@@ -69,7 +71,7 @@ try {
 		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, emulated: false },
 		commands, tui, clipboard: { addon: target.clipboardNativeFile, loadedAndCalled: true, elapsedMs: clipboard.elapsedMs },
 		thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: sha256(noticesPath), bytes: statSync(noticesPath).size },
-		timingsMs: { version: version.elapsedMs, help: help.elapsedMs, listModels: listModels.elapsedMs, interactive: commands.filter(({ name }) => name.startsWith("tui-")).reduce((sum, entry) => sum + entry.elapsedMs, 0) },
+		timingsMs: { coldVersion: coldVersion.elapsedMs, version: version.elapsedMs, help: help.elapsedMs, listModels: listModels.elapsedMs, interactive: commands.filter(({ name }) => name.startsWith("tui-")).reduce((sum, entry) => sum + entry.elapsedMs, 0) },
 		limits: SMOKE_LIMITS,
 	};
 	if (osArchitecture !== target.arch) throw new Error(`operating-system architecture ${osArchitecture} does not match ${target.arch}`);
