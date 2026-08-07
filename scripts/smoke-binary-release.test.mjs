@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 const target = "linux-x64-gnu-baseline";
+const bunAvailable = spawnSync("bun", ["--version"]).status === 0;
 
-test("Unix TUI harness allows startup initialization to settle before sending exit", () => {
+test("Unix TUI harness allows startup initialization to settle before sending exit", { skip: !bunAvailable && "Bun is not installed" }, () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-tui-startup-settle-"));
 	try {
 		const executable = join(root, "pi");
