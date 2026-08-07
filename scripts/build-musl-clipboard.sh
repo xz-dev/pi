@@ -27,7 +27,18 @@ case "$ARCH" in
 esac
 host_machine=$(uname -m)
 [[ "$host_machine" == "$expected_machine" ]] || { echo "native $ARCH runner required (host is $host_machine); emulation is not accepted" >&2; exit 1; }
-work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+work=$(mktemp -d)
+host_uid=$(id -u)
+host_gid=$(id -g)
+cleanup() {
+	if [[ -d "$work" ]]; then
+		if ! docker run --rm --network none -e HOST_UID="$host_uid" -e HOST_GID="$host_gid" -v "$work:/work" "$image" sh -c 'chown -R "$HOST_UID:$HOST_GID" /work'; then
+			echo "failed to restore musl build workspace ownership" >&2
+		fi
+		rm -rf "$work"
+	fi
+}
+trap cleanup EXIT
 source_dir="$work/clipboard-$SOURCE_COMMIT"
 mkdir -p "$source_dir"
 cp -a "$VENDOR_DIR/source/." "$source_dir/"

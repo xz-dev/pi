@@ -71,6 +71,7 @@ jobs:
           set -euo pipefail
           version=$(node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.GITHUB_SHA.slice(0, 8)')
           args=(--skip-install --skip-deps --skip-build --platform '${{ matrix.id }}' --out "$RUNNER_TEMP/target" --distribution-version "$version")
+          if [[ '${{ matrix.id }}' == windows-* ]]; then args+=(--hydrate-target-deps); fi
           if [[ '${{ matrix.id }}' == *-musl ]]; then args+=(--clipboard-musl-dir "$RUNNER_TEMP/clipboard-musl"); fi
           scripts/build-binaries.sh "${args[@]}"
           test "$(find "$RUNNER_TEMP/target" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 1

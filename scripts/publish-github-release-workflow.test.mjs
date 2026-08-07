@@ -86,6 +86,10 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
   );
   assert.match(
     buildStep.run,
+    /if \[\[ '\$\{\{ matrix\.id \}\}' == windows-\* \]\]; then args\+\=\(--hydrate-target-deps\); fi/,
+  );
+  assert.match(
+    buildStep.run,
     /if \[\[ '\$\{\{ matrix\.id \}\}' == \*-musl \]\]; then args\+\=\(--clipboard-musl-dir "\$RUNNER_TEMP\/clipboard-musl"\); fi/,
   );
   assert.match(buildStep.run, /--skip-deps/);
@@ -113,7 +117,16 @@ test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.3.
   const builder = readFileSync(join(ROOT, "scripts", "build-musl-clipboard.sh"), "utf8");
   assert.doesNotMatch(builder, /curl|apk add --no-cache|apk update/);
   assert.match(builder, /--network none/);
+  assert.match(builder, /host_uid=\$\(id -u\)/);
+  assert.match(builder, /host_gid=\$\(id -g\)/);
+  assert.match(builder, /chown -R "\$HOST_UID:\$HOST_GID" \/work/);
+  assert.match(builder, /trap cleanup EXIT/);
   assert.match(builder, /tar -xzf \/inputs\/musl-dev\.apk/);
+  const packager = readFileSync(join(ROOT, "scripts", "build-binaries.sh"), "utf8");
+  assert.match(packager, /--hydrate-target-deps/);
+  assert.match(packager, /require\('\.\/package-lock\.json'\)\.packages/);
+  assert.match(packager, /clipboard tarball integrity mismatch/);
+  assert.match(packager, /tarball="\$\(pwd\)\/\$\(npm pack/);
 });
 
 test("publication attests final subjects before draft publication and keeps audit list separate", () => {

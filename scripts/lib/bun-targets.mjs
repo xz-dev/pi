@@ -28,7 +28,7 @@ const MUSL_IMAGES = Object.freeze({
 	arm64: "docker.io/oven/bun@sha256:3c9ab1a521c82144dff537125695017a0480d3a13088fba7e012cfae0f63146f",
 });
 
-function target({ id, bunTarget, os, arch, libc, cpu, runner, clipboardNativePackage, clipboardNativeFile, nativeHelperDir, nativeHelperFile }) {
+function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runner, clipboardNativePackage, clipboardNativeFile, nativeHelperDir, nativeHelperFile }) {
 	if (!GITHUB_HOSTED_RUNNERS.includes(runner)) throw new Error(`Unsupported GitHub-hosted runner label: ${runner}`);
 	const executor = libc === "musl" ? "pinned-musl-container" : "native";
 	return Object.freeze({
@@ -39,6 +39,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, clipboardNativePac
 		libc,
 		cpu,
 		runner,
+		buildRunner,
 		runnerOs: os === "darwin" ? "macOS" : os === "windows" ? "Windows" : "Linux",
 		runnerArch: arch === "arm64" ? "ARM64" : "X64",
 		executor,
@@ -65,14 +66,14 @@ export const BUN_TARGETS = Object.freeze([
 	target({ id: "linux-x64-musl-baseline", bunTarget: "bun-linux-x64-musl-baseline", os: "linux", arch: "x64", libc: "musl", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-musl", clipboardNativeFile: "clipboard.linux-x64-musl.node" }),
 	target({ id: "linux-x64-musl-modern", bunTarget: "bun-linux-x64-musl", os: "linux", arch: "x64", libc: "musl", cpu: "modern", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-musl", clipboardNativeFile: "clipboard.linux-x64-musl.node" }),
 	target({ id: "linux-arm64-musl", bunTarget: "bun-linux-arm64-musl", os: "linux", arch: "arm64", libc: "musl", cpu: "arm64", runner: "ubuntu-24.04-arm", clipboardNativePackage: "clipboard-linux-arm64-musl", clipboardNativeFile: "clipboard.linux-arm64-musl.node" }),
-	target({ id: "windows-x64-baseline", bunTarget: "bun-windows-x64-baseline", os: "windows", arch: "x64", cpu: "baseline", runner: "windows-2022", clipboardNativePackage: "clipboard-win32-x64-msvc", clipboardNativeFile: "clipboard.win32-x64-msvc.node", ...windowsHelper("x64") }),
-	target({ id: "windows-x64-modern", bunTarget: "bun-windows-x64", os: "windows", arch: "x64", cpu: "modern", runner: "windows-2025", clipboardNativePackage: "clipboard-win32-x64-msvc", clipboardNativeFile: "clipboard.win32-x64-msvc.node", ...windowsHelper("x64") }),
-	target({ id: "windows-arm64", bunTarget: "bun-windows-arm64", os: "windows", arch: "arm64", cpu: "arm64", runner: "windows-11-arm", clipboardNativePackage: "clipboard-win32-arm64-msvc", clipboardNativeFile: "clipboard.win32-arm64-msvc.node", ...windowsHelper("arm64") }),
+	target({ id: "windows-x64-baseline", bunTarget: "bun-windows-x64-baseline", os: "windows", arch: "x64", cpu: "baseline", runner: "windows-2022", buildRunner: "ubuntu-24.04", clipboardNativePackage: "clipboard-win32-x64-msvc", clipboardNativeFile: "clipboard.win32-x64-msvc.node", ...windowsHelper("x64") }),
+	target({ id: "windows-x64-modern", bunTarget: "bun-windows-x64", os: "windows", arch: "x64", cpu: "modern", runner: "windows-2025", buildRunner: "ubuntu-24.04", clipboardNativePackage: "clipboard-win32-x64-msvc", clipboardNativeFile: "clipboard.win32-x64-msvc.node", ...windowsHelper("x64") }),
+	target({ id: "windows-arm64", bunTarget: "bun-windows-arm64", os: "windows", arch: "arm64", cpu: "arm64", runner: "windows-11-arm", buildRunner: "ubuntu-24.04", clipboardNativePackage: "clipboard-win32-arm64-msvc", clipboardNativeFile: "clipboard.win32-arm64-msvc.node", ...windowsHelper("arm64") }),
 ]);
 export const BUN_TARGET_IDS = Object.freeze(BUN_TARGETS.map(({ id }) => id));
 export function bunTarget(id) { const found = BUN_TARGETS.find((entry) => entry.id === id); if (!found) throw new Error(`Unknown Bun Release target: ${id}`); return found; }
 export function binaryArchiveName(id) { const entry = bunTarget(id); return `pi-${id}.${entry.archive}`; }
-export function githubBuildMatrix() { return { include: BUN_TARGETS.map(({ id, runner, arch }) => ({ id, runner, arch })) }; }
+export function githubBuildMatrix() { return { include: BUN_TARGETS.map(({ id, buildRunner, arch }) => ({ id, runner: buildRunner, arch })) }; }
 export function githubSmokeMatrix() {
 	return { include: BUN_TARGETS.map(({ id: target, runner, executor, containerImage }) => ({ target, runner, executor, ...(containerImage ? { containerImage } : {}) })) };
 }

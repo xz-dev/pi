@@ -15,6 +15,10 @@ test("authoritative Bun target descriptors contain the exact supported matrix", 
 	const matrix = githubBuildMatrix();
 	assert.deepEqual(matrix.include.map(({ id }) => id), EXPECTED);
 	assert.ok(matrix.include.every(({ id, runner, arch }) => id && runner && arch));
+	assert.deepEqual(
+		matrix.include.filter(({ id }) => id.startsWith("windows-")).map(({ id, runner }) => [id, runner]),
+		[["windows-x64-baseline", "ubuntu-24.04"], ["windows-x64-modern", "ubuntu-24.04"], ["windows-arm64", "ubuntu-24.04"]],
+	);
 	assert.equal(BUN_TARGETS.find(({ id }) => id === "darwin-x64-baseline").runner, "macos-15-intel");
 	assert.deepEqual(new Set(BUN_TARGETS.filter(({ os, arch }) => os === "darwin" && arch === "x64").map(({ runner }) => runner)), new Set(["macos-15-intel"]));
 	assert.ok(BUN_TARGETS.every(({ runner }) => GITHUB_HOSTED_RUNNERS.includes(runner)));
@@ -39,6 +43,10 @@ test("release compiler settings and smoke descriptors cover every target", () =>
 	const smoke = githubSmokeMatrix().include;
 	assert.deepEqual(smoke.map(({ target }) => target), EXPECTED);
 	assert.ok(smoke.every(({ runner, executor }) => runner && ["native", "pinned-musl-container"].includes(executor)));
+	assert.deepEqual(
+		smoke.filter(({ target }) => target.startsWith("windows-")).map(({ target, runner }) => [target, runner]),
+		[["windows-x64-baseline", "windows-2022"], ["windows-x64-modern", "windows-2025"], ["windows-arm64", "windows-11-arm"]],
+	);
 	for (const target of BUN_TARGETS) {
 		assert.ok(target.runnerOs && target.runnerArch && target.requiredCommands.length > 0);
 		assert.deepEqual(target.executor, target.libc === "musl" ? "pinned-musl-container" : "native");

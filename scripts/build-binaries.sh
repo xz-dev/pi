@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 SKIP_INSTALL=false
 SKIP_DEPS=false
 SKIP_BUILD=false
+HYDRATE_TARGET_DEPS=false
 OFFLINE_MODEL_DATA=false
 PLATFORMS_REQUESTED=()
 OUTPUT_DIR=""
@@ -18,6 +19,7 @@ while [[ $# -gt 0 ]]; do
 		--skip-install) SKIP_INSTALL=true; shift ;;
 		--skip-deps) SKIP_DEPS=true; shift ;;
 		--skip-build) SKIP_BUILD=true; shift ;;
+		--hydrate-target-deps) HYDRATE_TARGET_DEPS=true; shift ;;
 		--offline-model-data) OFFLINE_MODEL_DATA=true; shift ;;
 		--platform) PLATFORMS_REQUESTED+=("$2"); shift 2 ;;
 		--out) OUTPUT_DIR="$2"; shift 2 ;;
@@ -58,6 +60,21 @@ if [[ "$SKIP_DEPS" == false ]]; then
 fi
 if [[ "$SKIP_BUILD" == false ]]; then
 	if [[ "$OFFLINE_MODEL_DATA" == true ]]; then npm run build:offline; else npm run build; fi
+fi
+if [[ "$HYDRATE_TARGET_DEPS" == true ]]; then
+	test "${#PLATFORMS_REQUESTED[@]}" -eq 1 || { echo "--hydrate-target-deps requires exactly one target" >&2; exit 1; }
+	clipboard_package=$(node scripts/lib/bun-targets.mjs --get "${PLATFORMS_REQUESTED[0]}" clipboardNativePackage)
+	lock_entry="node_modules/@mariozechner/$clipboard_package"
+	resolved=$(node -p "require('./package-lock.json').packages['$lock_entry'].resolved")
+	integrity=$(node -p "require('./package-lock.json').packages['$lock_entry'].integrity")
+	mkdir -p node_modules/@mariozechner
+	tarball="$(pwd)/$(npm pack --ignore-scripts --silent "$resolved")"
+	node -e "const fs=require('node:fs');const crypto=require('node:crypto');const [file,expected]=process.argv.slice(1);const [algorithm,digest]=expected.split('-',2);const actual=crypto.createHash(algorithm).update(fs.readFileSync(file)).digest('base64');if(actual!==digest)throw new Error('clipboard tarball integrity mismatch')" "$tarball" "$integrity"
+	tmp_deps=$(mktemp -d)
+	trap 'rm -rf "$tmp_deps" "$tarball"' EXIT
+	tar -xzf "$tarball" -C "$tmp_deps"
+	rm -rf "node_modules/@mariozechner/$clipboard_package"
+	mv "$tmp_deps/package" "node_modules/@mariozechner/$clipboard_package"
 fi
 export NODE_ENV=production
 if [[ -z "$CLIPBOARD_MUSL_DIR" ]] && printf '%s\n' "${PLATFORMS_REQUESTED[@]}" | grep -q -- '-musl'; then
