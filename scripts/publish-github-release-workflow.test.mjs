@@ -107,7 +107,8 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.match(workflowText, /smoke-binary-release\.mjs/);
   assert.match(workflowText, /PI_XZ_VERIFY_TARGET/);
   assert.match(workflowText, /verify-github-release\.mjs all/);
-  assert.match(workflowText, /smoke-unix-tui\.py/);
+  assert.match(workflowText, /smoke-bun-tui\.mjs/);
+  assert.doesNotMatch(workflowText, /smoke-unix-tui\.py/);
   assert.doesNotMatch(workflowText, /AppActivate|SendKeys|Docker allocated TTY|fabricated/);
 });
 

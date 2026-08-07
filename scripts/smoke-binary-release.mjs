@@ -36,7 +36,8 @@ function cpuFeatures() {
 try {
 	const archiveBytes = statSync(archive).size;
 	if (archiveBytes > SMOKE_LIMITS.archiveBytes) throw new Error(`archive size ${archiveBytes} exceeds ${SMOKE_LIMITS.archiveBytes}`);
-	run("extract", "tar", target.os === "windows" ? ["-xf", archive, "-C", work] : ["-xzf", archive, "-C", work]);
+	if (target.os === "windows") run("extract", "powershell", ["-NoProfile", "-Command", "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force", archive, work]);
+	else run("extract", "tar", ["-xzf", archive, "-C", work]);
 	const root = target.os === "windows" ? work : join(work, "pi");
 	const extractedBytes = directoryBytes(root);
 	if (extractedBytes > SMOKE_LIMITS.extractedBytes) throw new Error(`extracted size ${extractedBytes} exceeds ${SMOKE_LIMITS.extractedBytes}`);
@@ -57,13 +58,13 @@ try {
 	let tui;
 	if (process.env.PI_XZ_TUI_EVIDENCE) {
 		tui = JSON.parse(readFileSync(process.env.PI_XZ_TUI_EVIDENCE, "utf8"));
-		if (tui.harness !== "Python standard-library PTY" || !Number.isSafeInteger(tui.elapsedMs) || tui.elapsedMs < 0 || tui.elapsedMs > SMOKE_LIMITS.interactiveMs || !Number.isSafeInteger(tui.outputBytes) || tui.outputBytes <= 0 || tui.input !== "ctrl-c,ctrl-d" || tui.childExitCode !== 0 || !tui.observedOutput || !tui.exitSent || !tui.cleanExit) throw new Error("invalid external TUI evidence");
+		if (tui.harness !== "Bun.Terminal PTY" || !Number.isSafeInteger(tui.elapsedMs) || tui.elapsedMs < 0 || tui.elapsedMs > SMOKE_LIMITS.interactiveMs || !Number.isSafeInteger(tui.outputBytes) || tui.outputBytes <= 0 || tui.input !== "ctrl-c,ctrl-d" || tui.childExitCode !== 0 || !tui.observedOutput || !tui.exitSent || !tui.cleanExit) throw new Error("invalid external TUI evidence");
 		commands.push({ name: "tui-pseudoterminal", command: `external:${process.env.PI_XZ_TUI_EVIDENCE}`, status: tui.childExitCode, elapsedMs: tui.elapsedMs });
 	} else if (platform() === "win32") {
 		const tuiResult = run("tui-pseudoconsole", "powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(process.cwd(), "scripts", "smoke-windows-tui.ps1"), "-Executable", executable, "-Record", join(work, "windows-tui.json")], { env, timeout: SMOKE_LIMITS.interactiveMs + 3000 });
 		tui = JSON.parse(tuiResult.stdout.trim().split(/\r?\n/).at(-1));
 	} else {
-		const result = run("tui-pseudoterminal", "python3", [join(process.cwd(), "scripts", "smoke-unix-tui.py"), executable], { env, timeout: SMOKE_LIMITS.interactiveMs + 3000 });
+		const result = run("tui-pseudoterminal", "bun", [join(process.cwd(), "scripts", "smoke-bun-tui.mjs"), executable], { env, timeout: SMOKE_LIMITS.interactiveMs + 3000 });
 		tui = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
 	}
 	const osArchitecture = operatingSystemArchitecture();

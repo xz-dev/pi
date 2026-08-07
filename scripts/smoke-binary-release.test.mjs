@@ -26,7 +26,7 @@ while time.monotonic() < deadline and b"\\x04" not in received:
 raise SystemExit(0 if b"\\x04" in received else 3)
 `);
 		chmodSync(executable, 0o755);
-		const result = execFileSync("python3", [join(import.meta.dirname, "smoke-unix-tui.py"), executable], { encoding: "utf8" });
+		const result = execFileSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8" });
 		const evidence = JSON.parse(result.trim());
 		assert.equal(evidence.cleanExit, true);
 		assert.equal(evidence.input, "ctrl-c,ctrl-d");
@@ -50,7 +50,7 @@ test("external TUI evidence contributes the authoritative pseudoterminal command
 		assert.match(notices, /### LICENSE\nLicense SHA-256: [0-9a-f]{64}/);
 		const archive = join(root, "pi-linux-x64-gnu-baseline.tar.gz"); execFileSync("tar", ["-czf", archive, "-C", join(root, "stage"), "pi"]);
 		const bin = join(root, "bin"); mkdirSync(bin); const bun = join(bin, "bun"); writeFileSync(bun, "#!/bin/sh\nexit 0\n"); chmodSync(bun, 0o755);
-		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Python standard-library PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-c,ctrl-d", childExitCode: 0, observedOutput: true, exitSent: true, cleanExit: true }));
+		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-c,ctrl-d", childExitCode: 0, observedOutput: true, exitSent: true, cleanExit: true }));
 		const recordPath = join(root, "record.json");
 		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), archive, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_XZ_TUI_EVIDENCE: evidence, RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
 		const record = JSON.parse(readFileSync(recordPath, "utf8"));
