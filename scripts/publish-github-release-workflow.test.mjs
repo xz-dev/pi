@@ -122,21 +122,15 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.doesNotMatch(workflowText, /AppActivate|SendKeys|Docker allocated TTY|fabricated/);
 });
 
-test("Windows ConPTY uses the mutable CreateProcessW command-line contract", () => {
-  const harness = readFileSync(join(ROOT, "scripts", "smoke-windows-tui.ps1"), "utf8");
-  assert.match(harness, /using System\.Text;/);
-  assert.match(harness, /CreateProcessW\(string application, StringBuilder commandLine/);
-  assert.match(harness, /\$Executable = \[IO\.Path\]::GetFullPath\(\$Executable\)/);
-  assert.match(harness, /\[IO\.File\]::Exists\(\$Executable\)/);
-  assert.match(harness, /CreateProcessW\(\$Executable, \$commandLine/);
-  assert.match(harness, /input="startup-benchmark"/);
-  assert.doesNotMatch(harness, /GetBytes\("\/exit/);
-  assert.doesNotMatch(harness, /CreateProcessW\(\$null, \$commandLine/);
-  assert.match(harness, /\$startupInfo\.cb = \[Runtime\.InteropServices\.Marshal\]::SizeOf\(\[type\]\[PiConPty\.Native\+STARTUPINFOEX\]\)/);
-  assert.match(harness, /\$startup\.StartupInfo = \$startupInfo/);
-  assert.match(harness, /failed with Win32 error/);
-  assert.doesNotMatch(harness, /\$startup\.StartupInfo\.cb =/);
-  assert.doesNotMatch(harness, /CreateProcessW\(string application, string commandLine/);
+test("Windows ConPTY uses Bun 1.3.14's native Terminal implementation", () => {
+  const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
+  const harness = readFileSync(join(ROOT, "scripts", "smoke-bun-tui.mjs"), "utf8");
+  assert.match(workflowText, /bun-version: ["']?1\.3\.14/);
+  assert.match(smoke, /platform\(\) === "win32" \? "tui-pseudoconsole" : "tui-pseudoterminal"/);
+  assert.match(smoke, /"bun", \[join\(process\.cwd\(\), "scripts", "smoke-bun-tui\.mjs"\), executable\]/);
+  assert.doesNotMatch(smoke, /smoke-windows-tui\.ps1/);
+  assert.match(harness, /process\.platform === "win32" \? "Bun\.Terminal ConPTY" : "Bun\.Terminal PTY"/);
+  assert.match(harness, /if \(!startupBenchmark\)/);
 });
 
 test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.3.14", () => {
