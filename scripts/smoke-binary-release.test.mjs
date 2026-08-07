@@ -7,6 +7,13 @@ import test from "node:test";
 
 const target = "linux-x64-gnu-baseline";
 const bunAvailable = spawnSync("bun", ["--version"]).status === 0;
+const smokeScript = readFileSync(join(import.meta.dirname, "smoke-binary-release.mjs"), "utf8");
+
+test("Windows extraction passes absolute paths through environment variables", () => {
+	assert.match(smokeScript, /PI_XZ_ARCHIVE: archive, PI_XZ_EXTRACT_DIR: work/);
+	assert.match(smokeScript, /Expand-Archive -LiteralPath \$env:PI_XZ_ARCHIVE -DestinationPath \$env:PI_XZ_EXTRACT_DIR -Force/);
+	assert.doesNotMatch(smokeScript, /Expand-Archive[^\n]*\$args/);
+});
 
 test("Unix TUI harness allows startup initialization to settle before sending exit", { skip: !bunAvailable && "Bun is not installed" }, () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-tui-startup-settle-"));

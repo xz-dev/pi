@@ -36,7 +36,7 @@ function cpuFeatures() {
 try {
 	const archiveBytes = statSync(archive).size;
 	if (archiveBytes > SMOKE_LIMITS.archiveBytes) throw new Error(`archive size ${archiveBytes} exceeds ${SMOKE_LIMITS.archiveBytes}`);
-	if (target.os === "windows") run("extract", "powershell", ["-NoProfile", "-Command", "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force", archive, work]);
+	if (target.os === "windows") run("extract", "powershell", ["-NoProfile", "-Command", "Expand-Archive -LiteralPath $env:PI_XZ_ARCHIVE -DestinationPath $env:PI_XZ_EXTRACT_DIR -Force"], { env: { ...process.env, PI_XZ_ARCHIVE: archive, PI_XZ_EXTRACT_DIR: work } });
 	else run("extract", "tar", ["-xzf", archive, "-C", work]);
 	const root = target.os === "windows" ? work : join(work, "pi");
 	const extractedBytes = directoryBytes(root);
