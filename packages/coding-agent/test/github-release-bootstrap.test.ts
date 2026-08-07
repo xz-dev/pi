@@ -10,6 +10,20 @@ const GENERATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "generate-install-
 const VERSION = "1.2.3-xz.9.1.gabcdef12";
 const TAG = `xz-v${VERSION}`;
 const COMMIT = `abcdef12${"3".repeat(32)}`;
+const TARGETS = [
+	"darwin-x64-baseline",
+	"darwin-x64-modern",
+	"darwin-arm64",
+	"linux-x64-gnu-baseline",
+	"linux-x64-gnu-modern",
+	"linux-arm64-gnu",
+	"linux-x64-musl-baseline",
+	"linux-x64-musl-modern",
+	"linux-arm64-musl",
+	"windows-x64-baseline",
+	"windows-x64-modern",
+	"windows-arm64",
+];
 let tempDir: string | undefined;
 
 afterEach(() => {
@@ -23,7 +37,7 @@ function sha256(content: string): string {
 
 function bundles(): Record<string, { file: string; bytes: number; sha256: string }> {
 	return Object.fromEntries(
-		["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"].map((platform) => [
+		TARGETS.map((platform) => [
 			platform,
 			{
 				file: `pi-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`,
@@ -72,19 +86,19 @@ describe("GitHub Release native installer generator", () => {
 			expect(content).not.toMatch(/install\.ts|npm install|require_cmd (?:node|bun)\b|exec\s+(?:node|bun)\b/i);
 		}
 		expect(sh.startsWith("#!/bin/sh\n")).toBe(true);
-		expect(sh).toContain("pi-linux-x64.tar.gz");
-		expect(ps1).toContain("pi-windows-x64.zip");
+		expect(sh).toContain("pi-linux-x64-gnu-modern.tar.gz");
+		expect(ps1).toContain("pi-windows-x64-modern.zip");
 	});
 
 	test("requires complete canonical POSIX and Windows bundle pins", async () => {
 		const generator = await loadGenerator();
 		const incomplete = pins();
 		delete incomplete.bundles["darwin-arm64"];
-		expect(() => generator.generateInstallSh(incomplete)).toThrow(/four canonical POSIX/);
+		expect(() => generator.generateInstallSh(incomplete)).toThrow(/9 canonical POSIX/);
 
 		const missingWindows = pins();
 		delete missingWindows.bundles["windows-arm64"];
-		expect(() => generator.generateInstallPs1(missingWindows)).toThrow(/two canonical Windows/);
+		expect(() => generator.generateInstallPs1(missingWindows)).toThrow(/3 canonical Windows/);
 	});
 
 	test("rejects mutable or malformed release identity", async () => {

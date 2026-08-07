@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.GITHUB_SHA.slice(0, 8)')
-          args=(--skip-install --skip-build --platform '${{ matrix.id }}' --out "$RUNNER_TEMP/target" --distribution-version "$version")
+          args=(--skip-install --skip-deps --skip-build --platform '${{ matrix.id }}' --out "$RUNNER_TEMP/target" --distribution-version "$version")
           if [[ '${{ matrix.id }}' == *-musl ]]; then args+=(--clipboard-musl-dir "$RUNNER_TEMP/clipboard-musl"); fi
           scripts/build-binaries.sh "${args[@]}"
           test "$(find "$RUNNER_TEMP/target" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 1
@@ -180,8 +180,14 @@ jobs:
         run: |
           set -euo pipefail
           candidate="$RUNNER_TEMP/pi-github-release"; subjects="$candidate/attestation-subjects.txt"; bundle="$RUNNER_TEMP/public-attestation-bundle.jsonl"
-          test -s "$BUNDLE_PATH"; cp "$BUNDLE_PATH" "$bundle"; mapfile -t names < "$subjects"; test "${#names[@]}" -eq 17
-          for subject in "${names[@]}"; do gh attestation verify "$candidate/$subject" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners; done
+          test -s "$BUNDLE_PATH"; cp "$BUNDLE_PATH" "$bundle"
+          subject_count=0
+          while IFS= read -r subject; do
+            test -n "$subject"
+            subject_count=$((subject_count + 1))
+            gh attestation verify "$candidate/$subject" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+          done < "$subjects"
+          test "$subject_count" -eq 17
           empty_gh_config="$RUNNER_TEMP/empty-gh-config"; mkdir "$empty_gh_config"; GH_CONFIG_DIR="$empty_gh_config" GH_TOKEN= GITHUB_TOKEN= gh attestation verify "$candidate/binary-acceptance.json" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners --format json > "$RUNNER_TEMP/public-attestation-verification.json"
           cp "$bundle" "$subjects"
       - name: Publish immutable GitHub Release

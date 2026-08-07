@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -10,35 +11,156 @@ const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 const PREPARE_SCRIPT = join(REPO_ROOT, "scripts", "prepare-github-release.mjs");
 const VERIFY_SCRIPT = join(REPO_ROOT, "scripts", "verify-github-release.mjs");
 const LIB_URL = pathToFileURL(join(REPO_ROOT, "scripts", "lib", "github-release.mjs")).href;
-
-let tempDir: string | undefined;
-
-afterEach(() => {
-	if (tempDir) {
-		rmSync(tempDir, { recursive: true, force: true });
-		tempDir = undefined;
-	}
-});
+const TARGETS = [
+	"darwin-x64-baseline",
+	"darwin-x64-modern",
+	"darwin-arm64",
+	"linux-x64-gnu-baseline",
+	"linux-x64-gnu-modern",
+	"linux-arm64-gnu",
+	"linux-x64-musl-baseline",
+	"linux-x64-musl-modern",
+	"linux-arm64-musl",
+	"windows-x64-baseline",
+	"windows-x64-modern",
+	"windows-arm64",
+];
 
 async function loadLib() {
 	return import(LIB_URL);
 }
 
+const tempDirs: string[] = [];
+
+afterEach(() => {
+	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+function temporaryDirectory(prefix: string): string {
+	const directory = mkdtempSync(join(tmpdir(), prefix));
+	tempDirs.push(directory);
+	return directory;
+}
+
+function sha256(path: string): string {
+	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function run(command: string, args: string[], cwd = REPO_ROOT) {
+	const result = spawnSync(command, args, { cwd, encoding: "utf8" });
+	expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+	return result;
+}
+
+async function writePrebuiltFixture(directory: string, version: string) {
+	const lib = await loadLib();
+	for (const target of TARGETS) {
+		const root = join(directory, "fixture", target);
+		const info = lib.platformNativeInfo(target);
+		const requiredPaths: string[] = lib.binaryRequiredPaths(target);
+		for (const required of requiredPaths) {
+			const path = join(root, required);
+			if (required === "pi" || required === "pi.exe") continue;
+			if (requiredPaths.some((candidate) => candidate.startsWith(`${required}/`))) {
+				mkdirSync(path, { recursive: true });
+			} else {
+				mkdirSync(dirname(path), { recursive: true });
+				writeFileSync(
+					path,
+					required === "package.json"
+						? `${JSON.stringify({ name: ENTRY_PACKAGE, version, piConfig: { distribution: "xz-dev" } })}\n`
+						: `${required}\n`,
+				);
+			}
+		}
+		const executable = join(root, info.executable);
+		writeFileSync(
+			executable,
+			`#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' '${version}'; else printf 'pi fixture help\\n'; fi\n`,
+		);
+		chmodSync(executable, 0o755);
+		const archive = join(directory, lib.binaryArchiveName(target));
+		if (info.os === "windows") run("zip", ["-q", "-r", archive, "."], root);
+		else
+			run("tar", [
+				"-czf",
+				archive,
+				"-C",
+				root,
+				"--transform=s,^,pi/ ,".replace("/ ", "/"),
+				...requiredPaths.filter(
+					(required) => !requiredPaths.some((candidate) => required.startsWith(`${candidate}/`)),
+				),
+			]);
+	}
+}
+
+function addAcceptanceEvidence(
+	releaseDir: string,
+	manifest: {
+		commit: string;
+		bundles: Record<string, { file: string; bytes: number; sha256: string }>;
+	},
+) {
+	const records = TARGETS.map((target) => {
+		const archive = join(releaseDir, manifest.bundles[target].file);
+		const noticeDirectory = temporaryDirectory("pi-release-notice-fixture-");
+		if (target.startsWith("windows-")) run("unzip", ["-q", archive, "THIRD_PARTY_NOTICES.md", "-d", noticeDirectory]);
+		else run("tar", ["-xzf", archive, "-C", noticeDirectory, "pi/THIRD_PARTY_NOTICES.md"]);
+		const notice = join(
+			noticeDirectory,
+			target.startsWith("windows-") ? "THIRD_PARTY_NOTICES.md" : "pi/THIRD_PARTY_NOTICES.md",
+		);
+		return {
+			schemaVersion: 1,
+			target,
+			archive: manifest.bundles[target],
+			runner: { osArchitecture: target.includes("arm64") ? "arm64" : "x64" },
+			executor: { emulated: false },
+			tui: { observedOutput: true, cleanExit: true },
+			clipboard: { loadedAndCalled: true },
+			thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: sha256(notice), bytes: statSync(notice).size },
+		};
+	});
+	const manifestPath = join(releaseDir, "release-manifest.json");
+	const acceptancePath = join(releaseDir, "binary-acceptance.json");
+	writeFileSync(
+		acceptancePath,
+		`${JSON.stringify(
+			{
+				schemaVersion: 1,
+				manifest: {
+					file: "release-manifest.json",
+					sha256: sha256(manifestPath),
+					schemaVersion: 4,
+					commit: manifest.commit,
+				},
+				targetCount: TARGETS.length,
+				targets: records,
+			},
+			null,
+			2,
+		)}\n`,
+	);
+	const sumsPath = join(releaseDir, "SHA256SUMS");
+	const sums = readFileSync(sumsPath, "utf8").trimEnd().split("\n");
+	sums.push(`${sha256(acceptancePath)}  binary-acceptance.json`);
+	sums.sort((left, right) => left.slice(66).localeCompare(right.slice(66)));
+	writeFileSync(sumsPath, `${sums.join("\n")}\n`);
+	const subjectsPath = join(releaseDir, "attestation-subjects.txt");
+	writeFileSync(subjectsPath, `${readFileSync(subjectsPath, "utf8").trimEnd()}\nbinary-acceptance.json\n`);
+}
+
 describe("GitHub Release binary packaging helpers", () => {
-	test("defines the six canonical platform bundles and the layout version", async () => {
+	test("defines the twelve canonical target bundles and the layout version", async () => {
 		const lib = await loadLib();
-		expect(lib.BINARY_PLATFORMS).toEqual([
-			"darwin-arm64",
-			"darwin-x64",
-			"linux-arm64",
-			"linux-x64",
-			"windows-arm64",
-			"windows-x64",
-		]);
+		expect(lib.BINARY_PLATFORMS).toEqual(TARGETS);
+		expect(lib.MANIFEST_SCHEMA_VERSION).toBe(4);
 		expect(lib.BUNDLE_LAYOUT_VERSION).toBe(1);
 		expect(lib.PACKAGING_BINARY).toBe("binary");
-		expect(lib.binaryArchiveName("linux-x64", "0.0.1-xz.1.1.g11111111")).toBe("pi-linux-x64.tar.gz");
-		expect(lib.binaryArchiveName("windows-arm64", "0.0.1-xz.1.1.g11111111")).toBe("pi-windows-arm64.zip");
+		expect(lib.BINARY_PLATFORMS).toHaveLength(12);
+		expect(lib.binaryArchiveName("linux-x64-gnu-modern")).toBe("pi-linux-x64-gnu-modern.tar.gz");
+		expect(lib.binaryArchiveName("windows-arm64")).toBe("pi-windows-arm64.zip");
 	});
 
 	test("provides the machine-checkable required-path inventory per platform", async () => {
@@ -66,13 +188,13 @@ describe("GitHub Release binary packaging helpers", () => {
 		}
 	});
 
-	test("darwin platforms carry the native modifier helper; windows carries console-mode", async () => {
+	test("darwin targets carry the native modifier helper; windows carries console-mode", async () => {
 		const lib = await loadLib();
 		expect(lib.platformNativeInfo("darwin-arm64").nativeHelperFile).toBe("darwin-modifiers.node");
-		expect(lib.platformNativeInfo("darwin-x64").nativeHelperDir).toBe("native/darwin/prebuilds/darwin-x64");
-		expect(lib.platformNativeInfo("windows-x64").nativeHelperDir).toBe("native/win32/prebuilds/win32-x64");
+		expect(lib.platformNativeInfo("darwin-x64-modern").nativeHelperDir).toBe("native/darwin/prebuilds/darwin-x64");
+		expect(lib.platformNativeInfo("windows-x64-modern").nativeHelperDir).toBe("native/win32/prebuilds/win32-x64");
 		expect(lib.platformNativeInfo("windows-arm64").nativeHelperFile).toBe("win32-console-mode.node");
-		expect(lib.platformNativeInfo("linux-x64").nativeHelperDir).toBeUndefined();
+		expect(lib.platformNativeInfo("linux-x64-gnu-modern").nativeHelperDir).toBeUndefined();
 	});
 });
 
@@ -86,199 +208,63 @@ describe("GitHub Release preparation (binary bundles)", () => {
 		expect(`${result.stdout}\n${result.stderr}`).toMatch(/external temporary directory/);
 	});
 
-	test("builds the six canonical binary bundles with downstream identity and a binary manifest", () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-github-release-"));
-		const hasCli = existsSync(join(REPO_ROOT, "packages", "coding-agent", "dist", "cli.js"));
-		if (!hasCli) {
-			expect(hasCli, "packages/coding-agent/dist/cli.js must exist before release prepare").toBe(true);
-			return;
-		}
-
-		const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).stdout.trim();
-		// Installer generation requires the full platform-family fixture: install.sh
-		// pins all four POSIX bundles and install.ps1 pins both Windows bundles.
-		const result = spawnSync(
-			"node",
-			[
-				PREPARE_SCRIPT,
-				"--out",
-				tempDir,
-				"--skip-deps",
-				"--skip-build",
-				"--platform",
-				"darwin-arm64",
-				"--platform",
-				"darwin-x64",
-				"--platform",
-				"linux-arm64",
-				"--platform",
-				"linux-x64",
-				"--platform",
-				"windows-arm64",
-				"--platform",
-				"windows-x64",
-			],
-			{
-				cwd: REPO_ROOT,
-				encoding: "utf8",
-				env: {
-					...process.env,
-					PATH: `${process.env.HOME}/.bun/bin:${process.env.PATH}`,
-					GITHUB_RUN_NUMBER: "129",
-					GITHUB_RUN_ATTEMPT: "1",
-					GITHUB_SHA: head,
-				},
-			},
-		);
-		expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-		expect(result.stdout).toMatch(/binary/i);
-
-		const basePackageJson = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")) as {
-			version: string;
-		};
-		const version = `${basePackageJson.version}-xz.129.1.g${head.slice(0, 8)}`;
-		const archiveFile = "pi-linux-x64.tar.gz";
-		expect(existsSync(join(tempDir, archiveFile))).toBe(true);
-		expect(existsSync(join(tempDir, "pi-darwin-arm64.tar.gz"))).toBe(true);
-		expect(existsSync(join(tempDir, "pi-windows-x64.zip"))).toBe(true);
-		expect(existsSync(join(tempDir, "release-manifest.json"))).toBe(true);
-		expect(existsSync(join(tempDir, "SHA256SUMS"))).toBe(true);
-		expect(existsSync(join(tempDir, "install.ts"))).toBe(false);
-		expect(existsSync(join(tempDir, "install.sh"))).toBe(true);
-		expect(existsSync(join(tempDir, "install.ps1"))).toBe(true);
-		// The hybrid npm tarball is no longer produced.
-		expect(existsSync(join(tempDir, `earendil-works-pi-coding-agent-${version}.tgz`))).toBe(false);
-
-		const manifest = JSON.parse(readFileSync(join(tempDir, "release-manifest.json"), "utf8")) as {
-			schemaVersion: number;
-			repository: string;
-			tag: string;
-			distributionVersion: string;
-			apiVersion: string;
-			minimumNodeVersion: string;
-			packaging: string;
-			layoutVersion: number;
-			bundles: Record<string, { file: string; bytes: number; sha256: string }>;
-			requiredPaths: Record<string, string[]>;
-			installer: {
-				posix: { file: string };
-				windows: { file: string };
-				checksums: { file: string; algorithm: string };
-			};
-		};
-
-		expect(manifest.schemaVersion).toBe(3);
-		expect(manifest.repository).toBe("xz-dev/pi");
-		expect(manifest.tag).toBe(`xz-v${version}`);
-		expect(manifest.distributionVersion).toBe(version);
-		expect(manifest.apiVersion).toBe(basePackageJson.version);
-		expect(manifest.packaging).toBe("binary");
-		expect(manifest.layoutVersion).toBe(1);
-		expect(manifest.bundles["linux-x64"]).toMatchObject({
-			file: archiveFile,
-			bytes: expect.any(Number),
-			sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-		});
-		expect(Object.keys(manifest.bundles).sort()).toEqual([
-			"darwin-arm64",
-			"darwin-x64",
-			"linux-arm64",
-			"linux-x64",
-			"windows-arm64",
-			"windows-x64",
-		]);
-		// The required-path inventory is frozen into the manifest.
-		expect(manifest.requiredPaths["linux-x64"]).toEqual(
-			expect.arrayContaining(["pi", "package.json", "photon_rs_bg.wasm", "theme/dark.json"]),
-		);
-
-		expect(manifest.installer).toEqual({
-			posix: { file: "install.sh" },
-			windows: { file: "install.ps1" },
-			checksums: { file: "SHA256SUMS", algorithm: "sha256" },
-		});
-
-		const sums = parseSha256Sums(readFileSync(join(tempDir, "SHA256SUMS"), "utf8"));
-		expect(sums.get(archiveFile)).toBe(manifest.bundles["linux-x64"].sha256);
-		expect(sums.has("install.sh")).toBe(true);
-		expect(sums.has("install.ps1")).toBe(true);
-		expect(sums.has("release-manifest.json")).toBe(true);
-
-		// Bundle package.json carries the downstream identity.
-		const packageJson = JSON.parse(
-			spawnSync("tar", ["-xOf", join(tempDir, archiveFile), "pi/package.json"], { encoding: "utf8" }).stdout,
-		) as { name: string; version: string; piConfig?: { distribution?: string; changelogVersion?: string } };
-		expect(packageJson.name).toBe(ENTRY_PACKAGE);
-		expect(packageJson.version).toBe(version);
-		expect(packageJson.piConfig?.distribution).toBe("xz-dev");
-		expect(packageJson.piConfig?.changelogVersion).toBe(basePackageJson.version);
-
-		// Bootstrap embeds tag/base URL pins.
-		const installSh = readFileSync(join(tempDir, "install.sh"), "utf8");
-		expect(installSh).toContain(manifest.tag);
-		expect(installSh).toContain(`https://github.com/xz-dev/pi/releases/download/${manifest.tag}/`);
-		expect(installSh).toContain("curl");
-	}, 600_000);
-});
-
-describe("GitHub Release verifier gates", () => {
-	test("local mode verifies a linux-x64 bundle and runs the host-native smoke", () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-github-release-verify-"));
-		const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).stdout.trim();
-		const result = spawnSync(
-			"node",
-			[
-				PREPARE_SCRIPT,
-				"--out",
-				tempDir,
-				"--skip-deps",
-				"--skip-build",
-				"--platform",
-				"darwin-arm64",
-				"--platform",
-				"darwin-x64",
-				"--platform",
-				"linux-arm64",
-				"--platform",
-				"linux-x64",
-				"--platform",
-				"windows-arm64",
-				"--platform",
-				"windows-x64",
-			],
-			{
-				cwd: REPO_ROOT,
-				encoding: "utf8",
-				env: {
-					...process.env,
-					PATH: `${process.env.HOME}/.bun/bin:${process.env.PATH}`,
-					GITHUB_RUN_NUMBER: "130",
-					GITHUB_RUN_ATTEMPT: "1",
-					GITHUB_SHA: head,
-				},
-			},
-		);
-		expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-		const verify = spawnSync("node", [VERIFY_SCRIPT, "local", join(tempDir, "release-manifest.json")], {
-			cwd: tempDir,
+	test("assembles the exact schema-v4 Release from twelve prebuilt archives", async () => {
+		const prebuilt = temporaryDirectory("pi-release-prebuilt-");
+		const output = temporaryDirectory("pi-release-output-");
+		const head = run("git", ["rev-parse", "HEAD"]).stdout.trim();
+		const apiVersion = JSON.parse(
+			readFileSync(join(REPO_ROOT, "packages", "coding-agent", "package.json"), "utf8"),
+		).version;
+		const version = `${apiVersion}-xz.501.1.g${head.slice(0, 8)}`;
+		await writePrebuiltFixture(prebuilt, version);
+		const prepared = spawnSync("node", [PREPARE_SCRIPT, "--out", output, "--prebuilt", prebuilt], {
+			cwd: REPO_ROOT,
 			encoding: "utf8",
-			env: {
-				...process.env,
-				PATH: `${process.env.HOME}/.bun/bin:${process.env.PATH}`,
-			},
+			env: { ...process.env, GITHUB_RUN_NUMBER: "501", GITHUB_RUN_ATTEMPT: "1", GITHUB_SHA: head },
 		});
-		expect(verify.status, `${verify.stdout}\n${verify.stderr}`).toBe(0);
-		expect(`${verify.stdout}\n${verify.stderr}`).toMatch(/Host-native bundle smoke ok/i);
-	}, 600_000);
-});
+		expect(prepared.status, `${prepared.stdout}\n${prepared.stderr}`).toBe(0);
+		const manifest = JSON.parse(readFileSync(join(output, "release-manifest.json"), "utf8"));
+		expect(manifest.schemaVersion).toBe(4);
+		expect(Object.keys(manifest.bundles)).toEqual(TARGETS);
+		expect(manifest.acceptance).toEqual({ file: "binary-acceptance.json", targetCount: 12 });
+		const lib = await loadLib();
+		const sums = lib.parseSha256Sums(readFileSync(join(output, "SHA256SUMS"), "utf8"));
+		expect(sums.size).toBe(15);
+		for (const target of TARGETS) {
+			const bundle = manifest.bundles[target];
+			expect(bundle.file).toBe(lib.binaryArchiveName(target));
+			expect(sums.get(bundle.file)).toBe(sha256(join(output, bundle.file)));
+		}
+		for (const installer of ["install.sh", "install.ps1"]) {
+			expect(sums.get(installer)).toBe(sha256(join(output, installer)));
+			expect(readFileSync(join(output, installer), "utf8")).toContain(sha256(join(output, "release-manifest.json")));
+		}
+	});
 
-function parseSha256Sums(text: string): Map<string, string> {
-	const entries = new Map<string, string>();
-	for (const line of text.split(/\r?\n/)) {
-		if (!line.trim()) continue;
-		const match = line.match(/^([0-9a-f]{64}) {2}(.+)$/);
-		expect(match, `Invalid SHA256SUMS line: ${line}`).toBeTruthy();
-		entries.set(match![2], match![1]);
-	}
-	return entries;
-}
+	test("local verifier validates the full candidate and smoke-tests a host-native archive", async () => {
+		const prebuilt = temporaryDirectory("pi-release-verify-prebuilt-");
+		const output = temporaryDirectory("pi-release-verify-output-");
+		const head = run("git", ["rev-parse", "HEAD"]).stdout.trim();
+		const apiVersion = JSON.parse(
+			readFileSync(join(REPO_ROOT, "packages", "coding-agent", "package.json"), "utf8"),
+		).version;
+		const version = `${apiVersion}-xz.502.1.g${head.slice(0, 8)}`;
+		await writePrebuiltFixture(prebuilt, version);
+		const prepared = spawnSync("node", [PREPARE_SCRIPT, "--out", output, "--prebuilt", prebuilt], {
+			cwd: REPO_ROOT,
+			encoding: "utf8",
+			env: { ...process.env, GITHUB_RUN_NUMBER: "502", GITHUB_RUN_ATTEMPT: "1", GITHUB_SHA: head },
+		});
+		expect(prepared.status, `${prepared.stdout}\n${prepared.stderr}`).toBe(0);
+		const manifest = JSON.parse(readFileSync(join(output, "release-manifest.json"), "utf8"));
+		addAcceptanceEvidence(output, manifest);
+		const verified = spawnSync("node", [VERIFY_SCRIPT, "local", join(output, "release-manifest.json")], {
+			cwd: output,
+			encoding: "utf8",
+			env: { ...process.env, PI_XZ_VERIFY_TARGET: "linux-x64-gnu-modern" },
+		});
+		expect(verified.status, `${verified.stdout}\n${verified.stderr}`).toBe(0);
+		expect(verified.stdout).toContain(`Host-native bundle smoke ok: ${version}`);
+		expect(verified.stdout).toContain("local: exact Release assets and binary contract verified");
+	}, 60_000);
+});

@@ -27,13 +27,19 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-mapfile -t ALL_TARGETS < <(node scripts/lib/bun-targets.mjs --ids)
+ALL_TARGETS=()
+while IFS= read -r target; do
+	[[ -n "$target" ]] && ALL_TARGETS+=("$target")
+done < <(node scripts/lib/bun-targets.mjs --ids)
 if [[ ${#PLATFORMS_REQUESTED[@]} -eq 0 ]]; then PLATFORMS_REQUESTED=("${ALL_TARGETS[@]}"); fi
 for target in "${PLATFORMS_REQUESTED[@]}"; do
 	node scripts/lib/bun-targets.mjs --get "$target" bunTarget >/dev/null || { echo "Invalid target: $target" >&2; exit 1; }
 done
 
 OUTPUT_DIR=${OUTPUT_DIR:-packages/coding-agent/binaries}
+if command -v cygpath >/dev/null 2>&1 && [[ "$OUTPUT_DIR" =~ ^[A-Za-z]:[\\/] ]]; then
+	OUTPUT_DIR=$(cygpath -u "$OUTPUT_DIR")
+fi
 [[ "$OUTPUT_DIR" = /* ]] || OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
 
 if [[ "$SKIP_INSTALL" == false ]]; then npm ci --ignore-scripts; fi
@@ -92,8 +98,10 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		cp "$CLIPBOARD_MUSL_DIR/provenance.json" "$target_dir/clipboard-native-provenance.json"
 		cp "$CLIPBOARD_MUSL_DIR/$clipboard_package/LICENSE" "$target_dir/node_modules/@mariozechner/$clipboard_package/LICENSE"
 	else
-		cp -r "../../node_modules/@mariozechner/$clipboard_package" "$target_dir/node_modules/@mariozechner/"
-		cp "../../node_modules/@mariozechner/$clipboard_package/$clipboard_file" "$target_dir/node_modules/@mariozechner/clipboard/"
+		native_package="../../node_modules/@mariozechner/$clipboard_package"
+		test -f "$native_package/$clipboard_file" || { echo "npm ci did not install host native package @mariozechner/$clipboard_package for $target" >&2; exit 1; }
+		cp -r "$native_package" "$target_dir/node_modules/@mariozechner/"
+		cp "$native_package/$clipboard_file" "$target_dir/node_modules/@mariozechner/clipboard/"
 	fi
 
 	native_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperDir 2>/dev/null || true)

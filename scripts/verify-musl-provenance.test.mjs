@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { MUSL_CLIPBOARD_PROVENANCE } from "./lib/musl-provenance.mjs";
+import { hashFileTree, MUSL_CLIPBOARD_PROVENANCE } from "./lib/musl-provenance.mjs";
+
+const ROOT = join(import.meta.dirname, "..");
+const VENDOR_ROOT = join(ROOT, "scripts", "vendor", "clipboard-musl");
+const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 
 const target = "linux-x64-musl-modern";
 function fixture() {
@@ -21,12 +26,36 @@ function fixture() {
 	return { root, path, addon, provenance };
 }
 
+test("committed musl inputs match every authoritative digest", () => {
+	const expected = MUSL_CLIPBOARD_PROVENANCE;
+	assert.equal(hashFileTree(join(VENDOR_ROOT, "source")), expected.source.sourceTreeSha256);
+	assert.equal(hashFileTree(join(VENDOR_ROOT, "vendor")), expected.source.vendorTreeSha256);
+	assert.equal(sha256(join(VENDOR_ROOT, "Cargo.lock")), expected.source.cargoLockSha256);
+	assert.equal(sha256(join(VENDOR_ROOT, "source", "Cargo.lock")), expected.source.cargoLockSha256);
+	for (const arch of ["x64", "arm64"]) {
+		assert.equal(sha256(join(VENDOR_ROOT, "apk", arch, `musl-dev-${expected.build.muslDev}.apk`)), expected.build.targets[arch].muslDevApkSha256);
+	}
+});
+
+test("file-tree digest is deterministic across creation order", () => {
+	const left = mkdtempSync(join(tmpdir(), "pi-tree-left-"));
+	const right = mkdtempSync(join(tmpdir(), "pi-tree-right-"));
+	try {
+		writeFileSync(join(left, "b"), "second"); writeFileSync(join(left, "a"), "first");
+		writeFileSync(join(right, "a"), "first"); writeFileSync(join(right, "b"), "second");
+		assert.equal(hashFileTree(left), hashFileTree(right));
+	} finally {
+		rmSync(left, { recursive: true, force: true }); rmSync(right, { recursive: true, force: true });
+	}
+});
+
 test("verifier accepts exact authoritative musl inputs", () => {
 	const value = fixture(); try { execFileSync(process.execPath, [join(import.meta.dirname, "verify-musl-provenance.mjs"), value.path, value.addon, target]); } finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 
 for (const [label, mutate] of [
 	["vendored source closure", (value) => { value.source.sourceTreeSha256 = "0".repeat(64); }],
+	["vendored dependency closure", (value) => { value.source.vendorTreeSha256 = "0".repeat(64); }],
 	["vendored Cargo.lock", (value) => { value.source.cargoLockSha256 = "0".repeat(64); }],
 	["target image digest", (value) => { value.build.container = `docker.io/library/rust@sha256:${"0".repeat(64)}`; }],
 	["Rust version", (value) => { value.build.rust = "rustc 0.0.0"; }],

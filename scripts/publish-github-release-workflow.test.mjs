@@ -82,13 +82,14 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
   assert.equal(buildStep.env.NODE_ENV, "production");
   assert.match(
     buildStep.run,
-    /args=\(--skip-install --skip-build --platform '\$\{\{ matrix\.id \}\}' --out "\$RUNNER_TEMP\/target" --distribution-version "\$version"\)/,
+    /args=\(--skip-install --skip-deps --skip-build --platform '\$\{\{ matrix\.id \}\}' --out "\$RUNNER_TEMP\/target" --distribution-version "\$version"\)/,
   );
   assert.match(
     buildStep.run,
     /if \[\[ '\$\{\{ matrix\.id \}\}' == \*-musl \]\]; then args\+\=\(--clipboard-musl-dir "\$RUNNER_TEMP\/clipboard-musl"\); fi/,
   );
-  assert.doesNotMatch(buildStep.run, /--skip-deps/);
+  assert.match(buildStep.run, /--skip-deps/);
+  assert.match(workflowText, /build-target:[\s\S]*- run: npm ci --ignore-scripts/);
 });
 
 test("acceptance matrix is generated from explicit per-target smoke descriptors", () => {
@@ -148,6 +149,9 @@ test("publication attests final subjects before draft publication and keeps audi
   assert.match(workflowText, /cp "\$BUNDLE_PATH" "\$bundle"/);
   assert.match(workflowText, /cp "\$bundle" "\$subjects"/);
   assert.match(workflowText, /GH_CONFIG_DIR="\$empty_gh_config" GH_TOKEN= GITHUB_TOKEN=/);
+  assert.doesNotMatch(workflowText, /mapfile|readarray/);
+  assert.match(workflowText, /while IFS= read -r subject/);
+  assert.match(workflowText, /test "\$subject_count" -eq 17/);
   assert.match(workflowText, /gh attestation verify/);
   assert.match(workflowText, /--bundle "\$bundle"/);
   assert.match(workflowText, /--source-digest "\$GITHUB_SHA"/);

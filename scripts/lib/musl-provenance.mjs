@@ -1,4 +1,27 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
+
+export function hashFileTree(root) {
+	const files = [];
+	const visit = (directory) => {
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const path = join(directory, entry.name);
+			if (entry.isDirectory()) visit(path);
+			else if (entry.isFile()) files.push(path);
+		}
+	};
+	visit(root);
+	const entries = files.map((path) => ({ path, name: relative(root, path).replaceAll("\\", "/") }));
+	entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+	const closure = createHash("sha256");
+	for (const { path, name } of entries) {
+		const digest = createHash("sha256").update(readFileSync(path)).digest("hex");
+		closure.update(`${name}\0${digest}\n`);
+	}
+	return closure.digest("hex");
+}
 
 export const MUSL_CLIPBOARD_PROVENANCE = Object.freeze({
 	component: "@mariozechner/clipboard",
@@ -8,7 +31,7 @@ export const MUSL_CLIPBOARD_PROVENANCE = Object.freeze({
 		commit: "3a0f58eb7250a9a46ad77863bc4618eee099a248",
 		archiveSha256: "55eaf95319b8a3e99ddc795c1539f0e72f0988d89359f7d4e5a91764dc3fd268",
 		sourceTreeSha256: "d5d9b09e2e2207d723438a308a57012288908fe2eb4af79a35b25b1089d67ae9",
-		vendorTreeSha256: "8bbbcbb4abd9a7ff847dba5fecee58217d92daa91df6e3ce7d39fbf577f55c30",
+		vendorTreeSha256: "a4654a4f744b2534d7d7d59b0958fa87f5914eb426c9990aa73356cd9ad5f6ab",
 		cargoLockSha256: "2a98c447e6398e737f6f494aece7b08cbf228641bdf0ffe78238be36e75e66d2",
 		license: "MIT",
 	}),

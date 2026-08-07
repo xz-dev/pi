@@ -10,9 +10,9 @@ const ROOT = join(import.meta.dirname, "..", "..", "..");
 const VERSION = "0.82.1-xz.1.1.g11111111";
 const COMMIT = "1".repeat(40);
 const TAG = `xz-v${VERSION}`;
-let server: Server;
+let server: Server | undefined;
 let baseUrl: string;
-let releaseDir: string;
+let releaseDir: string | undefined;
 
 function sha(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -37,22 +37,27 @@ beforeAll(async () => {
 	);
 	writeFileSync(join(bundle, "README.md"), "fixture\n");
 	writeFileSync(join(bundle, "photon_rs_bg.wasm"), "wasm\n");
-	const archive = join(releaseDir, "pi-linux-x64.tar.gz");
+	const archive = join(releaseDir, "pi-linux-x64-gnu-modern.tar.gz");
 	const packed = spawnSync("tar", ["-czf", archive, "-C", releaseDir, "pi"]);
 	expect(packed.status).toBe(0);
 	const archiveBytes = readFileSync(archive).byteLength;
 	const archiveSha = sha(archive);
-	// install.sh pins all four POSIX bundles; install.ps1 pins both Windows
-	// bundles. This test only executes install.sh, so the Windows archives are
-	// metadata-only fixture pins (same bytes, correct names) - the contract that
-	// matters here is that the full six-platform fixture generates both installers.
+	// install.sh pins all nine POSIX bundles; install.ps1 pins all three Windows
+	// bundles. This test executes the current GNU host target; the other archives
+	// are metadata-only fixture pins with canonical names.
 	const bundleFiles = {
+		"darwin-x64-baseline": "pi-darwin-x64-baseline.tar.gz",
+		"darwin-x64-modern": "pi-darwin-x64-modern.tar.gz",
 		"darwin-arm64": "pi-darwin-arm64.tar.gz",
-		"darwin-x64": "pi-darwin-x64.tar.gz",
-		"linux-arm64": "pi-linux-arm64.tar.gz",
-		"linux-x64": "pi-linux-x64.tar.gz",
+		"linux-x64-gnu-baseline": "pi-linux-x64-gnu-baseline.tar.gz",
+		"linux-x64-gnu-modern": "pi-linux-x64-gnu-modern.tar.gz",
+		"linux-arm64-gnu": "pi-linux-arm64-gnu.tar.gz",
+		"linux-x64-musl-baseline": "pi-linux-x64-musl-baseline.tar.gz",
+		"linux-x64-musl-modern": "pi-linux-x64-musl-modern.tar.gz",
+		"linux-arm64-musl": "pi-linux-arm64-musl.tar.gz",
+		"windows-x64-baseline": "pi-windows-x64-baseline.zip",
+		"windows-x64-modern": "pi-windows-x64-modern.zip",
 		"windows-arm64": "pi-windows-arm64.zip",
-		"windows-x64": "pi-windows-x64.zip",
 	};
 	for (const file of Object.values(bundleFiles)) copyFileSync(archive, join(releaseDir, file));
 	const bundles = Object.fromEntries(
@@ -62,7 +67,7 @@ beforeAll(async () => {
 		]),
 	);
 	const manifest = {
-		schemaVersion: 3,
+		schemaVersion: 4,
 		repository: "xz-dev/pi",
 		tag: TAG,
 		distributionVersion: VERSION,
@@ -77,6 +82,7 @@ beforeAll(async () => {
 				["pi", "pi/package.json", "pi/README.md", "pi/photon_rs_bg.wasm"],
 			]),
 		),
+		acceptance: { file: "binary-acceptance.json", targetCount: 12 },
 		installer: {
 			posix: { file: "install.sh" },
 			windows: { file: "install.ps1" },
@@ -131,8 +137,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-	await new Promise<void>((resolve) => server.close(() => resolve()));
-	rmSync(releaseDir, { recursive: true, force: true });
+	if (server) await new Promise<void>((resolve) => server?.close(() => resolve()));
+	if (releaseDir) rmSync(releaseDir, { recursive: true, force: true });
 });
 
 function runProcess(
@@ -165,6 +171,7 @@ describe("generated POSIX installer", () => {
 		mkdirSync(bin, { recursive: true });
 		const fakeGh = join(sandbox, "gh");
 		writeFileSync(fakeGh, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		if (!releaseDir) throw new Error("installer fixture was not initialized");
 		const result = await runProcess("sh", [join(releaseDir, "install.sh")], {
 			env: {
 				...process.env,
