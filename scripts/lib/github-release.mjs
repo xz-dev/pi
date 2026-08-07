@@ -25,7 +25,7 @@ export const REPOSITORY = "xz-dev/pi";
 export const MANIFEST_SCHEMA_VERSION = 4;
 export const ATTESTATION_SIGNER_WORKFLOW = ".github/workflows/publish-github-release.yml";
 export const ATTESTATION_SIGNER_REF = "refs/heads/main";
-export const ATTESTATION_SUBJECTS_FILENAME = "attestation-subjects.txt";
+export const ATTESTATION_SUBJECTS_FILENAME = "attestation-subjects.jsonl";
 export const PACKAGING_BINARY = "binary";
 export const BUNDLE_LAYOUT_VERSION = 1;
 

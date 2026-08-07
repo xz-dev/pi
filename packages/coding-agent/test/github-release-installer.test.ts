@@ -94,7 +94,7 @@ beforeAll(async () => {
 			signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
 			signerRef: "refs/heads/main",
 			denySelfHostedRunners: true,
-			subjectsFile: "attestation-subjects.txt",
+			subjectsFile: "attestation-subjects.jsonl",
 		},
 	};
 	writeFileSync(join(releaseDir, "release-manifest.json"), `${JSON.stringify(manifest)}\n`);
@@ -118,7 +118,7 @@ beforeAll(async () => {
 			)}\n${sha(join(releaseDir, "install.sh"))}  install.sh\n${sha(join(releaseDir, "install.ps1"))}  install.ps1\n`,
 	);
 	writeFileSync(
-		join(releaseDir, "attestation-subjects.txt"),
+		join(releaseDir, "attestation-subjects.jsonl"),
 		`${Object.values(bundleFiles).join("\n")}\nrelease-manifest.json\ninstall.sh\ninstall.ps1\nSHA256SUMS\n`,
 	);
 	const fixtureServer = createServer((request, response) => {

@@ -180,7 +180,7 @@ jobs:
         env: { BUNDLE_PATH: "${{ steps.attest.outputs.bundle-path }}" }
         run: |
           set -euo pipefail
-          candidate="$RUNNER_TEMP/pi-github-release"; subjects="$candidate/attestation-subjects.txt"; bundle="$RUNNER_TEMP/public-attestation-bundle.jsonl"
+          candidate="$RUNNER_TEMP/pi-github-release"; subjects="$candidate/attestation-subjects.jsonl"; bundle="$RUNNER_TEMP/public-attestation-bundle.jsonl"
           test -s "$BUNDLE_PATH"; cp "$BUNDLE_PATH" "$bundle"
           subject_count=0
           while IFS= read -r subject; do

@@ -147,7 +147,7 @@ function addAcceptanceEvidence(
 	sums.push(`${sha256(acceptancePath)}  binary-acceptance.json`);
 	sums.sort((left, right) => left.slice(66).localeCompare(right.slice(66)));
 	writeFileSync(sumsPath, `${sums.join("\n")}\n`);
-	const subjectsPath = join(releaseDir, "attestation-subjects.txt");
+	const subjectsPath = join(releaseDir, "attestation-subjects.jsonl");
 	writeFileSync(subjectsPath, `${readFileSync(subjectsPath, "utf8").trimEnd()}\nbinary-acceptance.json\n`);
 }
 

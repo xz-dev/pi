@@ -69,7 +69,7 @@ function fixture() {
       signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
       signerRef: "refs/heads/main",
       denySelfHostedRunners: true,
-      subjectsFile: "attestation-subjects.txt",
+      subjectsFile: "attestation-subjects.jsonl",
     },
     bootstrap: {
       tag: TAG,
@@ -85,7 +85,7 @@ function fixture() {
   for (const [name, body] of files) writeFileSync(join(directory, name), body);
   const subjects = [...files.keys()];
   writeFileSync(
-    join(directory, "attestation-subjects.txt"),
+    join(directory, "attestation-subjects.jsonl"),
     `${subjects.join("\n")}\n`,
   );
   return {
@@ -94,8 +94,8 @@ function fixture() {
     assetBodies: new Map([
       ...files,
       [
-        "attestation-subjects.txt",
-        readFileSync(join(directory, "attestation-subjects.txt")),
+        "attestation-subjects.jsonl",
+        readFileSync(join(directory, "attestation-subjects.jsonl")),
       ],
     ]),
   };
@@ -205,7 +205,7 @@ test("creates a draft, uploads every bundle asset plus subjects, then publishes 
       assert.ok(assets.has(file), `missing uploaded bundle ${file}`);
     }
     assert.ok(events.indexOf("latest-ref-recheck") < events.indexOf("publish"));
-    assert.ok(events.indexOf("upload:attestation-subjects.txt") < events.indexOf("latest-ref-recheck"));
+    assert.ok(events.indexOf("upload:attestation-subjects.jsonl") < events.indexOf("latest-ref-recheck"));
   } finally {
     rmSync(candidate.directory, { recursive: true, force: true });
   }
@@ -324,7 +324,7 @@ test("empty public attestation bundle fails before any GitHub request", async ()
   const candidate = fixture();
   let requests = 0;
   try {
-    writeFileSync(join(candidate.directory, "attestation-subjects.txt"), "");
+    writeFileSync(join(candidate.directory, "attestation-subjects.jsonl"), "");
     await assert.rejects(
       () =>
         withFetch(

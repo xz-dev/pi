@@ -25,8 +25,8 @@ function fixture() {
 		bundles[target.id] = { file: binaryArchiveName(target.id), ...identity };
 		writeFileSync(join(records, `${target.id}.json`), JSON.stringify(record(target, identity)));
 	}
-	const manifest = { schemaVersion: 4, commit: "b".repeat(40), bundles, attestation: { subjectsFile: "attestation-subjects.txt" } };
-	writeFileSync(join(root, "manifest.json"), JSON.stringify(manifest)); writeFileSync(join(root, "SHA256SUMS"), ""); writeFileSync(join(root, "attestation-subjects.txt"), "manifest.json\n");
+	const manifest = { schemaVersion: 4, commit: "b".repeat(40), bundles, attestation: { subjectsFile: "attestation-subjects.jsonl" } };
+	writeFileSync(join(root, "manifest.json"), JSON.stringify(manifest)); writeFileSync(join(root, "SHA256SUMS"), ""); writeFileSync(join(root, "attestation-subjects.jsonl"), "manifest.json\n");
 	return { root, records, manifest: join(root, "manifest.json"), output: join(root, "binary-acceptance.json") };
 }
 

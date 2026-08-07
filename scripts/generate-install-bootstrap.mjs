@@ -27,7 +27,7 @@ import { REPOSITORY } from "./lib/github-release.mjs";
 export const INSTALL_SH_FILENAME = "install.sh";
 export const INSTALL_PS1_FILENAME = "install.ps1";
 export const RELEASE_MANIFEST_FILENAME = "release-manifest.json";
-export const ATTESTATION_BUNDLE_FILENAME = "attestation-subjects.txt";
+export const ATTESTATION_BUNDLE_FILENAME = "attestation-subjects.jsonl";
 
 /** POSIX-family canonical target IDs (tar.gz bundles). */
 export const POSIX_PLATFORMS = Object.freeze(BUN_TARGETS.filter((target) => target.os !== "windows").map((target) => target.id));

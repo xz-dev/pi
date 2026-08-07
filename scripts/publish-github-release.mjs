@@ -53,7 +53,7 @@ function readManifest(path) {
     manifest.installer?.checksums?.algorithm !== "sha256" ||
     manifest.acceptance?.file !== "binary-acceptance.json" ||
     manifest.acceptance?.targetCount !== BUN_TARGET_IDS.length ||
-    manifest.attestation?.subjectsFile !== "attestation-subjects.txt" ||
+    manifest.attestation?.subjectsFile !== "attestation-subjects.jsonl" ||
     manifest.attestation?.repository !== EXPECTED_REPOSITORY ||
     manifest.attestation?.signerWorkflow !== `${EXPECTED_REPOSITORY}/.github/workflows/publish-github-release.yml` ||
     manifest.attestation?.signerRef !== EXPECTED_REF ||
