@@ -90,7 +90,7 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
   );
   assert.match(
     buildStep.run,
-    /if \[\[ '\$\{\{ matrix\.id \}\}' == \*-musl \]\]; then args\+\=\(--clipboard-musl-dir "\$RUNNER_TEMP\/clipboard-musl"\); fi/,
+    /if \[\[ '\$\{\{ matrix\.id \}\}' == \*-musl\* \]\]; then args\+\=\(--clipboard-musl-dir "\$RUNNER_TEMP\/clipboard-musl"\); fi/,
   );
   assert.match(buildStep.run, /--skip-deps/);
   assert.match(workflowText, /build-target:[\s\S]*- run: npm ci --ignore-scripts/);

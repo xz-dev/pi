@@ -72,7 +72,7 @@ jobs:
           version=$(node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.GITHUB_SHA.slice(0, 8)')
           args=(--skip-install --skip-deps --skip-build --platform '${{ matrix.id }}' --out "$RUNNER_TEMP/target" --distribution-version "$version")
           if [[ '${{ matrix.id }}' == windows-* ]]; then args+=(--hydrate-target-deps); fi
-          if [[ '${{ matrix.id }}' == *-musl ]]; then args+=(--clipboard-musl-dir "$RUNNER_TEMP/clipboard-musl"); fi
+          if [[ '${{ matrix.id }}' == *-musl* ]]; then args+=(--clipboard-musl-dir "$RUNNER_TEMP/clipboard-musl"); fi
           scripts/build-binaries.sh "${args[@]}"
           test "$(find "$RUNNER_TEMP/target" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
