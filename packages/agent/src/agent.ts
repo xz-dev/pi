@@ -547,6 +547,7 @@ export class Agent {
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
+		await this.processEvents({ type: "run_failure", message: failureMessage });
 
 		if (!aborted) {
 			await this.processEvents({ type: "message_start", message: failureMessage });
@@ -561,7 +562,12 @@ export class Agent {
 		}
 
 		let terminalMessage = this.runTerminalization.lastAssistantMessage;
-		if (!this.runTerminalization.assistantMessageFinalized || !terminalMessage) {
+		const lastRunMessage = this.runTerminalization.runMessages.at(-1);
+		if (
+			!this.runTerminalization.assistantMessageFinalized ||
+			!terminalMessage ||
+			lastRunMessage?.role === "toolResult"
+		) {
 			await this.processEvents({ type: "message_start", message: failureMessage });
 			await this.processEvents({ type: "message_end", message: failureMessage });
 			terminalMessage = failureMessage;
@@ -644,6 +650,9 @@ export class Agent {
 			case "agent_end":
 				this.runTerminalization.agentEndEmitted = true;
 				this._state.streamingMessage = undefined;
+				break;
+
+			case "run_failure":
 				break;
 		}
 
