@@ -135,6 +135,7 @@ function manifest(version = LATEST_VERSION): Record<string, unknown> {
 			windows: { file: "install.ps1" },
 			checksums: { file: "SHA256SUMS", algorithm: "sha256" },
 		},
+		acceptance: { file: "binary-acceptance.json", targetCount: BINARY_PLATFORMS.length },
 		attestation: {
 			repository: "xz-dev/pi",
 			signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
@@ -157,6 +158,7 @@ function sha256Sums(version = LATEST_VERSION): string {
 				.update(JSON.stringify(manifest(version)))
 				.digest("hex"),
 		},
+		{ file: "binary-acceptance.json", sha256: "4".repeat(64) },
 		{ file: "install.sh", sha256: createHash("sha256").update(INSTALLER_SH).digest("hex") },
 		{ file: "install.ps1", sha256: createHash("sha256").update(INSTALLER_PS1).digest("hex") },
 	];

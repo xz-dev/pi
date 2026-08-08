@@ -13,6 +13,7 @@ const RELEASE_ASSET_CDN_HOST = "release-assets.githubusercontent.com";
 const SHA256SUMS_FILE = "SHA256SUMS";
 const INSTALL_SH_FILE = "install.sh";
 const INSTALL_PS1_FILE = "install.ps1";
+const BINARY_ACCEPTANCE_FILE = "binary-acceptance.json";
 const ATTESTATION_SUBJECTS_FILE = "attestation-subjects.jsonl";
 const ATTESTATION_SIGNER_WORKFLOW = `${REPOSITORY}/.github/workflows/publish-github-release.yml`;
 const ATTESTATION_SIGNER_REF = "refs/heads/main";
@@ -53,6 +54,7 @@ export interface XzReleaseManifest {
 		windows: { file: typeof INSTALL_PS1_FILE };
 		checksums: { file: typeof SHA256SUMS_FILE; algorithm: "sha256" };
 	};
+	acceptance: { file: typeof BINARY_ACCEPTANCE_FILE; targetCount: number };
 	attestation: {
 		repository: typeof REPOSITORY;
 		signerWorkflow: typeof ATTESTATION_SIGNER_WORKFLOW;
@@ -137,6 +139,7 @@ function parseManifest(value: unknown): XzReleaseManifest {
 		"bundles",
 		"requiredPaths",
 		"installer",
+		"acceptance",
 		"attestation",
 	]);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key))) return fail("Invalid release manifest schema");
@@ -215,6 +218,15 @@ function parseManifest(value: unknown): XzReleaseManifest {
 	}
 
 	if (
+		!isRecord(value.acceptance) ||
+		value.acceptance.file !== BINARY_ACCEPTANCE_FILE ||
+		value.acceptance.targetCount !== BINARY_PLATFORMS.length ||
+		Object.keys(value.acceptance).length !== 2
+	) {
+		return fail("Invalid binary acceptance metadata");
+	}
+
+	if (
 		!isRecord(value.attestation) ||
 		Object.keys(value.attestation).some(
 			(key) => !["repository", "signerWorkflow", "signerRef", "denySelfHostedRunners", "subjectsFile"].includes(key),
@@ -243,6 +255,7 @@ function parseManifest(value: unknown): XzReleaseManifest {
 			windows: { file: INSTALL_PS1_FILE },
 			checksums: { file: SHA256SUMS_FILE, algorithm: "sha256" },
 		},
+		acceptance: { file: BINARY_ACCEPTANCE_FILE, targetCount: BINARY_PLATFORMS.length },
 		attestation: {
 			repository: REPOSITORY,
 			signerWorkflow: ATTESTATION_SIGNER_WORKFLOW,
@@ -361,6 +374,7 @@ export async function getLatestXzRelease(
 	const expectedChecksums = [
 		...Object.values(manifest.bundles).map((bundle) => bundle.file),
 		"release-manifest.json",
+		BINARY_ACCEPTANCE_FILE,
 		INSTALL_SH_FILE,
 		INSTALL_PS1_FILE,
 	].sort();

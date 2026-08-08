@@ -120,6 +120,7 @@ function fixtureManifest(): Record<string, unknown> {
 			windows: { file: "install.ps1" },
 			checksums: { file: "SHA256SUMS", algorithm: "sha256" },
 		},
+		acceptance: { file: "binary-acceptance.json", targetCount: BINARY_PLATFORMS.length },
 		attestation: {
 			repository: "xz-dev/pi",
 			signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
@@ -140,6 +141,7 @@ function sha256Sums(): string {
 			file: "release-manifest.json",
 			sha256: createHash("sha256").update(JSON.stringify(fixtureManifest())).digest("hex"),
 		},
+		{ file: "binary-acceptance.json", sha256: "4".repeat(64) },
 		{ file: "install.sh", sha256: "a".repeat(64) },
 		{ file: "install.ps1", sha256: "b".repeat(64) },
 	];

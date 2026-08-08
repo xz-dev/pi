@@ -126,6 +126,7 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
 			windows: { file: "install.ps1" },
 			checksums: { file: "SHA256SUMS", algorithm: "sha256" },
 		},
+		acceptance: { file: "binary-acceptance.json", targetCount: BINARY_PLATFORMS.length },
 		attestation: {
 			repository: "xz-dev/pi",
 			signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",
@@ -144,6 +145,7 @@ function sha256Sums(): string {
 	const entries: Array<{ file: string; sha256: string }> = [
 		...Object.values(BUNDLE_NAMES).map((file) => ({ file, sha256: "3".repeat(64) })),
 		{ file: "release-manifest.json", sha256: createHash("sha256").update(JSON.stringify(manifest())).digest("hex") },
+		{ file: "binary-acceptance.json", sha256: "4".repeat(64) },
 		{ file: "install.sh", sha256: createHash("sha256").update(INSTALLER_SH).digest("hex") },
 		{ file: "install.ps1", sha256: createHash("sha256").update(INSTALLER_PS1).digest("hex") },
 	];
@@ -226,6 +228,22 @@ describe("xz-dev GitHub Release binary updates", () => {
 			}),
 		);
 		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/attestation policy/);
+	});
+
+	it("requires exact binary acceptance metadata and its checksum asset", async () => {
+		allowNetwork();
+		stubFetch(manifest({ acceptance: undefined }));
+		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/acceptance metadata/);
+
+		stubFetch(manifest({ acceptance: { file: "other.json", targetCount: BINARY_PLATFORMS.length } }));
+		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/acceptance metadata/);
+
+		const sumsWithoutAcceptance = sha256Sums()
+			.split("\n")
+			.filter((line) => !line.includes("binary-acceptance.json"))
+			.join("\n");
+		stubFetch(manifest(), sumsWithoutAcceptance);
+		await expect(getLatestXzRelease(VERSION)).rejects.toThrow(/exact canonical release asset inventory/);
 	});
 
 	it("rejects manifests that do not cover the exact twelve platform bundles", async () => {
