@@ -25,6 +25,7 @@ import type {
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
+import { compactOpenAIResponses, type OpenAIResponsesCompaction } from "@earendil-works/pi-ai/api/openai-responses";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -94,7 +95,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -197,6 +198,7 @@ function withoutDeletedHeaders(headers: ProviderHeaders | undefined): Record<str
 
 export interface AgentSessionConfig {
 	agent: Agent;
+	prepareRequestHeaders?: (model: Model<any>, headers?: ProviderHeaders) => Promise<ProviderHeaders>;
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;
@@ -362,6 +364,7 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
+	private _prepareRequestHeaders?: AgentSessionConfig["prepareRequestHeaders"];
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -383,6 +386,7 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRuntime = config.modelRuntime;
+		this._prepareRequestHeaders = config.prepareRequestHeaders;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -466,6 +470,58 @@ export class AgentSession {
 		} catch {
 			return { model };
 		}
+	}
+
+	private _isRemoteCompactionModel(model: Model<any>): model is Model<"openai-responses"> {
+		return (
+			model.api === "openai-responses" &&
+			model.provider === "openai" &&
+			model.baseUrl === "https://api.openai.com/v1"
+		);
+	}
+
+	private async _compactOpenAIResponses(
+		preparation: NonNullable<ReturnType<typeof prepareCompaction>>,
+		model: Model<"openai-responses">,
+		apiKey: string | undefined,
+		headers: Record<string, string> | undefined,
+		env: Record<string, string> | undefined,
+		signal: AbortSignal,
+	): Promise<CompactionResult> {
+		const providerRetry = this.settingsManager.getProviderRetrySettings();
+		const requestHeaders = await this._prepareRequestHeaders?.(model, headers);
+		const previous = this.agent.state.messages.find((message) => message.role === "compactionSummary")?.remote as
+			| OpenAIResponsesCompaction
+			| undefined;
+		const prefix = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+		const compaction = await compactOpenAIResponses(
+			model,
+			{
+				systemPrompt: previous ? undefined : this.agent.state.systemPrompt,
+				messages: convertToLlm(prefix),
+				tools: this.agent.state.tools,
+			},
+			{
+				previous,
+				apiKey,
+				headers: requestHeaders ?? headers,
+				env,
+				signal,
+				timeoutMs: providerRetry.timeoutMs,
+				maxRetries: providerRetry.maxRetries,
+				maxRetryDelayMs: providerRetry.maxRetryDelayMs,
+				onPayload: this.agent.onPayload,
+				onResponse: this.agent.onResponse,
+			},
+		);
+		return {
+			summary: "OpenAI Responses remote compaction",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			estimatedTokensAfter: Math.ceil(JSON.stringify(compaction.output).length / 4),
+			usage: compaction.usage,
+			details: { type: "openaiResponses", compaction },
+		};
 	}
 
 	/**
@@ -1849,6 +1905,20 @@ export class AgentSession {
 				tokensBefore = extensionCompaction.tokensBefore;
 				usage = extensionCompaction.usage;
 				details = extensionCompaction.details;
+			} else if (this._isRemoteCompactionModel(requestModel)) {
+				const result = await this._compactOpenAIResponses(
+					preparation,
+					requestModel,
+					apiKey,
+					headers,
+					env,
+					this._compactionAbortController.signal,
+				);
+				summary = result.summary;
+				firstKeptEntryId = result.firstKeptEntryId;
+				tokensBefore = result.tokensBefore;
+				usage = result.usage;
+				details = result.details;
 			} else {
 				// Generate compaction result
 				const result = await compact(
@@ -1916,7 +1986,10 @@ export class AgentSession {
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+			const aborted =
+				this._compactionAbortController?.signal.aborted === true ||
+				message === "Compaction cancelled" ||
+				(error instanceof Error && error.name === "AbortError");
 			this._compactionAbortController = undefined;
 			this._emit({
 				type: "compaction_end",
@@ -2121,6 +2194,20 @@ export class AgentSession {
 				tokensBefore = extensionCompaction.tokensBefore;
 				usage = extensionCompaction.usage;
 				details = extensionCompaction.details;
+			} else if (this._isRemoteCompactionModel(requestModel)) {
+				const compactResult = await this._compactOpenAIResponses(
+					preparation,
+					requestModel,
+					apiKey,
+					headers,
+					env,
+					this._autoCompactionAbortController.signal,
+				);
+				summary = compactResult.summary;
+				firstKeptEntryId = compactResult.firstKeptEntryId;
+				tokensBefore = compactResult.tokensBefore;
+				usage = compactResult.usage;
+				details = compactResult.details;
 			} else {
 				// Generate compaction result
 				const compactResult = await compact(
@@ -2203,19 +2290,25 @@ export class AgentSession {
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			const aborted =
+				this._autoCompactionAbortController?.signal.aborted === true ||
+				(error instanceof Error && error.name === "AbortError");
+			const remoteFailure = this.model !== undefined && this._isRemoteCompactionModel(this.model);
 			if (started) {
 				this._emit({
 					type: "compaction_end",
 					reason,
 					result: undefined,
-					aborted: false,
+					aborted,
 					willRetry: false,
-					errorMessage:
-						reason === "overflow"
+					errorMessage: aborted
+						? undefined
+						: reason === "overflow"
 							? `Context overflow recovery failed: ${errorMessage}`
 							: `Auto-compaction failed: ${errorMessage}`,
 				});
 			}
+			if (remoteFailure) throw error;
 			return false;
 		} finally {
 			this._autoCompactionAbortController = undefined;

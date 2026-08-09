@@ -1,12 +1,17 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { stream as streamOpenAIResponses } from "../src/api/openai-responses.ts";
+import {
+	compactOpenAIResponses,
+	replayOpenAIResponsesCompaction,
+	stream as streamOpenAIResponses,
+} from "../src/api/openai-responses.ts";
 import { getModel } from "../src/compat.ts";
 import type { Model } from "../src/types.ts";
 
 type CapturedHeaders = Headers | string[][] | Record<string, string | readonly string[]> | undefined;
 
 interface CapturedResponsesPayload {
+	input?: unknown[];
 	prompt_cache_key?: string;
 	session_id?: string;
 	tools?: Array<{ name?: string; strict?: boolean }>;
@@ -70,6 +75,103 @@ async function captureOpenAIResponseHeaders(
 describe("openai-responses provider defaults", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("compacts full input and replays the returned output as replacement history", async () => {
+		const requests: Array<{ url: string; payload: CapturedResponsesPayload }> = [];
+		const compactOutput = [
+			{ role: "user", content: [{ type: "input_text", text: "retained" }] },
+			{ type: "compaction", id: "cmp_1", encrypted_content: "opaque" },
+		];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = input instanceof Request ? input.url : String(input);
+			requests.push({ url, payload: JSON.parse(String(init?.body)) as CapturedResponsesPayload });
+			if (url.endsWith("/responses/compact")) {
+				return new Response(
+					JSON.stringify({
+						id: "resp_compact_1",
+						created_at: 1,
+						object: "response.compaction",
+						output: compactOutput,
+						usage: {
+							input_tokens: 12,
+							input_tokens_details: { cached_tokens: 2 },
+							output_tokens: 3,
+							output_tokens_details: { reasoning_tokens: 1 },
+							total_tokens: 15,
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(
+				`data: ${JSON.stringify({
+					type: "response.completed",
+					sequence_number: 0,
+					response: { id: "resp_1", status: "completed", output: [] },
+				})}\n\ndata: [DONE]\n\n`,
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		});
+		const model = getModel("openai", "gpt-5.4");
+		const compaction = await compactOpenAIResponses(
+			model,
+			{
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "old", timestamp: 1 }],
+			},
+			{ apiKey: "test-key" },
+		);
+		const stream = replayOpenAIResponsesCompaction(
+			model,
+			compaction,
+			{ messages: [{ role: "user", content: "new", timestamp: 2 }] },
+			{ apiKey: "test-key" },
+		);
+		await stream.result();
+
+		expect(requests[0]).toMatchObject({
+			url: "https://api.openai.com/v1/responses/compact",
+			payload: {
+				model: model.id,
+				input: [
+					{ role: "developer", content: "sys" },
+					{ role: "user", content: [{ type: "input_text", text: "old" }] },
+				],
+			},
+		});
+		expect(requests[1]?.payload.input).toEqual([
+			...compactOutput,
+			{ role: "user", content: [{ type: "input_text", text: "new" }] },
+		]);
+		expect(compaction.usage).toMatchObject({ input: 10, output: 3, cacheRead: 2, totalTokens: 15 });
+
+		await compactOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "later", timestamp: 3 }] },
+			{ apiKey: "test-key", previous: compaction },
+		);
+		expect(requests[2]?.payload.input).toEqual([
+			...compactOutput,
+			{ role: "user", content: [{ type: "input_text", text: "later" }] },
+		]);
+	});
+
+	it("propagates the caller's abort reason from remote compaction", async () => {
+		const controller = new AbortController();
+		const reason = new Error("cancelled by caller");
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			await new Promise((resolve) => init?.signal?.addEventListener("abort", resolve, { once: true }));
+			throw new DOMException("aborted", "AbortError");
+		});
+		const pending = compactOpenAIResponses(
+			getModel("openai", "gpt-5.4"),
+			{ messages: [{ role: "user", content: "old", timestamp: 1 }] },
+			{ apiKey: "test-key", signal: controller.signal },
+		);
+		controller.abort(reason);
+
+		await expect(pending).rejects.toBe(reason);
 	});
 
 	it("omits reasoning when no reasoning is requested", async () => {

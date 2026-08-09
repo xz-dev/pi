@@ -380,6 +380,24 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
  * Project one selected session entry into LLM/runtime messages.
  * Plain custom entries are display/state entries and do not participate in context.
  */
+function getRemoteCompaction(details: unknown): unknown {
+	if (!details || typeof details !== "object" || !("type" in details) || details.type !== "openaiResponses") {
+		return undefined;
+	}
+	if (!("compaction" in details) || !details.compaction || typeof details.compaction !== "object") {
+		throw new Error("Invalid OpenAI Responses compaction details");
+	}
+	const compaction = details.compaction as Record<string, unknown>;
+	if (
+		typeof compaction.model !== "string" ||
+		!Array.isArray(compaction.output) ||
+		!compaction.output.every((item) => item && typeof item === "object" && ("type" in item || "role" in item))
+	) {
+		throw new Error("Invalid OpenAI Responses compaction details");
+	}
+	return compaction;
+}
+
 export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage[] {
 	if (entry.type === "message") {
 		const message = entry.message;
@@ -402,7 +420,14 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
 	if (entry.type === "compaction") {
-		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
+		return [
+			createCompactionSummaryMessage(
+				entry.summary,
+				entry.tokensBefore,
+				entry.timestamp,
+				entry.fromHook ? undefined : getRemoteCompaction(entry.details),
+			),
+		];
 	}
 	return [];
 }

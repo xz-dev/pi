@@ -192,6 +192,92 @@ describe("AgentSession compaction characterization", () => {
 		await expect(harness.session.compact()).rejects.toThrow("No model selected");
 	});
 
+	it("uses remote replacement history for official OpenAI Responses compaction", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const model = {
+			...harness.getModel(),
+			api: "openai-responses" as const,
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			id: "gpt-5.4",
+		};
+		harness.session.agent.state.model = model;
+		harness.session.modelRuntime.registerNativeProvider({
+			id: "openai",
+			name: "OpenAI",
+			auth: {
+				apiKey: {
+					name: "OpenAI API key",
+					resolve: async () => ({ auth: { apiKey: "test-key" }, source: "test" }),
+				},
+			},
+			getModels: () => [model],
+			stream: () => createAssistantMessageEventStream(),
+			streamSimple: () => createAssistantMessageEventStream(),
+		});
+		let streamCalls = 0;
+		let compactInput: unknown;
+		harness.session.agent.streamFunction = () => {
+			streamCalls++;
+			return createAssistantMessageEventStream();
+		};
+		const compactOutput = [
+			{ role: "user", content: [{ type: "input_text", text: "retained" }] },
+			{ type: "compaction", id: "cmp_1", encrypted_content: "opaque" },
+		];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			compactInput = (JSON.parse(String(init?.body)) as { input?: unknown }).input;
+			return new Response(
+				JSON.stringify({
+					id: "resp_compact_1",
+					created_at: 1,
+					object: "response.compaction",
+					output: compactOutput,
+					usage: {
+						input_tokens: 12,
+						input_tokens_details: { cached_tokens: 2 },
+						output_tokens: 3,
+						output_tokens_details: { reasoning_tokens: 1 },
+						total_tokens: 15,
+					},
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		});
+
+		const result = await harness.session.compact();
+		const compactionEntry = harness.sessionManager
+			.getEntries()
+			.slice()
+			.reverse()
+			.find((entry) => entry.type === "compaction");
+
+		expect(streamCalls).toBe(0);
+		expect(JSON.stringify(compactInput)).toContain("message to compact");
+		expect(JSON.stringify(compactInput)).not.toContain("assistant response to compact");
+		expect(result.summary).toBe("OpenAI Responses remote compaction");
+		expect(result.details).toEqual({
+			type: "openaiResponses",
+			compaction: expect.objectContaining({ model: "gpt-5.4", output: compactOutput }),
+		});
+		expect(compactionEntry).toMatchObject({ details: result.details });
+	});
+
+	it("rejects malformed persisted remote compaction details", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
+		harness.sessionManager.appendCompaction("remote", firstKeptEntryId, 100, {
+			type: "openaiResponses",
+			compaction: { model: "gpt-5.4", output: "not-an-array" },
+		});
+
+		expect(() => harness.sessionManager.buildSessionContext()).toThrow("Invalid OpenAI Responses compaction details");
+	});
+
 	it("throws when compacting without configured auth", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
