@@ -1,8 +1,7 @@
 #ifdef _WIN32
 #include <errno.h>
-#include <process.h>
-#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 #include <wchar.h>
@@ -18,6 +17,7 @@ static int valid_version(const wchar_t *value) {
 
 int wmain(int argc, wchar_t **argv) {
 	(void)argc;
+	(void)argv;
 	wchar_t directory[32768];
 	DWORD length = GetModuleFileNameW(NULL, directory, (DWORD)(sizeof(directory) / sizeof(directory[0])));
 	if (length == 0 || length >= sizeof(directory) / sizeof(directory[0])) return 1;
@@ -40,11 +40,49 @@ int wmain(int argc, wchar_t **argv) {
 	} else {
 		return 1;
 	}
-	argv[0] = executable;
-	intptr_t status = _wspawnv(_P_WAIT, executable, (const wchar_t *const *)argv);
-	if (status != -1) return (int)status;
-	fwprintf(stderr, L"pi: could not execute %ls: %hs\n", executable, strerror(errno));
-	return 1;
+	const wchar_t *tail = GetCommandLineW();
+	if (*tail == L'"') {
+		tail++;
+		while (*tail != L'\0' && *tail != L'"') tail++;
+		if (*tail == L'"') tail++;
+	} else {
+		while (*tail != L'\0' && *tail != L' ' && *tail != L'\t') tail++;
+	}
+	while (*tail == L' ' || *tail == L'\t') tail++;
+
+	size_t capacity = wcslen(executable) + wcslen(tail) + 4;
+	wchar_t *command_line = malloc(capacity * sizeof(*command_line));
+	if (command_line == NULL) return 1;
+	int written = *tail == L'\0'
+		? swprintf(command_line, capacity, L"\"%ls\"", executable)
+		: swprintf(command_line, capacity, L"\"%ls\" %ls", executable, tail);
+	if (written < 0) { free(command_line); return 1; }
+
+	STARTUPINFOW startup;
+	PROCESS_INFORMATION process;
+	ZeroMemory(&startup, sizeof(startup));
+	ZeroMemory(&process, sizeof(process));
+	startup.cb = sizeof(startup);
+	startup.dwFlags = STARTF_USESTDHANDLES;
+	startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+	startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+	startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+	BOOL created = CreateProcessW(executable, command_line, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process);
+	DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+	free(command_line);
+	if (!created) {
+		fwprintf(stderr, L"pi: could not execute %ls: Windows error %lu\n", executable, create_error);
+		return 1;
+	}
+	CloseHandle(process.hThread);
+	if (WaitForSingleObject(process.hProcess, INFINITE) != WAIT_OBJECT_0) {
+		CloseHandle(process.hProcess);
+		return 1;
+	}
+	DWORD status;
+	if (!GetExitCodeProcess(process.hProcess, &status)) status = 1;
+	CloseHandle(process.hProcess);
+	return (int)status;
 }
 #else
 #define _POSIX_C_SOURCE 200809L
