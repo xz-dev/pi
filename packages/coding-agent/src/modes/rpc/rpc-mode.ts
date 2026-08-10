@@ -542,6 +542,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// Retry
 			// =================================================================
 
+			case "retry": {
+				await session.retry();
+				return success(id, "retry");
+			}
+
 			case "set_auto_retry": {
 				session.setAutoRetryEnabled(command.enabled);
 				return success(id, "set_auto_retry");
