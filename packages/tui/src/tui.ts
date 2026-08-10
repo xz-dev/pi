@@ -345,6 +345,7 @@ export abstract class TuiBase extends Container implements TUI {
 	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1";
 	protected fullRedrawCount = 0;
 	protected stopped = false;
+	protected forceFullRedraw = false;
 	private pendingOsc11BackgroundReplies = 0;
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
 	private terminalColorSchemeListeners = new Set<(scheme: TerminalColorScheme) => void>();
@@ -381,6 +382,8 @@ export abstract class TuiBase extends Container implements TUI {
 
 	protected afterTerminalStop(_options: TuiStopOptions): void {}
 
+	protected invalidateEmittedCursorState(): void {}
+
 	get fullRedraws(): number {
 		return this.fullRedrawCount;
 	}
@@ -392,9 +395,6 @@ export abstract class TuiBase extends Container implements TUI {
 	setShowHardwareCursor(enabled: boolean): void {
 		if (this.showHardwareCursor === enabled) return;
 		this.showHardwareCursor = enabled;
-		if (!enabled) {
-			this.terminal.hideCursor();
-		}
 		this.requestRender();
 	}
 
@@ -560,6 +560,7 @@ export abstract class TuiBase extends Container implements TUI {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
+		this.invalidateEmittedCursorState();
 		this.requestRender();
 
 		// Return handle for controlling this overlay
@@ -575,7 +576,10 @@ export abstract class TuiBase extends Container implements TUI {
 						const topVisible = this.getTopmostVisibleOverlay();
 						this.setFocus(topVisible?.component ?? entry.preFocus);
 					}
-					if (this.overlayStack.length === 0) this.terminal.hideCursor();
+					if (this.overlayStack.length === 0) {
+						this.terminal.hideCursor();
+						this.invalidateEmittedCursorState();
+					}
 					this.requestRender();
 				}
 			},
@@ -653,7 +657,10 @@ export abstract class TuiBase extends Container implements TUI {
 			const topVisible = this.getTopmostVisibleOverlay();
 			this.setFocus(topVisible?.component ?? overlay.preFocus);
 		}
-		if (this.overlayStack.length === 0) this.terminal.hideCursor();
+		if (this.overlayStack.length === 0) {
+			this.terminal.hideCursor();
+			this.invalidateEmittedCursorState();
+		}
 		this.requestRender();
 	}
 
@@ -689,7 +696,9 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	start(): void {
+		const restarting = this.stopped;
 		this.stopped = false;
+		if (restarting) this.forceFullRedraw = true;
 		this.beforeTerminalStart();
 		this.terminal.start(
 			(data) => this.handleTerminalInput(data),
@@ -697,11 +706,16 @@ export abstract class TuiBase extends Container implements TUI {
 		);
 		this.afterTerminalStart();
 		this.terminal.hideCursor();
+		this.invalidateEmittedCursorState();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031h");
 		}
 		this.queryCellSize();
-		this.requestRender();
+		if (this.renderRequested) {
+			process.nextTick(() => this.scheduleRender());
+		} else {
+			this.requestRender();
+		}
 	}
 
 	addInputListener(listener: TuiInputListener): () => void {
@@ -750,6 +764,8 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 		this.beforeTerminalStop(options);
 		this.terminal.showCursor();
+		this.invalidateEmittedCursorState();
+		this.forceFullRedraw = true;
 		this.terminal.stop();
 		this.afterTerminalStop(options);
 	}
