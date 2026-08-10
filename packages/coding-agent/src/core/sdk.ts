@@ -1,5 +1,9 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import {
+	type OpenAIResponsesCompaction,
+	replayOpenAIResponsesCompaction,
+} from "@earendil-works/pi-ai/api/openai-responses";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -309,13 +313,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const headerRunner = extensionRunnerRef.current;
-			return modelRuntime.streamSimple(model, context, {
+			const runtimeMessages = agent.state.messages;
+			const remoteCompaction = runtimeMessages.find((message) => message.role === "compactionSummary")?.remote as
+				| OpenAIResponsesCompaction
+				| undefined;
+			if (remoteCompaction && remoteCompaction.model !== model.id) {
+				throw new Error("Responses compaction is not compatible with this model");
+			}
+			const requestContext = context;
+			const requestOptions = {
 				...options,
 				timeoutMs,
 				websocketConnectTimeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-				transformHeaders: async (requestHeaders) => {
+				transformHeaders: async (requestHeaders: Record<string, string | null>) => {
 					const headers = mergeProviderAttributionHeaders(
 						model,
 						settingsManager,
@@ -326,7 +338,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						? headerRunner.emitBeforeProviderHeaders(headers ?? {})
 						: (headers ?? {});
 				},
-			});
+			};
+			if (remoteCompaction) {
+				if (
+					model.api !== "openai-responses" ||
+					model.provider !== "openai" ||
+					model.baseUrl !== "https://api.openai.com/v1"
+				) {
+					throw new Error("Responses compaction requires the same official OpenAI Responses provider");
+				}
+				const auth = await modelRuntime.getAuth(model, { signal: options?.signal });
+				if (!auth) throw new Error(`Provider is not configured: ${model.provider}`);
+				const responsesModel = auth.auth.baseUrl
+					? { ...(model as Model<"openai-responses">), baseUrl: auth.auth.baseUrl }
+					: (model as Model<"openai-responses">);
+				if (responsesModel.baseUrl !== "https://api.openai.com/v1") {
+					throw new Error("Responses compaction requires the official OpenAI endpoint");
+				}
+				return replayOpenAIResponsesCompaction(responsesModel, remoteCompaction, requestContext, {
+					...requestOptions,
+					apiKey: requestOptions.apiKey ?? auth.auth.apiKey,
+					headers: { ...auth.auth.headers, ...requestOptions.headers },
+					env: { ...auth.env, ...requestOptions.env },
+				});
+			}
+			return modelRuntime.streamSimple(model, requestContext, requestOptions);
 		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;
@@ -375,6 +411,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const session = new AgentSession({
 		agent,
+		prepareRequestHeaders: async (requestModel, requestHeaders) => {
+			const headers = mergeProviderAttributionHeaders(
+				requestModel,
+				settingsManager,
+				sessionManager.getSessionId(),
+				requestHeaders,
+			);
+			const runner = extensionRunnerRef.current;
+			return runner?.hasHandlers("before_provider_headers")
+				? runner.emitBeforeProviderHeaders(headers ?? {})
+				: (headers ?? {});
+		},
 		sessionManager,
 		settingsManager,
 		cwd,
