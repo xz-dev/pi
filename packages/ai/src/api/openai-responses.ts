@@ -1,6 +1,11 @@
 import OpenAI from "openai";
-import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
-import { clampThinkingLevel } from "../models.ts";
+import type {
+	CompactedResponse,
+	ResponseCompactParams,
+	ResponseCreateParamsStreaming,
+	ResponseInput,
+} from "openai/resources/responses/responses.js";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -10,6 +15,7 @@ import type {
 	OpenAIResponsesCompat,
 	ProviderEnv,
 	ProviderHeaders,
+	ProviderResponse,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -94,6 +100,26 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	toolChoice?: ResponseCreateParamsStreaming["tool_choice"];
+}
+
+export interface OpenAIResponsesCompactionOptions {
+	previous?: OpenAIResponsesCompaction;
+	apiKey?: string;
+	fetch?: typeof globalThis.fetch;
+	env?: ProviderEnv;
+	headers?: ProviderHeaders;
+	signal?: AbortSignal;
+	timeoutMs?: number;
+	maxRetries?: number;
+	maxRetryDelayMs?: number;
+	onPayload?: (payload: ResponseCompactParams, model: Model<"openai-responses">) => Promise<unknown> | unknown;
+	onResponse?: (response: ProviderResponse, model: Model<"openai-responses">) => void | Promise<void>;
+}
+
+export interface OpenAIResponsesCompaction {
+	model: string;
+	output: CompactedResponse["output"];
+	usage: Usage;
 }
 
 /**
@@ -340,6 +366,88 @@ function buildParams(
 	}
 
 	return params;
+}
+
+export async function compactOpenAIResponses(
+	model: Model<"openai-responses">,
+	context: Context,
+	options?: OpenAIResponsesCompactionOptions,
+): Promise<OpenAIResponsesCompaction> {
+	const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
+	const compat = getCompat(model);
+	const grammarToolInputProperties = createGrammarToolInputProperties(
+		context.tools,
+		compat.supportsOpenAIGrammarTools,
+	);
+	let input = buildParams(model, context, undefined, compat, grammarToolInputProperties).input as ResponseInput;
+	if (options?.previous) {
+		if (options.previous.model !== model.id) {
+			throw new Error("Responses compaction is not compatible with this model");
+		}
+		input = [...structuredClone(options.previous.output), ...input] as ResponseInput;
+	}
+	const client = createClient(model, context, apiKey, options?.headers, options?.fetch);
+	let params: ResponseCompactParams = { model: model.id, input };
+	const nextParams = await options?.onPayload?.(params, model);
+	if (nextParams !== undefined) params = nextParams as ResponseCompactParams;
+	const requestOptions = {
+		...(options?.signal ? { signal: options.signal } : {}),
+		...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+		maxRetries: 0,
+	};
+	let data: CompactedResponse;
+	let response: globalThis.Response;
+	try {
+		({ data, response } = await retryProviderRequest(
+			() => client.responses.compact(params, requestOptions).withResponse(),
+			{
+				maxRetries: options?.maxRetries,
+				maxRetryDelayMs: options?.maxRetryDelayMs,
+				signal: options?.signal,
+			},
+		));
+	} catch (error) {
+		if (options?.signal?.aborted) throw options.signal.reason ?? error;
+		throw error;
+	}
+	await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+	const cachedTokens = data.usage.input_tokens_details.cached_tokens || 0;
+	const cacheWriteTokens =
+		(data.usage.input_tokens_details as { cache_write_tokens?: number }).cache_write_tokens || 0;
+	const usage: Usage = {
+		input: Math.max(0, data.usage.input_tokens - cachedTokens - cacheWriteTokens),
+		output: data.usage.output_tokens,
+		cacheRead: cachedTokens,
+		cacheWrite: cacheWriteTokens,
+		reasoning: data.usage.output_tokens_details.reasoning_tokens || 0,
+		totalTokens: data.usage.total_tokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, usage);
+	return { model: model.id, output: structuredClone(data.output), usage };
+}
+
+export function replayOpenAIResponsesCompaction(
+	model: Model<"openai-responses">,
+	compaction: OpenAIResponsesCompaction,
+	context: Context,
+	options?: OpenAIResponsesOptions,
+): AssistantMessageEventStream {
+	if (compaction.model !== model.id) {
+		throw new Error("Responses compaction is not compatible with this model");
+	}
+	return stream(
+		model,
+		{ ...context, systemPrompt: undefined },
+		{
+			...options,
+			onPayload: async (payload, requestModel) => {
+				const params = payload as ResponseCreateParamsStreaming;
+				params.input = [...structuredClone(compaction.output), ...(params.input as ResponseInput)] as ResponseInput;
+				return options?.onPayload?.(params, requestModel);
+			},
+		},
+	);
 }
 
 function getServiceTierCostMultiplier(
