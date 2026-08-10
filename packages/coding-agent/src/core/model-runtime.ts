@@ -150,6 +150,8 @@ export class ModelRuntime implements Models {
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
+	/** Rejection-neutral tail of registration-triggered refresh convergence. */
+	private registrationConvergence: Promise<void> | undefined;
 
 	private constructor(
 		credentials: RuntimeCredentials,
@@ -730,13 +732,39 @@ export class ModelRuntime implements Models {
 		return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
 	}
 
+	/**
+	 * Startup barrier: wait for registration-triggered refresh convergence, then run a normal refresh.
+	 * Caller-local cancellation only abandons the wait/refresh request; registration work continues.
+	 */
+	async refreshAfterRegistrationConvergence(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
+		const pending = this.registrationConvergence;
+		if (pending) await raceWithAbortSignal(pending, options.signal);
+		return this.refresh(options);
+	}
+
+	/** Queue a full offline refresh after a registration mutation; keep the tail rejection-neutral. */
+	private queueRegistrationConvergence(): void {
+		const previous = this.registrationConvergence;
+		const operation = previous
+			? previous.then(() => this.refresh({ allowNetwork: false }))
+			: this.refresh({ allowNetwork: false });
+		const tail = operation.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.registrationConvergence = tail;
+		void tail.then(() => {
+			if (this.registrationConvergence === tail) this.registrationConvergence = undefined;
+		});
+	}
+
 	registerNativeProvider(provider: Provider): void {
 		if (!provider.id.trim()) throw new Error("Provider id must not be empty.");
 		this.extensionProviders.delete(provider.id);
 		this.nativeExtensionProviders.set(provider.id, provider);
 		this.recomposeProvider(provider.id);
 		this.updateModelSnapshot();
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationConvergence();
 	}
 
 	registerProvider(providerId: string, config: ProviderConfigInput): void {
@@ -774,7 +802,7 @@ export class ModelRuntime implements Models {
 				available: this.snapshot.all.filter((model) => configuredProviders.has(model.provider)),
 			};
 		}
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationConvergence();
 	}
 
 	unregisterProvider(providerId: string): void {
@@ -782,6 +810,6 @@ export class ModelRuntime implements Models {
 		this.nativeExtensionProviders.delete(providerId);
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationConvergence();
 	}
 }
