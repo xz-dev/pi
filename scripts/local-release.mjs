@@ -22,7 +22,8 @@ Options:
   --skip-check         Do not run npm run check before building
   --skip-test          Do not run ./test.sh after building
   --skip-install       Only create the artifact set; do not create isolated installs
-  --skip-bun-install   Do not create the isolated Bun install
+  --skip-binary        Do not create the standalone Bun binary release
+  --skip-bun-install   Do not create the isolated Bun package install
   --help               Show this help
 `);
 }
@@ -72,6 +73,7 @@ const { values } = parseArgs({
 		force: { type: "boolean", default: false },
 		help: { type: "boolean", default: false },
 		out: { type: "string" },
+		"skip-binary": { type: "boolean", default: false },
 		"skip-bun-install": { type: "boolean", default: false },
 		"skip-check": { type: "boolean", default: false },
 		"skip-install": { type: "boolean", default: false },
@@ -85,6 +87,7 @@ if (values.help) {
 const options = {
 	force: values.force,
 	outDir: values.out,
+	skipBinary: values["skip-binary"],
 	skipBunInstall: values["skip-bun-install"],
 	skipCheck: values["skip-check"],
 	skipInstall: values["skip-install"],
@@ -113,7 +116,9 @@ if (!options.skipTest) execFileSync("bash", ["./test.sh"], { cwd: repoRoot, stdi
 
 let binaryPlatform;
 if (!options.skipInstall) {
-	binaryPlatform = buildBunBinaryRelease(binaryDirectory, outDir);
+	if (!options.skipBinary) {
+		binaryPlatform = buildBunBinaryRelease(binaryDirectory, outDir);
+	}
 	const validationRoot = mkdtempSync(join(tmpdir(), "pi-local-release-consumers-"));
 	try {
 		for (const pkg of artifactSet.packages) {
@@ -142,11 +147,13 @@ console.log("\nTarballs:");
 for (const pkg of artifactSet.packages) console.log(`  ${pkg.tarballPath}`);
 
 if (!options.skipInstall) {
-	console.log("\nLocal Bun binary release:");
-	console.log(`  ${binaryDirectory}`);
-	console.log(`  ${join(outDir, `pi-${binaryPlatform}.${String(binaryPlatform).startsWith("windows-") ? "zip" : "tar.gz"}`)}`);
-	console.log("\nRun the local Bun binary release from outside the repository:");
-	console.log(`  ${join(binaryDirectory, String(binaryPlatform).startsWith("windows-") ? "pi.exe" : "pi")} --help`);
+	if (!options.skipBinary) {
+		console.log("\nLocal Bun binary release:");
+		console.log(`  ${binaryDirectory}`);
+		console.log(`  ${join(outDir, `pi-${binaryPlatform}.${String(binaryPlatform).startsWith("windows-") ? "zip" : "tar.gz"}`)}`);
+		console.log("\nRun the local Bun binary release from outside the repository:");
+		console.log(`  ${join(binaryDirectory, String(binaryPlatform).startsWith("windows-") ? "pi.exe" : "pi")} --help`);
+	}
 
 	console.log("\nIsolated npm install:");
 	console.log(`  ${nodeInstallDirectory}`);

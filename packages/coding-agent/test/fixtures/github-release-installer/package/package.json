@@ -1,0 +1,15 @@
+{
+  "name": "@earendil-works/pi-coding-agent",
+  "version": "0.82.1-xz.100.1.g11111111",
+  "type": "module",
+  "bin": {
+    "pi": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
