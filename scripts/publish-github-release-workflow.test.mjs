@@ -163,6 +163,7 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.doesNotMatch(workflowText, /smoke-unix-tui\.py/);
   assert.doesNotMatch(workflowText, /AppActivate|SendKeys|Docker allocated TTY|fabricated/);
   assert.match(workflowText, /e2e-binary-self-update\.mjs/);
+  assert.match(syncWorkflowText, /test\/xz-release-update\.test\.ts/);
   assert.match(updateHarness, /PI_XZ_LATEST_RELEASE_URL: `\$\{releaseBase\}latest-release\.json`/);
   assert.match(updateHarness, /digest: `sha256:\$\{bundle\.sha256\}`/);
   assert.match(updateHarness, /assets: \[/);
