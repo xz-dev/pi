@@ -7,7 +7,8 @@ readonly RELEASE_SELF_UPDATE_CONFLICT_PATHS=(
 )
 
 resolve_release_self_update_squash_conflicts() {
-  local -a conflicts=("$@")
+  local -a conflicts=()
+  if (( $# > 0 )); then conflicts=("$@"); fi
   local -A expected=()
   local conflict
 
@@ -17,7 +18,7 @@ resolve_release_self_update_squash_conflicts() {
 
   if (( ${#conflicts[@]} < 1 || ${#conflicts[@]} > ${#RELEASE_SELF_UPDATE_CONFLICT_PATHS[@]} )); then
     printf '::error::Unexpected release-self-update squash conflicts:'
-    printf ' %q' "${conflicts[@]}"
+    if (( ${#conflicts[@]} > 0 )); then printf ' %q' "${conflicts[@]}"; fi
     printf '\n'
     return 1
   fi
@@ -42,7 +43,7 @@ resolve_release_self_update_squash_conflicts() {
   git checkout --ours -- packages/coding-agent/CHANGELOG.md
   git add packages/coding-agent/CHANGELOG.md
   if [[ ! -v expected["package.json"] ]]; then
-    node scripts/apply-xz-release-contract-to-package.mjs
+    git checkout --ours -- package.json
     git add package.json
   fi
 
