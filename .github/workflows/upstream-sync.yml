@@ -281,6 +281,7 @@ jobs:
               test/interactive-mode-startup-input.test.ts \
               test/startup-benchmark.test.ts \
               test/tools-manager.test.ts \
+              test/xz-release-update.test.ts \
               test/interactive-mode-queue-tui.test.ts \
               test/suite/manual-retry.test.ts \
               test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
