@@ -1,4 +1,10 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai/compat";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	EventStream,
+	getModel,
+	type ToolResultMessage,
+} from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
@@ -26,7 +32,7 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 	}
 }
 
-function createAssistantMessage(text: string): AssistantMessage {
+function createAssistantMessage(text: string, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
@@ -41,7 +47,18 @@ function createAssistantMessage(text: string): AssistantMessage {
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "stop",
+		stopReason,
+		timestamp: Date.now(),
+	};
+}
+
+function createToolResultMessage(text: string): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: "call-1",
+		toolName: "tool",
+		content: [{ type: "text", text }],
+		isError: true,
 		timestamp: Date.now(),
 	};
 }
@@ -188,6 +205,50 @@ describe("Agent", () => {
 		expect(lastMessage.stopReason).toBe("error");
 		expect(lastMessage.errorMessage).toBe("provider exploded");
 		expect(agent.state.errorMessage).toBe("provider exploded");
+	});
+
+	it("synthesizes an aborted assistant after the last aborted tool result", async () => {
+		const agent = new Agent({
+			streamFn: () => {
+				throw new Error("unused");
+			},
+		});
+		const handleRunFailure = Reflect.get(agent, "handleRunFailure") as (
+			error: unknown,
+			aborted: boolean,
+		) => Promise<void>;
+		const terminalization = {
+			agentEndEmitted: false,
+			turnEndEmitted: false,
+			assistantMessageFinalized: true,
+			lastAssistantMessage: createAssistantMessage("tool call", "toolUse"),
+			runMessages: [createAssistantMessage("tool call", "toolUse"), createToolResultMessage("tool aborted")],
+		};
+		Reflect.set(agent, "runTerminalization", terminalization);
+		const events: AgentEvent[] = [];
+		agent.subscribe((event) => {
+			events.push(event);
+		});
+		const abortController = new AbortController();
+		Reflect.set(agent, "activeRun", {
+			promise: Promise.resolve(),
+			resolve: () => {},
+			abortController,
+		});
+
+		await handleRunFailure.call(agent, new Error("Operation aborted"), true);
+
+		expect(events.filter((event) => event.type === "message_end")).toHaveLength(1);
+		expect(events.find((event) => event.type === "message_end")).toMatchObject({
+			message: { role: "assistant", stopReason: "aborted" },
+		});
+		expect(events.find((event) => event.type === "agent_end")).toMatchObject({
+			messages: [
+				{ role: "assistant", stopReason: "toolUse" },
+				{ role: "toolResult" },
+				{ role: "assistant", stopReason: "aborted" },
+			],
+		});
 	});
 
 	it("should await async subscribers before prompt resolves", async () => {
