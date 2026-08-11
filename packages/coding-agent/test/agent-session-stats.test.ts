@@ -2,6 +2,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	getModel,
+	InMemoryModelsStore,
 	streamSimple,
 	type ToolResultMessage,
 	type Usage,
@@ -9,6 +10,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { getUsageCostBreakdown } from "../src/core/usage-totals.ts";
@@ -113,6 +115,159 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage?.percent).toBe((200 / model.contextWindow) * 100);
 		} finally {
 			session.dispose();
+		}
+	});
+
+	it("uses refreshed metadata for the active model", async () => {
+		const settingsManager = SettingsManager.inMemory();
+		const sessionManager = SessionManager.inMemory();
+		const authStorage = AuthStorage.inMemory();
+		await authStorage.modify("dynamic", async () => ({ type: "api_key", key: "test-key" }));
+		const modelRuntime = await ModelRuntime.create({
+			credentials: authStorage,
+			modelsStore: new InMemoryModelsStore(),
+			modelsPath: null,
+			allowModelNetwork: false,
+		});
+		let contextWindow = 1_000_000;
+		modelRuntime.registerProvider("dynamic", {
+			baseUrl: "https://example.test/v1",
+			apiKey: "test-key",
+			api: "openai-completions",
+			refreshModels: async () => [
+				{
+					...model,
+					id: "changing-context",
+					name: "Changing context",
+					provider: "dynamic",
+					baseUrl: "https://example.test/v1",
+					contextWindow,
+				},
+			],
+		});
+		await modelRuntime.refresh({ allowNetwork: false, providers: ["dynamic"] });
+		const initialModel = modelRuntime.getModel("dynamic", "changing-context")!;
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				streamFn: streamSimple,
+				initialState: {
+					model: initialModel,
+					systemPrompt: "You are a helpful assistant.",
+					tools: [],
+					thinkingLevel: "high",
+				},
+			}),
+			sessionManager,
+			settingsManager,
+			cwd: process.cwd(),
+			scopedModels: [{ model: initialModel }],
+			modelRuntime,
+			resourceLoader: createTestResourceLoader(),
+		});
+
+		try {
+			const assistant = {
+				...createAssistantMessage("response", 400_000, 1),
+				api: initialModel.api,
+				provider: initialModel.provider,
+				model: initialModel.id,
+			};
+			sessionManager.appendMessage(assistant);
+			syncAgentMessages(session, sessionManager);
+			expect(session.getContextUsage()).toMatchObject({ contextWindow: 1_000_000, percent: 40 });
+
+			contextWindow = 372_000;
+			await modelRuntime.refresh({ allowNetwork: false, providers: ["dynamic"] });
+
+			expect(session.model).not.toBe(initialModel);
+			expect(session.model?.contextWindow).toBe(372_000);
+			expect(session.scopedModels[0]?.model.contextWindow).toBe(372_000);
+			expect(session.getContextUsage()).toMatchObject({
+				contextWindow: 372_000,
+				percent: (400_000 / 372_000) * 100,
+			});
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("keeps missing models and stops rebinding after disposal", async () => {
+		const settingsManager = SettingsManager.inMemory();
+		const authStorage = AuthStorage.inMemory();
+		await authStorage.modify("dynamic", async () => ({ type: "api_key", key: "test-key" }));
+		const modelRuntime = await ModelRuntime.create({
+			credentials: authStorage,
+			modelsStore: new InMemoryModelsStore(),
+			modelsPath: null,
+			allowModelNetwork: false,
+		});
+		let models = [
+			{
+				...model,
+				id: "removed-model",
+				name: "Removed model",
+				provider: "dynamic",
+				baseUrl: "https://example.test/v1",
+				contextWindow: 1_000_000,
+			},
+			{
+				...model,
+				id: "live-model",
+				name: "Live model",
+				provider: "dynamic",
+				baseUrl: "https://example.test/v1",
+				contextWindow: 1_000_000,
+			},
+		];
+		modelRuntime.registerProvider("dynamic", {
+			baseUrl: "https://example.test/v1",
+			apiKey: "test-key",
+			api: "openai-completions",
+			refreshModels: async () => models,
+		});
+		await modelRuntime.refresh({ allowNetwork: false, providers: ["dynamic"] });
+		const removedModel = modelRuntime.getModel("dynamic", "removed-model")!;
+		const liveModel = modelRuntime.getModel("dynamic", "live-model")!;
+		const createDynamicSession = (activeModel: typeof removedModel) =>
+			new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					streamFn: streamSimple,
+					initialState: {
+						model: activeModel,
+						systemPrompt: "You are a helpful assistant.",
+						tools: [],
+						thinkingLevel: "high",
+					},
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settingsManager,
+				cwd: process.cwd(),
+				scopedModels: [{ model: activeModel }],
+				modelRuntime,
+				resourceLoader: createTestResourceLoader(),
+			});
+		const removedSession = createDynamicSession(removedModel);
+		const liveSession = createDynamicSession(liveModel);
+
+		try {
+			models = [{ ...models[1]!, contextWindow: 372_000 }];
+			await modelRuntime.refresh({ allowNetwork: false, providers: ["dynamic"] });
+
+			expect(removedSession.model).toBe(removedModel);
+			expect(removedSession.scopedModels[0]?.model).toBe(removedModel);
+			expect(liveSession.model?.contextWindow).toBe(372_000);
+			const reboundModel = liveSession.model;
+
+			liveSession.dispose();
+			models = [{ ...models[0]!, contextWindow: 200_000 }];
+			await modelRuntime.refresh({ allowNetwork: false, providers: ["dynamic"] });
+			expect(liveSession.model).toBe(reboundModel);
+			expect(liveSession.model?.contextWindow).toBe(372_000);
+		} finally {
+			removedSession.dispose();
+			liveSession.dispose();
 		}
 	});
 
