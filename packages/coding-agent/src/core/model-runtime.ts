@@ -280,6 +280,7 @@ export class ModelRuntime implements Models {
 			all,
 			available: all.filter((model) => this.snapshot.configuredProviders.has(model.provider)),
 		};
+		for (const listener of this.modelListeners) listener();
 	}
 
 	private async runAvailabilityRefresh(seq: number, errorSeq: number, signal: AbortSignal): Promise<void> {
@@ -391,6 +392,13 @@ export class ModelRuntime implements Models {
 
 	getModels(providerId?: string): readonly Model<Api>[] {
 		return this.models.getModels(providerId);
+	}
+
+	private readonly modelListeners = new Set<() => void>();
+
+	onModelsChanged(listener: () => void): () => void {
+		this.modelListeners.add(listener);
+		return () => this.modelListeners.delete(listener);
 	}
 
 	getModel(providerId: string, modelId: string): Model<Api> | undefined {
