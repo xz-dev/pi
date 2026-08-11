@@ -33,6 +33,7 @@ jobs:
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
             +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
+            +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
@@ -51,6 +52,9 @@ jobs:
 
           git merge --squash origin/patch/model-startup-refresh-barrier
           git commit -m "merge patch/model-startup-refresh-barrier branch"
+
+          git merge --squash origin/patch/model-refresh-session-rebind
+          git commit -m "merge patch/model-refresh-session-rebind branch"
 
           git merge --squash origin/patch/startup-benchmark-exit
           git commit -m "merge patch/startup-benchmark-exit branch"
@@ -266,6 +270,7 @@ jobs:
               test/tree-selector.test.ts \
               test/session-manager/custom-session-id.test.ts \
               test/session-manager/tree-traversal.test.ts \
+              test/agent-session-stats.test.ts \
               test/model-runtime-modify-models-compat.test.ts \
               test/remote-catalog-provider.test.ts \
               test/interactive-mode-selector-dispose.test.ts \
