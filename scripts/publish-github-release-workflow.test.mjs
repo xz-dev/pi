@@ -34,6 +34,14 @@ test("upstream sync fetches and merges the persistent native wrapper patch", () 
 	assert.match(syncWorkflowText, /git commit -m "merge patch\/native-wrapper-release branch"/);
 });
 
+test("upstream sync fetches every merged patch explicitly", () => {
+  assert.match(
+    syncWorkflowText,
+    /\+refs\/heads\/patch\/tui-synchronized-cursor-fleet:refs\/remotes\/origin\/patch\/tui-synchronized-cursor-fleet/,
+  );
+  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/tui-synchronized-cursor-fleet/);
+});
+
 test("upstream sync carries and tests the bounded startup benchmark patch", () => {
   assert.match(syncWorkflowText, /\+refs\/heads\/patch\/startup-benchmark-exit:refs\/remotes\/origin\/patch\/startup-benchmark-exit/);
   assert.match(syncWorkflowText, /git merge --squash origin\/patch\/startup-benchmark-exit/);
