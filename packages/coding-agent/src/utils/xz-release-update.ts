@@ -17,7 +17,8 @@ import { getPiUserAgent } from "./pi-user-agent.ts";
 import { extractZipArchive } from "./tools-manager.ts";
 
 const REPOSITORY = "xz-dev/pi";
-const LATEST_RELEASE_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
+const LATEST_RELEASE_URL =
+	process.env.PI_XZ_LATEST_RELEASE_URL ?? `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const RELEASE_DOWNLOAD_ORIGIN = "https://github.com";
 const RELEASE_ASSET_CDN_HOST = "release-assets.githubusercontent.com";
 const RELEASE_MAX_BYTES = 1024 * 1024;
