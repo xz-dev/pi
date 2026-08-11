@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { binaryArchiveName, bunTarget } from "./lib/bun-targets.mjs";
+import { BUNDLE_LAYOUT_VERSION, MANIFEST_SCHEMA_VERSION } from "./lib/github-release.mjs";
 
 const [candidateArg, targetId, expectedVersion] = process.argv.slice(2);
 if (!candidateArg || !targetId || !expectedVersion) {
@@ -56,9 +57,38 @@ function run(command, args, env = process.env) {
 	});
 }
 
+const manifest = JSON.parse(readFileSync(join(candidate, "release-manifest.json"), "utf8"));
+if (manifest.schemaVersion !== MANIFEST_SCHEMA_VERSION || manifest.layoutVersion !== BUNDLE_LAYOUT_VERSION) {
+	throw new Error("Release candidate manifest does not match the current audit contract");
+}
+const bundle = manifest.bundles?.[targetId];
+if (bundle?.file !== binaryArchiveName(targetId) || bundle.bytes !== statSync(archive).size) {
+	throw new Error(`Release candidate bundle metadata mismatch for ${targetId}`);
+}
+
+let releaseBase;
 const server = createServer((request, response) => {
 	try {
 		const name = decodeURIComponent(new URL(request.url ?? "/", "http://localhost").pathname.slice(1));
+		if (name === "latest-release.json") {
+			const metadata = JSON.stringify({
+				tag_name: manifest.tag,
+				target_commitish: manifest.commit,
+				draft: false,
+				prerelease: false,
+				assets: [
+					{
+						name: bundle.file,
+						browser_download_url: `${releaseBase}${bundle.file}`,
+						size: bundle.bytes,
+						digest: `sha256:${bundle.sha256}`,
+					},
+				],
+			});
+			response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(metadata) });
+			response.end(metadata);
+			return;
+		}
 		if (!name || basename(name) !== name) {
 			response.writeHead(404).end();
 			return;
@@ -70,7 +100,7 @@ const server = createServer((request, response) => {
 		}
 		console.log(`Serving ${name}`);
 		response.once("finish", () => console.log(`Served ${name}`));
-		response.writeHead(200, { "connection": "close", "content-length": statSync(path).size });
+		response.writeHead(200, { connection: "close", "content-length": statSync(path).size });
 		createReadStream(path).pipe(response);
 	} catch (error) {
 		response.writeHead(500).end(String(error));
@@ -104,11 +134,13 @@ try {
 	await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
 	const address = server.address();
 	if (!address || typeof address === "string") throw new Error("Could not bind local Release server");
+	releaseBase = `http://127.0.0.1:${address.port}/`;
 	console.log(`Updating from local Release: ${targetId} ${expectedVersion}`);
 	await run(executable, ["update", "--self"], {
 		...process.env,
 		PI_CODING_AGENT_DIR: join(work, "agent"),
-		PI_XZ_RELEASE_BASE_URL: `http://127.0.0.1:${address.port}/`,
+		PI_XZ_LATEST_RELEASE_URL: `${releaseBase}latest-release.json`,
+		PI_XZ_RELEASE_BASE_URL: releaseBase,
 	});
 
 	const current = readFileSync(join(install, "current"), "utf8").trim();
@@ -129,7 +161,8 @@ try {
 	await run(wrapper, ["update", "--self", "--force"], {
 		...process.env,
 		PI_CODING_AGENT_DIR: join(work, "agent"),
-		PI_XZ_RELEASE_BASE_URL: `http://127.0.0.1:${address.port}/`,
+		PI_XZ_LATEST_RELEASE_URL: `${releaseBase}latest-release.json`,
+		PI_XZ_RELEASE_BASE_URL: releaseBase,
 	});
 	if ((await run(wrapper, ["--version"], offlineEnv)).trim() !== expectedVersion) {
 		throw new Error("Managed bundle did not survive a forced update");
