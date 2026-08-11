@@ -13,55 +13,45 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ### Features
 
-- Detach eligible long-running AI tool calls into session-owned managed executions, with `tool_task` controls for status, bounded waits, and cancellation requests while preserving exactly one result for each original tool call.
-  - Use case: Let Pi continue reasoning while opted-in shell or extension work runs, without turning untrusted tool output into a steering message or losing cancellation/lifecycle ownership.
-  - Patch branch: [`patch/managed-tool-executions`](https://github.com/xz-dev/pi/tree/patch/managed-tool-executions)
 - Continue from the nearest protocol-safe conversation boundary with `/retry` or RPC `retry`, preserving superseded history as an append-only sibling branch, retaining completed tool results, and synthesizing explicit unknown-outcome errors only for missing results without replaying old tool calls.
-  - Use case: Resume after Pi or its provider was interrupted, without replaying completed tool calls.
   - Patch branch: [`patch/manual-retry`](https://github.com/xz-dev/pi/tree/patch/manual-retry)
 - Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
-  - Use case: Keep a skill available to `/skill:<name>` while preventing automatic model invocation.
   - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
 - Allow `settings.retry.nonRetryableErrorPatterns` to fail-fast on gateway-specific terminal quota/limit error messages without expanding the built-in retry classifier.
-  - Use case: Stop retrying when a gateway returns a known terminal quota or limit message.
   - Patch branch: [`patch/retry-non-retryable-patterns`](https://github.com/xz-dev/pi/tree/patch/retry-non-retryable-patterns)
-- Show awaited extension handlers exceeding `slowHookThresholdMs` only in interactive TUI, with synchronous handlers in warning yellow and asynchronous handlers in default gray. During shutdown, show the current handler while waiting, clear fast handlers, and keep slow handlers on the terminal without writing timing diagnostics to session history, model context, RPC/print events, or disk.
-  - Use case: Diagnose slow extension hooks without persisting diagnostic records.
-  - Patch branch: [`patch/slow-hook-tui-only`](https://github.com/xz-dev/pi/tree/patch/slow-hook-tui-only)
-- Expose public `pi.spliceEntry(entryId)` so an extension can delete one non-root session-tree node and reparent its children, preserving descendants.
-  - Use case: Remove a hidden watchdog decision node from session history without deleting later conversation descendants.
-  - Patch branch: [`patch/session-tree-splice`](https://github.com/xz-dev/pi/tree/patch/session-tree-splice)
 
 ### Fixes
 
 - Wait for extension-provider registration refreshes before startup resolves configured models, while preserving synchronous registration and caller-owned cancellation.
-  - Use case: Start with models an extension registered asynchronously instead of resolving a stale catalog.
   - Patch branch: [`patch/model-startup-refresh-barrier`](https://github.com/xz-dev/pi/tree/patch/model-startup-refresh-barrier)
 - Rebind active and scoped sessions to refreshed same-ID model metadata so context percentages and automatic compaction use the current context window.
-  - Use case: Keep context percentages and compaction limits correct after a provider refreshes model metadata.
   - Patch branch: [`patch/model-refresh-session-rebind`](https://github.com/xz-dev/pi/tree/patch/model-refresh-session-rebind)
-- Add `--refresh` to `pi --list-models` so the command loads extension providers, force-refreshes every loaded catalog, then prints refreshed models while preserving cached entries for failed providers. Keep `pi update --models` extension-free for Pi-managed catalog maintenance.
-  - Use case: Refresh and inspect a third-party provider's latest model list from one non-interactive CLI command.
-  - Patch branch: [`patch/model-catalog-extension-refresh`](https://github.com/xz-dev/pi/tree/patch/model-catalog-extension-refresh)
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
-  - Use case: Recover control when Esc is pressed during a hook, provider setup, stream, or listener that does not settle.
   - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
+- Keep content and hardware-cursor state in one synchronized terminal release so tmux cannot redraw centered overlays from an intermediate cursor position.
+  - Patch branch: [`patch/tui-synchronized-cursor-fleet`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor-fleet)
 
 The integrated Esc and manual-retry patches both extend the Agent failure lifecycle. Their independent branches remain directly reviewable; [`tmp/patch/esc-manual-retry-compat`](https://github.com/xz-dev/pi/tree/tmp/patch/esc-manual-retry-compat) supplies only the downstream combined `handleRunFailure()` resolution and is merged immediately after them.
 
 ### Temporarily disabled
 
-- `patch/tui-synchronized-cursor-fleet` is temporarily retired from generated `main`. Its synchronized-output implementation can emit excessive terminal data and now conflicts with upstream's bounded main-screen writer. The source branch remains retained for a corrected design and independent validation; do not mask the product conflict with a CI resolver.
-- Provider-transparent Responses remote compaction and its dependent pre-provider compaction patch are temporarily retired from generated `main`. Classic compaction remains the default path; both source branches remain retained for re-evaluation. A third-party extension such as [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions) can provide Codex-native remote compaction without adding provider-specific behavior to core.
+These branches still exist but are not squash-merged into rebuilt `main` until they are rebased onto current upstream:
+
+- Provider catalog refresh consistency
+  - Patch branch: [`patch/model-refresh-consistency`](https://github.com/xz-dev/pi/tree/patch/model-refresh-consistency)
+- TUI synchronized-output hardware cursor positioning
+  - Patch branch: [`patch/tui-synchronized-cursor`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor)
 
 ### Maintenance
 
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
-  - Use case: Keep downstream prerelease display and changelog lookup correct when package and release versions differ.
   - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
-- Remove old managed binary bundles with `pi update --clean` while keeping the current bundle and `.update-*` staging directories.
-  - Use case: Free disk after several `pi update --self` cycles without deleting the active version or an in-progress update.
-  - Patch branch: [`patch/update-clean`](https://github.com/xz-dev/pi/tree/patch/update-clean)
+
+### Unsupported
+
+- ~~Provider-transparent compaction keeps one portable session history across providers while allowing compatible providers to resume from private checkpoints.~~ This feature is retired and explicitly unsupported.
+  - Archived branch: [`retired/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/retired/provider-transparent-compaction)
+  - Responses API compaction does not reduce API charges: compacted or provider-held context remains billable. It also makes the client-visible state machine opaque, and that hidden state can amplify charges in some cases through unexpected context retention, replay, or repeated compaction.
 
 ## Installation
 
@@ -75,17 +65,6 @@ unzip pi-<target>.zip -d pi
 chmod +x pi/pi pi/pi-native
 ./pi/pi --version
 ```
-
-### Windows Scoop
-
-```powershell
-$scoopRoot = (Resolve-Path (Join-Path (scoop prefix scoop) '..\..\..')).Path
-$bucket = Join-Path $scoopRoot 'buckets\xz-dev'
-git clone --branch scoop --single-branch https://github.com/xz-dev/pi.git $bucket
-scoop install xz-dev/pi
-```
-
-Scoop installs the AVX2-optimized x64 build, or the native arm64 build on Windows arm64. Update with `scoop update pi`. Use the manual method below for an x64 baseline build.
 
 ### Windows PowerShell
 
@@ -110,8 +89,6 @@ pi update --self
 ```
 
 The first update converts the extracted directory into a managed layout: the complete ZIP is staged under `bundles/<version>`, then `current` is atomically replaced. On POSIX, the root wrapper is also atomically refreshed. On Windows, `pi.exe` remains stable, waits for `pi-native.exe`, and returns its exit status without overwriting the running wrapper. A new invocation reads `current` and starts the activated bundle.
-
-`pi update --clean` keeps only `bundles/<current>`, deletes other ordinary bundle directories and the top-level `previous` pointer, and leaves `.update-*` staging directories untouched.
 
 ### Source checkout
 
