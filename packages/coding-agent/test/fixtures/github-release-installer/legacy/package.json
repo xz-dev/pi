@@ -1,8 +1,0 @@
-{
-  "name": "@xz-dev/pi-coding-agent",
-  "version": "0.81.0-xz.99",
-  "type": "module",
-  "bin": {
-    "pi": "dist/cli.js"
-  }
-}
