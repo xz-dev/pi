@@ -1,14 +1,21 @@
 import { AzureOpenAI } from "openai";
-import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
-import { clampThinkingLevel } from "../models.ts";
+import type {
+	CompactedResponse,
+	ResponseCompactParams,
+	ResponseCreateParamsStreaming,
+	ResponseInput,
+} from "openai/resources/responses/responses.js";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
 	Context,
 	Model,
+	ProviderResponse,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
+	Usage,
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -17,6 +24,12 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import {
+	type OpenAIResponsesCompaction,
+	type OpenAIResponsesCompactionOptions,
+	type ResponsesCompactionIdentity,
+	responsesCompactionIdentitiesEqual,
+} from "./openai-responses.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
@@ -126,7 +139,9 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model, { grammarToolInputProperties });
+			await processResponsesStream(openaiStream, output, stream, model, {
+				grammarToolInputProperties,
+			});
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -265,6 +280,114 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 		defaultHeaders: headers,
 		baseURL: baseUrl,
 	});
+}
+
+export function getAzureOpenAIResponsesCompactionIdentity(
+	model: Model<"azure-openai-responses">,
+	options?: AzureOpenAIResponsesOptions,
+): ResponsesCompactionIdentity {
+	const deploymentName = resolveDeploymentName(model, options);
+	const { baseUrl, apiVersion } = resolveAzureConfig(model, options);
+	return {
+		api: "azure-openai-responses",
+		provider: model.provider,
+		model: model.id,
+		endpoint: `${baseUrl.replace(/\/+$/, "")}/responses/compact`,
+		deployment: deploymentName,
+		apiVersion,
+	};
+}
+
+export async function compactAzureOpenAIResponses(
+	model: Model<"azure-openai-responses">,
+	context: Context,
+	options?: OpenAIResponsesCompactionOptions<"azure-openai-responses">,
+): Promise<OpenAIResponsesCompaction> {
+	if (!options?.apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+	const azureOptions: AzureOpenAIResponsesOptions = {
+		apiKey: options.apiKey,
+		fetch: options.fetch,
+		env: options.env,
+		headers: options.headers,
+	};
+	const deploymentName = resolveDeploymentName(model, azureOptions);
+	const identity = getAzureOpenAIResponsesCompactionIdentity(model, azureOptions);
+	if (options.previous && !responsesCompactionIdentitiesEqual(options.previous.identity, identity)) {
+		throw new Error("Responses compaction is not compatible with this provider identity");
+	}
+	let input = buildParams(model, context, undefined, deploymentName).input as ResponseInput;
+	if (options.previous) input = [...structuredClone(options.previous.output), ...input] as ResponseInput;
+	const client = createClient(model, options.apiKey, azureOptions);
+	let params: ResponseCompactParams = { model: deploymentName, input };
+	const nextParams = await options.onPayload?.(params, model);
+	if (nextParams !== undefined) params = nextParams as ResponseCompactParams;
+	const { data, response } = await retryProviderRequest(
+		() =>
+			client.responses
+				.compact(params, {
+					...(options.signal ? { signal: options.signal } : {}),
+					...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+					maxRetries: 0,
+				})
+				.withResponse(),
+		{
+			maxRetries: options.maxRetries,
+			maxRetryDelayMs: options.maxRetryDelayMs,
+			signal: options.signal,
+		},
+	);
+	await options.onResponse?.(
+		{
+			status: response.status,
+			headers: headersToRecord(response.headers),
+		} satisfies ProviderResponse,
+		model,
+	);
+	return {
+		identity,
+		output: structuredClone(data.output),
+		usage: compactedUsage(model, data),
+	};
+}
+
+export function replayAzureOpenAIResponsesCompaction(
+	model: Model<"azure-openai-responses">,
+	compaction: OpenAIResponsesCompaction,
+	context: Context,
+	options?: AzureOpenAIResponsesOptions,
+): AssistantMessageEventStream {
+	const identity = getAzureOpenAIResponsesCompactionIdentity(model, options);
+	if (!responsesCompactionIdentitiesEqual(compaction.identity, identity)) {
+		throw new Error("Responses compaction is not compatible with this provider identity");
+	}
+	return stream(
+		model,
+		{ ...context, systemPrompt: undefined },
+		{
+			...options,
+			onPayload: async (payload, requestModel) => {
+				const params = payload as ResponseCreateParamsStreaming;
+				params.input = [...structuredClone(compaction.output), ...(params.input as ResponseInput)] as ResponseInput;
+				return options?.onPayload?.(params, requestModel);
+			},
+		},
+	);
+}
+
+function compactedUsage(model: Model<"azure-openai-responses">, data: CompactedResponse): Usage {
+	const cachedTokens = data.usage.input_tokens_details.cached_tokens || 0;
+	const cacheWrite = (data.usage.input_tokens_details as { cache_write_tokens?: number }).cache_write_tokens || 0;
+	const usage: Usage = {
+		input: Math.max(0, data.usage.input_tokens - cachedTokens - cacheWrite),
+		output: data.usage.output_tokens,
+		cacheRead: cachedTokens,
+		cacheWrite,
+		reasoning: data.usage.output_tokens_details.reasoning_tokens || 0,
+		totalTokens: data.usage.total_tokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, usage);
+	return usage;
 }
 
 function buildParams(

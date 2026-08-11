@@ -102,7 +102,9 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	toolChoice?: ResponseCreateParamsStreaming["tool_choice"];
 }
 
-export interface OpenAIResponsesCompactionOptions {
+export interface OpenAIResponsesCompactionOptions<
+	TApi extends "openai-responses" | "azure-openai-responses" | "openai-codex-responses" = "openai-responses",
+> {
 	previous?: OpenAIResponsesCompaction;
 	apiKey?: string;
 	fetch?: typeof globalThis.fetch;
@@ -112,12 +114,44 @@ export interface OpenAIResponsesCompactionOptions {
 	timeoutMs?: number;
 	maxRetries?: number;
 	maxRetryDelayMs?: number;
-	onPayload?: (payload: ResponseCompactParams, model: Model<"openai-responses">) => Promise<unknown> | unknown;
-	onResponse?: (response: ProviderResponse, model: Model<"openai-responses">) => void | Promise<void>;
+	onPayload?: (payload: ResponseCompactParams, model: Model<TApi>) => Promise<unknown> | unknown;
+	onResponse?: (response: ProviderResponse, model: Model<TApi>) => void | Promise<void>;
+}
+
+export interface ResponsesCompactionIdentity {
+	api: "openai-responses" | "azure-openai-responses" | "openai-codex-responses";
+	provider: string;
+	model: string;
+	endpoint: string;
+	deployment?: string;
+	apiVersion?: string;
+}
+
+export function responsesCompactionIdentitiesEqual(
+	left: ResponsesCompactionIdentity,
+	right: ResponsesCompactionIdentity,
+): boolean {
+	return (
+		left.api === right.api &&
+		left.provider === right.provider &&
+		left.model === right.model &&
+		left.endpoint === right.endpoint &&
+		left.deployment === right.deployment &&
+		left.apiVersion === right.apiVersion
+	);
+}
+
+export function getOpenAIResponsesCompactionIdentity(model: Model<"openai-responses">): ResponsesCompactionIdentity {
+	return {
+		api: "openai-responses",
+		provider: model.provider,
+		model: model.id,
+		endpoint: model.baseUrl.replace(/\/+$/, ""),
+	};
 }
 
 export interface OpenAIResponsesCompaction {
-	model: string;
+	identity: ResponsesCompactionIdentity;
 	output: CompactedResponse["output"];
 	usage: Usage;
 }
@@ -309,7 +343,9 @@ function buildParams(
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 	const disableImplicitPromptCache = cacheRetention === "none" && compat.supportsExplicitPromptCacheMode;
-	const params: ResponseCreateParamsStreaming & { prompt_cache_options?: { mode: "explicit" } } = {
+	const params: ResponseCreateParamsStreaming & {
+		prompt_cache_options?: { mode: "explicit" };
+	} = {
 		model: model.id,
 		input: messages,
 		stream: true,
@@ -380,9 +416,10 @@ export async function compactOpenAIResponses(
 		compat.supportsOpenAIGrammarTools,
 	);
 	let input = buildParams(model, context, undefined, compat, grammarToolInputProperties).input as ResponseInput;
+	const identity = getOpenAIResponsesCompactionIdentity(model);
 	if (options?.previous) {
-		if (options.previous.model !== model.id) {
-			throw new Error("Responses compaction is not compatible with this model");
+		if (!responsesCompactionIdentitiesEqual(options.previous.identity, identity)) {
+			throw new Error("Responses compaction is not compatible with this provider identity");
 		}
 		input = [...structuredClone(options.previous.output), ...input] as ResponseInput;
 	}
@@ -424,7 +461,7 @@ export async function compactOpenAIResponses(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage);
-	return { model: model.id, output: structuredClone(data.output), usage };
+	return { identity, output: structuredClone(data.output), usage };
 }
 
 export function replayOpenAIResponsesCompaction(
@@ -433,8 +470,9 @@ export function replayOpenAIResponsesCompaction(
 	context: Context,
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream {
-	if (compaction.model !== model.id) {
-		throw new Error("Responses compaction is not compatible with this model");
+	const identity = getOpenAIResponsesCompactionIdentity(model);
+	if (!responsesCompactionIdentitiesEqual(compaction.identity, identity)) {
+		throw new Error("Responses compaction is not compatible with this provider identity");
 	}
 	return stream(
 		model,

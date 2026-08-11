@@ -369,7 +369,10 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
+			model = {
+				provider: entry.message.provider,
+				modelId: entry.message.model,
+			};
 		}
 	}
 
@@ -388,8 +391,14 @@ function getRemoteCompaction(details: unknown): unknown {
 		throw new Error("Invalid OpenAI Responses compaction details");
 	}
 	const compaction = details.compaction as Record<string, unknown>;
+	const identity = compaction.identity;
 	if (
-		typeof compaction.model !== "string" ||
+		!identity ||
+		typeof identity !== "object" ||
+		typeof (identity as Record<string, unknown>).api !== "string" ||
+		typeof (identity as Record<string, unknown>).provider !== "string" ||
+		typeof (identity as Record<string, unknown>).model !== "string" ||
+		typeof (identity as Record<string, unknown>).endpoint !== "string" ||
 		!Array.isArray(compaction.output) ||
 		!compaction.output.every((item) => item && typeof item === "object" && ("type" in item || "role" in item))
 	) {
@@ -1310,6 +1319,10 @@ export class SessionManager {
 		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
 	}
 
+	buildRawCompactionEntries(): SessionEntry[] {
+		return this.getBranch().filter((entry) => entry.type !== "compaction");
+	}
+
 	/**
 	 * Get session header.
 	 */
@@ -1468,10 +1481,18 @@ export class SessionManager {
 
 		// Collect labels for entries in the path
 		const pathEntryIds = new Set(pathWithoutLabels.map((e) => e.id));
-		const labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }> = [];
+		const labelsToWrite: Array<{
+			targetId: string;
+			label: string;
+			timestamp: string;
+		}> = [];
 		for (const [targetId, label] of this.labelsById) {
 			if (pathEntryIds.has(targetId)) {
-				labelsToWrite.push({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! });
+				labelsToWrite.push({
+					targetId,
+					label,
+					timestamp: this.labelTimestampsById.get(targetId)!,
+				});
 			}
 		}
 
@@ -1642,7 +1663,9 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
+		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, {
+			flag: "wx",
+		});
 
 		// Copy all non-header entries from source
 		for (const entry of sourceEntries) {

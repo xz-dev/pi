@@ -455,6 +455,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					sessionId: session.sessionId,
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
+					remoteCompactionEnabled: session.remoteCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
 				};
@@ -536,6 +537,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "set_auto_compaction": {
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
+			}
+
+			case "set_remote_compaction": {
+				session.setRemoteCompactionEnabled(command.enabled);
+				return success(id, "set_remote_compaction");
 			}
 
 			// =================================================================
