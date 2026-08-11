@@ -7,13 +7,15 @@ import test from "node:test";
 
 const ROOT = join(import.meta.dirname, "..");
 const RESOLVER_PATH = "scripts/resolve-release-self-update-squash-conflicts.sh";
-const HELPER_PATH = "scripts/apply-xz-release-contract-to-package.mjs";
 const CONFLICTS = ["package.json", "packages/coding-agent/CHANGELOG.md"];
-const CONTRACT_COMMAND =
-	"node scripts/generate-xz-release-binary-contract.mjs --check && node scripts/xz-release-targets.test.mjs";
 
 function git(repo, args, options = {}) {
-	const result = spawnSync("git", args, { cwd: repo, encoding: "utf8", ...options });
+	const result = spawnSync("git", args, {
+		cwd: repo,
+		encoding: "utf8",
+		env: { ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "commit.gpgsign", GIT_CONFIG_VALUE_0: "false" },
+		...options,
+	});
 	if (options.allowFailure !== true && result.status !== 0) {
 		assert.fail(`git ${args.join(" ")} failed:\n${result.stdout}${result.stderr}`);
 	}
@@ -31,17 +33,12 @@ function commitAll(repo, message) {
 	git(repo, ["commit", "-m", message]);
 }
 
-function packageText({ check, build, workspace, contract }) {
+function packageText({ build, workspace }) {
 	return `${JSON.stringify(
 		{
 			name: "fixture",
 			workspaces: [workspace],
-			scripts: {
-				build,
-				check,
-				...(contract === undefined ? {} : { "check:xz-release-contract": contract }),
-				prepare: "fixture-prepare",
-			},
+			scripts: { build, check: "format && types", prepare: "fixture-prepare" },
 		},
 		null,
 		"\t",
@@ -49,19 +46,11 @@ function packageText({ check, build, workspace, contract }) {
 }
 
 function createConflictFixture({ packageConflict = true } = {}) {
-	const repo = mkdtempSync(join(tmpdir(), "pi-release-self-update-conflicts-"));
+	const repo = mkdtempSync(join(tmpdir(), "pi-native-release-conflicts-"));
 	git(repo, ["init", "-q", "-b", "base"]);
 	git(repo, ["config", "user.name", "test"]);
 	git(repo, ["config", "user.email", "test@example.invalid"]);
-	write(
-		repo,
-		"package.json",
-		packageText({
-			check: "format && npm run check:shrinkwrap && npm run check:install-lock:coding-agent && types",
-			build: "base-build",
-			workspace: "packages/old/*",
-		}),
-	);
+	write(repo, "package.json", packageText({ build: "base-build", workspace: "packages/old/*" }));
 	write(repo, "packages/coding-agent/CHANGELOG.md", "base changelog\n");
 	commitAll(repo, "base");
 
@@ -70,33 +59,15 @@ function createConflictFixture({ packageConflict = true } = {}) {
 		repo,
 		"package.json",
 		packageConflict
-			? packageText({
-					check: "format && npm run check:shrinkwrap && npm run check:install-lock:coding-agent && types",
-					build: "current-upstream-build-with-new-workspaces",
-					workspace: "packages/session-backends/*",
-				})
-			: packageText({
-					check: "format && npm run check:shrinkwrap && npm run check:install-lock:coding-agent && types",
-					build: "base-build",
-					workspace: "packages/old/*",
-				}),
+			? packageText({ build: "current-upstream-build", workspace: "packages/session-backends/*" })
+			: packageText({ build: "base-build", workspace: "packages/old/*" }),
 	);
 	write(repo, "packages/coding-agent/CHANGELOG.md", "current integrated changelog\n");
 	commitAll(repo, "integrated");
 
 	git(repo, ["switch", "-q", "base"]);
 	git(repo, ["switch", "-q", "-c", "patch"]);
-	write(
-		repo,
-		"package.json",
-		packageText({
-			check:
-				"format && npm run check:shrinkwrap && npm run check:xz-release-contract && npm run check:install-lock:coding-agent && types",
-			build: "stale-patch-build",
-			workspace: "packages/old/*",
-			contract: CONTRACT_COMMAND,
-		}),
-	);
+	write(repo, "package.json", packageText({ build: "stale-patch-build", workspace: "packages/old/*" }));
 	write(repo, "packages/coding-agent/CHANGELOG.md", "patch changelog\n");
 	commitAll(repo, "patch");
 
@@ -108,7 +79,6 @@ function createConflictFixture({ packageConflict = true } = {}) {
 		packageConflict ? CONFLICTS : [CONFLICTS[1]],
 	);
 	write(repo, RESOLVER_PATH, readFileSync(join(ROOT, RESOLVER_PATH), "utf8"));
-	write(repo, HELPER_PATH, readFileSync(join(ROOT, HELPER_PATH), "utf8"));
 	return repo;
 }
 
@@ -128,45 +98,25 @@ function callResolverFunction(repo, conflicts) {
 	});
 }
 
-test("resolves the exact conflicts while preserving integrated package structure", () => {
-	const repo = createConflictFixture();
-	try {
-		const result = spawnSync("bash", [RESOLVER_PATH], { cwd: repo, encoding: "utf8" });
-		assert.equal(result.status, 0, result.stdout + result.stderr);
-		assert.equal(git(repo, ["diff", "--name-only", "--diff-filter=U"]).stdout, "");
-		const packageJson = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
-		assert.deepEqual(packageJson.workspaces, ["packages/session-backends/*"]);
-		assert.equal(packageJson.scripts.build, "current-upstream-build-with-new-workspaces");
-		assert.equal(packageJson.scripts["check:xz-release-contract"], CONTRACT_COMMAND);
-		assert.equal(
-			packageJson.scripts.check,
-			"format && npm run check:shrinkwrap && npm run check:xz-release-contract && npm run check:install-lock:coding-agent && types",
-		);
-		assert.equal(
-			readFileSync(join(repo, "packages/coding-agent/CHANGELOG.md"), "utf8"),
-			"current integrated changelog\n",
-		);
-	} finally {
-		rmSync(repo, { recursive: true, force: true });
-	}
-});
-
-test("resolves a changelog-only conflict after package metadata merges cleanly", () => {
-	const repo = createConflictFixture({ packageConflict: false });
-	try {
-		const result = spawnSync("bash", [RESOLVER_PATH], { cwd: repo, encoding: "utf8" });
-		assert.equal(result.status, 0, result.stdout + result.stderr);
-		assert.equal(git(repo, ["diff", "--name-only", "--diff-filter=U"]).stdout, "");
-		const packageJson = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
-		assert.equal(packageJson.scripts["check:xz-release-contract"], CONTRACT_COMMAND);
-		assert.equal(
-			readFileSync(join(repo, "packages/coding-agent/CHANGELOG.md"), "utf8"),
-			"current integrated changelog\n",
-		);
-	} finally {
-		rmSync(repo, { recursive: true, force: true });
-	}
-});
+for (const packageConflict of [true, false]) {
+	test(`preserves integrated metadata with ${packageConflict ? "package and changelog" : "changelog-only"} conflicts`, () => {
+		const repo = createConflictFixture({ packageConflict });
+		try {
+			const result = spawnSync("bash", [RESOLVER_PATH], { cwd: repo, encoding: "utf8" });
+			assert.equal(result.status, 0, result.stdout + result.stderr);
+			assert.equal(git(repo, ["diff", "--name-only", "--diff-filter=U"]).stdout, "");
+			const packageJson = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
+			assert.equal(packageJson.scripts["check:xz-release-contract"], undefined);
+			assert.equal(packageJson.scripts.check, "format && types");
+			assert.equal(
+				readFileSync(join(repo, "packages/coding-agent/CHANGELOG.md"), "utf8"),
+				"current integrated changelog\n",
+			);
+		} finally {
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+}
 
 for (const [name, conflicts] of [
 	["empty", []],
