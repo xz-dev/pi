@@ -146,81 +146,141 @@ jobs:
 
           if ! git merge --squash origin/patch/responses-remote-compaction; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/src/core/agent-session.ts ]]; then
+            expected_conflicts=(
+              packages/coding-agent/src/core/agent-session.ts
+              packages/coding-agent/src/core/settings-manager.ts
+            )
+            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )); then
               printf '::error::Unexpected Responses compaction squash conflicts:'
               printf ' %q' "${conflicts[@]}"
               printf '\n'
               exit 1
             fi
-            git checkout --ours -- packages/coding-agent/src/core/agent-session.ts
+            for i in "${!expected_conflicts[@]}"; do
+              if [[ ${conflicts[i]} != "${expected_conflicts[i]}" ]]; then
+                printf '::error::Unexpected Responses compaction squash conflicts:'
+                printf ' %q' "${conflicts[@]}"
+                printf '\n'
+                exit 1
+              fi
+            done
+            printf 'Resolving expected Responses compaction conflicts:'
+            printf ' %q' "${conflicts[@]}"
+            printf '\n'
             python3 - <<'PY'
           from pathlib import Path
-          path = Path("packages/coding-agent/src/core/agent-session.ts")
-          text = path.read_text()
-          text = text.replace(
-              'import { contentText, type Message } from "@earendil-works/pi-ai";\n',
-              'import { contentText, type Message } from "@earendil-works/pi-ai";\nimport { compactOpenAIResponses, type OpenAIResponsesCompaction } from "@earendil-works/pi-ai/api/openai-responses";\n',
+
+          def conflict_blocks(text: str) -> list[tuple[int, int, str, str]]:
+              lines = text.splitlines(keepends=True)
+              blocks: list[tuple[int, int, str, str]] = []
+              i = 0
+              while i < len(lines):
+                  if not lines[i].startswith("<<<<<<<"):
+                      i += 1
+                      continue
+                  start = i
+                  i += 1
+                  ours: list[str] = []
+                  while i < len(lines) and not lines[i].startswith(("|||||||", "=======")):
+                      ours.append(lines[i])
+                      i += 1
+                  if i < len(lines) and lines[i].startswith("|||||||"):
+                      i += 1
+                      while i < len(lines) and not lines[i].startswith("======="):
+                          i += 1
+                  if i >= len(lines) or not lines[i].startswith("======="):
+                      raise SystemExit("Responses resolver: malformed conflict block")
+                  i += 1
+                  theirs: list[str] = []
+                  while i < len(lines) and not lines[i].startswith(">>>>>>>"):
+                      theirs.append(lines[i])
+                      i += 1
+                  if i >= len(lines):
+                      raise SystemExit("Responses resolver: unterminated conflict block")
+                  blocks.append((start, i + 1, "".join(ours), "".join(theirs)))
+                  i += 1
+              return blocks
+
+          def resolve(path: str, expected_count: int, combine) -> None:
+              target = Path(path)
+              text = target.read_text()
+              lines = text.splitlines(keepends=True)
+              blocks = conflict_blocks(text)
+              if len(blocks) != expected_count:
+                  raise SystemExit(f"Responses resolver: expected {expected_count} conflicts in {path}, found {len(blocks)}")
+              for index, (start, end, ours, theirs) in reversed(list(enumerate(blocks))):
+                  lines[start:end] = [combine(index, ours, theirs)]
+              resolved = "".join(lines)
+              if any(line.startswith(("<<<<<<<", "|||||||", "=======", ">>>>>>>")) for line in resolved.splitlines()):
+                  raise SystemExit(f"Responses resolver: conflict marker remains in {path}")
+              target.write_text(resolved)
+
+          agent_conflicts = [
+              (
+                  'import { contentText, type Message } from "@earendil-works/pi-ai";\n',
+                  'import { contentText } from "@earendil-works/pi-ai";\n'
+                  'import {\n'
+                  '\tcompactAzureOpenAIResponses,\n'
+                  '\tgetAzureOpenAIResponsesCompactionIdentity,\n'
+                  '} from "@earendil-works/pi-ai/api/azure-openai-responses";\n'
+                  'import {\n'
+                  '\tcompactOpenAICodexResponses,\n'
+                  '\tgetOpenAICodexResponsesCompactionIdentity,\n'
+                  '} from "@earendil-works/pi-ai/api/openai-codex-responses";\n'
+                  'import {\n'
+                  '\tcompactOpenAIResponses,\n'
+                  '\tgetOpenAIResponsesCompactionIdentity,\n'
+                  '\ttype OpenAIResponsesCompaction,\n'
+                  '\ttype ResponsesCompactionIdentity,\n'
+                  '\tresponsesCompactionIdentitiesEqual,\n'
+                  '} from "@earendil-works/pi-ai/api/openai-responses";\n',
+              ),
+              (
+                  'import { planContinuation } from "./manual-retry.ts";\n'
+                  'import type { BashExecutionMessage, CustomMessage } from "./messages.ts";\n',
+                  'import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";\n',
+              ),
+              (
+                  '\tprivate _unsubscribeModelsChanged: () => void;\n',
+                  '\tprivate _classicRecoveryStreamFn?: StreamFn;\n'
+                  '\tprivate _prepareRequestHeaders?: AgentSessionConfig["prepareRequestHeaders"];\n',
+              ),
+              (
+                  '\t\tthis._unsubscribeModelsChanged = this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime());\n',
+                  '\t\tthis._classicRecoveryStreamFn = config.classicRecoveryStreamFn;\n'
+                  '\t\tthis._prepareRequestHeaders = config.prepareRequestHeaders;\n',
+              ),
+          ]
+          settings_conflict = (
+              '\t\tnonRetryableErrorPatterns?: string[];\n'
+              '\t} {\n'
+              '\t\tconst nonRetryableErrorPatterns = normalizeNonRetryableErrorPatterns(\n'
+              '\t\t\tthis.settings.retry?.nonRetryableErrorPatterns,\n'
+              '\t\t);\n',
+              '\t} {\n',
           )
-          text = text.replace(
-              'import type { BashExecutionMessage, CustomMessage } from "./messages.ts";\n',
-              'import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";\n',
-          )
-          text = text.replace(
-              '\tagent: Agent;\n',
-              '\tagent: Agent;\n\tprepareRequestHeaders?: (model: Model<any>, headers?: ProviderHeaders) => Promise<ProviderHeaders>;\n',
-          )
-          text = text.replace(
-              '\tprivate _modelRuntime: ModelRuntime;\n',
-              '\tprivate _modelRuntime: ModelRuntime;\n\tprivate _prepareRequestHeaders?: AgentSessionConfig["prepareRequestHeaders"];\n',
-          )
-          text = text.replace(
-              '\t\tthis._modelRuntime = config.modelRuntime;\n',
-              '\t\tthis._modelRuntime = config.modelRuntime;\n\t\tthis._prepareRequestHeaders = config.prepareRequestHeaders;\n',
-          )
-          source = Path("/tmp/responses-agent-session.ts")
-          source.write_text(text)
+
+          def combine_agent(index: int, ours: str, theirs: str) -> str:
+              if index >= len(agent_conflicts) or (ours, theirs) != agent_conflicts[index]:
+                  raise SystemExit(f"Responses resolver: unexpected agent-session conflict {index + 1}")
+              if index == 0:
+                  return ours + theirs.split("\n", 1)[1]
+              if index == 1:
+                  return ours.splitlines(keepends=True)[0] + theirs
+              return ours + theirs
+
+          def combine_settings(index: int, ours: str, theirs: str) -> str:
+              if index != 0 or (ours, theirs) != settings_conflict:
+                  raise SystemExit("Responses resolver: unexpected retry settings conflict")
+              return ours
+
+          resolve("packages/coding-agent/src/core/agent-session.ts", 4, combine_agent)
+          resolve("packages/coding-agent/src/core/settings-manager.ts", 1, combine_settings)
           PY
-            git show origin/patch/responses-remote-compaction:packages/coding-agent/src/core/agent-session.ts > /tmp/responses-agent-session-patch.ts
-            python3 - <<'PY'
-          from pathlib import Path
-          target = Path("packages/coding-agent/src/core/agent-session.ts")
-          text = Path("/tmp/responses-agent-session.ts").read_text()
-          patch = Path("/tmp/responses-agent-session-patch.ts").read_text()
-          patch_start = patch.index("\tprivate _isRemoteCompactionModel")
-          patch_end = patch.index("\n\tprivate _installAgentToolHooks", patch_start)
-          block = patch[patch_start:patch_end]
-          insert_at = text.index("\n\tprivate _installAgentToolHooks")
-          text = text[:insert_at] + "\n" + block + text[insert_at:]
-          needle = '\t\t\t} else if (this._isRemoteCompactionModel(requestModel)) {'
-          anchor = '\t\t\t} else {\n\t\t\t\t// Generate compaction result'
-          source_cursor = 0
-          target_cursor = 0
-          for _ in range(2):
-              source_start = patch.index(needle, source_cursor)
-              source_end = patch.index(anchor, source_start) + len('\t\t\t} else {')
-              replacement = patch[source_start:source_end]
-              target_start = text.index(anchor, target_cursor)
-              text = text[:target_start] + replacement + text[target_start + len('\t\t\t} else {'):]
-              source_cursor = source_end
-              target_cursor = target_start + len(replacement)
-          old_manual = '\t\t\tconst aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");'
-          new_manual = '\t\t\tconst aborted =\n\t\t\t\tthis._compactionAbortController?.signal.aborted === true ||\n\t\t\t\tmessage === "Compaction cancelled" ||\n\t\t\t\t(error instanceof Error && error.name === "AbortError");'
-          text = text.replace(old_manual, new_manual, 1)
-          old_auto = '\t\t\tconst errorMessage = error instanceof Error ? error.message : "compaction failed";\n'
-          new_auto = old_auto + '\t\t\tconst aborted =\n\t\t\t\tthis._autoCompactionAbortController?.signal.aborted === true ||\n\t\t\t\t(error instanceof Error && error.name === "AbortError");\n\t\t\tconst remoteFailure = this.model !== undefined && this._isRemoteCompactionModel(this.model);\n'
-          text = text.replace(old_auto, new_auto, 1)
-          auto_catch_start = text.index(new_auto)
-          aborted_field = text.index('\t\t\t\t\taborted: false,', auto_catch_start)
-          text = text[:aborted_field] + '\t\t\t\t\taborted,' + text[aborted_field + len('\t\t\t\t\taborted: false,'):]
-          text = text.replace(
-              '\t\t\t\t\terrorMessage:\n\t\t\t\t\t\treason === "overflow"',
-              '\t\t\t\t\terrorMessage: aborted\n\t\t\t\t\t\t? undefined\n\t\t\t\t\t\t: reason === "overflow"',
-              1,
-          )
-          text = text.replace('\t\t\t}\n\t\t\treturn false;\n\t\t} finally {', '\t\t\t}\n\t\t\tif (remoteFailure) throw error;\n\t\t\treturn false;\n\t\t} finally {', 1)
-          target.write_text(text)
-          PY
-            git add packages/coding-agent/src/core/agent-session.ts
+            test $? -eq 0 || exit 1
+            git add \
+              packages/coding-agent/src/core/agent-session.ts \
+              packages/coding-agent/src/core/settings-manager.ts
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying Responses compaction conflict staging'
