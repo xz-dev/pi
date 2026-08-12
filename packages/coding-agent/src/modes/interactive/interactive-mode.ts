@@ -79,6 +79,7 @@ import type {
 	ProjectTrustContext,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { SLOW_EXTENSION_HOOK_ENTRY_TYPE } from "../../core/extensions/runner.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -140,6 +141,7 @@ import { ScopedModelsSelectorComponent } from "./components/scoped-models-select
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
+import { renderSlowExtensionHookEntry } from "./components/slow-extension-hook-entry.ts";
 import {
 	BranchSummaryStatusIndicator,
 	CompactionStatusIndicator,
@@ -3445,7 +3447,10 @@ export class InteractiveMode {
 	}
 
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
-		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
+		const renderer =
+			entry.customType === SLOW_EXTENSION_HOOK_ENTRY_TYPE
+				? renderSlowExtensionHookEntry
+				: this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
 			return;
 		}
