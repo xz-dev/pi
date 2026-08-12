@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import type { CustomEntry } from "../src/core/session-manager.ts";
 import { renderSlowExtensionHookEntry } from "../src/modes/interactive/components/slow-extension-hook-entry.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 
 function stripAnsi(value: string): string {
 	return value.replace(/\x1b\[[0-9;]*m/g, "");
@@ -37,7 +37,7 @@ describe("slow extension hook transcript entry", () => {
 	it("renders sync entries as yellow warnings", () => {
 		const output = rendered({ ...validData, executionKind: "sync" }, "entry-sync");
 		expect(stripAnsi(output)).toContain("Slow sync extension hook: in put · /tmp/private/slow.ts#2 · 143 ms");
-		expect(output).toContain("\x1b[38;2;255;255;0m");
+		expect(output).toContain(theme.fg("warning", "Slow sync extension hook:").slice(0, -5));
 		expect(output).not.toContain("c2VjcmV0");
 	});
 
@@ -46,8 +46,8 @@ describe("slow extension hook transcript entry", () => {
 		const legacyOutput = rendered(validData, "entry-legacy");
 		expect(stripAnsi(asyncOutput)).toContain("Slow async extension hook: in put · /tmp/private/slow.ts#2 · 143 ms");
 		expect(stripAnsi(legacyOutput)).toContain("Slow extension hook: in put · /tmp/private/slow.ts#2 · 143 ms");
-		expect(asyncOutput).toContain("\x1b[38;2;128;128;128m");
-		expect(legacyOutput).toContain("\x1b[38;2;128;128;128m");
+		expect(asyncOutput).toContain(theme.fg("muted", "Slow async extension hook:").slice(0, -5));
+		expect(legacyOutput).toContain(theme.fg("muted", "Slow extension hook:").slice(0, -5));
 	});
 
 	it("ignores malformed persisted entries", () => {
