@@ -35,7 +35,7 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 - Keep runtime self-update behavior on `patch/native-wrapper-release`; keep descriptor, packaging, E2E workflow, README, and this guide on `ci`. Both are squash-integrated by `.github/workflows/upstream-sync.yml`.
 - Integrate `patch/hidden-internal-runs` after `patch/responses-remote-compaction`; both touch `AgentSession`, and the hidden-run patch must be validated against the final compaction implementation.
 - Integrate `patch/shutdown-lifecycle-log` after `patch/hidden-internal-runs`; its guarded resolver must preserve the combined Responses, manual-retry, and hidden-run `AgentSession` imports while adding lifecycle diagnostics.
-- Integrate `patch/slow-hook-execution-kind` immediately after `patch/shutdown-lifecycle-log`; it extends those lifecycle diagnostics with synchronous and asynchronous execution labels.
+- Integrate the commits after `patch/shutdown-lifecycle-log` on `patch/slow-hook-execution-kind` immediately after that base patch; they extend those lifecycle diagnostics with synchronous and asynchronous execution labels.
 
 ## Patch retirement
 
