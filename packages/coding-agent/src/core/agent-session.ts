@@ -95,6 +95,7 @@ import {
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
+	type SendMessageOptions,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
 	type SessionStartEvent,
@@ -406,6 +407,8 @@ export class AgentSession {
 		  }
 		| undefined;
 	private _continuationAnchorId: string | undefined;
+	/** Nonzero while one explicitly requested internal run has hidden presentation. */
+	private _hiddenRunDepth = 0;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -846,8 +849,11 @@ export class AgentSession {
 	// Event Subscription
 	// =========================================================================
 
-	/** Emit an event to all listeners */
+	/** Emit an event to presentation subscribers unless the current run is hidden. */
 	private _emit(event: AgentSessionEvent): void {
+		if (this._hiddenRunDepth > 0 && event.type !== "agent_start" && event.type !== "agent_end") {
+			return;
+		}
 		for (const l of this._eventListeners) {
 			l(event);
 		}
@@ -932,7 +938,15 @@ export class AgentSession {
 		}
 
 		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		if (event.type === "agent_end") {
+			this._emit({
+				...event,
+				messages: event.messages.map((message) => this._messageForPersistence(message)),
+				willRetry: this._willRetryAfterAgentEnd(event),
+			});
+		} else {
+			this._emit(event);
+		}
 
 		if (event.type === "run_failure" && this._manualRetryCommit && !this._manualRetryCommit.committed) {
 			this._manualRetryCommit.runFailedBeforeCommit = true;
@@ -985,7 +999,7 @@ export class AgentSession {
 				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				this.sessionManager.appendMessage(this._messageForPersistence(event.message));
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -1053,6 +1067,16 @@ export class AgentSession {
 			delete targetRecord[key];
 		}
 		Object.assign(targetRecord, replacement);
+	}
+
+	private _messageForPersistence<T extends AgentMessage>(message: T): T {
+		if (this._hiddenRunDepth === 0) return message;
+		if (message.role === "assistant") {
+			return { ...message, content: [], errorMessage: undefined } as T;
+		}
+		if (message.role === "custom") return { ...message, content: [] } as T;
+		if (message.role === "toolResult") return { ...message, content: [], details: undefined } as T;
+		return message;
 	}
 
 	/** Emit extension events based on agent events */
@@ -1399,18 +1423,30 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+	private async _runAgentPrompt(
+		messages: AgentMessage | AgentMessage[],
+		options?: Pick<SendMessageOptions, "presentation">,
+	): Promise<void> {
 		this._continuationAnchorId = undefined;
 		this._isAgentRunActive = true;
+		if (options?.presentation === "hidden") {
+			this._hiddenRunDepth++;
+		}
 		try {
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
 				await this.agent.continue();
 			}
 		} finally {
-			this._systemPromptOverride = undefined;
-			this._flushPendingBashMessages();
-			await this._emitAgentSettled();
+			try {
+				this._systemPromptOverride = undefined;
+				this._flushPendingBashMessages();
+				await this._emitAgentSettled();
+			} finally {
+				if (options?.presentation === "hidden") {
+					this._hiddenRunDepth--;
+				}
+			}
 		}
 	}
 
@@ -1859,11 +1895,14 @@ export class AgentSession {
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: {
-			triggerTurn?: boolean;
-			deliverAs?: "steer" | "followUp" | "nextTurn";
-		},
+		options?: SendMessageOptions,
 	): Promise<void> {
+		if (
+			options?.presentation === "hidden" &&
+			(!options.triggerTurn || options.deliverAs === "nextTurn" || this.isStreaming)
+		) {
+			throw new Error("Hidden presentation requires an immediate triggerTurn while the agent is idle.");
+		}
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -1882,7 +1921,7 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._runAgentPrompt(appMessage);
+			await this._runAgentPrompt(appMessage, { presentation: options.presentation });
 		} else {
 			this.agent.state.messages.push(appMessage);
 			this.sessionManager.appendCustomMessageEntry(

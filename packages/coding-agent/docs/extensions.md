@@ -1400,6 +1400,17 @@ pi.sendMessage({
   triggerTurn: true,
   deliverAs: "steer",
 });
+
+// Use Pi's normal agent lifecycle for an internal decision without presenting
+// assistant/tool content; the initiating custom message persists normally.
+pi.sendMessage({
+  customType: "my-extension:decision",
+  content: "Decide whether background work should continue",
+  display: false,
+}, {
+  triggerTurn: true,
+  presentation: "hidden",
+});
 ```
 
 **Options:**
@@ -1408,6 +1419,7 @@ pi.sendMessage({
   - `"followUp"` - Waits for agent to finish. Delivered only when agent has no more tool calls.
   - `"nextTurn"` - Queued for next user prompt. Does not interrupt or trigger anything.
 - `triggerTurn: true` - If agent is idle, trigger an LLM response immediately. Only applies to `"steer"` and `"followUp"` modes (ignored for `"nextTurn"`).
+- `presentation: "hidden"` - For an immediate internal run only. Requires `triggerTurn: true`, an idle agent, and a delivery mode other than `"nextTurn"`. Extension lifecycle hooks still receive the run, but session subscribers (interactive, JSON, and RPC presentation) receive only `agent_start`/`agent_end`; custom/assistant/thinking/tool content is hidden. Persisted assistant and tool-result content is empty while metadata such as usage and `stopReason` is retained; assistant `errorMessage` and tool-result `details` are also removed. The initiating custom message keeps its normal `display`-controlled persistence semantics so extensions can retain correlation state.
 
 ### pi.sendUserMessage(content, options?)
 
