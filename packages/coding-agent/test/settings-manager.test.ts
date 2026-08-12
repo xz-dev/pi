@@ -156,6 +156,24 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("remote compaction", () => {
+		it("defaults to enabled and persists explicit false across reload", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getRemoteCompactionEnabled()).toBe(true);
+			expect(manager.getCompactionSettings().remoteEnabled).toBe(true);
+
+			manager.setRemoteCompactionEnabled(false);
+			await manager.flush();
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).compaction.remoteEnabled).toBe(
+				false,
+			);
+
+			await manager.reload();
+			expect(manager.getRemoteCompactionEnabled()).toBe(false);
+		});
+	});
+
 	describe("reload", () => {
 		it("should reload global settings from disk", async () => {
 			const settingsPath = join(agentDir, "settings.json");
