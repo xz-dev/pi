@@ -34,6 +34,7 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 - Do not publish this fork to npm, GitHub Packages, tags outside `xz-v*`, or a second Release plane. `.github/workflows/build-binaries.yml` is persistently removed from generated `main`; the `ci` overlay and generated-main verification continue removing it if upstream ever reintroduces it.
 - Keep runtime self-update behavior on `patch/native-wrapper-release`; keep descriptor, packaging, E2E workflow, README, and this guide on `ci`. Both are squash-integrated by `.github/workflows/upstream-sync.yml`.
 - Integrate `patch/hidden-internal-runs` after `patch/responses-remote-compaction`; both touch `AgentSession`, and the hidden-run patch must be validated against the final compaction implementation.
+- Integrate `patch/shutdown-lifecycle-log` after `patch/hidden-internal-runs`; its guarded resolver must preserve the combined Responses, manual-retry, and hidden-run `AgentSession` imports while adding lifecycle diagnostics.
 
 ## Patch retirement
 
