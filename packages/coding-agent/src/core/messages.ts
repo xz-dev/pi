@@ -63,6 +63,7 @@ export interface CompactionSummaryMessage {
 	role: "compactionSummary";
 	summary: string;
 	tokensBefore: number;
+	remote?: unknown;
 	timestamp: number;
 }
 
@@ -110,11 +111,13 @@ export function createCompactionSummaryMessage(
 	summary: string,
 	tokensBefore: number,
 	timestamp: string,
+	remote?: unknown,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
-		summary: summary,
+		summary,
 		tokensBefore,
+		remote,
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -174,6 +177,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				case "compactionSummary":
+					if (m.remote) return undefined;
 					return {
 						role: "user",
 						content: [
