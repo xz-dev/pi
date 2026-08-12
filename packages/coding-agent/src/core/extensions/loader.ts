@@ -32,6 +32,7 @@ import { execCommand } from "../exec.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { time } from "../timings.ts";
+import { startExtensionLifecycleOperation } from "./lifecycle-log.ts";
 import type {
 	EntryRenderer,
 	Extension,
@@ -497,7 +498,16 @@ async function loadExtension(
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
 	try {
-		const factory = await loadExtensionModule(resolvedPath, cacheToken);
+		const finishImport = startExtensionLifecycleOperation("module_import", { extensionPath: resolvedPath });
+		const importStartedAt = performance.now();
+		let factory: ExtensionFactory | undefined;
+		try {
+			factory = await loadExtensionModule(resolvedPath, cacheToken);
+			finishImport("end", performance.now() - importStartedAt);
+		} catch (error) {
+			finishImport("error", performance.now() - importStartedAt);
+			throw error;
+		}
 		time(`${extensionPath} module import`, "extensions");
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
@@ -505,7 +515,15 @@ async function loadExtension(
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-		await factory(api);
+		const finishFactory = startExtensionLifecycleOperation("extension_factory", { extensionPath: resolvedPath });
+		const factoryStartedAt = performance.now();
+		try {
+			await factory(api);
+			finishFactory("end", performance.now() - factoryStartedAt);
+		} catch (error) {
+			finishFactory("error", performance.now() - factoryStartedAt);
+			throw error;
+		}
 		time(`${extensionPath} factory`, "extensions");
 
 		return { extension, error: null };
@@ -528,7 +546,15 @@ export async function loadExtensionFromFactory(
 	const extension = createExtension(extensionPath, extensionPath);
 	const resolvedCwd = resolvePath(cwd);
 	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus);
-	await factory(api);
+	const finishFactory = startExtensionLifecycleOperation("extension_factory", { extensionPath });
+	const factoryStartedAt = performance.now();
+	try {
+		await factory(api);
+		finishFactory("end", performance.now() - factoryStartedAt);
+	} catch (error) {
+		finishFactory("error", performance.now() - factoryStartedAt);
+		throw error;
+	}
 	time(`${extensionPath} factory`, "extensions");
 	return extension;
 }

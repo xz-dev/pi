@@ -347,6 +347,8 @@ exit (Ctrl+C, Ctrl+D, SIGHUP, SIGTERM)
   └─► session_shutdown
 ```
 
+Pi records blocking extension startup and shutdown operations in `~/.pi/agent/logs/extension-lifecycle.jsonl`. An unmatched `"status":"start"` line identifies the operation or handler still pending.
+
 ### Startup Events
 
 #### project_trust
