@@ -839,7 +839,7 @@ export async function handlePackageCommand(
 				if (updateTargetIncludesSelf(target)) {
 					if (DISTRIBUTION === "xz-dev" && PACKAGE_NAME === "@earendil-works/pi-coding-agent") {
 						if (detectInstallMethod() === "bun-binary") {
-							const latestRelease = await getLatestXzRelease(VERSION);
+							const latestRelease = await getLatestXzRelease(VERSION, { retry: true });
 							if (!latestRelease) {
 								throw new Error(`Could not determine latest ${APP_NAME} version.`);
 							}

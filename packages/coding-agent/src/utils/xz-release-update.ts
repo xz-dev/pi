@@ -48,6 +48,15 @@ export interface XzLatestRelease {
 
 interface XzReleaseOptions {
 	timeoutMs?: number;
+	retry?: boolean;
+}
+
+class RetryableDiscoveryError {
+	readonly error: unknown;
+
+	constructor(error: unknown) {
+		this.error = error;
+	}
 }
 
 interface XzSelfUpdateOptions {
@@ -212,16 +221,34 @@ async function fetchResponse(
 	currentVersion: string,
 	timeoutMs: number,
 	accept: string,
+	classifyRetryable = false,
 ): Promise<Response> {
-	const response = await fetch(new URL(url).href, {
-		headers: fetchHeaders(currentVersion, accept),
-		signal: AbortSignal.timeout(timeoutMs),
-	});
-	if (!response.ok) return fail(`GitHub Release request failed: HTTP ${response.status}`);
+	let response: Response;
+	try {
+		response = await fetch(new URL(url).href, {
+			headers: fetchHeaders(currentVersion, accept),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (error) {
+		if (classifyRetryable) throw new RetryableDiscoveryError(error);
+		throw error;
+	}
+	if (!response.ok) {
+		const error = new Error(`GitHub Release request failed: HTTP ${response.status}`);
+		if (classifyRetryable && [408, 425, 429, 500, 502, 503, 504].includes(response.status)) {
+			throw new RetryableDiscoveryError(error);
+		}
+		throw error;
+	}
 	return response;
 }
 
-async function readBoundedResponse(response: Response, maximumBytes: number, label: string): Promise<Uint8Array> {
+async function readBoundedResponse(
+	response: Response,
+	maximumBytes: number,
+	label: string,
+	retryTransportFailures = false,
+): Promise<Uint8Array> {
 	const contentLength = response.headers.get("content-length");
 	if (contentLength) {
 		const parsed = Number(contentLength);
@@ -234,7 +261,13 @@ async function readBoundedResponse(response: Response, maximumBytes: number, lab
 	const chunks: Uint8Array[] = [];
 	let total = 0;
 	for (;;) {
-		const next = await reader.read();
+		let next: Awaited<ReturnType<typeof reader.read>>;
+		try {
+			next = await reader.read();
+		} catch (error) {
+			if (retryTransportFailures) throw new RetryableDiscoveryError(error);
+			throw error;
+		}
 		if (next.done) break;
 		total += next.value.byteLength;
 		if (total > maximumBytes) {
@@ -252,24 +285,25 @@ async function readBoundedResponse(response: Response, maximumBytes: number, lab
 	return body;
 }
 
-export async function getLatestXzRelease(
-	currentVersion: string,
-	options: XzReleaseOptions = {},
-): Promise<XzLatestRelease | undefined> {
-	if (process.env.PI_OFFLINE) return undefined;
-	parseDistributionVersion(currentVersion);
-	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+async function discoverLatestXzRelease(currentVersion: string, timeoutMs: number): Promise<XzLatestRelease> {
 	const latestBase = releaseBaseUrl("latest");
-	const sumsResponse = await fetchResponse(`${latestBase}${SUMS_FILENAME}`, currentVersion, timeoutMs, "text/plain");
-	const sumsBytes = await readBoundedResponse(sumsResponse, RELEASE_MAX_BYTES, SUMS_FILENAME);
+	const sumsResponse = await fetchResponse(
+		`${latestBase}${SUMS_FILENAME}`,
+		currentVersion,
+		timeoutMs,
+		"text/plain",
+		true,
+	);
+	const sumsBytes = await readBoundedResponse(sumsResponse, RELEASE_MAX_BYTES, SUMS_FILENAME, true);
 	const expectedManifestDigest = manifestDigestFromSums(sumsBytes);
 	const manifestResponse = await fetchResponse(
 		`${latestBase}${MANIFEST_FILENAME}`,
 		currentVersion,
 		timeoutMs,
 		"application/json",
+		true,
 	);
-	const bytes = await readBoundedResponse(manifestResponse, RELEASE_MAX_BYTES, "Release manifest");
+	const bytes = await readBoundedResponse(manifestResponse, RELEASE_MAX_BYTES, "Release manifest", true);
 	const actualManifestDigest = createHash("sha256").update(bytes).digest("hex");
 	if (actualManifestDigest !== expectedManifestDigest) return fail("Release manifest sha256 mismatch");
 	let value: unknown;
@@ -279,6 +313,24 @@ export async function getLatestXzRelease(
 		return fail("Invalid xz-dev Release manifest JSON");
 	}
 	return parseLatestRelease(value);
+}
+
+export async function getLatestXzRelease(
+	currentVersion: string,
+	options: XzReleaseOptions = {},
+): Promise<XzLatestRelease | undefined> {
+	if (process.env.PI_OFFLINE) return undefined;
+	parseDistributionVersion(currentVersion);
+	const attempts = options.retry ? 3 : 1;
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return await discoverLatestXzRelease(currentVersion, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+		} catch (error) {
+			if (!(error instanceof RetryableDiscoveryError) || attempt + 1 >= attempts) {
+				throw error instanceof RetryableDiscoveryError ? error.error : error;
+			}
+		}
+	}
 }
 
 async function downloadBundle(release: XzLatestRelease, currentVersion: string, destination: string): Promise<void> {
