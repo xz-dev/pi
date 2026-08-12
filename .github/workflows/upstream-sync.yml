@@ -442,7 +442,15 @@ jobs:
           fi
           git commit -m "merge patch/shutdown-lifecycle-log branch"
 
-          git merge --squash origin/patch/slow-hook-execution-kind
+          if ! git merge-base --is-ancestor origin/patch/shutdown-lifecycle-log origin/patch/slow-hook-execution-kind ||
+            [[ $(git rev-list --count origin/patch/shutdown-lifecycle-log..origin/patch/slow-hook-execution-kind) != 1 ]]; then
+            echo '::error::patch/slow-hook-execution-kind must be exactly one commit atop patch/shutdown-lifecycle-log'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/slow-hook-execution-kind; then
+            echo '::error::Failed to apply slow-hook execution labels'
+            exit 1
+          fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying slow-hook execution labels'
             exit 1
