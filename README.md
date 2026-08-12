@@ -23,6 +23,8 @@ It tracks upstream `main` with a minimal downstream patch stack.
   - Patch branch: [`patch/hidden-internal-runs`](https://github.com/xz-dev/pi/tree/patch/hidden-internal-runs)
 - Record blocking extension startup and shutdown operations in a private lifecycle JSONL, and persist visible non-model reminders for individual awaited extension hooks that exceed the configurable threshold.
   - Patch branch: [`patch/shutdown-lifecycle-log`](https://github.com/xz-dev/pi/tree/patch/shutdown-lifecycle-log)
+- Label slow extension-hook reminders by synchronous or asynchronous execution while preserving historical unlabeled entries.
+  - Patch branch: [`patch/slow-hook-execution-kind`](https://github.com/xz-dev/pi/tree/patch/slow-hook-execution-kind)
 
 ### Fixes
 
