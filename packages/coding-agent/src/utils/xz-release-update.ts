@@ -17,11 +17,12 @@ import { getPiUserAgent } from "./pi-user-agent.ts";
 import { extractZipArchive } from "./tools-manager.ts";
 
 const REPOSITORY = "xz-dev/pi";
-const LATEST_RELEASE_URL =
-	process.env.PI_XZ_LATEST_RELEASE_URL ?? `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const RELEASE_DOWNLOAD_ORIGIN = "https://github.com";
-const RELEASE_ASSET_CDN_HOST = "release-assets.githubusercontent.com";
 const RELEASE_MAX_BYTES = 1024 * 1024;
+const MANIFEST_SCHEMA_VERSION = 5;
+const BUNDLE_LAYOUT_VERSION = 2;
+const MANIFEST_FILENAME = "release-manifest.json";
+const SUMS_FILENAME = "SHA256SUMS";
 const BUNDLE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10000;
 const BUNDLE_TIMEOUT_MS = 120000;
@@ -84,14 +85,18 @@ function parseDistributionVersion(value: string): { commit: string } {
 	return { commit: match[1] };
 }
 
-function exactBaseUrl(tag: string): string {
+function releaseBaseUrl(kind: "latest" | string): string {
 	const override = process.env.PI_XZ_RELEASE_BASE_URL;
 	if (override) {
 		const url = new URL(override);
 		if (url.protocol !== "https:" && url.protocol !== "http:") return fail("Invalid PI_XZ_RELEASE_BASE_URL");
 		return url.href.endsWith("/") ? url.href : `${url.href}/`;
 	}
-	return `${RELEASE_DOWNLOAD_ORIGIN}/${REPOSITORY}/releases/download/${encodeURIComponent(tag)}/`;
+	return `${RELEASE_DOWNLOAD_ORIGIN}/${REPOSITORY}/releases/${kind === "latest" ? "latest/download" : `download/${encodeURIComponent(kind)}`}/`;
+}
+
+function exactBaseUrl(tag: string): string {
+	return releaseBaseUrl(tag);
 }
 
 function expectedBundleName(target: string): string {
@@ -149,30 +154,30 @@ function validateZipEntries(archivePath: string): void {
 }
 
 function parseLatestRelease(value: unknown): XzLatestRelease {
-	if (!isRecord(value)) return fail("Invalid GitHub latest Release response");
-	if (value.draft !== false || value.prerelease !== false) return fail("Latest xz-dev Release is not final");
-
-	const tag = requireString(value.tag_name, "release tag");
+	if (!isRecord(value)) return fail("Invalid xz-dev Release manifest");
+	if (
+		value.schemaVersion !== MANIFEST_SCHEMA_VERSION ||
+		value.repository !== REPOSITORY ||
+		value.packaging !== "binary" ||
+		value.layoutVersion !== BUNDLE_LAYOUT_VERSION
+	) {
+		return fail("Invalid xz-dev Release manifest identity");
+	}
+	const tag = requireString(value.tag, "release tag");
 	if (!tag.startsWith("xz-v")) return fail("Invalid xz-dev Release tag");
-	const version = tag.slice("xz-v".length);
+	const version = requireString(value.distributionVersion, "distribution version");
+	if (tag !== `xz-v${version}`) return fail("Release tag/version mismatch");
 	const parsedVersion = parseDistributionVersion(version);
-	const commit = requireString(value.target_commitish, "release commit");
+	const commit = requireString(value.commit, "release commit");
 	if (!/^[0-9a-f]{40}$/.test(commit) || !commit.startsWith(parsedVersion.commit)) {
 		return fail("Release commit/version mismatch");
 	}
 	if (!RELEASE_TARGET) return fail("xz-dev Release target metadata is missing from this binary");
 	const expectedFile = expectedBundleName(RELEASE_TARGET);
-	if (!Array.isArray(value.assets)) return fail("Latest xz-dev Release assets are missing");
-	const matches = value.assets.filter(
-		(asset): asset is Record<string, unknown> => isRecord(asset) && asset.name === expectedFile,
-	);
-	if (matches.length !== 1) return fail(`Latest xz-dev Release must contain exactly one ${expectedFile} asset`);
-	const asset = matches[0];
+	if (!isRecord(value.bundles)) return fail("Latest xz-dev Release bundles are missing");
+	const bundle = value.bundles[RELEASE_TARGET];
+	if (!isRecord(bundle) || bundle.file !== expectedFile) return fail(`Invalid ${expectedFile} bundle metadata`);
 	const exactBase = exactBaseUrl(tag);
-	const expectedUrl = `${exactBase}${expectedFile}`;
-	const browserDownloadUrl = requireString(asset.browser_download_url, "bundle URL");
-	if (browserDownloadUrl !== expectedUrl) return fail("Release bundle URL is not the exact xz-dev tag asset");
-
 	return {
 		version,
 		tag,
@@ -180,15 +185,26 @@ function parseLatestRelease(value: unknown): XzLatestRelease {
 		exactBaseUrl: exactBase,
 		bundle: {
 			name: expectedFile,
-			browser_download_url: browserDownloadUrl,
-			size: requirePositiveSize(asset.size, BUNDLE_MAX_BYTES, "bundle size"),
-			digest: requireSha256Digest(asset.digest, "bundle digest"),
+			browser_download_url: `${exactBase}${expectedFile}`,
+			size: requirePositiveSize(bundle.bytes, BUNDLE_MAX_BYTES, "bundle size"),
+			digest: requireSha256Digest(`sha256:${requireString(bundle.sha256, "bundle digest")}`, "bundle digest"),
 		},
 	};
 }
 
 function fetchHeaders(currentVersion: string, accept: string): Record<string, string> {
 	return { "User-Agent": getPiUserAgent(currentVersion), accept };
+}
+
+function manifestDigestFromSums(bytes: Uint8Array): string {
+	const matches = new TextDecoder()
+		.decode(bytes)
+		.split(/\r?\n/)
+		.filter((line) => line.endsWith(`  ${MANIFEST_FILENAME}`));
+	if (matches.length !== 1 || !/^[0-9a-f]{64} {2}release-manifest\.json$/.test(matches[0])) {
+		return fail(`Invalid ${SUMS_FILENAME} entry for ${MANIFEST_FILENAME}`);
+	}
+	return matches[0].slice(0, 64);
 }
 
 async function fetchResponse(
@@ -201,12 +217,6 @@ async function fetchResponse(
 		headers: fetchHeaders(currentVersion, accept),
 		signal: AbortSignal.timeout(timeoutMs),
 	});
-	if (response.redirected) {
-		const destination = new URL(response.url);
-		if (destination.protocol !== "https:" || destination.hostname !== RELEASE_ASSET_CDN_HOST) {
-			return fail("GitHub Release asset redirected outside the trusted GitHub asset CDN");
-		}
-	}
 	if (!response.ok) return fail(`GitHub Release request failed: HTTP ${response.status}`);
 	return response;
 }
@@ -248,18 +258,25 @@ export async function getLatestXzRelease(
 ): Promise<XzLatestRelease | undefined> {
 	if (process.env.PI_OFFLINE) return undefined;
 	parseDistributionVersion(currentVersion);
-	const response = await fetchResponse(
-		LATEST_RELEASE_URL,
+	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+	const latestBase = releaseBaseUrl("latest");
+	const sumsResponse = await fetchResponse(`${latestBase}${SUMS_FILENAME}`, currentVersion, timeoutMs, "text/plain");
+	const sumsBytes = await readBoundedResponse(sumsResponse, RELEASE_MAX_BYTES, SUMS_FILENAME);
+	const expectedManifestDigest = manifestDigestFromSums(sumsBytes);
+	const manifestResponse = await fetchResponse(
+		`${latestBase}${MANIFEST_FILENAME}`,
 		currentVersion,
-		options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-		"application/vnd.github+json",
+		timeoutMs,
+		"application/json",
 	);
-	const bytes = await readBoundedResponse(response, RELEASE_MAX_BYTES, "latest Release response");
+	const bytes = await readBoundedResponse(manifestResponse, RELEASE_MAX_BYTES, "Release manifest");
+	const actualManifestDigest = createHash("sha256").update(bytes).digest("hex");
+	if (actualManifestDigest !== expectedManifestDigest) return fail("Release manifest sha256 mismatch");
 	let value: unknown;
 	try {
 		value = JSON.parse(new TextDecoder().decode(bytes));
 	} catch {
-		return fail("Invalid GitHub latest Release JSON");
+		return fail("Invalid xz-dev Release manifest JSON");
 	}
 	return parseLatestRelease(value);
 }
