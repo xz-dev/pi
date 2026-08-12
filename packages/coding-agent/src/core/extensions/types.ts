@@ -391,10 +391,24 @@ export interface ExtensionCommandContext extends ExtensionContext {
  *
  * This is passed to `withSession()` callbacks on `newSession()`, `fork()`, and `switchSession()`.
  */
+export interface SendMessageOptions {
+	triggerTurn?: boolean;
+	deliverAs?: "steer" | "followUp" | "nextTurn";
+	/**
+	 * Presentation policy for an immediate internally-triggered run.
+	 *
+	 * `"hidden"` requires `triggerTurn: true`, an idle agent, and a delivery mode other than `"nextTurn"`.
+	 * It keeps extension lifecycle hooks active, hides the run's message/tool stream
+	 * from session subscribers, emits custom/assistant/tool-result metadata with empty
+	 * content, and persists assistant/tool-result metadata with empty content.
+	 */
+	presentation?: "visible" | "hidden";
+}
+
 export interface ReplacedSessionContext extends ExtensionCommandContext {
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: SendMessageOptions,
 	): Promise<void>;
 
 	sendUserMessage(
@@ -1301,7 +1315,7 @@ export interface ExtensionAPI {
 	/** Send a custom message to the session. */
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: SendMessageOptions,
 	): void;
 
 	/**
@@ -1556,7 +1570,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: SendMessageOptions,
 ) => void;
 
 export type SendUserMessageHandler = (

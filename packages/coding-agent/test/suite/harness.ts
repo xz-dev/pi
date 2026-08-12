@@ -13,6 +13,7 @@ import type {
 	FauxProviderRegistration,
 	FauxResponseStep,
 	Model,
+	RegisterFauxProviderOptions,
 } from "@earendil-works/pi-ai/compat";
 import { registerFauxProvider, streamSimple } from "@earendil-works/pi-ai/compat";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
@@ -63,6 +64,7 @@ export function getAssistantTexts(harness: Harness): string[] {
 
 export interface HarnessOptions {
 	models?: FauxModelDefinition[];
+	fauxProviderOptions?: Omit<RegisterFauxProviderOptions, "models">;
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
@@ -104,6 +106,7 @@ function createTempDir(): string {
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const tempDir = createTempDir();
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
+		...options.fauxProviderOptions,
 		models: options.models,
 	});
 	fauxProvider.setResponses([]);
