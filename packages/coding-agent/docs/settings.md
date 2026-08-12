@@ -114,6 +114,7 @@ Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--off
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
+| `compaction.remoteEnabled` | boolean | `true` | Use provider-native compaction when supported, falling back to local compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
 
@@ -121,6 +122,7 @@ Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--off
 {
   "compaction": {
     "enabled": true,
+    "remoteEnabled": true,
     "reserveTokens": 16384,
     "keepRecentTokens": 20000
   }
