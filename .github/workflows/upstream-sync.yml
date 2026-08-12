@@ -44,7 +44,8 @@ jobs:
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/responses-remote-compaction:refs/remotes/origin/patch/responses-remote-compaction \
-            +refs/heads/patch/hidden-internal-runs:refs/remotes/origin/patch/hidden-internal-runs
+            +refs/heads/patch/hidden-internal-runs:refs/remotes/origin/patch/hidden-internal-runs \
+            +refs/heads/patch/shutdown-lifecycle-log:refs/remotes/origin/patch/shutdown-lifecycle-log
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -384,6 +385,62 @@ jobs:
           fi
           git commit -m "merge patch/hidden-internal-runs branch"
 
+          if ! git merge --squash origin/patch/shutdown-lifecycle-log; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/src/core/agent-session.ts ]]; then
+              printf '::error::Unexpected lifecycle diagnostics squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            python3 - <<'PY_LIFECYCLE'
+          from pathlib import Path
+
+          path = Path("packages/coding-agent/src/core/agent-session.ts")
+          text = path.read_text()
+          old = (
+              "<<<<<<< HEAD\n"
+              'import { emitSessionShutdownEvent } from "./extensions/runner.ts";\n'
+              'import { planContinuation } from "./manual-retry.ts";\n'
+              'import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";\n'
+              "=======\n"
+              'import { emitSessionShutdownEvent, SLOW_EXTENSION_HOOK_ENTRY_TYPE } from "./extensions/runner.ts";\n'
+              'import type { BashExecutionMessage, CustomMessage } from "./messages.ts";\n'
+              ">>>>>>> origin/patch/shutdown-lifecycle-log\n"
+          )
+          new = (
+              'import { emitSessionShutdownEvent, SLOW_EXTENSION_HOOK_ENTRY_TYPE } from "./extensions/runner.ts";\n'
+              'import { planContinuation } from "./manual-retry.ts";\n'
+              'import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";\n'
+          )
+          if text.count(old) != 1:
+              raise SystemExit("Lifecycle resolver: expected import conflict block not found exactly once")
+          text = text.replace(old, new, 1)
+          if any(line.startswith(("<<<<<<<", "|||||||", "=======", ">>>>>>>")) for line in text.splitlines()):
+              raise SystemExit("Lifecycle resolver: conflict marker remains")
+          for needle in (
+              "SLOW_EXTENSION_HOOK_ENTRY_TYPE",
+              "planContinuation",
+              "convertToLlm",
+              "_hiddenRunDepth",
+              "reportSlowExtensionHook",
+          ):
+              if needle not in text:
+                  raise SystemExit(f"Lifecycle resolver: missing invariant {needle}")
+          path.write_text(text)
+          PY_LIFECYCLE
+            git add packages/coding-agent/src/core/agent-session.ts
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying lifecycle diagnostics conflict staging'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/shutdown-lifecycle-log'
+            exit 1
+          fi
+          git commit -m "merge patch/shutdown-lifecycle-log branch"
+
       - name: Install dependencies for pre-push gates
         run: npm ci --ignore-scripts
 
@@ -419,6 +476,9 @@ jobs:
             cd packages/coding-agent
             node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
               test/settings-manager.test.ts \
+              test/extensions-runner.test.ts \
+              test/lifecycle-diagnostics.test.ts \
+              test/slow-extension-hook-entry.test.ts \
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
               test/suite/hidden-run-presentation.test.ts \
