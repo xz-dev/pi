@@ -45,7 +45,8 @@ jobs:
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/responses-remote-compaction:refs/remotes/origin/patch/responses-remote-compaction \
             +refs/heads/patch/hidden-internal-runs:refs/remotes/origin/patch/hidden-internal-runs \
-            +refs/heads/patch/shutdown-lifecycle-log:refs/remotes/origin/patch/shutdown-lifecycle-log
+            +refs/heads/patch/shutdown-lifecycle-log:refs/remotes/origin/patch/shutdown-lifecycle-log \
+            +refs/heads/patch/slow-hook-execution-kind:refs/remotes/origin/patch/slow-hook-execution-kind
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -440,6 +441,17 @@ jobs:
             exit 1
           fi
           git commit -m "merge patch/shutdown-lifecycle-log branch"
+
+          git merge --squash origin/patch/slow-hook-execution-kind
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying slow-hook execution labels'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/slow-hook-execution-kind'
+            exit 1
+          fi
+          git commit -m "merge patch/slow-hook-execution-kind branch"
 
       - name: Install dependencies for pre-push gates
         run: npm ci --ignore-scripts
