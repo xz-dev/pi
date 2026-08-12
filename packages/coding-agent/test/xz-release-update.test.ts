@@ -11,28 +11,49 @@ const TAG = `xz-v${NEXT_VERSION}`;
 const TARGET = "linux-x64-gnu-modern";
 const BUNDLE = `pi-${TARGET}.zip`;
 const BUNDLE_BYTES = new TextEncoder().encode("bundle");
-const DIGEST = `sha256:${createHash("sha256").update(BUNDLE_BYTES).digest("hex")}`;
+const BUNDLE_SHA256 = createHash("sha256").update(BUNDLE_BYTES).digest("hex");
+const DIGEST = `sha256:${BUNDLE_SHA256}`;
+const RELEASE_ORIGIN = "https://github.com";
+const LATEST_BASE = `${RELEASE_ORIGIN}/xz-dev/pi/releases/latest/download/`;
 const EXACT_BASE = `https://github.com/xz-dev/pi/releases/download/${TAG}/`;
-const LATEST_RELEASE = "https://api.github.com/repos/xz-dev/pi/releases/latest";
+const SUMS_URL = `${LATEST_BASE}SHA256SUMS`;
+const MANIFEST_URL = `${LATEST_BASE}release-manifest.json`;
 
-function release(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
-		tag_name: TAG,
-		target_commitish: `22222222${"3".repeat(32)}`,
-		draft: false,
-		prerelease: false,
+		schemaVersion: 5,
+		repository: "xz-dev/pi",
+		tag: TAG,
+		distributionVersion: NEXT_VERSION,
+		apiVersion: "0.84.1",
+		commit: `22222222${"3".repeat(32)}`,
+		packaging: "binary",
+		layoutVersion: 2,
+		bundles: {
+			[TARGET]: { file: BUNDLE, bytes: BUNDLE_BYTES.byteLength, sha256: BUNDLE_SHA256 },
+			"windows-arm64": { file: "pi-windows-arm64.zip", bytes: 10, sha256: "4".repeat(64) },
+		},
 		new_future_field: { ignored: true },
-		assets: [
-			{
-				name: BUNDLE,
-				browser_download_url: `${EXACT_BASE}${BUNDLE}`,
-				size: BUNDLE_BYTES.byteLength,
-				digest: DIGEST,
-			},
-			{ name: "pi-windows-arm64.zip", browser_download_url: `${EXACT_BASE}pi-windows-arm64.zip` },
-		],
 		...overrides,
 	};
+}
+
+function discoveryFiles(value: Record<string, unknown> = manifest()): { manifestBytes: Uint8Array; sums: string } {
+	const manifestBytes = new TextEncoder().encode(JSON.stringify(value));
+	const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
+	return {
+		manifestBytes,
+		sums: `${BUNDLE_SHA256}  ${BUNDLE}\n${manifestSha256}  release-manifest.json\n`,
+	};
+}
+
+function discoveryFetch(value: Record<string, unknown> = manifest()) {
+	const { manifestBytes, sums } = discoveryFiles(value);
+	return vi.fn(async (input: string | URL, _init?: RequestInit) => {
+		if (String(input) === SUMS_URL) return new Response(sums);
+		if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+		return new Response("not found", { status: 404 });
+	});
 }
 
 async function loadUpdater(executablePath = process.execPath) {
@@ -58,12 +79,9 @@ afterEach(() => {
 });
 
 describe("xz-dev native Release updates", () => {
-	it("discovers only this binary's exact target and ignores new metadata", async () => {
+	it("discovers this binary's target from checksum-verified public latest/download assets", async () => {
 		allowNetwork();
-		const fetchMock = vi.fn(async (input: string | URL) => {
-			if (String(input) === LATEST_RELEASE) return Response.json(release());
-			return new Response("not found", { status: 404 });
-		});
+		const fetchMock = discoveryFetch();
 		vi.stubGlobal("fetch", fetchMock);
 		const { getLatestXzRelease } = await loadUpdater();
 
@@ -72,49 +90,59 @@ describe("xz-dev native Release updates", () => {
 			tag: TAG,
 			commit: `22222222${"3".repeat(32)}`,
 			exactBaseUrl: EXACT_BASE,
-			bundle: { name: BUNDLE, digest: DIGEST },
+			bundle: { name: BUNDLE, digest: DIGEST, size: BUNDLE_BYTES.byteLength },
 		});
-		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([SUMS_URL, MANIFEST_URL]);
+		for (const [, init] of fetchMock.mock.calls) {
+			expect(new Headers(init?.headers).has("authorization")).toBe(false);
+		}
 	});
 
-	it("rejects forged exact-tag URLs and invalid digests", async () => {
+	it("rejects a corrupt manifest before parsing or requesting a bundle", async () => {
+		allowNetwork();
+		const { manifestBytes, sums } = discoveryFiles();
+		const corrupt = manifestBytes.slice();
+		corrupt[corrupt.byteLength - 1] = " ".charCodeAt(0);
+		const fetchMock = vi.fn(async (input: string | URL, _init?: RequestInit) => {
+			if (String(input) === SUMS_URL) return new Response(sums);
+			if (String(input) === MANIFEST_URL) return new Response(corrupt);
+			return new Response(BUNDLE_BYTES);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease } = await loadUpdater();
+
+		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/manifest sha256 mismatch/);
+		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([SUMS_URL, MANIFEST_URL]);
+	});
+
+	it("requires one strict SHA256SUMS entry for release-manifest.json", async () => {
+		allowNetwork();
+		const { manifestBytes } = discoveryFiles();
+		const digest = createHash("sha256").update(manifestBytes).digest("hex");
+		const { getLatestXzRelease } = await loadUpdater();
+		for (const sums of [
+			`${digest} *release-manifest.json\n`,
+			`${digest}  release-manifest.json\n${digest}  release-manifest.json\n`,
+		]) {
+			const fetchMock = vi.fn(async (input: string | URL, _init?: RequestInit) => {
+				if (String(input) === SUMS_URL) return new Response(sums);
+				return new Response(manifestBytes);
+			});
+			vi.stubGlobal("fetch", fetchMock);
+			await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/SHA256SUMS/);
+			expect(fetchMock).toHaveBeenCalledOnce();
+		}
+	});
+
+	it("rejects invalid manifest identity and target digest", async () => {
 		allowNetwork();
 		const { getLatestXzRelease } = await loadUpdater();
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () =>
-				Response.json(
-					release({
-						assets: [
-							{
-								name: BUNDLE,
-								browser_download_url: "https://example.test/bundle.zip",
-								size: 6,
-								digest: DIGEST,
-							},
-						],
-					}),
-				),
-			),
-		);
-		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/exact xz-dev tag asset/);
+		vi.stubGlobal("fetch", discoveryFetch(manifest({ repository: "attacker/pi" })));
+		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/manifest identity/);
 
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () =>
-				Response.json(
-					release({
-						assets: [
-							{
-								name: BUNDLE,
-								browser_download_url: `${EXACT_BASE}${BUNDLE}`,
-								size: 6,
-								digest: "sha256:not-a-digest",
-							},
-						],
-					}),
-				),
-			),
+			discoveryFetch(manifest({ bundles: { [TARGET]: { file: BUNDLE, bytes: 6, sha256: "not-a-digest" } } })),
 		);
 		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/bundle digest/);
 	});
@@ -135,22 +163,21 @@ describe("xz-dev native Release updates", () => {
 			const zipped = spawnSync("zip", ["-q", archive, "../escape"], { cwd: source });
 			expect(zipped.status).toBe(0);
 			const bytes = readFileSync(archive);
+			const value = manifest({
+				bundles: {
+					[TARGET]: {
+						file: BUNDLE,
+						bytes: bytes.byteLength,
+						sha256: createHash("sha256").update(bytes).digest("hex"),
+					},
+				},
+			});
+			const { manifestBytes, sums } = discoveryFiles(value);
 			vi.stubGlobal(
 				"fetch",
-				vi.fn(async (input: string | URL) => {
-					if (String(input) === LATEST_RELEASE)
-						return Response.json(
-							release({
-								assets: [
-									{
-										name: BUNDLE,
-										browser_download_url: `${EXACT_BASE}${BUNDLE}`,
-										size: bytes.byteLength,
-										digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
-									},
-								],
-							}),
-						);
+				vi.fn(async (input: string | URL, _init?: RequestInit) => {
+					if (String(input) === SUMS_URL) return new Response(sums);
+					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
 					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
 				}),
 			);
@@ -172,19 +199,21 @@ describe("xz-dev native Release updates", () => {
 		mkdirSync(oldBundle, { recursive: true });
 		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		writeFileSync(join(root, "previous"), "older\n");
-		const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(join(oldBundle, "pi-native"));
-		const fetchMock = vi.fn(async (input: string | URL) => {
-			if (String(input) === LATEST_RELEASE) return Response.json(release());
+		const { manifestBytes, sums } = discoveryFiles();
+		const fetchMock = vi.fn(async (input: string | URL, _init?: RequestInit) => {
+			if (String(input) === SUMS_URL) return new Response(sums);
+			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
 			if (String(input) === `${EXACT_BASE}${BUNDLE}`)
-				return new Response("wrong", { headers: { "content-length": "5" } });
+				return new Response("broken", { headers: { "content-length": String(BUNDLE_BYTES.byteLength) } });
 			return new Response("not found", { status: 404 });
 		});
 		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(join(oldBundle, "pi-native"));
 		try {
 			const latest = await getLatestXzRelease(CURRENT_VERSION);
 			await expect(
 				runXzSelfUpdate(latest!, CURRENT_VERSION, false, { executablePath: join(oldBundle, "pi-native") }),
-			).rejects.toThrow(/byte length mismatch|sha256 mismatch/);
+			).rejects.toThrow(/sha256 mismatch/);
 			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
 			expect(readFileSync(join(root, "previous"), "utf8")).toBe("older\n");
 		} finally {
