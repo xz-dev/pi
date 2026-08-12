@@ -98,6 +98,86 @@ describe("xz-dev native Release updates", () => {
 		}
 	});
 
+	it("restarts discovery from SHA256SUMS after a manifest body transport failure", async () => {
+		allowNetwork();
+		const { manifestBytes, sums } = discoveryFiles();
+		let manifestAttempts = 0;
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			if (String(input) === SUMS_URL) return new Response(sums);
+			if (String(input) === MANIFEST_URL && manifestAttempts++ === 0) {
+				return new Response(
+					new ReadableStream({
+						start(controller) {
+							controller.enqueue(manifestBytes.subarray(0, 1));
+							controller.error(new Error("manifest stream failed"));
+						},
+					}),
+				);
+			}
+			return new Response(manifestBytes);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease } = await loadUpdater();
+
+		await expect(getLatestXzRelease(CURRENT_VERSION, { retry: true })).resolves.toMatchObject({
+			version: NEXT_VERSION,
+		});
+		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+			SUMS_URL,
+			MANIFEST_URL,
+			SUMS_URL,
+			MANIFEST_URL,
+		]);
+	});
+
+	it("does not retry transient discovery failures by default", async () => {
+		allowNetwork();
+		const fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease } = await loadUpdater();
+
+		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow("GitHub Release request failed: HTTP 503");
+		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
+	it("does not retry integrity failures", async () => {
+		allowNetwork();
+		const { manifestBytes, sums } = discoveryFiles();
+		const corrupt = manifestBytes.slice();
+		corrupt[corrupt.byteLength - 1] = " ".charCodeAt(0);
+		const fetchMock = vi.fn(async (input: string | URL) => new Response(String(input) === SUMS_URL ? sums : corrupt));
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease } = await loadUpdater();
+
+		await expect(getLatestXzRelease(CURRENT_VERSION, { retry: true })).rejects.toThrow(/manifest sha256 mismatch/);
+		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([SUMS_URL, MANIFEST_URL]);
+	});
+
+	it("stops retrying discovery after three whole attempts", async () => {
+		allowNetwork();
+		const { sums } = discoveryFiles();
+		const fetchMock = vi.fn(
+			async (input: string | URL) =>
+				new Response(String(input) === SUMS_URL ? sums : "timeout", {
+					status: String(input) === SUMS_URL ? 200 : 504,
+				}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease } = await loadUpdater();
+
+		await expect(getLatestXzRelease(CURRENT_VERSION, { retry: true })).rejects.toThrow(
+			"GitHub Release request failed: HTTP 504",
+		);
+		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+			SUMS_URL,
+			MANIFEST_URL,
+			SUMS_URL,
+			MANIFEST_URL,
+			SUMS_URL,
+			MANIFEST_URL,
+		]);
+	});
+
 	it("rejects a corrupt manifest before parsing or requesting a bundle", async () => {
 		allowNetwork();
 		const { manifestBytes, sums } = discoveryFiles();
@@ -186,6 +266,41 @@ describe("xz-dev native Release updates", () => {
 			await expect(
 				runXzSelfUpdate(latest!, CURRENT_VERSION, false, { executablePath: join(oldBundle, "pi-native") }),
 			).rejects.toThrow(/Unsafe Release bundle ZIP entry/);
+			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not classify a bundle HTTP failure as retryable discovery", async () => {
+		allowNetwork();
+		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
+		const oldBundle = join(root, "bundles", CURRENT_VERSION);
+		mkdirSync(oldBundle, { recursive: true });
+		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
+		const { manifestBytes, sums } = discoveryFiles();
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			if (String(input) === SUMS_URL) return new Response(sums);
+			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+			return new Response("unavailable", { status: 503 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(join(oldBundle, "pi-native"));
+		try {
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			const error = await runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+				executablePath: join(oldBundle, "pi-native"),
+			}).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toBe("GitHub Release request failed: HTTP 503");
+			expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+				SUMS_URL,
+				MANIFEST_URL,
+				`${EXACT_BASE}${BUNDLE}`,
+			]);
 			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
