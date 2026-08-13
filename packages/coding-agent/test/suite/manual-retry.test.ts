@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { createManualRetryRecoveryCue } from "../../src/core/messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "./harness.ts";
 
@@ -54,33 +55,89 @@ describe("manual /retry continuation", () => {
 	}
 
 	it.each(["error", "aborted"] as const)(
-		"creates a successful sibling after a terminal assistant %s without duplicating the request",
+		"recovers interrupted assistant %s with an internal cue and preserved partial text",
 		async (stopReason) => {
 			const created = await harness();
 			const requestId = created.sessionManager.appendMessage(userMessage("original request"));
 			const failureId = created.sessionManager.appendMessage(
-				fauxAssistantMessage("failed tail", {
+				fauxAssistantMessage("safe partial", {
 					stopReason,
 					errorMessage: stopReason === "error" ? "boom" : undefined,
 				}),
 			);
 			created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
-			created.setResponses([fauxAssistantMessage("recovered")]);
+			let requestMessages: Message[] = [];
+			created.setResponses([
+				(context) => {
+					requestMessages = providerMessages(context);
+					return fauxAssistantMessage("recovered continuation");
+				},
+			]);
 
 			await created.session.retry();
 
 			const leaf = created.sessionManager.getLeafEntry();
 			expect(leaf).toMatchObject({ type: "message", parentId: requestId, message: { role: "assistant" } });
-			expect(leaf?.id).not.toBe(failureId);
 			expect(getUserTexts(created)).toEqual(["original request"]);
-			expect(getAssistantTexts(created)).toEqual(["recovered"]);
-			const failure = created.sessionManager.getEntry(failureId);
-			expect(failure).toMatchObject({ type: "message", parentId: requestId, message: { stopReason } });
-			expect(created.sessionManager.getChildren(requestId).map((entry) => entry.id)).toEqual(
-				expect.arrayContaining([failureId, leaf?.id]),
-			);
+			expect(getAssistantTexts(created)).toEqual(["recovered continuation"]);
+			expect(requestMessages.map((message) => message.role)).toEqual(["user", "user"]);
+			expect(requestMessages.at(-1)).toMatchObject({
+				role: "user",
+				content: [{ type: "text", text: createManualRetryRecoveryCue("safe partial") }],
+			});
+			expect(created.sessionManager.getEntries()).toHaveLength(3);
+			expect(created.sessionManager.getEntry(failureId)).toMatchObject({
+				type: "message",
+				parentId: requestId,
+				message: { stopReason },
+			});
 		},
 	);
+
+	it("closes an interrupted tool call with an unknown result without replaying it", async () => {
+		let executions = 0;
+		const tool: AgentTool = {
+			name: "side_effect",
+			label: "Side effect",
+			description: "Must not run during retry",
+			parameters: Type.Object({}),
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "executed" }], details: undefined };
+			},
+		};
+		const created = await createHarness({ tools: [tool], settings: { retry: { enabled: false } } });
+		harnesses.push(created);
+		setBranch(created, [
+			userMessage("attempt side effect"),
+			fauxAssistantMessage([fauxToolCall("side_effect", {}, { id: "interrupted-call" })], {
+				stopReason: "error",
+				errorMessage: "network failed",
+			}),
+		]);
+		let seenRecovery = false;
+		created.setResponses([
+			(context) => {
+				const messages = providerMessages(context);
+				seenRecovery =
+					messages.some((message) => message.role === "assistant" && message.stopReason === "toolUse") &&
+					messages.some(
+						(message) =>
+							message.role === "toolResult" &&
+							message.toolCallId === "interrupted-call" &&
+							message.isError === true,
+					);
+				return fauxAssistantMessage("continued safely");
+			},
+		]);
+
+		await created.session.retry();
+
+		expect(executions).toBe(0);
+		expect(seenRecovery).toBe(true);
+		expect(getAssistantTexts(created)).toEqual(["continued safely"]);
+		expect(getUserTexts(created)).toEqual(["attempt side effect"]);
+	});
 
 	it("continues after a complete tool result without executing a tool", async () => {
 		let executions = 0;
@@ -186,6 +243,27 @@ describe("manual /retry continuation", () => {
 		expect(results[1]).toMatchObject({ toolCallId: "call-2", isError: true });
 	});
 
+	it("creates a sibling when retrying an interrupted assistant selected through /tree", async () => {
+		const created = await harness();
+		const [userId, failureId] = setBranch(created, [
+			userMessage("tree retry"),
+			fauxAssistantMessage("partial", { stopReason: "aborted" }),
+			userMessage("later branch"),
+			fauxAssistantMessage("later answer"),
+		]);
+		await created.session.navigateTree(failureId!);
+		created.setResponses([fauxAssistantMessage("recovered sibling")]);
+
+		await created.session.retry();
+
+		const leaf = created.sessionManager.getLeafEntry();
+		expect(leaf).toMatchObject({ parentId: userId, message: { role: "assistant" } });
+		expect(getAssistantTexts(created)).toEqual(["recovered sibling"]);
+		expect(created.sessionManager.getChildren(userId!).map((entry) => entry.id)).toEqual(
+			expect.arrayContaining([failureId, leaf?.id]),
+		);
+	});
+
 	it("continues from a /tree-selected tool protocol node", async () => {
 		const created = await harness();
 		const [, toolCallId] = setBranch(created, [
@@ -243,9 +321,7 @@ describe("manual /retry continuation", () => {
 		expect(reopened.getLeafId()).toBe(newLeafId);
 		expect(reopened.getEntry(failureId)).toMatchObject({ parentId: userId, message: { stopReason: "error" } });
 		expect(reopened.getEntry(newLeafId!)).toMatchObject({ parentId: userId, message: { stopReason: "stop" } });
-		expect(reopened.getChildren(userId).map((entry) => entry.id)).toEqual(
-			expect.arrayContaining([failureId, newLeafId]),
-		);
+		expect(reopened.getChildren(userId).map((entry) => entry.id)).toEqual([failureId, newLeafId]);
 	});
 
 	it.each([
@@ -274,13 +350,40 @@ describe("manual /retry continuation", () => {
 		expect(created.sessionManager.getEntries()).toEqual(beforeEntries);
 	});
 
-	it("refuses an ordinary completed assistant with an actionable Nothing to continue error", async () => {
+	it.each([
+		["stop", /Assistant EOF.*Send a new message/i],
+		["length", /Assistant EOF.*length-continuation command/i],
+	] as const)("refuses deliberate assistant %s with novice-facing guidance", async (stopReason, message) => {
 		const created = await harness();
-		setBranch(created, [userMessage("done"), fauxAssistantMessage("complete")]);
+		setBranch(created, [userMessage("done"), fauxAssistantMessage("complete", { stopReason })]);
 		created.setResponses([fauxAssistantMessage("must not run")]);
 
-		await expect(created.session.retry()).rejects.toThrow(/Nothing to continue/);
+		await expect(created.session.retry()).rejects.toThrow(message);
 		expect(created.faux.state.callCount).toBe(0);
+	});
+
+	it("ignores trailing plugin output without persisting the internal recovery cue", async () => {
+		const created = await createHarness({
+			settings: { retry: { enabled: false } },
+			sessionManagerFactory: (tempDir) =>
+				SessionManager.create(tempDir, tempDir, { id: "manual-retry-trailing-plugin" }),
+		});
+		harnesses.push(created);
+		setBranch(created, [
+			userMessage("retry once"),
+			fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "network failed" }),
+		]);
+		created.sessionManager.appendCustomMessageEntry("notice", "trailing plugin output", true);
+		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
+		created.setResponses([fauxAssistantMessage("continued")]);
+
+		await created.session.retry();
+
+		expect(getAssistantTexts(created)).toEqual(["continued"]);
+		expect(getUserTexts(created)).toEqual(["retry once"]);
+		const persisted = readFileSync(created.sessionManager.getSessionFile()!, "utf8");
+		expect(persisted).not.toContain("manualRetryRecovery");
+		expect(persisted).not.toContain("The previous assistant response was interrupted");
 	});
 
 	it("rolls back when the provider throws before producing an assistant", async () => {

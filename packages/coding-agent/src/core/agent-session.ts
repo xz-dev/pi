@@ -95,7 +95,7 @@ import {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { planContinuation } from "./manual-retry.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import type { BashExecutionMessage, CustomMessage, ManualRetryRecoveryMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -277,7 +277,7 @@ export interface ExtensionBindings {
 
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
-	/** Whether to expand file-based prompt templates (default: true) */
+	/** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
 	expandPromptTemplates?: boolean;
 	/** Image attachments */
 	images?: ImageContent[];
@@ -360,7 +360,7 @@ export class AgentSession {
 				expectedSessionId: string;
 				expectedLeafId: string | null;
 				expectedGeneration: number;
-				branchFromId: string;
+				branchFromId: string | null;
 				recoveryMessages: Message[];
 				committed: boolean;
 				runFailedBeforeCommit: boolean;
@@ -1173,7 +1173,7 @@ export class AgentSession {
 		}
 	}
 
-	/** Normalize the active branch at the nearest safe boundary and continue it. */
+	/** Recover the latest interrupted response or continue from an explicit safe protocol boundary. */
 	async retry(): Promise<void> {
 		const continuationAnchorId = this._continuationAnchorId;
 		this._continuationAnchorId = undefined;
@@ -1212,6 +1212,14 @@ export class AgentSession {
 			selectedEntryId: continuationAnchorId,
 			recoveryTimestamp: Date.now(),
 		});
+		const recoveryCue: ManualRetryRecoveryMessage | undefined =
+			plan.kind === "interrupted_assistant"
+				? {
+						role: "manualRetryRecovery",
+						partialAssistantText: plan.partialAssistantText,
+						timestamp: Date.now(),
+					}
+				: undefined;
 		const previousMessages = this.agent.state.messages;
 		this._manualRetryActive = true;
 		this._isAgentRunActive = true;
@@ -1226,7 +1234,12 @@ export class AgentSession {
 			runFailedBeforeCommit: false,
 			runFailureMessage: undefined,
 		};
-		this.agent.state.messages = [...plan.contextMessages, ...plan.recoveryMessages];
+		this.agent.state.messages = [
+			...plan.contextMessages,
+			...(plan.providerRecoveryMessages ?? []),
+			...plan.recoveryMessages,
+			...(recoveryCue ? [recoveryCue] : []),
+		];
 		try {
 			await this.agent.continue();
 			if (this._manualRetryCommit.runFailureMessage) {
@@ -1631,7 +1644,7 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this.isStreaming) {
+		} else if (this.isStreaming && options?.triggerTurn !== false) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
@@ -1658,10 +1671,11 @@ export class AgentSession {
 	 *
 	 * @param content User message content (string or content array)
 	 * @param options.deliverAs Delivery mode when streaming: "steer" or "followUp"
+	 * @param options.expandPromptTemplates Whether to dispatch extension commands and expand skill commands and prompt templates. Default: false.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -1683,9 +1697,8 @@ export class AgentSession {
 			if (images.length === 0) images = undefined;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
 		await this.prompt(text, {
-			expandPromptTemplates: false,
+			expandPromptTemplates: options?.expandPromptTemplates ?? false,
 			streamingBehavior: options?.deliverAs,
 			images,
 			source: "extension",
@@ -3407,11 +3420,13 @@ export class AgentSession {
 	/**
 	 * Export session to HTML.
 	 * @param outputPath Optional output path (defaults to session directory)
+	 * @param options Optional export presentation settings
 	 * @returns Path to exported file
 	 */
-	async exportToHtml(outputPath?: string): Promise<string> {
-		const configuredThemeName = this.settingsManager.getTheme();
-		const themeName = configuredThemeName && getThemeByName(configuredThemeName) ? configuredThemeName : undefined;
+	async exportToHtml(outputPath?: string, options: { themeName?: string } = {}): Promise<string> {
+		const themeName = [options.themeName, this.settingsManager.getTheme()].find(
+			(candidate) => candidate !== undefined && getThemeByName(candidate) !== undefined,
+		);
 
 		// Create tool renderer if we have an extension runner (for custom tool HTML rendering)
 		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({

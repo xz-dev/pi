@@ -175,14 +175,6 @@ function configureSqliteDatabase(db: SqliteDatabase): void {
 	sql`PRAGMA busy_timeout=5000`.exec(db);
 }
 
-function timestampToText(timestamp: number): string {
-	return new Date(timestamp).toISOString();
-}
-
-function timestampFromText(timestamp: string): number {
-	return Date.parse(timestamp);
-}
-
 function entryRowFromCached(row: CachedBranchEntryRow): EntryRow {
 	return { ...row, seq: row.entry_seq, type: row.type as Entry["type"] };
 }
@@ -198,9 +190,7 @@ function readObjectPayload(row: EntryRow): Record<string, unknown> {
 function decodeEntry(row: EntryRow): Entry {
 	try {
 		const payload = readObjectPayload(row);
-		const timestamp = timestampFromText(row.timestamp);
-		if (!Number.isFinite(timestamp)) throw new Error(`Invalid timestamp ${row.timestamp}`);
-		const base = { id: row.id, seq: row.seq, parentId: row.parent_id, timestamp };
+		const base = { id: row.id, seq: row.seq, parentId: row.parent_id, timestamp: row.timestamp };
 		switch (row.type) {
 			case "message":
 				if (typeof payload.message !== "object" || payload.message === null) throw new Error("Missing message");
@@ -283,14 +273,12 @@ function recordOpKind(record: NewRecord): string | undefined {
 	return record.type === "operation_started" ? record.intent.kind : undefined;
 }
 
-function decodeRecord(row: { seq: number; timestamp: string; payload: string }): LaneRecord {
+function decodeRecord(row: { seq: number; timestamp: number; payload: string }): LaneRecord {
 	try {
-		const timestamp = timestampFromText(row.timestamp);
-		if (!Number.isFinite(timestamp)) throw new Error(`Invalid timestamp ${row.timestamp}`);
 		return {
 			...(JSON.parse(row.payload) as object),
 			seq: row.seq,
-			timestamp,
+			timestamp: row.timestamp,
 		} as LaneRecord;
 	} catch (error) {
 		throw new SessionError(
@@ -301,10 +289,15 @@ function decodeRecord(row: { seq: number; timestamp: string; payload: string }):
 	}
 }
 
-function validateCachedBranchRows(rows: readonly CachedBranchEntryRow[], query: BranchBounds): void {
-	if (rows.length === 0) return;
+function validateCachedBranchRows(rows: readonly CachedBranchEntryRow[], query: BranchBounds & EntryQuery): void {
+	if (rows.length === 0 || query.type !== undefined || query.customType !== undefined) return;
 	const path = [...rows].sort((left, right) => left.entry_seq - right.entry_seq);
-	if (query.stopAtId === undefined && query.stopAtType === undefined && path[0]?.parent_id !== null) {
+	const shouldIncludeRoot =
+		query.stopAtId === undefined &&
+		query.stopAtType === undefined &&
+		query.cursor === undefined &&
+		(query.order === "oldestFirst" || query.limit === undefined);
+	if (shouldIncludeRoot && path[0]?.parent_id !== null) {
 		throw new SessionError("invalid_entry", `Entry ${path[0]?.parent_id} not found`);
 	}
 	for (let index = 1; index < path.length; index++) {
@@ -471,7 +464,7 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 				id: committed.id,
 				parentId: committed.parentId,
 				type: committed.type,
-				timestamp: timestampToText(committed.timestamp),
+				timestamp: committed.timestamp,
 				payload: JSON.stringify(entryPayload(committed)),
 			});
 			setLaneLeaf(this.db, this.metadata.id, lane, committed.id);
@@ -509,7 +502,7 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 				runId: recordRunId(record),
 				type: record.type,
 				opKind: recordOpKind(record),
-				timestamp: timestampToText(committed.timestamp),
+				timestamp: committed.timestamp,
 				payload: JSON.stringify(record),
 			});
 			if (record.type === "operation_finished") {
@@ -527,7 +520,14 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 	}
 
 	async findEntries(query: EntryQuery = {}): Promise<Entry[]> {
-		const rows = readEntryRows(this.db, this.metadata.id, { order: query.order });
+		const sqlType = query.type ?? (query.customType === undefined ? undefined : "custom");
+		const sqlLimit = query.customType === undefined ? query.limit : undefined;
+		const rows = readEntryRows(this.db, this.metadata.id, {
+			cursor: query.cursor,
+			limit: sqlLimit,
+			order: query.order,
+			type: sqlType,
+		});
 		const entries = rows.map(decodeEntry).filter((entry) => matchesEntryQuery(entry, query));
 		return query.limit === undefined ? entries : entries.slice(0, query.limit);
 	}
@@ -567,33 +567,47 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 
 	async getLog(options: LogOptions = {}): Promise<LogItem[]> {
 		const afterSeq = options.afterSeq ?? 0;
-		const entryRows = readEntryRows(this.db, this.metadata.id, { afterSeq, order: "oldestFirst" });
-		const recordRows = readRecordRows(this.db, this.metadata.id, { afterSeq });
-		const laneRows = readLaneMoveRows(this.db, this.metadata.id, { afterSeq });
-		const factRows = readFactRows(this.db, this.metadata.id, { afterSeq });
+		const limit = options.limit;
+		const entryRows = readEntryRows(this.db, this.metadata.id, { afterSeq, order: "oldestFirst", limit });
+		const recordRows = readRecordRows(this.db, this.metadata.id, { afterSeq, order: "oldestFirst", limit });
+		const laneRows = readLaneMoveRows(this.db, this.metadata.id, { afterSeq, limit });
+		const factRows = readFactRows(this.db, this.metadata.id, { afterSeq, limit });
 
-		const log: LogItem[] = [
-			...entryRows.map((row) => ({ kind: "entry" as const, seq: row.seq, entry: decodeEntry(row) })),
-			...recordRows.map((row) => ({ kind: "record" as const, seq: row.seq, record: decodeRecord(row) })),
-			...laneRows.map((row) => ({ kind: "lane" as const, seq: row.seq, lane: row.lane, leafId: row.leaf_id })),
-			...factRows.map((row) => {
-				if (row.kind === "name")
+		const logRows: { seq: number; decode: () => LogItem }[] = [
+			...entryRows.map((row) => ({
+				seq: row.seq,
+				decode: () => ({ kind: "entry" as const, seq: row.seq, entry: decodeEntry(row) }),
+			})),
+			...recordRows.map((row) => ({
+				seq: row.seq,
+				decode: () => ({ kind: "record" as const, seq: row.seq, record: decodeRecord(row) }),
+			})),
+			...laneRows.map((row) => ({
+				seq: row.seq,
+				decode: () => ({ kind: "lane" as const, seq: row.seq, lane: row.lane, leafId: row.leaf_id }),
+			})),
+			...factRows.map((row) => ({
+				seq: row.seq,
+				decode: () => {
+					if (row.kind === "name")
+						return {
+							kind: "fact" as const,
+							seq: row.seq,
+							fact: "name" as const,
+							name: row.value === null ? undefined : (JSON.parse(row.value) as string),
+						};
 					return {
 						kind: "fact" as const,
 						seq: row.seq,
-						fact: "name" as const,
-						name: JSON.parse(row.value ?? "null") as string,
+						fact: "label" as const,
+						targetId: row.key ?? "",
+						label: row.value === null ? undefined : (JSON.parse(row.value) as string),
 					};
-				return {
-					kind: "fact" as const,
-					seq: row.seq,
-					fact: "label" as const,
-					targetId: row.key ?? "",
-					label: row.value === null ? undefined : (JSON.parse(row.value) as string),
-				};
-			}),
+				},
+			})),
 		].sort((left, right) => left.seq - right.seq);
-		return options.limit === undefined ? log : log.slice(0, options.limit);
+		const selectedRows = options.limit === undefined ? logRows : logRows.slice(0, options.limit);
+		return selectedRows.map((row) => row.decode());
 	}
 
 	async getName(): Promise<string | undefined> {
@@ -601,10 +615,10 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 		return row?.value === undefined || row.value === null ? undefined : (JSON.parse(row.value) as string);
 	}
 
-	async setName(name: string): Promise<void> {
+	async setName(name: string | undefined): Promise<void> {
 		return this.enqueueWrite(() => {
 			const seq = getNextSequence(this.db, this.metadata.id);
-			appendFact(this.db, this.metadata.id, seq, "name", null, JSON.stringify(name));
+			appendFact(this.db, this.metadata.id, seq, "name", null, name === undefined ? null : JSON.stringify(name));
 			advanceSequence(this.db, this.metadata.id, seq);
 		});
 	}
@@ -713,7 +727,7 @@ export class SqliteSessionRepository
 			const lease = db.transaction(() => {
 				insertSessionRow(db, {
 					id,
-					createdAt: timestampToText(createdAt),
+					createdAt,
 					cwd: options.cwd,
 					parentSessionId: options.parentSessionId,
 					metadata: options.metadata,
@@ -844,7 +858,7 @@ export class SqliteSessionRepository
 				lease = db.transaction(() => {
 					insertSessionRow(db, {
 						id,
-						createdAt: timestampToText(createdAt),
+						createdAt,
 						cwd: options.cwd,
 						parentSessionId: options.parentSessionId ?? source.id,
 						metadata,
