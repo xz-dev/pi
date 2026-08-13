@@ -248,7 +248,7 @@ jobs:
               ),
               (
                   'import { planContinuation } from "./manual-retry.ts";\n'
-                  'import type { BashExecutionMessage, CustomMessage } from "./messages.ts";\n',
+                  'import type { BashExecutionMessage, CustomMessage, ManualRetryRecoveryMessage } from "./messages.ts";\n',
                   'import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";\n',
               ),
               (
