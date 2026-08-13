@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { delimiter, join } from "path";
@@ -144,6 +145,49 @@ function createFakeBunScript(bunBin: string): string {
 	const escapedBunBin = bunBin.replaceAll("'", "'\\''");
 	return `#!/bin/sh\nif [ "$1" = "pm" ] && [ "$2" = "bin" ] && [ "$3" = "-g" ]; then\n\tprintf '%s\\n' '${escapedBunBin}'\n\texit 0\nfi\nexit 1\n`;
 }
+
+describe("package config", () => {
+	test("keeps the package version separate from the changelog baseline", () => {
+		const temp = mkdtempSync(join(tmpdir(), "pi-config-version-"));
+		const packageDir = join(temp, "package");
+		mkdirSync(packageDir, { recursive: true });
+		tempDir = temp;
+		writeFileSync(
+			join(packageDir, "package.json"),
+			`${JSON.stringify(
+				{
+					name: "@xz-dev/pi-coding-agent",
+					version: "0.80.6-xz.29.1.g4dea8cc9",
+					piConfig: { changelogVersion: "0.80.6" },
+				},
+				undefined,
+				"\t",
+			)}\n`,
+		);
+
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--input-type=module",
+				"--eval",
+				`import { CHANGELOG_VERSION, VERSION } from ${JSON.stringify(new URL("../src/config.ts", import.meta.url).href)}; console.log(JSON.stringify({ VERSION, CHANGELOG_VERSION }));`,
+			],
+			{
+				encoding: "utf8",
+				env: {
+					...process.env,
+					PI_PACKAGE_DIR: packageDir,
+				},
+			},
+		);
+
+		expect(result.status, result.stderr).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			VERSION: "0.80.6-xz.29.1.g4dea8cc9",
+			CHANGELOG_VERSION: "0.80.6",
+		});
+	});
+});
 
 describe("detectInstallMethod", () => {
 	test("detects pnpm from Windows .pnpm install paths", () => {
