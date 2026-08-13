@@ -28,6 +28,9 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - Label slow extension-hook reminders by synchronous or asynchronous execution while preserving historical unlabeled entries.
   - Use case: Tell whether a visible slow-hook reminder came from synchronous or asynchronous extension work.
   - Patch branch: [`patch/slow-hook-execution-kind`](https://github.com/xz-dev/pi/tree/patch/slow-hook-execution-kind)
+- Expose public `pi.spliceEntry(entryId)` so an extension can delete one non-root session-tree node and reparent its children, preserving descendants.
+  - Use case: Remove a hidden watchdog decision node from session history without deleting later conversation descendants.
+  - Patch branch: [`patch/session-tree-splice`](https://github.com/xz-dev/pi/tree/patch/session-tree-splice)
 
 ### Fixes
 
