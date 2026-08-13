@@ -651,6 +651,9 @@ export class Agent {
 				this.runTerminalization.agentEndEmitted = true;
 				this._state.streamingMessage = undefined;
 				break;
+
+			case "run_failure":
+				break;
 		}
 
 		const signal = this.activeRun?.abortController.signal;
