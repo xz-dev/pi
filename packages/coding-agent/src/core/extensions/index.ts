@@ -144,6 +144,7 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
+	SlowExtensionHookEntry,
 	TerminalInputHandler,
 	// Events - Tool
 	ToolCallEvent,
