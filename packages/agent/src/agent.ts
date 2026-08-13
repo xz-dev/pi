@@ -547,6 +547,7 @@ export class Agent {
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
+		await this.processEvents({ type: "run_failure", message: failureMessage });
 
 		if (!aborted) {
 			await this.processEvents({ type: "message_start", message: failureMessage });
