@@ -283,8 +283,8 @@ jobs:
                       + 'import {\n'
                       + '\ttype BashExecutionMessage,\n'
                       + '\ttype CustomMessage,\n'
-                      + '\ttype ManualRetryRecoveryMessage,\n'
                       + '\tconvertToLlm,\n'
+                      + '\ttype ManualRetryRecoveryMessage,\n'
                       + '} from "./messages.ts";\n'
                   )
               return ours + theirs
@@ -342,8 +342,8 @@ jobs:
               'import {\n'
               '\ttype BashExecutionMessage,\n'
               '\ttype CustomMessage,\n'
-              '\ttype ManualRetryRecoveryMessage,\n'
               '\tconvertToLlm,\n'
+              '\ttype ManualRetryRecoveryMessage,\n'
               '} from "./messages.ts";\n'
           )
           if text.count(old) != 1:
