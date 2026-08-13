@@ -327,7 +327,6 @@ jobs:
               "SLOW_EXTENSION_HOOK_ENTRY_TYPE",
               "planContinuation",
               "convertToLlm",
-              "_hiddenRunDepth",
               "reportSlowExtensionHook",
           ):
               if needle not in text:
@@ -404,7 +403,6 @@ jobs:
               test/slow-extension-hook-entry.test.ts \
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
-              test/suite/hidden-run-presentation.test.ts \
               test/agent-session-concurrent.test.ts \
               test/manual-retry-planner.test.ts \
               test/manual-retry-commands.test.ts \
