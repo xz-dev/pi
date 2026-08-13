@@ -14,25 +14,34 @@ It tracks upstream `main` with a minimal downstream patch stack.
 ### Features
 
 - Continue from the nearest protocol-safe conversation boundary with `/retry` or RPC `retry`, preserving superseded history as an append-only sibling branch, retaining completed tool results, and synthesizing explicit unknown-outcome errors only for missing results without replaying old tool calls.
+  - Use case: Resume after Pi or its provider was interrupted, without replaying completed tool calls.
   - Patch branch: [`patch/manual-retry`](https://github.com/xz-dev/pi/tree/patch/manual-retry)
 - Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
+  - Use case: Keep a skill available to `/skill:<name>` while preventing automatic model invocation.
   - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
 - Allow `settings.retry.nonRetryableErrorPatterns` to fail-fast on gateway-specific terminal quota/limit error messages without expanding the built-in retry classifier.
+  - Use case: Stop retrying when a gateway returns a known terminal quota or limit message.
   - Patch branch: [`patch/retry-non-retryable-patterns`](https://github.com/xz-dev/pi/tree/patch/retry-non-retryable-patterns)
 - Record blocking extension startup and shutdown operations in a private lifecycle JSONL, and persist visible non-model reminders for individual awaited extension hooks that exceed the configurable threshold.
+  - Use case: Diagnose startup/shutdown or slow extension-hook stalls without adding diagnostics to model context.
   - Patch branch: [`patch/shutdown-lifecycle-log`](https://github.com/xz-dev/pi/tree/patch/shutdown-lifecycle-log)
 - Label slow extension-hook reminders by synchronous or asynchronous execution while preserving historical unlabeled entries.
+  - Use case: Tell whether a visible slow-hook reminder came from synchronous or asynchronous extension work.
   - Patch branch: [`patch/slow-hook-execution-kind`](https://github.com/xz-dev/pi/tree/patch/slow-hook-execution-kind)
 
 ### Fixes
 
 - Wait for extension-provider registration refreshes before startup resolves configured models, while preserving synchronous registration and caller-owned cancellation.
+  - Use case: Start with models an extension registered asynchronously instead of resolving a stale catalog.
   - Patch branch: [`patch/model-startup-refresh-barrier`](https://github.com/xz-dev/pi/tree/patch/model-startup-refresh-barrier)
 - Rebind active and scoped sessions to refreshed same-ID model metadata so context percentages and automatic compaction use the current context window.
+  - Use case: Keep context percentages and compaction limits correct after a provider refreshes model metadata.
   - Patch branch: [`patch/model-refresh-session-rebind`](https://github.com/xz-dev/pi/tree/patch/model-refresh-session-rebind)
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
+  - Use case: Recover control when Esc is pressed during a hook, provider setup, stream, or listener that does not settle.
   - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
 - Keep content and hardware-cursor state in one synchronized terminal release so tmux cannot redraw centered overlays from an intermediate cursor position.
+  - Use case: Prevent tmux from redrawing overlays from an intermediate cursor position.
   - Patch branch: [`patch/tui-synchronized-cursor-fleet`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor-fleet)
 
 The integrated Esc and manual-retry patches both extend the Agent failure lifecycle. Their independent branches remain directly reviewable; [`tmp/patch/esc-manual-retry-compat`](https://github.com/xz-dev/pi/tree/tmp/patch/esc-manual-retry-compat) supplies only the downstream combined `handleRunFailure()` resolution and is merged immediately after them.
@@ -49,6 +58,7 @@ These branches still exist but are not squash-merged into rebuilt `main` until t
 ### Maintenance
 
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
+  - Use case: Keep downstream prerelease display and changelog lookup correct when package and release versions differ.
   - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
 
 ### Unsupported
