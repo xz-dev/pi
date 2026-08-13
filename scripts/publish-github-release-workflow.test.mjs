@@ -277,7 +277,7 @@ test("published Releases update the isolated Scoop bucket branch", () => {
   const publishIndex = steps.findIndex((step) => step.name === "Publish immutable GitHub Release");
   const scoopIndex = steps.findIndex((step) => step.name === "Update Scoop bucket branch");
   assert.ok(publishIndex >= 0 && scoopIndex > publishIndex);
-  assert.match(steps[scoopIndex].run, /scripts\/publish-scoop-bucket\.sh/);
+  assert.match(steps[scoopIndex].run, /bash scripts\/publish-scoop-bucket\.sh/);
   assert.deepEqual(steps[scoopIndex].env, { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" });
   const publisher = readFileSync(join(ROOT, "scripts", "publish-scoop-bucket.sh"), "utf8");
   assert.match(publisher, /ls-remote --exit-code --heads origin scoop/);
