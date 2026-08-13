@@ -405,8 +405,7 @@ jobs:
           git commit -m "merge patch/slow-hook-execution-kind branch"
 
           if ! git merge --squash origin/patch/session-tree-splice; then
-            echo '::error::Failed to apply session-tree splice'
-            exit 1
+            scripts/resolve-session-tree-splice-conflicts.sh
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying session-tree splice'
