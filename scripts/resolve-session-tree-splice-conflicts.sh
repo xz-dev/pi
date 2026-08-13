@@ -16,7 +16,7 @@ for name,(old,new) in replacements.items():
  p.write_text(s.replace(old,new,1))
 p=Path('packages/coding-agent/test/suite/harness.ts'); s=p.read_text()
 a='<<<<<<< HEAD\n\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n=======\n\tpersist?: boolean;\n>>>>>>> origin/patch/session-tree-splice\n'; b='\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n\tpersist?: boolean;\n'
-c='<<<<<<< HEAD\n\tconst sessionManager = options.sessionManagerFactory?.(tempDir) ?? SessionManager.inMemory();\n=======\n\tconst sessionManager = options.persist\n\t\t? SessionManager.create(tempDir, join(tempDir, "sessions"))\n\t\t: SessionManager.inMemory();\n>>>>>>> origin/patch/session-tree-splice\n'; d='\tconst sessionManager =\n\t\toptions.sessionManagerFactory?.(tempDir) ??\n\t\t(options.persist\n\t\t\t? SessionManager.create(tempDir, join(tempDir, "sessions"))\n\t\t\t: SessionManager.inMemory());\n'
+c='<<<<<<< HEAD\n\tconst sessionManager = options.sessionManagerFactory?.(tempDir) ?? SessionManager.inMemory();\n=======\n\tconst sessionManager = options.persist\n\t\t? SessionManager.create(tempDir, join(tempDir, "sessions"))\n\t\t: SessionManager.inMemory();\n>>>>>>> origin/patch/session-tree-splice\n'; d='\tconst sessionManager =\n\t\toptions.sessionManagerFactory?.(tempDir) ??\n\t\t(options.persist ? SessionManager.create(tempDir, join(tempDir, "sessions")) : SessionManager.inMemory());\n'
 if s.count(a)!=1 or s.count(c)!=1: raise SystemExit('missing/ambiguous session-tree harness conflict')
 p.write_text(s.replace(a,b,1).replace(c,d,1))
 PY
@@ -41,7 +41,7 @@ from pathlib import Path
 path = Path("packages/coding-agent/test/suite/session-tree-splice.test.ts")
 text = path.read_text()
 old = '''\t\texpect(\n\t\t\treopened.getEntries().map((entry) => (entry.type === "message" ? entry.message.role : entry.type)),\n\t\t).toEqual(["user"]);\n\t\texpect(reopened.getLeafId()).toBe(reopened.getEntries()[0]?.id);\n'''
-new = '''\t\tconst reopenedEntries = reopened.getEntries();\n\t\texpect(\n\t\t\treopenedEntries\n\t\t\t\t.filter((entry) => entry.type === "message")\n\t\t\t\t.map((entry) => entry.message.role),\n\t\t).toEqual(["user"]);\n\t\texpect(reopened.getLeafId()).toBe(reopenedEntries.at(-1)?.id);\n'''
+new = '''\t\tconst reopenedEntries = reopened.getEntries();\n\t\texpect(reopenedEntries.filter((entry) => entry.type === "message").map((entry) => entry.message.role)).toEqual([\n\t\t\t"user",\n\t\t]);\n\t\texpect(reopened.getLeafId()).toBe(reopenedEntries.at(-1)?.id);\n'''
 if text.count(old) != 1:
     raise SystemExit("session-tree persisted assertion anchor is missing or ambiguous")
 path.write_text(text.replace(old, new, 1))
