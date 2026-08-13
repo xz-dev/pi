@@ -14,22 +14,25 @@ import {
 	type CredentialInfo,
 	type CredentialStore,
 	createModels,
+	type DeferredCancelOptions,
 	type DeferredFetchOptions,
 	type DeferredHandle,
 	lazyStream,
 	type Model,
 	type Models,
 	type ModelsApiStreamOptions,
-	type ModelsDeferredOptions,
+	type ModelsDeferredCancelOptions,
+	type ModelsDeferredFetchOptions,
 	ModelsError,
 	type ModelsRefreshOptions,
 	type ModelsRefreshResult,
+	type ModelsRequestTransforms,
 	type ModelsSimpleStreamOptions,
 	type ModelsStore,
-	type ModelsStreamTransforms,
 	type MutableModels,
 	type Provider,
 	type ProviderHeaders,
+	type ProviderRequestOptions,
 	type SimpleStreamOptions,
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
@@ -74,6 +77,8 @@ export interface CreateModelRuntimeOptions {
 	catalogBaseUrl?: string;
 	/** Optional caller cancellation for initial cache restoration and availability checks. */
 	signal?: AbortSignal;
+	/** Skip initial catalog and availability refresh. Static models remain available. */
+	refreshOnCreate?: boolean;
 }
 
 export interface ModelRuntimeAuthOverrides extends AuthOperationOptions {
@@ -202,7 +207,9 @@ export class ModelRuntime implements Models {
 				: controller.signal
 			: options.signal;
 		try {
-			await runtime.refresh({ allowNetwork: refreshFromNetwork, signal });
+			if (options.refreshOnCreate !== false) {
+				await runtime.refresh({ allowNetwork: refreshFromNetwork, signal });
+			}
 		} finally {
 			if (timeout) clearTimeout(timeout);
 		}
@@ -452,6 +459,10 @@ export class ModelRuntime implements Models {
 		return this.snapshot.auth.get(providerId)?.type === "oauth";
 	}
 
+	isUsingSubscription(providerId: string): boolean {
+		return this.isUsingOAuth(providerId) && this.models.getProvider(providerId)?.auth.oauth?.isSubscription === true;
+	}
+
 	hasConfiguredAuth(providerId: string): boolean {
 		return this.snapshot.configuredProviders.has(providerId);
 	}
@@ -559,10 +570,14 @@ export class ModelRuntime implements Models {
 		return check ? { configured: true, source: "environment", label: check.source } : { configured: false };
 	}
 
-	private async prepareRequest(
+	private async prepareRequest<TOptions extends ProviderRequestOptions & ModelsRequestTransforms>(
 		model: Model<Api>,
-		options: (StreamOptions & ModelsStreamTransforms) | undefined,
-	): Promise<{ provider: Provider; model: Model<Api>; options: StreamOptions }> {
+		options: TOptions | undefined,
+	): Promise<{
+		provider: Provider;
+		model: Model<Api>;
+		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions;
+	}> {
 		const provider = this.models.getProvider(model.provider);
 		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
 		const resolution = await this.getAuth(model, {
@@ -572,7 +587,8 @@ export class ModelRuntime implements Models {
 		});
 		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
 
-		const { transformHeaders, ...providerOptions } = options ?? {};
+		const { transformHeaders, ...rawProviderOptions } = options ?? {};
+		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions;
 		let headers = mergeHeaders(resolution.auth.headers, providerOptions.headers);
 		if (transformHeaders) headers = await transformHeaders(headers ?? {});
 		const env =
@@ -587,7 +603,7 @@ export class ModelRuntime implements Models {
 				apiKey: providerOptions.apiKey ?? resolution.auth.apiKey,
 				headers,
 				env,
-			},
+			} as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions,
 		};
 	}
 
@@ -599,7 +615,7 @@ export class ModelRuntime implements Models {
 		return lazyStream(model, async () => {
 			const prepared = await this.prepareRequest(
 				model,
-				options as (StreamOptions & ModelsStreamTransforms) | undefined,
+				options as (StreamOptions & ModelsRequestTransforms) | undefined,
 			);
 			return prepared.provider.stream(
 				prepared.model as Model<TApi>,
@@ -631,7 +647,7 @@ export class ModelRuntime implements Models {
 	async fetchDeferred(
 		model: Model<Api>,
 		handle: DeferredHandle,
-		options?: ModelsDeferredOptions,
+		options?: ModelsDeferredFetchOptions,
 	): Promise<AssistantMessage> {
 		return lazyStream(model, async () => {
 			const prepared = await this.prepareRequest(model, options);
@@ -642,12 +658,16 @@ export class ModelRuntime implements Models {
 		}).result();
 	}
 
-	async cancelDeferred(model: Model<Api>, handle: DeferredHandle, options?: ModelsDeferredOptions): Promise<void> {
+	async cancelDeferred(
+		model: Model<Api>,
+		handle: DeferredHandle,
+		options?: ModelsDeferredCancelOptions,
+	): Promise<void> {
 		const prepared = await this.prepareRequest(model, options);
 		if (!prepared.provider.cancelDeferred) {
 			throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
 		}
-		await prepared.provider.cancelDeferred(prepared.model, handle, prepared.options);
+		await prepared.provider.cancelDeferred(prepared.model, handle, prepared.options as DeferredCancelOptions);
 	}
 
 	login(providerId: string, type: AuthType, interaction: AuthInteraction): Promise<Credential> {
