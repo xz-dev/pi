@@ -1470,6 +1470,16 @@ pi.on("session_start", async (_event, ctx) => {
 });
 ```
 
+### pi.spliceEntry(entryId)
+
+Delete exactly one existing non-root session entry and reparent its direct children to that entry's parent. Descendants stay. If the deleted entry is the current leaf, the parent becomes the leaf. Persisted JSONL is rewritten so a later reload keeps the same topology, and the live agent context is rebuilt.
+
+Call this only while the agent is idle. It is a later best-effort rewrite, not a replacement for other session cleanup. Root, missing, and unsafe metadata references (label targets, compaction `firstKeptEntryId`, branch-summary `fromId`, missing parent) throw.
+
+```typescript
+pi.spliceEntry(entryId);
+```
+
 ### pi.setSessionName(name)
 
 Set the session display name (shown in session selector instead of first message).
