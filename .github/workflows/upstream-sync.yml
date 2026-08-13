@@ -278,7 +278,15 @@ jobs:
               if index == 0:
                   return ours + theirs.split("\n", 1)[1]
               if index == 1:
-                  return ours.splitlines(keepends=True)[0] + theirs
+                  return (
+                      ours.splitlines(keepends=True)[0]
+                      + 'import {\n'
+                      + '\ttype BashExecutionMessage,\n'
+                      + '\ttype CustomMessage,\n'
+                      + '\ttype ManualRetryRecoveryMessage,\n'
+                      + '\tconvertToLlm,\n'
+                      + '} from "./messages.ts";\n'
+                  )
               return ours + theirs
 
           def combine_settings(index: int, ours: str, theirs: str) -> str:
