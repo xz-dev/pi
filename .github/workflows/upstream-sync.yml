@@ -44,7 +44,6 @@ jobs:
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/responses-remote-compaction:refs/remotes/origin/patch/responses-remote-compaction \
-            +refs/heads/patch/hidden-internal-runs:refs/remotes/origin/patch/hidden-internal-runs \
             +refs/heads/patch/shutdown-lifecycle-log:refs/remotes/origin/patch/shutdown-lifecycle-log \
             +refs/heads/patch/slow-hook-execution-kind:refs/remotes/origin/patch/slow-hook-execution-kind
           git reset --hard upstream/main
@@ -290,101 +289,6 @@ jobs:
             exit 1
           fi
           git commit -m "merge patch/responses-remote-compaction branch"
-
-          if ! git merge --squash origin/patch/hidden-internal-runs; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/src/core/agent-session.ts ]]; then
-              printf '::error::Unexpected hidden-run squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            python3 - <<'PY_HIDDEN'
-          from pathlib import Path
-
-          path = Path("packages/coding-agent/src/core/agent-session.ts")
-          text = path.read_text()
-          blocks = [
-              (
-                  "<<<<<<< HEAD\n"
-                  "\tprivate _manualRetryActive = false;\n"
-                  "\tprivate _manualRetryCommit:\n"
-                  "\t\t| {\n"
-                  "\t\t\t\texpectedSessionId: string;\n"
-                  "\t\t\t\texpectedLeafId: string | null;\n"
-                  "\t\t\t\texpectedGeneration: number;\n"
-                  "\t\t\t\tbranchFromId: string;\n"
-                  "\t\t\t\trecoveryMessages: Message[];\n"
-                  "\t\t\t\tcommitted: boolean;\n"
-                  "\t\t\t\trunFailedBeforeCommit: boolean;\n"
-                  "\t\t\t\trunFailureMessage: string | undefined;\n"
-                  "\t\t  }\n"
-                  "\t\t| undefined;\n"
-                  "\tprivate _continuationAnchorId: string | undefined;\n"
-                  "=======\n"
-                  "\t/** Nonzero while one explicitly requested internal run has hidden presentation. */\n"
-                  "\tprivate _hiddenRunDepth = 0;\n"
-                  ">>>>>>> origin/patch/hidden-internal-runs\n",
-                  "\tprivate _manualRetryActive = false;\n"
-                  "\tprivate _manualRetryCommit:\n"
-                  "\t\t| {\n"
-                  "\t\t\t\texpectedSessionId: string;\n"
-                  "\t\t\t\texpectedLeafId: string | null;\n"
-                  "\t\t\t\texpectedGeneration: number;\n"
-                  "\t\t\t\tbranchFromId: string;\n"
-                  "\t\t\t\trecoveryMessages: Message[];\n"
-                  "\t\t\t\tcommitted: boolean;\n"
-                  "\t\t\t\trunFailedBeforeCommit: boolean;\n"
-                  "\t\t\t\trunFailureMessage: string | undefined;\n"
-                  "\t\t  }\n"
-                  "\t\t| undefined;\n"
-                  "\tprivate _continuationAnchorId: string | undefined;\n"
-                  "\t/** Nonzero while one explicitly requested internal run has hidden presentation. */\n"
-                  "\tprivate _hiddenRunDepth = 0;\n",
-              ),
-              (
-                  "<<<<<<< HEAD\n"
-                  "\tprivate async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {\n"
-                  "\t\tthis._continuationAnchorId = undefined;\n"
-                  "=======\n"
-                  "\tprivate async _runAgentPrompt(\n"
-                  "\t\tmessages: AgentMessage | AgentMessage[],\n"
-                  "\t\toptions?: Pick<SendMessageOptions, \"presentation\">,\n"
-                  "\t): Promise<void> {\n"
-                  ">>>>>>> origin/patch/hidden-internal-runs\n",
-                  "\tprivate async _runAgentPrompt(\n"
-                  "\t\tmessages: AgentMessage | AgentMessage[],\n"
-                  "\t\toptions?: Pick<SendMessageOptions, \"presentation\">,\n"
-                  "\t): Promise<void> {\n"
-                  "\t\tthis._continuationAnchorId = undefined;\n",
-              ),
-              (
-                  "<<<<<<< HEAD\n"
-                  "\t\toptions?: {\n"
-                  "\t\t\ttriggerTurn?: boolean;\n"
-                  "\t\t\tdeliverAs?: \"steer\" | \"followUp\" | \"nextTurn\";\n"
-                  "\t\t},\n"
-                  "=======\n"
-                  "\t\toptions?: SendMessageOptions,\n"
-                  ">>>>>>> origin/patch/hidden-internal-runs\n",
-                  "\t\toptions?: SendMessageOptions,\n",
-              ),
-          ]
-          for old, new in blocks:
-              if text.count(old) != 1:
-                  raise SystemExit("Hidden-run resolver: expected conflict block not found exactly once")
-              text = text.replace(old, new, 1)
-          if any(line.startswith(("<<<<<<<", "|||||||", "=======", ">>>>>>>")) for line in text.splitlines()):
-              raise SystemExit("Hidden-run resolver: conflict marker remains")
-          path.write_text(text)
-          PY_HIDDEN
-            git add packages/coding-agent/src/core/agent-session.ts
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying hidden-run conflict staging'
-            exit 1
-          fi
-          git commit -m "merge patch/hidden-internal-runs branch"
 
           if ! git merge --squash origin/patch/shutdown-lifecycle-log; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
