@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
@@ -425,6 +425,168 @@ describe("SessionManager append and tree traversal", () => {
 			expect((ctx.messages[2] as any).content[0].text).toBe("msg4-branch");
 		});
 	});
+});
+
+describe("spliceEntry", () => {
+	it("removes one entry and reparents children", () => {
+		const session = SessionManager.inMemory();
+		const id1 = session.appendMessage(userMsg("1"));
+		const id2 = session.appendMessage(assistantMsg("2"));
+		const id3 = session.appendMessage(userMsg("3"));
+		const id4 = session.appendMessage(assistantMsg("4"));
+
+		session.spliceEntry(id2);
+
+		const entries = session.getEntries();
+		expect(entries.map((e) => e.id)).toEqual([id1, id3, id4]);
+		expect(entries.find((e) => e.id === id3)?.parentId).toBe(id1);
+		expect(entries.find((e) => e.id === id4)?.parentId).toBe(id3);
+		expect(session.getLeafId()).toBe(id4);
+		expect(session.buildSessionContext().messages.map((m) => m.role)).toEqual(["user", "user", "assistant"]);
+	});
+
+	it("reparents every direct child and keeps descendants", () => {
+		const session = SessionManager.inMemory();
+		const id1 = session.appendMessage(userMsg("1"));
+		const id2 = session.appendMessage(assistantMsg("2"));
+		const abandonedId = session.appendMessage(userMsg("abandoned"));
+		session.branch(id2);
+		const id3 = session.appendMessage(userMsg("3"));
+		const id4 = session.appendMessage(assistantMsg("4"));
+
+		session.spliceEntry(id2);
+
+		expect(
+			session
+				.getChildren(id1)
+				.map((e) => e.id)
+				.sort(),
+		).toEqual([abandonedId, id3].sort());
+		expect(session.getEntry(abandonedId)?.parentId).toBe(id1);
+		expect(session.getEntry(id3)?.parentId).toBe(id1);
+		expect(session.getEntry(id4)?.parentId).toBe(id3);
+		expect(session.getLeafId()).toBe(id4);
+	});
+
+	it("moves the leaf to the parent when the deleted entry is the leaf", () => {
+		const session = SessionManager.inMemory();
+		const id1 = session.appendMessage(userMsg("1"));
+		const id2 = session.appendMessage(assistantMsg("2"));
+
+		session.spliceEntry(id2);
+
+		expect(session.getLeafId()).toBe(id1);
+		expect(session.getEntries().map((e) => e.id)).toEqual([id1]);
+	});
+
+	it("rejects the root, a missing id, and unsafe metadata references", () => {
+		const session = SessionManager.inMemory();
+		const rootId = session.appendMessage(userMsg("root"));
+		const keptId = session.appendMessage(assistantMsg("kept"));
+		const labeledId = session.appendMessage(userMsg("labeled"));
+		session.appendLabelChange(labeledId, "bookmark");
+		const compactedId = session.appendMessage(assistantMsg("compacted"));
+		session.appendCompaction("summary", compactedId, 10);
+		const fromId = session.appendMessage(userMsg("from"));
+		session.branchWithSummary(fromId, "left branch");
+
+		expect(() => session.spliceEntry(rootId)).toThrow(`Cannot splice root entry ${rootId}`);
+		expect(() => session.spliceEntry("missing")).toThrow("Entry missing not found");
+		expect(() => session.spliceEntry(labeledId)).toThrow(`Cannot splice entry ${labeledId}: referenced by label`);
+		expect(() => session.spliceEntry(compactedId)).toThrow(
+			`Cannot splice entry ${compactedId}: referenced by compaction`,
+		);
+		expect(() => session.spliceEntry(fromId)).toThrow(`Cannot splice entry ${fromId}: referenced by branch summary`);
+		expect(session.getEntry(keptId)).toBeDefined();
+	});
+
+	it("rejects an entry whose parent is missing", () => {
+		const tempDir = join(tmpdir(), `session-splice-orphan-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const file = join(tempDir, "orphan.jsonl");
+			writeFileSync(
+				file,
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "s1",
+					timestamp: "2025-01-01T00:00:00Z",
+					cwd: tempDir,
+				})}\n` +
+					`${JSON.stringify({
+						type: "message",
+						id: "root",
+						parentId: null,
+						timestamp: "2025-01-01T00:00:01Z",
+						message: { role: "user", content: "root", timestamp: 1 },
+					})}\n` +
+					`${JSON.stringify({
+						type: "message",
+						id: "orphan",
+						parentId: "gone",
+						timestamp: "2025-01-01T00:00:02Z",
+						message: { role: "assistant", content: [{ type: "text", text: "orphan" }], timestamp: 2 },
+					})}\n`,
+			);
+			const session = SessionManager.open(file, tempDir);
+			expect(() => session.spliceEntry("orphan")).toThrow("Cannot splice entry orphan: missing parent gone");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rewrites persisted JSONL so a reload keeps the spliced topology", () => {
+		const tempDir = join(tmpdir(), `session-splice-reload-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const session = SessionManager.create(tempDir, tempDir);
+			const id1 = session.appendMessage(userMsg("1"));
+			const id2 = session.appendMessage(assistantMsg("2"));
+			const id3 = session.appendMessage(userMsg("3"));
+			const id4 = session.appendMessage(assistantMsg("4"));
+			session.spliceEntry(id2);
+
+			const file = session.getSessionFile();
+			expect(file).toBeDefined();
+			const reopened = SessionManager.open(file!, tempDir);
+			expect(reopened.getEntries().map((e) => e.id)).toEqual([id1, id3, id4]);
+			expect(reopened.getEntry(id3)?.parentId).toBe(id1);
+			expect(reopened.getLeafId()).toBe(id4);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"keeps memory and file unchanged when durable replacement fails",
+		() => {
+			const tempDir = join(tmpdir(), `session-splice-write-fail-${Date.now()}`);
+			mkdirSync(tempDir, { recursive: true });
+			try {
+				const session = SessionManager.create(tempDir, tempDir);
+				const id1 = session.appendMessage(userMsg("1"));
+				const id2 = session.appendMessage(assistantMsg("2"));
+				const id3 = session.appendMessage(userMsg("3"));
+				const file = session.getSessionFile();
+				expect(file).toBeDefined();
+				const before = readFileSync(file!, "utf8");
+				chmodSync(tempDir, 0o500);
+				try {
+					expect(() => session.spliceEntry(id2)).toThrow();
+				} finally {
+					chmodSync(tempDir, 0o700);
+				}
+				expect(session.getEntries().map((e) => e.id)).toEqual([id1, id2, id3]);
+				expect(session.getLeafId()).toBe(id3);
+				expect(readFileSync(file!, "utf8")).toBe(before);
+				expect(existsSync(`${file}.tmp`)).toBe(false);
+			} finally {
+				chmodSync(tempDir, 0o700);
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 });
 
 describe("createBranchedSession", () => {
