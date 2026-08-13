@@ -99,12 +99,17 @@ export function finishLaneOperation(db: SqliteDatabase, sessionId: string, lane:
 		WHERE session_id = ${sessionId} AND lane = ${lane} AND open_operation_id = ${runId}`.run(db);
 }
 
-export function readLaneMoveRows(db: SqliteDatabase, sessionId: string, options: { afterSeq?: number } = {}) {
+export function readLaneMoveRows(
+	db: SqliteDatabase,
+	sessionId: string,
+	options: { afterSeq?: number; limit?: number } = {},
+) {
 	const after = options.afterSeq === undefined ? sql`` : sql` AND seq > ${options.afterSeq}`;
+	const limit = options.limit === undefined ? sql`` : sql` LIMIT ${options.limit}`;
 	return sql`SELECT session_id, seq, lane, leaf_id
 		FROM lane_moves
 		WHERE session_id = ${sessionId}${after}
-		ORDER BY seq`.all<LaneMoveRow>(db);
+		ORDER BY seq${limit}`.all<LaneMoveRow>(db);
 }
 
 export function deleteLaneRows(db: SqliteDatabase, sessionId: string) {
