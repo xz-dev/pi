@@ -280,9 +280,15 @@ test("published Releases update the isolated Scoop bucket branch", () => {
   assert.match(steps[scoopIndex].run, /bash scripts\/publish-scoop-bucket\.sh/);
   assert.deepEqual(steps[scoopIndex].env, { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" });
   const publisher = readFileSync(join(ROOT, "scripts", "publish-scoop-bucket.sh"), "utf8");
+  assert.match(publisher, /manifest_commit=.*require\(process\.argv\[1\]\)\.commit/);
+  assert.match(publisher, /current_main=.*ls-remote "\$remote" refs\/heads\/main/);
+  assert.match(publisher, /Scoop bucket update skipped for historical Release/);
   assert.match(publisher, /ls-remote --exit-code --heads origin scoop/);
   assert.match(publisher, /fetch -q --depth=1 origin scoop/);
   assert.match(publisher, /checkout -q --orphan scoop/);
+  assert.match(publisher, /find "\$work"[^\n]*! -name \.git[^\n]*rm -rf/);
+  assert.match(publisher, /git -C "\$work" add -A/);
+  assert.match(publisher, /git -C "\$work" config commit\.gpgsign false/);
   assert.match(publisher, /push origin HEAD:scoop/);
   assert.doesNotMatch(publisher, /--force/);
 });

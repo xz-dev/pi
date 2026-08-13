@@ -32,6 +32,7 @@ jobs:
           git fetch upstream main
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
+            +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
             +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
@@ -53,6 +54,11 @@ jobs:
             scripts/resolve-ci-squash-conflicts.sh
           fi
           git commit -m "merge ci branch"
+
+          git checkout origin/patch/contributor-approval -- .github/APPROVED_CONTRIBUTORS
+          test "$(git diff --cached --name-only)" = .github/APPROVED_CONTRIBUTORS
+          git diff --cached --check
+          git commit -m "merge patch/contributor-approval branch"
 
           git merge --squash origin/patch/model-startup-refresh-barrier
           git commit -m "merge patch/model-startup-refresh-barrier branch"
