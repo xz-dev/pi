@@ -70,6 +70,17 @@ chmod +x pi/pi pi/pi-native
 ./pi/pi --version
 ```
 
+### Windows Scoop
+
+```powershell
+$scoopRoot = (Resolve-Path (Join-Path (scoop prefix scoop) '..\..\..')).Path
+$bucket = Join-Path $scoopRoot 'buckets\xz-dev'
+git clone --branch scoop --single-branch https://github.com/xz-dev/pi.git $bucket
+scoop install xz-dev/pi
+```
+
+Scoop installs the AVX2-optimized x64 build, or the native arm64 build on Windows arm64. Update with `scoop update pi`. Use the manual method below for an x64 baseline build.
+
 ### Windows PowerShell
 
 ```powershell
