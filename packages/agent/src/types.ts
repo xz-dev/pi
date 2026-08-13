@@ -429,7 +429,6 @@ export type AgentEvent =
 	// Agent lifecycle
 	| { type: "agent_start" }
 	| { type: "agent_end"; messages: AgentMessage[] }
-	| { type: "run_failure"; message: AgentMessage }
 	// Turn lifecycle - a turn is one assistant response + any tool calls/results
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
@@ -438,6 +437,9 @@ export type AgentEvent =
 	// Only emitted for assistant messages during streaming
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
+	// Emitted only when Agent synthesizes a terminal assistant because the run
+	// failed before the loop could produce a terminal event sequence.
+	| { type: "run_failure"; message: AgentMessage }
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
