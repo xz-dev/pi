@@ -94,22 +94,31 @@ jobs:
           fi
           git commit -m "merge patch/manual-retry branch"
 
-          if ! git merge --squash origin/tmp/patch/esc-manual-retry-compat; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/agent/src/agent.ts ]]; then
-              printf '::error::Unexpected compatibility squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            git restore --source=origin/tmp/patch/esc-manual-retry-compat --staged --worktree -- packages/agent/src/agent.ts
-          fi
-          grep -Fq 'Agent is already processing. Wait for completion before resetting.' packages/agent/src/agent.ts
-          git diff --quiet origin/tmp/patch/esc-manual-retry-compat -- packages/agent/src/agent.ts
+          git merge --squash origin/tmp/patch/esc-manual-retry-compat
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying compatibility patch'
             exit 1
           fi
+          mapfile -t compatibility_paths < <(git diff --cached --name-only | sort)
+          expected_compatibility_paths=(
+            packages/agent/src/agent.ts
+            packages/agent/test/agent.test.ts
+          )
+          if [[ ${compatibility_paths[*]} != "${expected_compatibility_paths[*]}" ]]; then
+            printf '::error::Unexpected compatibility squash paths:'
+            printf ' %q' "${compatibility_paths[@]}"
+            printf '\n'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty compatibility patch integration'
+            exit 1
+          fi
+          grep -Fq 'Agent is already processing. Wait for completion before resetting.' packages/agent/src/agent.ts
+          test "$(grep -Fc '| { type: "run_failure"; message: AgentMessage }' packages/agent/src/types.ts)" -eq 1
+          grep -Fq 'lastRunMessage?.role === "toolResult"' packages/agent/src/agent.ts
+          grep -Fq 'synthesizes an aborted assistant after the last aborted tool result' packages/agent/test/agent.test.ts
+          git diff --cached --check
           git commit -m "merge tmp/patch/esc-manual-retry-compat branch"
 
           if ! git merge --squash origin/patch/changelog-prerelease; then
