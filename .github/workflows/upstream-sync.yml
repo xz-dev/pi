@@ -104,7 +104,8 @@ jobs:
             packages/agent/src/agent.ts
             packages/agent/test/agent.test.ts
           )
-          if [[ ${compatibility_paths[*]} != "${expected_compatibility_paths[*]}" ]]; then
+          if (( ${#compatibility_paths[@]} != ${#expected_compatibility_paths[@]} )) ||
+            [[ ${compatibility_paths[*]} != "${expected_compatibility_paths[*]}" ]]; then
             printf '::error::Unexpected compatibility squash paths:'
             printf ' %q' "${compatibility_paths[@]}"
             printf '\n'
