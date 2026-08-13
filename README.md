@@ -19,8 +19,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
   - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
 - Allow `settings.retry.nonRetryableErrorPatterns` to fail-fast on gateway-specific terminal quota/limit error messages without expanding the built-in retry classifier.
   - Patch branch: [`patch/retry-non-retryable-patterns`](https://github.com/xz-dev/pi/tree/patch/retry-non-retryable-patterns)
-- Let extensions run an immediate internal Agent turn with hidden presentation while retaining native provider hooks, retry, compaction, tools, usage, and extension lifecycle; public subscribers and persistence receive only redacted result metadata.
-  - Patch branch: [`patch/hidden-internal-runs`](https://github.com/xz-dev/pi/tree/patch/hidden-internal-runs)
 - Record blocking extension startup and shutdown operations in a private lifecycle JSONL, and persist visible non-model reminders for individual awaited extension hooks that exceed the configurable threshold.
   - Patch branch: [`patch/shutdown-lifecycle-log`](https://github.com/xz-dev/pi/tree/patch/shutdown-lifecycle-log)
 - Label slow extension-hook reminders by synchronous or asynchronous execution while preserving historical unlabeled entries.
