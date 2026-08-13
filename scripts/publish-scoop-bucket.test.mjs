@@ -16,14 +16,26 @@ test("creates and updates isolated Scoop bucket branch without force push", () =
 	const root = mkdtempSync(join(tmpdir(), "pi-scoop-publish-"));
 	const remote = join(root, "remote.git");
 	const fixture = join(root, "fixture");
+	const main = join(root, "main");
 	mkdirSync(fixture);
+	mkdirSync(main);
 	git(root, "init", "--bare", remote);
+	git(main, "init");
+	git(main, "config", "user.name", "test");
+	git(main, "config", "user.email", "test@example.invalid");
+	git(main, "config", "commit.gpgsign", "false");
+	writeFileSync(join(main, "README.md"), "test\n");
+	git(main, "add", "README.md");
+	git(main, "commit", "-m", "Initial");
+	const mainCommit = git(main, "rev-parse", "HEAD");
+	git(main, "push", remote, "HEAD:refs/heads/main");
 	const manifestPath = join(fixture, "release-manifest.json");
 	writeFileSync(
 		manifestPath,
 		`${JSON.stringify({
 			distributionVersion: VERSION,
 			tag: TAG,
+			commit: mainCommit,
 			bundles: {
 				"windows-x64-modern": { file: "pi-windows-x64-modern.zip", sha256: "a".repeat(64) },
 				"windows-arm64": { file: "pi-windows-arm64.zip", sha256: "b".repeat(64) },
@@ -39,11 +51,21 @@ test("creates and updates isolated Scoop bucket branch without force push", () =
 	try {
 		execFileSync("bash", [join(import.meta.dirname, "publish-scoop-bucket.sh"), manifestPath], { env });
 		const first = git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/scoop");
+		const files = git(root, `--git-dir=${remote}`, "ls-tree", "-r", "--name-only", "scoop").split("\n");
 		const manifest = JSON.parse(git(root, `--git-dir=${remote}`, "show", "scoop:bucket/pi.json"));
+		assert.deepEqual(files, ["bucket/pi.json"]);
 		assert.equal(manifest.version, VERSION);
 		assert.match(manifest.architecture["64bit"].url, /windows-x64-modern\.zip$/);
 		assert.match(manifest.architecture.arm64.url, /windows-arm64\.zip$/);
 
+		execFileSync("bash", [join(import.meta.dirname, "publish-scoop-bucket.sh"), manifestPath], { env });
+		assert.equal(git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/scoop"), first);
+
+		writeFileSync(join(main, "README.md"), "newer\n");
+		git(main, "add", "README.md");
+		git(main, "commit", "-m", "Newer main");
+		const newerMain = git(main, "rev-parse", "HEAD");
+		git(main, "push", remote, "HEAD:refs/heads/main");
 		execFileSync("bash", [join(import.meta.dirname, "publish-scoop-bucket.sh"), manifestPath], { env });
 		assert.equal(git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/scoop"), first);
 	} finally {
