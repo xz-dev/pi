@@ -328,8 +328,8 @@ jobs:
               'import {\n'
               '\ttype BashExecutionMessage,\n'
               '\ttype CustomMessage,\n'
-              '\ttype ManualRetryRecoveryMessage,\n'
               '\tconvertToLlm,\n'
+              '\ttype ManualRetryRecoveryMessage,\n'
               '} from "./messages.ts";\n'
               "=======\n"
               'import { emitSessionShutdownEvent, SLOW_EXTENSION_HOOK_ENTRY_TYPE } from "./extensions/runner.ts";\n'
