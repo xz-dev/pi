@@ -224,3 +224,6 @@ jobs:
       - name: Publish immutable GitHub Release
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
         run: node scripts/publish-github-release.mjs "${{ runner.temp }}/pi-github-release/release-manifest.json"
+      - name: Update Scoop bucket branch
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: scripts/publish-scoop-bucket.sh "${{ runner.temp }}/pi-github-release/release-manifest.json"

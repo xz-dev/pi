@@ -272,6 +272,21 @@ test("publisher stages a resumable immutable draft and rechecks main before fina
   assert.doesNotMatch(publisher, /clobber|DELETE/);
 });
 
+test("published Releases update the isolated Scoop bucket branch", () => {
+  const steps = workflow.jobs["publish-release"].steps;
+  const publishIndex = steps.findIndex((step) => step.name === "Publish immutable GitHub Release");
+  const scoopIndex = steps.findIndex((step) => step.name === "Update Scoop bucket branch");
+  assert.ok(publishIndex >= 0 && scoopIndex > publishIndex);
+  assert.match(steps[scoopIndex].run, /scripts\/publish-scoop-bucket\.sh/);
+  assert.deepEqual(steps[scoopIndex].env, { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" });
+  const publisher = readFileSync(join(ROOT, "scripts", "publish-scoop-bucket.sh"), "utf8");
+  assert.match(publisher, /ls-remote --exit-code --heads origin scoop/);
+  assert.match(publisher, /fetch -q --depth=1 origin scoop/);
+  assert.match(publisher, /checkout -q --orphan scoop/);
+  assert.match(publisher, /push origin HEAD:scoop/);
+  assert.doesNotMatch(publisher, /--force/);
+});
+
 test("upstream sync smoke packages and executes only the hydrated Linux host target", () => {
   const syncSteps = syncWorkflow.jobs["sync-main-with-squash-branches"].steps;
   assert.match(
