@@ -95,7 +95,7 @@ import {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { planContinuation } from "./manual-retry.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import type { BashExecutionMessage, CustomMessage, ManualRetryRecoveryMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -322,7 +322,7 @@ export class AgentSession {
 				expectedSessionId: string;
 				expectedLeafId: string | null;
 				expectedGeneration: number;
-				branchFromId: string;
+				branchFromId: string | null;
 				recoveryMessages: Message[];
 				committed: boolean;
 				runFailedBeforeCommit: boolean;
@@ -1124,7 +1124,7 @@ export class AgentSession {
 		}
 	}
 
-	/** Normalize the active branch at the nearest safe boundary and continue it. */
+	/** Recover the latest interrupted response or continue from an explicit safe protocol boundary. */
 	async retry(): Promise<void> {
 		const continuationAnchorId = this._continuationAnchorId;
 		this._continuationAnchorId = undefined;
@@ -1163,6 +1163,14 @@ export class AgentSession {
 			selectedEntryId: continuationAnchorId,
 			recoveryTimestamp: Date.now(),
 		});
+		const recoveryCue: ManualRetryRecoveryMessage | undefined =
+			plan.kind === "interrupted_assistant"
+				? {
+						role: "manualRetryRecovery",
+						partialAssistantText: plan.partialAssistantText,
+						timestamp: Date.now(),
+					}
+				: undefined;
 		const previousMessages = this.agent.state.messages;
 		this._manualRetryActive = true;
 		this._isAgentRunActive = true;
@@ -1177,7 +1185,12 @@ export class AgentSession {
 			runFailedBeforeCommit: false,
 			runFailureMessage: undefined,
 		};
-		this.agent.state.messages = [...plan.contextMessages, ...plan.recoveryMessages];
+		this.agent.state.messages = [
+			...plan.contextMessages,
+			...(plan.providerRecoveryMessages ?? []),
+			...plan.recoveryMessages,
+			...(recoveryCue ? [recoveryCue] : []),
+		];
 		try {
 			await this.agent.continue();
 			if (this._manualRetryCommit.runFailureMessage) {

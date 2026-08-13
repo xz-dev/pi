@@ -3556,6 +3556,10 @@ export class InteractiveMode {
 				// Tool results are rendered inline with tool calls, handled separately
 				break;
 			}
+			case "manualRetryRecovery": {
+				// Provider-only recovery cue is never rendered or persisted.
+				break;
+			}
 			default: {
 				const _exhaustive: never = message;
 			}

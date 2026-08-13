@@ -18,10 +18,13 @@ import {
 export const SYNTHETIC_TOOL_RESULT_TEXT =
 	"No usable result was recorded for this tool call. Whether it executed or produced side effects is unknown. Do not assume it is safe to repeat.";
 
-export type ContinuationPlanKind = "terminal_assistant" | "user_anchor" | "tool_batch";
+export type ContinuationPlanKind = "interrupted_assistant" | "user_anchor" | "tool_batch";
 
 export type ContinuationRejectionCode =
 	| "nothing_to_continue"
+	| "unsupported_tail"
+	| "assistant_eof"
+	| "assistant_length_eof"
 	| "orphan_tool_result"
 	| "duplicate_tool_call"
 	| "duplicate_tool_result"
@@ -51,8 +54,14 @@ export interface ContinuationPlan {
 	expectedLeafId: string;
 	/** Retained branch messages through the continuation boundary (no synthetics). */
 	contextMessages: AgentMessage[];
-	/** Protocol-valid synthetic tool results for missing calls, in original call order. */
+	/** Protocol-valid synthetic tool results that are safe to persist after an existing tool-call assistant. */
 	recoveryMessages: ToolResultMessage[];
+	/** Provider-only synthetic results for a normalized interrupted tool-call assistant. */
+	providerRecoveryMessages?: ToolResultMessage[];
+	/** A protocol-normalized copy of an interrupted assistant tool batch, when needed. */
+	recoveryAssistant?: AssistantMessage;
+	/** Safe interrupted assistant text preserved for the provider-only recovery request. */
+	partialAssistantText?: string;
 }
 
 export interface PlanContinuationInput {
@@ -88,6 +97,41 @@ function isNonblankString(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0;
 }
 
+function findLatestConversationEntryIndex(entries: readonly SessionEntry[]): number {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i]!;
+		if (entry.type === "custom" || entry.type === "custom_message") continue;
+		if (isMessageEntry(entry)) {
+			if (entry.message.role === "custom") continue;
+			if (
+				entry.message.role === "user" ||
+				entry.message.role === "assistant" ||
+				entry.message.role === "toolResult"
+			) {
+				return i;
+			}
+			reject(
+				"unsupported_tail",
+				`Cannot retry: the latest session message type ${entry.message.role} is not recoverable.`,
+			);
+		}
+		reject("unsupported_tail", `Cannot retry: the latest session entry type ${entry.type} is not recoverable.`);
+	}
+	reject("nothing_to_continue", "Nothing to continue: session contains no user, assistant, or toolResult message.");
+}
+
+function safePartialAssistantText(message: AssistantMessage): string | undefined {
+	if (!Array.isArray(message.content)) return undefined;
+	const text = message.content
+		.filter(
+			(block): block is { type: "text"; text: string } =>
+				isRecord(block) && block.type === "text" && typeof block.text === "string",
+		)
+		.map((block) => block.text)
+		.join("");
+	return isNonblankString(text) ? text : undefined;
+}
+
 function hasUsableUserContent(message: AgentMessage): boolean {
 	if (message.role !== "user") return false;
 	if (typeof message.content === "string") return isNonblankString(message.content);
@@ -121,18 +165,55 @@ function toolCallsOf(assistant: AssistantMessage): ToolCall[] {
 			calls.push(part as unknown as ToolCall);
 			continue;
 		}
-		if (part.type === "text" && typeof part.text === "string") {
-			continue;
-		}
-		if (part.type === "thinking" && typeof part.thinking === "string") {
-			continue;
-		}
+		if (part.type === "text" && typeof part.text === "string") continue;
+		if (part.type === "thinking" && typeof part.thinking === "string") continue;
 		reject("malformed_tool_call", `Assistant content contains an unsupported ${part.type} block.`);
 	}
 	if (calls.length > 0 && assistant.stopReason !== "toolUse") {
 		reject("malformed_tool_call", "Assistant tool calls require stopReason toolUse.");
 	}
 	return calls;
+}
+
+function inspectInterruptedAssistant(message: AssistantMessage): {
+	calls: ToolCall[];
+	malformed: boolean;
+} {
+	if (!Array.isArray(message.content)) return { calls: [], malformed: true };
+	const calls: ToolCall[] = [];
+	const seenCallIds = new Set<string>();
+	let malformed = false;
+	for (const part of message.content as unknown[]) {
+		if (!isRecord(part) || typeof part.type !== "string") {
+			malformed = true;
+			continue;
+		}
+		if (part.type === "text" && typeof part.text === "string") continue;
+		if (part.type === "thinking" && typeof part.thinking === "string") continue;
+		if (
+			part.type === "toolCall" &&
+			typeof part.id === "string" &&
+			part.id.trim().length > 0 &&
+			typeof part.name === "string" &&
+			part.name.trim().length > 0 &&
+			isRecord(part.arguments)
+		) {
+			if (seenCallIds.has(part.id)) {
+				malformed = true;
+				continue;
+			}
+			seenCallIds.add(part.id);
+			calls.push(part as unknown as ToolCall);
+			continue;
+		}
+		malformed = true;
+	}
+	return { calls, malformed };
+}
+
+function normalizedInterruptedAssistant(message: AssistantMessage, calls: ToolCall[]): AssistantMessage | undefined {
+	if (calls.length === 0) return undefined;
+	return { ...message, stopReason: "toolUse", errorMessage: undefined };
 }
 
 function createSyntheticToolResult(toolCallId: string, toolName: string, timestamp: number): ToolResultMessage {
@@ -296,27 +377,50 @@ function validateToolBatch(
 	};
 }
 
-function planTerminalAssistant(
+function planInterruptedAssistant(
 	entries: readonly SessionEntry[],
 	failedEntry: SessionMessageEntry,
 	expectedLeafId: string,
+	timestamp: number,
 ): ContinuationPlan {
 	const failedIndex = findEntryIndex(entries, failedEntry.id);
-	if (failedIndex === 0) {
-		reject("missing_anchor", "Terminal assistant has no parent entry to continue from.");
+	if (failedIndex === 0 || failedEntry.parentId === null) {
+		reject("missing_anchor", "Interrupted assistant has no parent entry to continue from.");
 	}
 
-	const anchor = entries[failedIndex - 1];
-	if (!anchor) {
-		reject("missing_anchor", "Terminal assistant has no parent entry to continue from.");
+	const failedAssistant = failedEntry.message as AssistantMessage;
+	const inspected = inspectInterruptedAssistant(failedAssistant);
+	const toolCalls = inspected.calls;
+	const partialAssistantText = safePartialAssistantText(failedAssistant);
+	if (inspected.malformed) {
+		reject("malformed_tool_call", "Interrupted assistant contains a partial or malformed tool call.");
+	}
+	if (toolCalls.length === 0) {
+		return {
+			kind: "interrupted_assistant",
+			anchorEntryId: failedEntry.parentId,
+			expectedLeafId,
+			contextMessages: contextThrough(entries, failedEntry.parentId),
+			recoveryMessages: [],
+			partialAssistantText,
+		};
 	}
 
+	// An interrupted assistant cannot be replayed with stopReason=error/aborted:
+	// providers reject tool calls on that assistant, and retry must never execute them.
+	const recoveryAssistant = normalizedInterruptedAssistant(failedAssistant, toolCalls);
+	if (!recoveryAssistant) {
+		reject("malformed_tool_call", "Interrupted assistant tool calls could not be normalized safely.");
+	}
 	return {
-		kind: "terminal_assistant",
-		anchorEntryId: anchor.id,
+		kind: "interrupted_assistant",
+		anchorEntryId: failedEntry.parentId,
 		expectedLeafId,
-		contextMessages: contextThrough(entries, anchor.id),
+		contextMessages: [...contextThrough(entries, failedEntry.parentId), recoveryAssistant],
 		recoveryMessages: [],
+		providerRecoveryMessages: toolCalls.map((call) => createSyntheticToolResult(call.id, call.name, timestamp)),
+		recoveryAssistant,
+		partialAssistantText,
 	};
 }
 
@@ -349,14 +453,14 @@ export function planContinuation(input: PlanContinuationInput): ContinuationPlan
 	}
 
 	const expectedLeafId = branchEntries[branchEntries.length - 1]!.id;
-	const focusId = input.selectedEntryId ?? expectedLeafId;
+	const focusId = input.selectedEntryId ?? branchEntries[findLatestConversationEntryIndex(branchEntries)]!.id;
 	const focusIndex = findEntryIndex(branchEntries, focusId);
 	const focusEntry = branchEntries[focusIndex]!;
 
 	if (!isMessageEntry(focusEntry)) {
 		reject(
 			"nothing_to_continue",
-			"Nothing to continue: selected entry is not a user, assistant, or toolResult message.",
+			`Nothing to continue: selected ${focusEntry.type} entry is not a user, assistant, or toolResult message.`,
 		);
 	}
 
@@ -378,7 +482,19 @@ export function planContinuation(input: PlanContinuationInput): ContinuationPlan
 
 	if (isAssistantMessage(focusMessage)) {
 		if (focusMessage.stopReason === "error" || focusMessage.stopReason === "aborted") {
-			return planTerminalAssistant(branchEntries, focusEntry, expectedLeafId);
+			return planInterruptedAssistant(branchEntries, focusEntry, expectedLeafId, now);
+		}
+		if (focusMessage.stopReason === "stop") {
+			reject(
+				"assistant_eof",
+				"Cannot retry: the previous AI response reached Assistant EOF. Send a new message if you want more detail.",
+			);
+		}
+		if (focusMessage.stopReason === "length") {
+			reject(
+				"assistant_length_eof",
+				"Cannot retry: the previous AI response reached Assistant EOF at its output limit. Use your length-continuation command or send a new message.",
+			);
 		}
 
 		if (toolCallsOf(focusMessage).length > 0) {

@@ -82,14 +82,14 @@ function expectRejection(code: string, run: () => void): void {
 
 describe("planContinuation", () => {
 	test.each(["error", "aborted"] as const)(
-		"classifies terminal assistant %s under the parent user anchor",
+		"classifies interrupted assistant %s while preserving safe partial text",
 		(stopReason) => {
 			const branch = [
 				userMessage("user-1", null, "retry me"),
 				assistantEntry(
 					"fail-1",
 					"user-1",
-					fauxAssistantMessage("failed", {
+					fauxAssistantMessage("safe partial", {
 						stopReason,
 						errorMessage: stopReason === "error" ? "boom" : undefined,
 					}),
@@ -98,15 +98,64 @@ describe("planContinuation", () => {
 
 			const plan = planContinuation({ branchEntries: branch, recoveryTimestamp: 123 });
 
-			expect(plan.kind).toBe("terminal_assistant");
+			expect(plan.kind).toBe("interrupted_assistant");
 			expect(plan.anchorEntryId).toBe("user-1");
 			expect(plan.expectedLeafId).toBe("fail-1");
 			expect(plan.recoveryMessages).toEqual([]);
-			expect(plan.contextMessages).toHaveLength(1);
-			expect(plan.contextMessages[0]).toMatchObject({ role: "user" });
-			expect(plan.contextMessages.some((message) => message.role === "assistant")).toBe(false);
+			expect(plan.partialAssistantText).toBe("safe partial");
+			expect(plan.contextMessages.map((message) => message.role)).toEqual(["user"]);
 		},
 	);
+
+	test("normalizes a complete interrupted tool call for provider recovery without persisting it", () => {
+		const branch = [
+			userMessage("user-1", null, "attempt tool"),
+			assistantEntry(
+				"fail-1",
+				"user-1",
+				fauxAssistantMessage([fauxToolCall("side_effect", {}, { id: "call-1" })], {
+					stopReason: "error",
+					errorMessage: "failed",
+				}),
+			),
+		];
+
+		const plan = planContinuation({ branchEntries: branch, recoveryTimestamp: 123 });
+
+		expect(plan.anchorEntryId).toBe("user-1");
+		expect(plan.contextMessages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(plan.contextMessages[1]).toMatchObject({ role: "assistant", stopReason: "toolUse" });
+		expect(plan.providerRecoveryMessages).toHaveLength(1);
+		expect(plan.providerRecoveryMessages?.[0]).toMatchObject({
+			role: "toolResult",
+			toolCallId: "call-1",
+			isError: true,
+		});
+		expect(plan.recoveryMessages).toEqual([]);
+	});
+
+	test.each([
+		[
+			"malformed tool suffix after text",
+			[
+				fauxAssistantMessage([{ type: "text", text: "safe text" }, { type: "toolCall", id: "call-2" } as never], {
+					stopReason: "aborted",
+				}),
+			],
+		],
+		[
+			"malformed tool suffix after a complete call",
+			[
+				fauxAssistantMessage(
+					[fauxToolCall("side_effect", {}, { id: "call-1" }), { type: "toolCall", id: "call-2" } as never],
+					{ stopReason: "aborted" },
+				),
+			],
+		],
+	] as const)("rejects interrupted assistant with $0", (_name, messages) => {
+		const branch = [userMessage("user-1", null, "bad"), assistantEntry("fail-1", "user-1", messages[0]!)];
+		expectRejection("malformed_tool_call", () => planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }));
+	});
 
 	test("classifies an explicit user anchor without duplicating context", () => {
 		const branch = [
@@ -239,12 +288,62 @@ describe("planContinuation", () => {
 		});
 	});
 
-	test("rejects a completed assistant with nothing_to_continue", () => {
+	test.each([
+		["stop", "assistant_eof"],
+		["length", "assistant_length_eof"],
+	] as const)("rejects deliberate assistant %s as Assistant EOF", (stopReason, code) => {
 		const branch = [
 			userMessage("user-1", null, "done"),
-			assistantEntry("ok-1", "user-1", fauxAssistantMessage("complete")),
+			assistantEntry("ok-1", "user-1", fauxAssistantMessage("complete", { stopReason })),
 		];
-		expectRejection("nothing_to_continue", () => planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }));
+		expectRejection(code, () => planContinuation({ branchEntries: branch, recoveryTimestamp: 123 }));
+	});
+
+	test("ignores trailing custom and plugin metadata when selecting the retry tail", () => {
+		const branch: SessionEntry[] = [
+			userMessage("user-1", null, "retry me"),
+			assistantEntry(
+				"fail-1",
+				"user-1",
+				fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "network failed" }),
+			),
+			{
+				type: "message",
+				id: "plugin-output",
+				parentId: "fail-1",
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "custom",
+					customType: "notice",
+					content: "trailing output",
+					display: true,
+					timestamp: Date.now(),
+				},
+			},
+			{
+				type: "custom_message",
+				id: "plugin-message",
+				parentId: "plugin-output",
+				timestamp: new Date().toISOString(),
+				customType: "notice",
+				content: "another trailing output",
+				display: true,
+			},
+			{
+				type: "custom",
+				id: "plugin-state",
+				parentId: "plugin-message",
+				timestamp: new Date().toISOString(),
+				customType: "state",
+				data: { trailing: true },
+			},
+		];
+
+		const plan = planContinuation({ branchEntries: branch, recoveryTimestamp: 123 });
+		expect(plan.kind).toBe("interrupted_assistant");
+		expect(plan.anchorEntryId).toBe("user-1");
+		expect(plan.expectedLeafId).toBe("plugin-state");
+		expect(plan.partialAssistantText).toBe("partial");
 	});
 
 	test("rejects an orphan tool result", () => {
@@ -381,7 +480,7 @@ describe("planContinuation", () => {
 		);
 	});
 
-	test("projects model-visible custom entries while ignoring plain metadata", () => {
+	test("preserves model-visible custom context before an interrupted assistant", () => {
 		const branch: SessionEntry[] = [
 			userMessage("user-1", null, "context"),
 			{
