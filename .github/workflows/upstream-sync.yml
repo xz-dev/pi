@@ -325,7 +325,12 @@ jobs:
               "<<<<<<< HEAD\n"
               'import { emitSessionShutdownEvent } from "./extensions/runner.ts";\n'
               'import { planContinuation } from "./manual-retry.ts";\n'
-              'import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";\n'
+              'import {\n'
+              '\ttype BashExecutionMessage,\n'
+              '\ttype CustomMessage,\n'
+              '\ttype ManualRetryRecoveryMessage,\n'
+              '\tconvertToLlm,\n'
+              '} from "./messages.ts";\n'
               "=======\n"
               'import { emitSessionShutdownEvent, SLOW_EXTENSION_HOOK_ENTRY_TYPE } from "./extensions/runner.ts";\n'
               'import type { BashExecutionMessage, CustomMessage } from "./messages.ts";\n'
