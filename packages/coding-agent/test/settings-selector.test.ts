@@ -14,6 +14,23 @@ describe("SettingsSelectorComponent", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
+	it("displays and cycles remote compaction", () => {
+		const onRemoteCompactionChange = vi.fn();
+		const config = {
+			remoteCompaction: true,
+			warnings: {},
+			availableThinkingLevels: [],
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = { onRemoteCompactionChange } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		for (const character of "Remote compaction") list.handleInput(character);
+		list.handleInput("\r");
+
+		expect(onRemoteCompactionChange).toHaveBeenCalledWith(false);
+	});
+
 	it("cycles through fullscreen settings", () => {
 		const onExitOutputChange = vi.fn();
 		const onScrollbarChange = vi.fn();
