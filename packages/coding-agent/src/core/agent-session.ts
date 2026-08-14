@@ -99,6 +99,7 @@ import {
 	type SessionBeforeTreeResult,
 	type SessionStartEvent,
 	type ShutdownHandler,
+	type SlowExtensionHookEntry,
 	type ToolDefinition,
 	type ToolExecutionEndEvent,
 	type ToolExecutionStartEvent,
@@ -109,7 +110,7 @@ import {
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
-import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { emitSessionShutdownEvent, SLOW_EXTENSION_HOOK_ENTRY_TYPE } from "./extensions/runner.ts";
 import { planContinuation } from "./manual-retry.ts";
 import {
 	type BashExecutionMessage,
@@ -2906,6 +2907,22 @@ export class AgentSession {
 		}));
 	}
 
+	private appendExtensionEntry(customType: string, data?: unknown): void {
+		const entryId = this.sessionManager.appendCustomEntry(customType, data);
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry) {
+			this._emit({ type: "entry_appended", entry });
+		}
+	}
+
+	private reportSlowExtensionHook(entry: SlowExtensionHookEntry): void {
+		try {
+			this.appendExtensionEntry(SLOW_EXTENSION_HOOK_ENTRY_TYPE, entry);
+		} catch {
+			// Diagnostics must never alter extension behavior.
+		}
+	}
+
 	private _bindExtensionCore(runner: ExtensionRunner): void {
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
@@ -2952,13 +2969,7 @@ export class AgentSession {
 						});
 					});
 				},
-				appendEntry: (customType, data) => {
-					const entryId = this.sessionManager.appendCustomEntry(customType, data);
-					const entry = this.sessionManager.getEntry(entryId);
-					if (entry) {
-						this._emit({ type: "entry_appended", entry });
-					}
-				},
+				appendEntry: (customType, data) => this.appendExtensionEntry(customType, data),
 				setSessionName: (name) => {
 					this.setSessionName(name);
 				},
@@ -3155,12 +3166,19 @@ export class AgentSession {
 			}
 		}
 
+		for (const entry of extensionsResult.pendingSlowHooks ?? []) {
+			this.reportSlowExtensionHook(entry);
+		}
+		extensionsResult.pendingSlowHooks = undefined;
+
 		this._extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
 			this._cwd,
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
+			() => this.settingsManager.getSlowHookThresholdMs(),
+			(entry) => this.reportSlowExtensionHook(entry),
 		);
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
