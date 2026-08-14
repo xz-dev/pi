@@ -377,6 +377,10 @@ jobs:
 
           session_path = Path("packages/coding-agent/src/core/session-manager.ts")
           session_text = session_path.read_text()
+          generation_method = "\tgetGeneration(): number {\n\t\treturn this.generation;\n\t}\n"
+          if session_text.count(generation_method) != 2:
+              raise SystemExit("Responses resolver: expected exactly two getGeneration methods before deduplication")
+          session_text = session_text.replace(generation_method, "", 1)
           generation_anchor = (
               "\tcreateBranchedSession(leafId: string): string | undefined {\n"
               "\t\tconst previousSessionFile = this.sessionFile;\n"

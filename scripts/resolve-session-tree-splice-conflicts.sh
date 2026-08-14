@@ -14,6 +14,13 @@ for name,(old,new) in replacements.items():
  p=Path(name); s=p.read_text();
  if s.count(old)!=1: raise SystemExit(f'missing/ambiguous session-tree conflict: {name}')
  p.write_text(s.replace(old,new,1))
+p=Path('packages/coding-agent/src/core/session-manager.ts'); s=p.read_text()
+splice_anchor='\tspliceEntry(entryId: string): void {\n\t\tconst entry = this.byId.get(entryId);\n'
+splice_replacement='\tspliceEntry(entryId: string): void {\n\t\tconst previousGeneration = this.generation;\n\t\tconst entry = this.byId.get(entryId);\n'
+splice_publish='\t\tthis.fileEntries = nextEntries;\n\t\tthis._buildIndex();\n\t\tthis.leafId = nextLeafId;\n'
+splice_publish_replacement='\t\tthis.fileEntries = nextEntries;\n\t\tthis._buildIndex();\n\t\tthis.leafId = nextLeafId;\n\t\tthis.generation = previousGeneration + 1;\n'
+if s.count(splice_anchor)!=1 or s.count(splice_publish)!=1: raise SystemExit('session-tree generation splice anchors are missing or ambiguous')
+p.write_text(s.replace(splice_anchor,splice_replacement,1).replace(splice_publish,splice_publish_replacement,1))
 p=Path('packages/coding-agent/test/suite/harness.ts'); s=p.read_text()
 a='<<<<<<< HEAD\n\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n=======\n\tpersist?: boolean;\n>>>>>>> origin/patch/session-tree-splice\n'; b='\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n\tpersist?: boolean;\n'
 c='<<<<<<< HEAD\n\tconst sessionManager = options.sessionManagerFactory?.(tempDir) ?? SessionManager.inMemory();\n=======\n\tconst sessionManager = options.persist\n\t\t? SessionManager.create(tempDir, join(tempDir, "sessions"))\n\t\t: SessionManager.inMemory();\n>>>>>>> origin/patch/session-tree-splice\n'; d='\tconst sessionManager =\n\t\toptions.sessionManagerFactory?.(tempDir) ??\n\t\t(options.persist ? SessionManager.create(tempDir, join(tempDir, "sessions")) : SessionManager.inMemory());\n'
@@ -22,6 +29,32 @@ p.write_text(s.replace(a,b,1).replace(c,d,1))
 PY
 git add "${expected[@]}"
 test -z "$(git diff --name-only --diff-filter=U)"
+
+python - <<'PY_GENERATION_TEST'
+from pathlib import Path
+path = Path("packages/coding-agent/test/session-manager/tree-traversal.test.ts")
+text = path.read_text()
+old = '''\t\tconst beforeMtime = statSync(sessionFile).mtimeMs;
+\t\tawait new Promise((resolve) => setTimeout(resolve, 20));
+
+\t\tsession.spliceEntry(id2);
+
+\t\tconst entries = session.getEntries();
+'''
+new = '''\t\tconst beforeMtime = statSync(sessionFile).mtimeMs;
+\t\tconst generationBeforeSplice = session.getGeneration();
+\t\tawait new Promise((resolve) => setTimeout(resolve, 20));
+
+\t\tsession.spliceEntry(id2);
+
+\t\texpect(session.getGeneration()).toBeGreaterThan(generationBeforeSplice);
+\t\tconst entries = session.getEntries();
+'''
+if text.count(old) != 1:
+    raise SystemExit("session-tree splice generation test anchor is missing or ambiguous")
+path.write_text(text.replace(old, new, 1))
+PY_GENERATION_TEST
+git add packages/coding-agent/test/session-manager/tree-traversal.test.ts
 
 python - <<'PY_FIXTURE'
 from pathlib import Path
