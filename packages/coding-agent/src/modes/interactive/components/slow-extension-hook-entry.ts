@@ -19,16 +19,12 @@ export function renderSlowExtensionHookEntry(entry: CustomEntry<unknown>): Text 
 		typeof data.extensionPath !== "string" ||
 		typeof data.handlerIndex !== "number" ||
 		typeof data.elapsedMs !== "number" ||
-		!Number.isFinite(data.elapsedMs)
+		!Number.isFinite(data.elapsedMs) ||
+		(data.executionKind !== undefined && data.executionKind !== "sync" && data.executionKind !== "async")
 	) {
 		return undefined;
 	}
-	return new Text(
-		theme.fg(
-			"warning",
-			`Slow extension hook: ${singleLine(data.event)} · ${singleLine(data.extensionPath)}#${data.handlerIndex} · ${Math.round(data.elapsedMs)} ms`,
-		),
-		1,
-		0,
-	);
+	const label = data.executionKind ? `Slow ${data.executionKind} extension hook` : "Slow extension hook";
+	const text = `${label}: ${singleLine(data.event)} · ${singleLine(data.extensionPath)}#${data.handlerIndex} · ${Math.round(data.elapsedMs)} ms`;
+	return new Text(theme.fg(data.executionKind === "sync" ? "warning" : "muted", text), 1, 0);
 }
