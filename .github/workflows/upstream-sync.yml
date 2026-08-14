@@ -57,10 +57,20 @@ jobs:
           fi
           git commit -m "merge ci branch"
 
-          git checkout origin/patch/contributor-approval -- .github/APPROVED_CONTRIBUTORS
-          test "$(git diff --cached --name-only)" = .github/APPROVED_CONTRIBUTORS
-          git diff --cached --check
-          git commit -m "merge patch/contributor-approval branch"
+          git show upstream/main:.github/APPROVED_CONTRIBUTORS > /tmp/upstream-approved-contributors
+          git show origin/patch/contributor-approval:.github/APPROVED_CONTRIBUTORS > /tmp/patch-approved-contributors
+          python3 scripts/union-contributor-approvals.py \
+            --current /tmp/upstream-approved-contributors \
+            --patch /tmp/patch-approved-contributors \
+            --output .github/APPROVED_CONTRIBUTORS
+          if git diff --quiet -- .github/APPROVED_CONTRIBUTORS; then
+            echo 'contributor approval union already complete'
+          else
+            git add .github/APPROVED_CONTRIBUTORS
+            test "$(git diff --cached --name-only)" = .github/APPROVED_CONTRIBUTORS
+            git diff --cached --check
+            git commit -m "merge patch/contributor-approval branch"
+          fi
 
           git merge --squash origin/patch/model-startup-refresh-barrier
           git commit -m "merge patch/model-startup-refresh-barrier branch"
