@@ -45,7 +45,7 @@ jobs:
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
-            +refs/heads/patch/responses-remote-compaction:refs/remotes/origin/patch/responses-remote-compaction \
+            +refs/heads/patch/provider-transparent-compaction:refs/remotes/origin/patch/provider-transparent-compaction \
             +refs/heads/patch/shutdown-lifecycle-log:refs/remotes/origin/patch/shutdown-lifecycle-log \
             +refs/heads/patch/slow-hook-execution-kind:refs/remotes/origin/patch/slow-hook-execution-kind \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
@@ -185,7 +185,7 @@ jobs:
           git merge --squash origin/patch/retry-non-retryable-patterns
           git commit -m "merge patch/retry-non-retryable-patterns branch"
 
-          if ! git merge --squash origin/patch/responses-remote-compaction; then
+          if ! git merge --squash origin/patch/provider-transparent-compaction; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
             expected_conflicts=(
               packages/coding-agent/src/core/agent-session.ts
@@ -335,7 +335,7 @@ jobs:
             echo '::error::Unresolved conflicts remain after applying Responses compaction conflict staging'
             exit 1
           fi
-          git commit -m "merge patch/responses-remote-compaction branch"
+          git commit -m "merge patch/provider-transparent-compaction branch"
 
           if ! git merge --squash origin/patch/shutdown-lifecycle-log; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
