@@ -46,6 +46,7 @@ export interface BranchSummaryMessage {
 
 export interface CompactionSummaryMessage {
 	role: "compactionSummary";
+	kind?: "remote" | "classic" | "extension";
 	summary: string;
 	tokensBefore: number;
 	timestamp: number;
@@ -95,9 +96,11 @@ export function createCompactionSummaryMessage(
 	summary: string,
 	tokensBefore: number,
 	timestamp: string | number,
+	kind?: CompactionSummaryMessage["kind"],
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
+		kind,
 		summary,
 		tokensBefore,
 		timestamp: typeof timestamp === "number" ? timestamp : new Date(timestamp).getTime(),
