@@ -46,7 +46,6 @@ jobs:
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/provider-transparent-compaction:refs/remotes/origin/patch/provider-transparent-compaction \
-            +refs/heads/patch/cloudflare-compat-test-stable:refs/remotes/origin/patch/cloudflare-compat-test-stable \
             +refs/heads/patch/shutdown-lifecycle-log:refs/remotes/origin/patch/shutdown-lifecycle-log \
             +refs/heads/patch/slow-hook-execution-kind:refs/remotes/origin/patch/slow-hook-execution-kind \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
@@ -433,9 +432,6 @@ jobs:
             exit 1
           fi
           git commit -m "merge patch/provider-transparent-compaction branch"
-
-          git merge --squash origin/patch/cloudflare-compat-test-stable
-          git commit -m "merge patch/cloudflare-compat-test-stable branch"
 
           if ! git merge --squash origin/patch/shutdown-lifecycle-log; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
