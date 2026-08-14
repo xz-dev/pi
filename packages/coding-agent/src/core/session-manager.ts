@@ -15,6 +15,7 @@ import {
 	renameSync,
 	rmSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
@@ -915,12 +916,13 @@ async function listSessionsFromDir(
 }
 
 /**
- * Manages conversation sessions as append-only trees stored in JSONL files.
+ * Manages conversation sessions as trees stored in JSONL files.
  *
  * Each session entry has an id and parentId forming a tree structure. The "leaf"
  * pointer tracks the current position. Appending creates a child of the current leaf.
  * Branching moves the leaf to an earlier entry, allowing new branches without
- * modifying history.
+ * modifying history. spliceEntry() is the one rewrite that removes a single node
+ * and reparents its children.
  *
  * Use buildSessionContext() to get the resolved message list for the LLM, which
  * handles compaction summaries and follows the path from root to current leaf.
@@ -1063,6 +1065,37 @@ export class SessionManager {
 			}
 		} finally {
 			closeSync(fd);
+		}
+	}
+
+	/** Write complete JSONL to a sibling temp file, then rename over the session file. */
+	private _replaceFile(entries: FileEntry[]): void {
+		if (!this.persist || !this.sessionFile) return;
+		const tempFile = `${this.sessionFile}.tmp`;
+		let fd: number | undefined;
+		try {
+			fd = openSync(tempFile, "w");
+			for (const entry of entries) {
+				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			}
+			fsyncSync(fd);
+			closeSync(fd);
+			fd = undefined;
+			renameSync(tempFile, this.sessionFile);
+		} catch (error) {
+			if (fd !== undefined) {
+				try {
+					closeSync(fd);
+				} catch {
+					// keep original error
+				}
+			}
+			try {
+				unlinkSync(tempFile);
+			} catch {
+				// temp may not exist
+			}
+			throw error;
 		}
 	}
 
@@ -1444,8 +1477,8 @@ export class SessionManager {
 
 	/**
 	 * Get all session entries (excludes header). Returns a shallow copy.
-	 * The session is append-only: use appendXXX() to add entries, branch() to
-	 * change the leaf pointer. Entries cannot be modified or deleted.
+	 * Use appendXXX() to add entries, branch() to change the leaf pointer, or
+	 * spliceEntry() to remove one node and reparent its children.
 	 */
 	getEntries(): SessionEntry[] {
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
@@ -1499,6 +1532,55 @@ export class SessionManager {
 	// =========================================================================
 	// Branching
 	// =========================================================================
+
+	/**
+	 * Remove one existing non-root entry and reparent its direct children to its parent.
+	 * Descendants stay. If the removed entry is the current leaf, the parent becomes the leaf.
+	 * Persisted sessions that have already been flushed are rewritten in place.
+	 */
+	spliceEntry(entryId: string): void {
+		const entry = this.byId.get(entryId);
+		if (!entry) {
+			throw new Error(`Entry ${entryId} not found`);
+		}
+		if (entry.parentId === null || entry.parentId === entry.id) {
+			throw new Error(`Cannot splice root entry ${entryId}`);
+		}
+		if (!this.byId.has(entry.parentId)) {
+			throw new Error(`Cannot splice entry ${entryId}: missing parent ${entry.parentId}`);
+		}
+
+		for (const other of this.byId.values()) {
+			if (other.id === entryId) continue;
+			if (other.type === "label" && other.targetId === entryId) {
+				throw new Error(`Cannot splice entry ${entryId}: referenced by label ${other.id}`);
+			}
+			if (other.type === "compaction" && other.firstKeptEntryId === entryId) {
+				throw new Error(`Cannot splice entry ${entryId}: referenced by compaction ${other.id}`);
+			}
+			if (other.type === "branch_summary" && other.fromId === entryId) {
+				throw new Error(`Cannot splice entry ${entryId}: referenced by branch summary ${other.id}`);
+			}
+		}
+
+		const parentId = entry.parentId;
+		const nextLeafId = this.leafId === entryId ? parentId : this.leafId;
+		const nextEntries: FileEntry[] = [];
+		for (const fileEntry of this.fileEntries) {
+			if (fileEntry.type === "session") {
+				nextEntries.push(fileEntry);
+				continue;
+			}
+			if (fileEntry.id === entryId) continue;
+			nextEntries.push(fileEntry.parentId === entryId ? { ...fileEntry, parentId } : fileEntry);
+		}
+		if (this.persist && this.sessionFile && this.flushed) {
+			this._replaceFile(nextEntries);
+		}
+		this.fileEntries = nextEntries;
+		this._buildIndex();
+		this.leafId = nextLeafId;
+	}
 
 	/**
 	 * Start a new branch from an earlier entry.
