@@ -189,6 +189,7 @@ jobs:
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
             expected_conflicts=(
               packages/coding-agent/src/core/agent-session.ts
+              packages/coding-agent/src/core/session-manager.ts
               packages/coding-agent/src/core/settings-manager.ts
             )
             if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )); then
@@ -273,7 +274,6 @@ jobs:
                   '\tgetOpenAIResponsesCompactionIdentity,\n'
                   '\ttype OpenAIResponsesCompaction,\n'
                   '\ttype ResponsesCompactionIdentity,\n'
-                  '\tresponsesCompactionIdentitiesEqual,\n'
                   '} from "@earendil-works/pi-ai/api/openai-responses";\n',
               ),
               (
@@ -290,6 +290,45 @@ jobs:
                   '\t\tthis._unsubscribeModelsChanged = this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime());\n',
                   '\t\tthis._classicRecoveryStreamFn = config.classicRecoveryStreamFn;\n'
                   '\t\tthis._prepareRequestHeaders = config.prepareRequestHeaders;\n',
+              ),
+          ]
+          session_conflicts = [
+              (
+                  '\trenameSync,\n',
+                  '',
+              ),
+              (
+                  '\t/** @internal Fault-injection seam for continuation publication tests. */\n'
+                  '\tcontinuationFileWriter: ContinuationFileWriter = writeContinuationFile;\n',
+                  '\tprivate persistenceOps = {\n'
+                  '\t\tappendFileSync,\n'
+                  '\t\tcloseSync,\n'
+                  '\t\topenSync,\n'
+                  '\t\trmSync,\n'
+                  '\t\twriteFileSync,\n'
+                  '\t};\n',
+              ),
+              (
+                  '\t\tthis.byId.set(entry.id, entry);\n'
+                  '\t\tthis.leafId = entry.id;\n'
+                  '\t\tthis.generation++;\n'
+                  '\t\tthis._persist(entry);\n',
+                  '\t\tthis.byId.set(publicEntry.id, publicEntry);\n'
+                  '\t\tthis.leafId = publicEntry.id;\n'
+                  '\t\tthis.generation++;\n'
+                  '\t\tthis.flushed = nextFlushed;\n'
+                  '\t}\n'
+                  '\n'
+                  '\tgetGeneration(): number {\n'
+                  '\t\treturn this.generation;\n'
+                  '\t}\n'
+                  '\n'
+                  '\tcaptureCompactionCommitExpectation(): CompactionCommitExpectation {\n'
+                  '\t\treturn {\n'
+                  '\t\t\tsessionId: this.sessionId,\n'
+                  '\t\t\tgeneration: this.generation,\n'
+                  '\t\t\tleafId: this.leafId,\n'
+                  '\t\t};\n',
               ),
           ]
           settings_conflict = (
@@ -318,17 +357,70 @@ jobs:
                   )
               return ours + theirs
 
+          def combine_session(index: int, ours: str, theirs: str) -> str:
+              if index >= len(session_conflicts) or (ours, theirs) != session_conflicts[index]:
+                  raise SystemExit(f"Responses resolver: unexpected session-manager conflict {index + 1}")
+              if index == 0:
+                  return ours
+              if index == 1:
+                  return ours + theirs
+              return theirs
+
           def combine_settings(index: int, ours: str, theirs: str) -> str:
               if index != 0 or (ours, theirs) != settings_conflict:
                   raise SystemExit("Responses resolver: unexpected retry settings conflict")
               return ours
 
           resolve("packages/coding-agent/src/core/agent-session.ts", 4, combine_agent)
+          resolve("packages/coding-agent/src/core/session-manager.ts", 3, combine_session)
           resolve("packages/coding-agent/src/core/settings-manager.ts", 1, combine_settings)
+
+          session_path = Path("packages/coding-agent/src/core/session-manager.ts")
+          session_text = session_path.read_text()
+          generation_anchor = (
+              "\tcreateBranchedSession(leafId: string): string | undefined {\n"
+              "\t\tconst previousSessionFile = this.sessionFile;\n"
+          )
+          generation_replacement = (
+              "\tcreateBranchedSession(leafId: string): string | undefined {\n"
+              "\t\tconst previousGeneration = this.generation;\n"
+              "\t\tconst previousSessionFile = this.sessionFile;\n"
+          )
+          persisted_scope = (
+              "\t\t\tthis.sessionFile = newSessionFile;\n"
+              "\t\t\tthis._buildIndex();\n"
+              "\t\t\tthis.generation++;\n"
+          )
+          persisted_replacement = (
+              "\t\t\tthis.sessionFile = newSessionFile;\n"
+              "\t\t\tthis._buildIndex();\n"
+              "\t\t\tthis.generation = previousGeneration + 1;\n"
+          )
+          memory_scope = (
+              "\t\tthis.sessionId = newSessionId;\n"
+              "\t\tthis._buildIndex();\n"
+              "\t\tthis.generation++;\n"
+              "\t\treturn undefined;\n"
+          )
+          memory_replacement = (
+              "\t\tthis.sessionId = newSessionId;\n"
+              "\t\tthis._buildIndex();\n"
+              "\t\tthis.generation = previousGeneration + 1;\n"
+              "\t\treturn undefined;\n"
+          )
+          if session_text.count(generation_anchor) != 1:
+              raise SystemExit("Responses resolver: createBranchedSession generation anchor is missing or ambiguous")
+          if session_text.count(persisted_scope) != 1 or session_text.count(memory_scope) != 1:
+              raise SystemExit("Responses resolver: branch generation scopes are missing or ambiguous")
+          session_text = session_text.replace(generation_anchor, generation_replacement, 1)
+          session_text = session_text.replace(persisted_scope, persisted_replacement, 1)
+          session_text = session_text.replace(memory_scope, memory_replacement, 1)
+          session_path.write_text(session_text)
           PY
             test $? -eq 0 || exit 1
             git add \
               packages/coding-agent/src/core/agent-session.ts \
+              packages/coding-agent/src/core/session-manager.ts \
               packages/coding-agent/src/core/settings-manager.ts
           fi
           if ! git diff --quiet --diff-filter=U --; then
