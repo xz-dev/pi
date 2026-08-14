@@ -25,7 +25,8 @@ const MANIFEST_FILENAME = "release-manifest.json";
 const SUMS_FILENAME = "SHA256SUMS";
 const BUNDLE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10000;
-const BUNDLE_TIMEOUT_MS = 120000;
+const BUNDLE_INACTIVITY_TIMEOUT_MS = 30000;
+const DOWNLOAD_PROGRESS_INTERVAL_MS = 1000;
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 const ZIP_CENTRAL_HEADER_SIGNATURE = 0x02014b50;
 const ZIP_DIRECTORY_TYPE = 0x4000;
@@ -61,6 +62,10 @@ class RetryableDiscoveryError {
 
 interface XzSelfUpdateOptions {
 	executablePath?: string;
+	inactivityTimeoutMs?: number;
+	now?: () => number;
+	writeProgress?: (message: string) => void;
+	isTTY?: boolean;
 }
 
 function fail(message: string): never {
@@ -219,7 +224,7 @@ function manifestDigestFromSums(bytes: Uint8Array): string {
 async function fetchResponse(
 	url: URL | string,
 	currentVersion: string,
-	timeoutMs: number,
+	timeout: number | AbortSignal,
 	accept: string,
 	classifyRetryable = false,
 ): Promise<Response> {
@@ -227,7 +232,7 @@ async function fetchResponse(
 	try {
 		response = await fetch(new URL(url).href, {
 			headers: fetchHeaders(currentVersion, accept),
-			signal: AbortSignal.timeout(timeoutMs),
+			signal: typeof timeout === "number" ? AbortSignal.timeout(timeout) : timeout,
 		});
 	} catch (error) {
 		if (classifyRetryable) throw new RetryableDiscoveryError(error);
@@ -248,6 +253,7 @@ async function readBoundedResponse(
 	maximumBytes: number,
 	label: string,
 	retryTransportFailures = false,
+	onProgress?: (total: number) => void,
 ): Promise<Uint8Array> {
 	const contentLength = response.headers.get("content-length");
 	if (contentLength) {
@@ -274,6 +280,7 @@ async function readBoundedResponse(
 			await reader.cancel();
 			return fail(`${label} exceeds the allowed size`);
 		}
+		if (next.value.byteLength > 0) onProgress?.(total);
 		chunks.push(next.value);
 	}
 	const body = new Uint8Array(total);
@@ -333,7 +340,28 @@ export async function getLatestXzRelease(
 	}
 }
 
-async function downloadBundle(release: XzLatestRelease, currentVersion: string, destination: string): Promise<void> {
+function formatBytes(bytes: number): string {
+	const units = ["B", "KiB", "MiB", "GiB"];
+	let value = bytes;
+	let unit = units[0];
+	for (const nextUnit of units.slice(1)) {
+		if (value < 1024) break;
+		value /= 1024;
+		unit = nextUnit;
+	}
+	return `${value.toFixed(unit === "B" ? 0 : 1)} ${unit}`;
+}
+
+function writeDownloadProgress(message: string, isTTY = Boolean(process.stdout.isTTY)): void {
+	process.stdout.write(isTTY ? `\r\x1b[2K${message}` : `${message}\n`);
+}
+
+async function downloadBundle(
+	release: XzLatestRelease,
+	currentVersion: string,
+	destination: string,
+	options: XzSelfUpdateOptions,
+): Promise<void> {
 	const expectedBase = exactBaseUrl(release.tag);
 	const expectedFile = RELEASE_TARGET ? expectedBundleName(RELEASE_TARGET) : "";
 	const expectedUrl = `${expectedBase}${expectedFile}`;
@@ -344,13 +372,56 @@ async function downloadBundle(release: XzLatestRelease, currentVersion: string, 
 	) {
 		return fail("Release bundle URL is not the exact xz-dev tag asset");
 	}
-	const response = await fetchResponse(expectedUrl, currentVersion, BUNDLE_TIMEOUT_MS, "application/octet-stream");
-	const bytes = await readBoundedResponse(response, release.bundle.size, release.bundle.name);
-	if (bytes.byteLength !== release.bundle.size) return fail(`${release.bundle.name} byte length mismatch`);
-	const digest = createHash("sha256").update(bytes).digest("hex");
-	if (`sha256:${digest}` !== release.bundle.digest) return fail(`${release.bundle.name} sha256 mismatch`);
-	writeFileSync(destination, bytes, { flag: "wx", mode: 0o600 });
-	validateZipEntries(destination);
+	const controller = new AbortController();
+	const inactivityTimeoutMs = options.inactivityTimeoutMs ?? BUNDLE_INACTIVITY_TIMEOUT_MS;
+	const abortStalledDownload = (): void => {
+		controller.abort(
+			new Error(
+				`${release.bundle.name} download stalled: no data received for ${Math.round(inactivityTimeoutMs / 1000)} seconds`,
+			),
+		);
+	};
+	let inactivityTimeout = setTimeout(abortStalledDownload, inactivityTimeoutMs);
+	const resetInactivityTimeout = (): void => {
+		clearTimeout(inactivityTimeout);
+		inactivityTimeout = setTimeout(abortStalledDownload, inactivityTimeoutMs);
+	};
+	const now = options.now ?? Date.now;
+	const writeProgress = options.writeProgress ?? ((message) => writeDownloadProgress(message, options.isTTY));
+	const startedAt = now();
+	let lastProgressAt = -Infinity;
+	let downloaded = 0;
+	let progressShown = false;
+	const showProgress = (complete = false): void => {
+		const timestamp = now();
+		if (!complete && timestamp - lastProgressAt < DOWNLOAD_PROGRESS_INTERVAL_MS) return;
+		lastProgressAt = timestamp;
+		progressShown = true;
+		const percent = Math.min(100, Math.floor((downloaded / release.bundle.size) * 100));
+		const elapsedSeconds = Math.max((timestamp - startedAt) / 1000, 0.001);
+		writeProgress(
+			`Downloading ${release.bundle.name}: ${percent}%  ${formatBytes(downloaded)} / ${formatBytes(release.bundle.size)}  ${formatBytes(downloaded / elapsedSeconds)}/s`,
+		);
+	};
+	try {
+		const response = await fetchResponse(expectedUrl, currentVersion, controller.signal, "application/octet-stream");
+		showProgress();
+		const bytes = await readBoundedResponse(response, release.bundle.size, release.bundle.name, false, (total) => {
+			resetInactivityTimeout();
+			downloaded = total;
+			showProgress();
+		});
+		if (downloaded !== release.bundle.size) return fail(`${release.bundle.name} byte length mismatch`);
+		showProgress(true);
+		const digest = createHash("sha256").update(bytes).digest("hex");
+		if (`sha256:${digest}` !== release.bundle.digest) return fail(`${release.bundle.name} sha256 mismatch`);
+		writeFileSync(destination, bytes, { flag: "wx", mode: 0o600 });
+		validateZipEntries(destination);
+	} finally {
+		clearTimeout(inactivityTimeout);
+		if (progressShown && !options.writeProgress && (options.isTTY ?? process.stdout.isTTY))
+			process.stdout.write("\n");
+	}
 }
 
 export async function runXzSelfUpdate(
@@ -398,7 +469,7 @@ export async function runXzSelfUpdate(
 		}
 	};
 	try {
-		await downloadBundle(release, currentVersion, archive);
+		await downloadBundle(release, currentVersion, archive, options);
 		extractZipArchive(archive, staging, release.bundle.name);
 		validateBundle(staging);
 		if (!existsSync(destination)) renameSync(staging, destination);
