@@ -214,6 +214,7 @@ export type AgentSessionEvent =
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
+	| { type: "session_entry_spliced"; entryId: string; parentId: string; newLeafId: string | null }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
@@ -2970,6 +2971,9 @@ export class AgentSession {
 					});
 				},
 				appendEntry: (customType, data) => this.appendExtensionEntry(customType, data),
+				spliceEntry: (entryId) => {
+					this.spliceEntry(entryId);
+				},
 				setSessionName: (name) => {
 					this.setSessionName(name);
 				},
@@ -3492,6 +3496,33 @@ export class AgentSession {
 		} as const;
 		this._emit(event);
 		void this._extensionRunner.emit(event);
+	}
+
+	/**
+	 * Delete one existing non-root session entry and reparent its children to its parent.
+	 * Safe only while idle: no agent run, compaction, or branch summarization.
+	 */
+	spliceEntry(entryId: string): void {
+		if (!this.isIdle || this.isCompacting) {
+			throw new Error("Wait for the current response to finish before splicing a session entry.");
+		}
+		const entry = this.sessionManager.getEntry(entryId);
+		if (!entry) {
+			throw new Error(`Entry ${entryId} not found`);
+		}
+		if (entry.parentId === null) {
+			throw new Error(`Cannot splice root entry ${entryId}`);
+		}
+		const parentId = entry.parentId;
+		this.sessionManager.spliceEntry(entryId);
+		const sessionContext = this.sessionManager.buildSessionContext();
+		this.agent.state.messages = sessionContext.messages;
+		this._emit({
+			type: "session_entry_spliced",
+			entryId,
+			parentId,
+			newLeafId: this.sessionManager.getLeafId(),
+		});
 	}
 
 	// =========================================================================
