@@ -81,7 +81,9 @@ describe("AgentSession model and extension characterization", () => {
 	it("cycles xhigh before max when both are supported", async () => {
 		const harness = await createHarness({ models: [{ id: "faux-1", reasoning: true }] });
 		harnesses.push(harness);
-		harness.getModel().thinkingLevelMap = { xhigh: "xhigh", max: "max" };
+		harness.modelRegistry.registerProvider(harness.getModel().provider, {
+			models: [{ ...harness.getModel(), thinkingLevelMap: { xhigh: "xhigh", max: "max" } }],
+		});
 
 		expect(harness.session.getAvailableThinkingLevels()).toEqual([
 			"off",
