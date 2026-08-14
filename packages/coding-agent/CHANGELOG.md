@@ -9,6 +9,7 @@
 - Added a fullscreen exit output setting to choose between printing the final transcript and only a session resume hint.
 - Added the `defaultTools` setting for configuring the initial built-in tool selection globally or per project.
 - Added `--use-theme <name[/name]>` to choose an initial per-run interactive theme without changing saved settings ([#7722](https://github.com/earendil-works/pi/pull/7722) by [@rwachtler](https://github.com/rwachtler)).
+- Added `pi update --clean` to remove old managed binary bundles while retaining the active version.
 
 ### Changed
 
