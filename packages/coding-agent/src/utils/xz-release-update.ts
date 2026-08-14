@@ -5,6 +5,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -66,6 +67,23 @@ interface XzSelfUpdateOptions {
 	now?: () => number;
 	writeProgress?: (message: string) => void;
 	isTTY?: boolean;
+}
+
+export function cleanXzBundles(executablePath = process.execPath): number {
+	const executableDirectory = dirname(executablePath);
+	const parentDirectory = dirname(executableDirectory);
+	const installRoot = basename(parentDirectory) === "bundles" ? dirname(parentDirectory) : executableDirectory;
+	const bundlesRoot = join(installRoot, "bundles");
+	const currentVersion = readFileSync(join(installRoot, "current"), "utf8").trim();
+	let removed = 0;
+
+	for (const entry of readdirSync(bundlesRoot, { withFileTypes: true })) {
+		if (!entry.isDirectory() || entry.name === currentVersion || entry.name.startsWith(".update-")) continue;
+		rmSync(join(bundlesRoot, entry.name), { recursive: true, force: true });
+		removed++;
+	}
+	rmSync(join(installRoot, "previous"), { force: true });
+	return removed;
 }
 
 function fail(message: string): never {
