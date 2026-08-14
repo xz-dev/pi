@@ -56,6 +56,11 @@ function discoveryFetch(value: Record<string, unknown> = manifest()) {
 	});
 }
 
+function initSignal(fetchMock: ReturnType<typeof vi.fn>, url: string): AbortSignal | undefined {
+	const call = fetchMock.mock.calls.find(([input]) => String(input) === url);
+	return call?.[1]?.signal ?? undefined;
+}
+
 async function loadUpdater(executablePath = process.execPath) {
 	vi.resetModules();
 	vi.doMock("../src/config.ts", async () => {
@@ -268,6 +273,216 @@ describe("xz-dev native Release updates", () => {
 			).rejects.toThrow(/Unsafe Release bundle ZIP entry/);
 			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
 		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("shows progress and permits downloads longer than the former total timeout while data stays active", async () => {
+		allowNetwork();
+		vi.useFakeTimers();
+		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
+		const oldBundle = join(root, "bundles", CURRENT_VERSION);
+		mkdirSync(oldBundle, { recursive: true });
+		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
+		const { manifestBytes, sums } = discoveryFiles();
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			if (String(input) === SUMS_URL) return new Response(sums);
+			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+			if (String(input) === `${EXACT_BASE}${BUNDLE}`) {
+				return new Response(
+					new ReadableStream({
+						async start(controller) {
+							for (const byte of BUNDLE_BYTES) {
+								await vi.advanceTimersByTimeAsync(25_000);
+								controller.enqueue(Uint8Array.of(byte));
+							}
+							controller.close();
+						},
+					}),
+					{ headers: { "content-length": String(BUNDLE_BYTES.byteLength) } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(join(oldBundle, "pi-native"));
+		const progress: string[] = [];
+		try {
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			await expect(
+				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+					executablePath: join(oldBundle, "pi-native"),
+					inactivityTimeoutMs: 30_000,
+					now: Date.now,
+					writeProgress: (message) => progress.push(message),
+				}),
+			).rejects.toThrow(/central directory/);
+			expect(vi.getTimerCount()).toBe(0);
+			expect(progress[0]).toContain(`Downloading ${BUNDLE}: 0%  0 B / 6 B  0 B/s`);
+			expect(progress.at(-1)).toContain(`100%  6 B / 6 B`);
+			expect(progress.at(-1)).toMatch(/\d+ B\/s$/);
+			expect(initSignal(fetchMock, `${EXACT_BASE}${BUNDLE}`)?.aborted).toBe(false);
+		} finally {
+			vi.useRealTimers();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("uses one terminal line for TTY progress and newline-delimited throttling otherwise", async () => {
+		allowNetwork();
+		vi.useFakeTimers();
+		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
+		const oldBundle = join(root, "bundles", CURRENT_VERSION);
+		mkdirSync(oldBundle, { recursive: true });
+		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
+		const { manifestBytes, sums } = discoveryFiles();
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			if (String(input) === SUMS_URL) return new Response(sums);
+			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+			if (String(input) === `${EXACT_BASE}${BUNDLE}`) {
+				return new Response(
+					new ReadableStream({
+						async start(controller) {
+							for (const byte of BUNDLE_BYTES) {
+								await vi.advanceTimersByTimeAsync(200);
+								controller.enqueue(Uint8Array.of(byte));
+							}
+							controller.close();
+						},
+					}),
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(join(oldBundle, "pi-native"));
+		try {
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			await expect(
+				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+					executablePath: join(oldBundle, "pi-native"),
+					isTTY: false,
+					now: Date.now,
+				}),
+			).rejects.toThrow(/central directory/);
+			const nonTtyWrites = writeSpy.mock.calls.map(([message]) => String(message));
+			expect(nonTtyWrites).toHaveLength(3);
+			expect(nonTtyWrites.every((message) => message.endsWith("\n"))).toBe(true);
+
+			writeSpy.mockClear();
+			vi.setSystemTime(0);
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL) => {
+					if (String(input) === SUMS_URL) return new Response(sums);
+					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+					return new Response(BUNDLE_BYTES);
+				}),
+			);
+			const ttyLatest = await getLatestXzRelease(CURRENT_VERSION);
+			await expect(
+				runXzSelfUpdate(ttyLatest!, CURRENT_VERSION, false, {
+					executablePath: join(oldBundle, "pi-native"),
+					isTTY: true,
+					now: Date.now,
+				}),
+			).rejects.toThrow(/central directory/);
+			const ttyWrites = writeSpy.mock.calls.map(([message]) => String(message));
+			expect(ttyWrites.at(-1)).toBe("\n");
+			expect(ttyWrites.slice(0, -1).every((message) => message.startsWith("\r\x1b[2K"))).toBe(true);
+			expect(ttyWrites.slice(0, -1).every((message) => !message.endsWith("\n"))).toBe(true);
+		} finally {
+			vi.useRealTimers();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not treat empty stream chunks as download activity", async () => {
+		allowNetwork();
+		vi.useFakeTimers();
+		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
+		const oldBundle = join(root, "bundles", CURRENT_VERSION);
+		mkdirSync(oldBundle, { recursive: true });
+		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
+		const { manifestBytes, sums } = discoveryFiles();
+		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+			if (String(input) === SUMS_URL) return new Response(sums);
+			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+			if (String(input) === `${EXACT_BASE}${BUNDLE}`) {
+				const signal = init?.signal;
+				return new Response(
+					new ReadableStream({
+						start(controller) {
+							for (const elapsed of [5_000, 10_000, 15_000, 20_000, 25_000]) {
+								setTimeout(() => controller.enqueue(new Uint8Array()), elapsed);
+							}
+							signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+						},
+					}),
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(join(oldBundle, "pi-native"));
+		try {
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			const update = runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+				executablePath: join(oldBundle, "pi-native"),
+				inactivityTimeoutMs: 30_000,
+				writeProgress: () => {},
+			});
+			const rejection = expect(update).rejects.toThrow(/download stalled: no data received for 30 seconds/);
+			await vi.advanceTimersByTimeAsync(30_000);
+			await rejection;
+		} finally {
+			vi.useRealTimers();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("aborts a bundle download after thirty seconds without data", async () => {
+		allowNetwork();
+		vi.useFakeTimers();
+		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
+		const oldBundle = join(root, "bundles", CURRENT_VERSION);
+		mkdirSync(oldBundle, { recursive: true });
+		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
+		const { manifestBytes, sums } = discoveryFiles();
+		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+			if (String(input) === SUMS_URL) return new Response(sums);
+			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+			if (String(input) === `${EXACT_BASE}${BUNDLE}`) {
+				const signal = init?.signal;
+				return new Response(
+					new ReadableStream({
+						start(controller) {
+							signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+						},
+					}),
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(join(oldBundle, "pi-native"));
+		try {
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			const update = runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+				executablePath: join(oldBundle, "pi-native"),
+				inactivityTimeoutMs: 30_000,
+				writeProgress: () => {},
+			});
+			const rejection = expect(update).rejects.toThrow(/download stalled: no data received for 30 seconds/);
+			await vi.advanceTimersByTimeAsync(29_999);
+			expect(initSignal(fetchMock, `${EXACT_BASE}${BUNDLE}`)?.aborted).toBe(false);
+			await vi.advanceTimersByTimeAsync(1);
+			await rejection;
+			expect(initSignal(fetchMock, `${EXACT_BASE}${BUNDLE}`)?.aborted).toBe(true);
+			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
+		} finally {
+			vi.useRealTimers();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
