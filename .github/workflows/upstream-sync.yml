@@ -37,6 +37,7 @@ jobs:
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
+            +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
             +refs/heads/patch/tui-synchronized-cursor-fleet:refs/remotes/origin/patch/tui-synchronized-cursor-fleet \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
@@ -84,6 +85,24 @@ jobs:
             exit 1
           fi
           git commit -m "merge patch/native-wrapper-release branch"
+
+          if ! git merge-base --is-ancestor origin/patch/native-wrapper-release origin/patch/update-clean; then
+            echo '::error::patch/update-clean must descend from patch/native-wrapper-release'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/native-wrapper-release..origin/patch/update-clean; then
+            echo '::error::Failed to apply patch/update-clean descendant range'
+            exit 1
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying patch/update-clean'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::patch/update-clean descendant range is empty'
+            exit 1
+          fi
+          git commit -m "merge patch/update-clean branch"
 
           git merge --squash origin/patch/tui-synchronized-cursor-fleet
           git commit -m "merge patch/tui-synchronized-cursor-fleet branch"
