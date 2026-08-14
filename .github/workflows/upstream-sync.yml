@@ -47,7 +47,8 @@ jobs:
             +refs/heads/patch/responses-remote-compaction:refs/remotes/origin/patch/responses-remote-compaction \
             +refs/heads/patch/shutdown-lifecycle-log:refs/remotes/origin/patch/shutdown-lifecycle-log \
             +refs/heads/patch/slow-hook-execution-kind:refs/remotes/origin/patch/slow-hook-execution-kind \
-            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice
+            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
+            +refs/heads/patch/shutdown-screen-log:refs/remotes/origin/patch/shutdown-screen-log
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -404,6 +405,25 @@ jobs:
           fi
           git commit -m "merge patch/slow-hook-execution-kind branch"
 
+          git fetch origin +refs/heads/patch/shutdown-screen-log:refs/remotes/origin/patch/shutdown-screen-log
+          if ! git merge-base --is-ancestor origin/patch/slow-hook-execution-kind origin/patch/shutdown-screen-log; then
+            echo '::error::patch/shutdown-screen-log must descend from patch/slow-hook-execution-kind'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/slow-hook-execution-kind..origin/patch/shutdown-screen-log; then
+            echo '::error::Failed to apply shutdown screen log'
+            exit 1
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying shutdown screen log'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/shutdown-screen-log'
+            exit 1
+          fi
+          git commit -m "merge patch/shutdown-screen-log branch"
+
           if ! git merge --squash origin/patch/session-tree-splice; then
             scripts/resolve-session-tree-splice-conflicts.sh
           fi
@@ -455,6 +475,7 @@ jobs:
               test/extensions-runner.test.ts \
               test/lifecycle-diagnostics.test.ts \
               test/slow-extension-hook-entry.test.ts \
+              test/shutdown-screen-log.test.ts \
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
               test/agent-session-concurrent.test.ts \
@@ -478,6 +499,7 @@ jobs:
               test/interactive-mode-queue-tui.test.ts \
               test/suite/manual-retry.test.ts \
               test/suite/session-tree-splice.test.ts \
+              test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts \
               test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
               test/suite/regressions/6949-unavailable-scoped-model.test.ts \
               test/suite/regressions/7209-model-selector-filter-resets-selection.test.ts
