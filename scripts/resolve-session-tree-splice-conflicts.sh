@@ -30,32 +30,6 @@ PY
 git add "${expected[@]}"
 test -z "$(git diff --name-only --diff-filter=U)"
 
-python - <<'PY_GENERATION_TEST'
-from pathlib import Path
-path = Path("packages/coding-agent/test/session-manager/tree-traversal.test.ts")
-text = path.read_text()
-old = '''\t\tconst beforeMtime = statSync(sessionFile).mtimeMs;
-\t\tawait new Promise((resolve) => setTimeout(resolve, 20));
-
-\t\tsession.spliceEntry(id2);
-
-\t\tconst entries = session.getEntries();
-'''
-new = '''\t\tconst beforeMtime = statSync(sessionFile).mtimeMs;
-\t\tconst generationBeforeSplice = session.getGeneration();
-\t\tawait new Promise((resolve) => setTimeout(resolve, 20));
-
-\t\tsession.spliceEntry(id2);
-
-\t\texpect(session.getGeneration()).toBeGreaterThan(generationBeforeSplice);
-\t\tconst entries = session.getEntries();
-'''
-if text.count(old) != 1:
-    raise SystemExit("session-tree splice generation test anchor is missing or ambiguous")
-path.write_text(text.replace(old, new, 1))
-PY_GENERATION_TEST
-git add packages/coding-agent/test/session-manager/tree-traversal.test.ts
-
 python - <<'PY_FIXTURE'
 from pathlib import Path
 path = Path("packages/coding-agent/test/lifecycle-diagnostics.test.ts")
