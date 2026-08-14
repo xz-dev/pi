@@ -9,7 +9,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
-import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
+import { ExtensionRunner, emitProjectTrustEvent, emitSessionShutdownEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
 	ExtensionContextActions,
@@ -26,10 +26,13 @@ describe("ExtensionRunner", () => {
 	let extensionsDir: string;
 	let sessionManager: SessionManager;
 	let modelRegistry: ModelRegistry;
+	let previousAgentDir: string | undefined;
 	const defaultKeybindings = new KeybindingsManager().getEffectiveConfig();
 
 	beforeEach(async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-runner-test-"));
+		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = tempDir;
 		extensionsDir = path.join(tempDir, "extensions");
 		fs.mkdirSync(extensionsDir);
 		sessionManager = SessionManager.inMemory();
@@ -38,6 +41,11 @@ describe("ExtensionRunner", () => {
 
 	afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
+		if (previousAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		}
 	});
 
 	const providerModelConfig: ProviderConfig = {
@@ -154,6 +162,43 @@ describe("ExtensionRunner", () => {
 
 			expect(result.result).toEqual({ trusted: "no", remember: true });
 			expect(result.errors).toEqual([]);
+		});
+
+		it("queues a slow failed project_trust reminder until the session runner exists", async () => {
+			vi.useFakeTimers();
+			const extensionPath = path.join(extensionsDir, "slow-project-trust.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`export default function(pi) { pi.on("project_trust", async () => { await new Promise((resolve) => setTimeout(resolve, 101)); throw new Error("private trust detail"); }); }`,
+			);
+			const extensionsResult = await loadExtensions([extensionPath], tempDir);
+			const trust = emitProjectTrustEvent(
+				extensionsResult,
+				{ type: "project_trust", cwd: tempDir },
+				{
+					cwd: tempDir,
+					mode: "tui",
+					hasUI: false,
+					ui: {
+						select: async () => undefined,
+						confirm: async () => false,
+						input: async () => undefined,
+						notify: () => {},
+					},
+				},
+				100,
+			);
+			await vi.advanceTimersByTimeAsync(101);
+			const result = await trust;
+
+			expect(result.errors).toHaveLength(1);
+			expect(extensionsResult.pendingSlowHooks).toEqual([
+				{ event: "project_trust", extensionPath, handlerIndex: 0, elapsedMs: 101 },
+			]);
+			expect(fs.readFileSync(path.join(tempDir, "logs", "extension-lifecycle.jsonl"), "utf8")).not.toContain(
+				"private trust detail",
+			);
+			vi.useRealTimers();
 		});
 	});
 
@@ -561,6 +606,127 @@ describe("ExtensionRunner", () => {
 			const ctx = runner.createContext();
 			expect(ctx.mode).toBe("tui");
 			expect(ctx.hasUI).toBe(true);
+		});
+	});
+
+	describe("shutdown lifecycle log", () => {
+		it("records each shutdown handler without logging error contents", async () => {
+			const firstPath = path.join(extensionsDir, "first.ts");
+			const secondPath = path.join(extensionsDir, "second.ts");
+			fs.writeFileSync(firstPath, `export default function(pi) { pi.on("session_shutdown", async () => {}); }`);
+			fs.writeFileSync(
+				secondPath,
+				`export default function(pi) { pi.on("session_shutdown", async () => { throw new Error("private shutdown detail"); }); }`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			await emitSessionShutdownEvent(runner, { type: "session_shutdown", reason: "quit" });
+
+			const logPath = path.join(tempDir, "logs", "extension-lifecycle.jsonl");
+			const entries = fs
+				.readFileSync(logPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.filter((entry) => entry.operation === "session_shutdown");
+
+			expect(entries.map((entry) => [entry.status, entry.extensionPath])).toEqual([
+				["start", firstPath],
+				["end", firstPath],
+				["start", secondPath],
+				["error", secondPath],
+			]);
+			expect(new Set(entries.map((entry) => entry.operationId)).size).toBe(2);
+			expect(entries.every((entry) => entry.operation === "session_shutdown")).toBe(true);
+			expect(entries.every((entry) => entry.pid === process.pid && entry.reason === "quit")).toBe(true);
+			expect(entries.every((entry) => typeof entry.timestamp === "string")).toBe(true);
+			expect(
+				entries.filter((entry) => entry.status !== "start").every((entry) => typeof entry.elapsedMs === "number"),
+			).toBe(true);
+			expect(fs.readFileSync(logPath, "utf8")).not.toContain("private shutdown detail");
+		});
+
+		it("leaves the pending handler identifiable until it settles", async () => {
+			const extensionPath = path.join(extensionsDir, "pending.ts");
+			fs.writeFileSync(extensionPath, `export default function() {}`);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			let release: (() => void) | undefined;
+			const pending = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			result.extensions[0].handlers.set("session_shutdown", [async () => pending]);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const shutdown = emitSessionShutdownEvent(runner, { type: "session_shutdown", reason: "quit" });
+			const logPath = path.join(tempDir, "logs", "extension-lifecycle.jsonl");
+			const pendingEntries = fs
+				.readFileSync(logPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.filter((entry) => entry.operation === "session_shutdown");
+			expect(pendingEntries.map((entry) => entry.status)).toEqual(["start"]);
+			expect(pendingEntries[0].extensionPath).toBe(extensionPath);
+
+			release?.();
+			await shutdown;
+			const completedStatuses = fs
+				.readFileSync(logPath, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.filter((entry) => entry.operation === "session_shutdown")
+				.map((entry) => entry.status);
+			expect(completedStatuses).toEqual(["start", "end"]);
+		});
+
+		if (process.platform !== "win32") {
+			it("repairs lifecycle log permissions", async () => {
+				const extensionPath = path.join(extensionsDir, "permissions.ts");
+				fs.writeFileSync(
+					extensionPath,
+					`export default function(pi) { pi.on("session_shutdown", async () => {}); }`,
+				);
+				const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+				const logDir = path.join(tempDir, "logs");
+				const logPath = path.join(logDir, "extension-lifecycle.jsonl");
+				fs.chmodSync(logDir, 0o755);
+				fs.chmodSync(logPath, 0o644);
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir,
+					sessionManager,
+					modelRegistry,
+				);
+
+				await emitSessionShutdownEvent(runner, { type: "session_shutdown", reason: "quit" });
+
+				expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
+				expect(fs.statSync(logPath).mode & 0o777).toBe(0o600);
+			});
+		}
+
+		it("continues shutdown when the log cannot be written", async () => {
+			const extensionPath = path.join(extensionsDir, "unwritable-log.ts");
+			fs.writeFileSync(extensionPath, `export default function() {}`);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			let handled = false;
+			result.extensions[0].handlers.set("session_shutdown", [
+				async () => {
+					handled = true;
+				},
+			]);
+			const logPath = path.join(tempDir, "logs", "extension-lifecycle.jsonl");
+			fs.rmSync(logPath, { force: true });
+			fs.mkdirSync(logPath, { recursive: true });
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			await expect(emitSessionShutdownEvent(runner, { type: "session_shutdown", reason: "quit" })).resolves.toBe(
+				true,
+			);
+			expect(handled).toBe(true);
 		});
 	});
 
