@@ -1709,11 +1709,20 @@ export interface Extension {
 }
 
 /** Result of loading extensions. */
+export interface SlowExtensionHookEntry {
+	event: string;
+	extensionPath: string;
+	handlerIndex: number;
+	elapsedMs: number;
+}
+
 export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
 	/** Shared runtime - actions are throwing stubs until runner.initialize() */
 	runtime: ExtensionRuntime;
+	/** Slow handlers completed before a session runner existed. */
+	pendingSlowHooks?: SlowExtensionHookEntry[];
 }
 
 // ============================================================================
