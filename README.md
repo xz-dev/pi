@@ -28,6 +28,9 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - Label slow extension-hook reminders by synchronous or asynchronous execution while preserving historical unlabeled entries.
   - Use case: Tell whether a visible slow-hook reminder came from synchronous or asynchronous extension work.
   - Patch branch: [`patch/slow-hook-execution-kind`](https://github.com/xz-dev/pi/tree/patch/slow-hook-execution-kind)
+- Keep raw append-only history portable across provider/model switches while replaying private Responses compaction only for a compatible request target; incompatible requests migrate atomically to bounded classic compaction before provider dispatch.
+  - Use case: Compact repeatedly without losing earlier history, then safely switch providers or models without exposing provider-held checkpoint state.
+  - Patch branch: [`patch/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/patch/provider-transparent-compaction)
 - Expose public `pi.spliceEntry(entryId)` so an extension can delete one non-root session-tree node and reparent its children, preserving descendants.
   - Use case: Remove a hidden watchdog decision node from session history without deleting later conversation descendants.
   - Patch branch: [`patch/session-tree-splice`](https://github.com/xz-dev/pi/tree/patch/session-tree-splice)
@@ -54,12 +57,6 @@ The integrated Esc and manual-retry patches both extend the Agent failure lifecy
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
   - Use case: Keep downstream prerelease display and changelog lookup correct when package and release versions differ.
   - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
-
-### Unsupported
-
-- ~~Provider-transparent compaction keeps one portable session history across providers while allowing compatible providers to resume from private checkpoints.~~ This feature is retired and explicitly unsupported.
-  - Archived branch: [`retired/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/retired/provider-transparent-compaction)
-  - Responses API compaction does not reduce API charges: compacted or provider-held context remains billable. It also makes the client-visible state machine opaque, and that hidden state can amplify charges in some cases through unexpected context retention, replay, or repeated compaction.
 
 ## Installation
 
