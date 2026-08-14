@@ -35,7 +35,7 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 - `pi update --self` from an xz-dev binary discovers only the latest immutable `xz-dev/pi` Release, downloads the exact target recorded in `piConfig.releaseTarget`, verifies the GitHub asset digest plus archive/package identity, and activates it without parsing the audit manifest at runtime. An xz-dev source checkout remains user-managed.
 - Do not publish this fork to npm, GitHub Packages, tags outside `xz-v*`, or a second Release plane. `.github/workflows/build-binaries.yml` is persistently removed from generated `main`; the `ci` overlay and generated-main verification continue removing it if upstream ever reintroduces it.
 - Keep runtime self-update behavior on `patch/native-wrapper-release`; keep descriptor, packaging, Scoop generator/publisher, E2E workflow, README, and this guide on `ci`. Generated Scoop artifacts alone live on `scoop`. Source automation is squash-integrated through `ci`; `scoop` is never merged into generated `main`.
-- Integrate `patch/shutdown-lifecycle-log` after `patch/responses-remote-compaction`; its guarded resolver must preserve the combined Responses and manual-retry `AgentSession` imports while adding lifecycle diagnostics.
+- Integrate `patch/shutdown-lifecycle-log` after `patch/provider-transparent-compaction`; its guarded resolver must preserve the combined compaction and manual-retry `AgentSession` imports while adding lifecycle diagnostics.
 - Integrate the commits after `patch/shutdown-lifecycle-log` on `patch/slow-hook-execution-kind` immediately after that base patch; they extend those lifecycle diagnostics with synchronous and asynchronous execution labels.
 
 ## Patch retirement
