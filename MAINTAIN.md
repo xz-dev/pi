@@ -6,7 +6,7 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 
 - `upstream/main` is the rebuild baseline.
 - `ci` owns downstream workflows, packaging, release gates, this guide, and the downstream README.
-- `patch/contributor-approval` owns `.github/APPROVED_CONTRIBUTORS`; contributor approval automation commits there, and generated `main` imports only that path after `ci` because the preserved approval commit descends from an older generated `main`.
+- `patch/contributor-approval` remains the bot-owned approval branch, including preserved commit `fa047a9bc8f3254bfde47bad2e93207f7a8bf62d`. After `ci`, generated `main` applies a deterministic additive union of the current upstream `.github/APPROVED_CONTRIBUTORS` file plus names present only on that branch. Whole-file replacement is forbidden.
 - `scoop` is an unrelated-root distribution branch containing only generated `bucket/pi.json`.
 - Product changes remain on the ordered `patch/*` branches declared in `.github/workflows/upstream-sync.yml`.
 - Generated `main` contains one countable squash integration commit for `ci` and each enabled patch. Do not fix release or product problems only on generated `main`.

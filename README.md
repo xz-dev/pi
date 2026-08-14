@@ -57,6 +57,9 @@ The integrated Esc and manual-retry patches both extend the Agent failure lifecy
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
   - Use case: Keep downstream prerelease display and changelog lookup correct when package and release versions differ.
   - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
+- Remove old managed binary bundles with `pi update --clean` while keeping the current bundle and `.update-*` staging directories.
+  - Use case: Free disk after several `pi update --self` cycles without deleting the active version or an in-progress update.
+  - Patch branch: [`patch/update-clean`](https://github.com/xz-dev/pi/tree/patch/update-clean)
 
 ## Installation
 
@@ -105,6 +108,8 @@ pi update --self
 ```
 
 The first update converts the extracted directory into a managed layout: the complete ZIP is staged under `bundles/<version>`, then `current` is atomically replaced. On POSIX, the root wrapper is also atomically refreshed. On Windows, `pi.exe` remains stable, waits for `pi-native.exe`, and returns its exit status without overwriting the running wrapper. A new invocation reads `current` and starts the activated bundle.
+
+`pi update --clean` keeps only `bundles/<current>`, deletes other ordinary bundle directories and the top-level `previous` pointer, and leaves `.update-*` staging directories untouched.
 
 ### Source checkout
 
