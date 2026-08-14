@@ -31,7 +31,7 @@ import {
 	cleanupWindowsSelfUpdateQuarantine,
 	quarantineWindowsNativeDependencies,
 } from "./utils/windows-self-update.ts";
-import { getLatestXzRelease, runXzSelfUpdate } from "./utils/xz-release-update.ts";
+import { cleanXzBundles, getLatestXzRelease, runXzSelfUpdate } from "./utils/xz-release-update.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -61,6 +61,7 @@ interface PackageCommandOptions {
 	showExtensionsSkippedNote: boolean;
 	local: boolean;
 	force: boolean;
+	clean: boolean;
 	projectTrustOverride?: boolean;
 	help: boolean;
 	invalidOption?: string;
@@ -86,7 +87,7 @@ function getPackageCommandUsage(command: PackageCommand): string {
 		case "remove":
 			return `${APP_NAME} remove <source> [-l] [--approve|--no-approve]`;
 		case "update":
-			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force]`;
+			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force|--clean]`;
 		case "list":
 			return `${APP_NAME} list [--approve|--no-approve]`;
 	}
@@ -165,6 +166,7 @@ Options:
   -a, --approve           Trust project-local files for this command
   -na, --no-approve       Ignore project-local files for this command
   --force                 Reinstall pi even if the current version is latest
+  --clean                 Remove all managed bundles except the current version
 
 Short forms:
   ${APP_NAME} update                Update pi only
@@ -203,6 +205,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 
 	let local = false;
 	let force = false;
+	let clean = false;
 	let projectTrustOverride: boolean | undefined;
 	let help = false;
 	let invalidOption: string | undefined;
@@ -287,6 +290,15 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			continue;
 		}
 
+		if (arg === "--clean") {
+			if (command === "update") {
+				clean = true;
+			} else {
+				invalidOption = invalidOption ?? arg;
+			}
+			continue;
+		}
+
 		if (arg === "--extension") {
 			if (command !== "update") {
 				invalidOption = invalidOption ?? arg;
@@ -321,6 +333,9 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let updateTarget: UpdateTarget | undefined;
 	let showExtensionsSkippedNote = false;
 	if (command === "update") {
+		if (clean && (source || selfFlag || extensionsFlag || modelsFlag || allFlag || extensionFlagSource || force)) {
+			conflictingOptions = conflictingOptions ?? "--clean cannot be combined with another update target or --force";
+		}
 		if (allFlag && (selfFlag || extensionsFlag || modelsFlag || extensionFlagSource)) {
 			conflictingOptions =
 				conflictingOptions ?? "--all cannot be combined with --self, --extensions, --models, or --extension";
@@ -380,6 +395,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		showExtensionsSkippedNote,
 		local,
 		force,
+		clean,
 		projectTrustOverride,
 		help,
 		invalidOption,
@@ -725,6 +741,18 @@ export async function handlePackageCommand(
 		console.error(chalk.red(`Missing ${options.command} source.`));
 		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
 		process.exitCode = 1;
+		return true;
+	}
+
+	if (options.command === "update" && options.clean) {
+		try {
+			const removed = cleanXzBundles();
+			console.log(chalk.green(`Removed ${removed} old ${removed === 1 ? "bundle" : "bundles"}`));
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : "Unknown bundle cleanup error";
+			console.error(chalk.red(`Error: ${message}`));
+			process.exitCode = 1;
+		}
 		return true;
 	}
 
