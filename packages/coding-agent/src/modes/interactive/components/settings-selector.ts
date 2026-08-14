@@ -58,6 +58,7 @@ const DEFAULT_PROJECT_TRUST_BY_LABEL = new Map(
 
 export interface SettingsConfig {
 	autoCompact: boolean;
+	remoteCompaction: boolean;
 	showImages: boolean;
 	imageWidthCells: number;
 	autoResizeImages: boolean;
@@ -95,6 +96,7 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onRemoteCompactionChange: (enabled: boolean) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onImageWidthCellsChange: (width: number) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
@@ -503,6 +505,13 @@ export class SettingsSelectorComponent extends Container {
 				values: ["true", "false"],
 			},
 			{
+				id: "remote-compaction",
+				label: "Remote compaction",
+				description: "Use provider-native compaction when supported",
+				currentValue: config.remoteCompaction ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
 				id: "steering-mode",
 				label: "Steering mode",
 				description:
@@ -782,6 +791,9 @@ export class SettingsSelectorComponent extends Container {
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
+						break;
+					case "remote-compaction":
+						callbacks.onRemoteCompactionChange(newValue === "true");
 						break;
 					case "show-images":
 						callbacks.onShowImagesChange(newValue === "true");

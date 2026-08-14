@@ -11,6 +11,7 @@ import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dis
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
+	remoteEnabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
 }
@@ -397,7 +398,10 @@ export class SettingsManager {
 		projectTrusted = true,
 	): { settings: Settings; error: Error | null } {
 		try {
-			return { settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted), error: null };
+			return {
+				settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted),
+				error: null,
+			};
 		} catch (error) {
 			return { settings: {}, error: error as Error };
 		}
@@ -796,6 +800,17 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getRemoteCompactionEnabled(): boolean {
+		return this.settings.compaction?.remoteEnabled ?? true;
+	}
+
+	setRemoteCompactionEnabled(enabled: boolean): void {
+		if (!this.globalSettings.compaction) this.globalSettings.compaction = {};
+		this.globalSettings.compaction.remoteEnabled = enabled;
+		this.markModified("compaction", "remoteEnabled");
+		this.save();
+	}
+
 	getCompactionReserveTokens(): number {
 		return this.settings.compaction?.reserveTokens ?? 16384;
 	}
@@ -804,9 +819,15 @@ export class SettingsManager {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionSettings(): {
+		enabled: boolean;
+		remoteEnabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+	} {
 		return {
 			enabled: this.getCompactionEnabled(),
+			remoteEnabled: this.getRemoteCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
 		};
@@ -866,7 +887,11 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
+	getProviderRetrySettings(): {
+		timeoutMs?: number;
+		maxRetries?: number;
+		maxRetryDelayMs: number;
+	} {
 		return {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
 			maxRetries: this.settings.retry?.provider?.maxRetries,
