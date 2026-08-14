@@ -40,4 +40,4 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 
 ## Patch retirement
 
-When upstream merges an equivalent patch, verify the upstream behavior, remove the patch from the configured order and README, rebuild and validate `main`, then archive/delete the source branch.
+When upstream merges equivalent behavior or an enabled downstream replacement supersedes a patch, verify the replacement, remove the retired patch from the configured order and README, rebuild and validate `main`, then move the source branch to `archive/<patch-name>` and delete its original `patch/<patch-name>` ref.
