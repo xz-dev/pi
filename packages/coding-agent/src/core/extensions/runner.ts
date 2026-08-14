@@ -187,6 +187,16 @@ export type ReloadHandler = () => Promise<void>;
 
 export type ShutdownHandler = () => void;
 
+export interface ExtensionShutdownProgress {
+	status: "start" | "end" | "error";
+	extensionPath: string;
+	handlerIndex: number;
+	elapsedMs?: number;
+	slow?: boolean;
+}
+
+export type ExtensionShutdownProgressListener = (entry: ExtensionShutdownProgress) => void;
+
 export const SLOW_EXTENSION_HOOK_ENTRY_TYPE = "pi.extension_hook_slow";
 
 function resolveHandlerResult<T>(value: T, markAsync: () => void): Promise<Awaited<T>> {
@@ -339,6 +349,7 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private getSlowHookThresholdMs: () => number;
 	private onSlowHook?: (entry: SlowExtensionHookEntry) => void;
+	private shutdownProgressListener?: ExtensionShutdownProgressListener;
 
 	constructor(
 		extensions: Extension[],
@@ -357,6 +368,10 @@ export class ExtensionRunner {
 		this.modelRegistry = modelRegistry;
 		this.getSlowHookThresholdMs = getSlowHookThresholdMs;
 		this.onSlowHook = onSlowHook;
+	}
+
+	setShutdownProgressListener(listener?: ExtensionShutdownProgressListener): void {
+		this.shutdownProgressListener = listener;
 	}
 
 	bindCore(
@@ -846,6 +861,14 @@ export class ExtensionRunner {
 		);
 	}
 
+	private emitShutdownProgress(entry: ExtensionShutdownProgress): void {
+		try {
+			this.shutdownProgressListener?.(entry);
+		} catch {
+			// Diagnostics must never alter extension behavior.
+		}
+	}
+
 	private async runHandler<T>(
 		event: string,
 		extension: Extension,
@@ -864,6 +887,14 @@ export class ExtensionRunner {
 		const startedAt = performance.now();
 		let status: "end" | "error" = "end";
 		let executionKind: SlowExtensionHookEntry["executionKind"] = "sync";
+		const isShutdown = event === "session_shutdown";
+		if (isShutdown) {
+			this.emitShutdownProgress({
+				status: "start",
+				extensionPath: extension.resolvedPath,
+				handlerIndex,
+			});
+		}
 		try {
 			const returned = handler();
 			return await resolveHandlerResult(returned, () => {
@@ -876,7 +907,22 @@ export class ExtensionRunner {
 			const elapsedMs = performance.now() - startedAt;
 			finishLifecycle?.(status, elapsedMs);
 			try {
-				if (elapsedMs > this.getSlowHookThresholdMs()) {
+				let slow = false;
+				try {
+					slow = elapsedMs > this.getSlowHookThresholdMs();
+				} catch {
+					// Diagnostics must never alter extension behavior.
+				}
+				if (isShutdown) {
+					this.emitShutdownProgress({
+						status,
+						extensionPath: extension.resolvedPath,
+						handlerIndex,
+						elapsedMs,
+						slow,
+					});
+				}
+				if (slow && !(isShutdown && this.shutdownProgressListener)) {
 					const entry = {
 						event,
 						extensionPath: extension.resolvedPath,
