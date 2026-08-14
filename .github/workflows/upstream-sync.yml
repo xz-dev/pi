@@ -85,10 +85,6 @@ jobs:
           fi
           git commit -m "merge patch/native-wrapper-release branch"
 
-          # Paused until rebased onto current upstream/main:
-          # - patch/model-refresh-consistency
-          # - patch/tui-synchronized-cursor
-
           git merge --squash origin/patch/tui-synchronized-cursor-fleet
           git commit -m "merge patch/tui-synchronized-cursor-fleet branch"
 

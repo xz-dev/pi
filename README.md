@@ -49,15 +49,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 The integrated Esc and manual-retry patches both extend the Agent failure lifecycle. Their independent branches remain directly reviewable; [`tmp/patch/esc-manual-retry-compat`](https://github.com/xz-dev/pi/tree/tmp/patch/esc-manual-retry-compat) supplies only the downstream combined `handleRunFailure()` resolution and is merged immediately after them.
 
-### Temporarily disabled
-
-These branches still exist but are not squash-merged into rebuilt `main` until they are rebased onto current upstream:
-
-- Provider catalog refresh consistency
-  - Patch branch: [`patch/model-refresh-consistency`](https://github.com/xz-dev/pi/tree/patch/model-refresh-consistency)
-- TUI synchronized-output hardware cursor positioning
-  - Patch branch: [`patch/tui-synchronized-cursor`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor)
-
 ### Maintenance
 
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
