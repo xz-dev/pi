@@ -54,11 +54,27 @@ test("upstream sync retires the obsolete OpenCode completions fixture patch", ()
   assert.doesNotMatch(syncWorkflowText, /patch\/opencode-completions-test-narrowing/);
 });
 
-test("upstream sync delegates ci squash conflict handling to the tested resolver", () => {
+test("upstream sync requires ci to merge cleanly without source rewriting", () => {
   assert.match(
     syncWorkflowText,
-    /if ! git merge --squash origin\/ci; then\s+scripts\/resolve-ci-squash-conflicts\.sh\s+fi/,
+    /if ! git merge --squash origin\/ci; then\s+echo '::error::Unexpected ci squash conflict; ci must merge cleanly onto current upstream'\s+exit 1\s+fi/,
   );
+  assert.doesNotMatch(syncWorkflowText, /resolve-ci-squash-conflicts/);
+});
+
+test("upstream sync keeps remote compaction temporarily retired", () => {
+  assert.doesNotMatch(syncWorkflowText, /patch\/provider-transparent-compaction/);
+  assert.doesNotMatch(syncWorkflowText, /Responses compaction/);
+});
+
+test("upstream sync carries the unified TUI-only slow-hook patch", () => {
+  assert.match(
+    syncWorkflowText,
+    /\+refs\/heads\/patch\/slow-hook-tui-only:refs\/remotes\/origin\/patch\/slow-hook-tui-only/,
+  );
+  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/slow-hook-tui-only/);
+  assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
+  assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
 
 test("esc abort integration builds the workspace dependency graph before focused regressions", () => {

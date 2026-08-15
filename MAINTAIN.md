@@ -35,9 +35,10 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 - `pi update --self` from an xz-dev binary discovers only the latest immutable `xz-dev/pi` Release, downloads the exact target recorded in `piConfig.releaseTarget`, verifies the GitHub asset digest plus archive/package identity, and activates it without parsing the audit manifest at runtime. An xz-dev source checkout remains user-managed.
 - Do not publish this fork to npm, GitHub Packages, tags outside `xz-v*`, or a second Release plane. `.github/workflows/build-binaries.yml` is persistently removed from generated `main`; the `ci` overlay and generated-main verification continue removing it if upstream ever reintroduces it.
 - Keep runtime self-update behavior on `patch/native-wrapper-release`; keep descriptor, packaging, Scoop generator/publisher, E2E workflow, README, and this guide on `ci`. Generated Scoop artifacts alone live on `scoop`. Source automation is squash-integrated through `ci`; `scoop` is never merged into generated `main`.
-- Integrate `patch/shutdown-lifecycle-log` after `patch/provider-transparent-compaction`; its guarded resolver must preserve the combined compaction and manual-retry `AgentSession` imports while adding lifecycle diagnostics.
-- Integrate the commits after `patch/shutdown-lifecycle-log` on `patch/slow-hook-execution-kind` immediately after that base patch; they extend those lifecycle diagnostics with synchronous and asynchronous execution labels.
+- Integrate `patch/slow-hook-tui-only` after `patch/retry-non-retryable-patterns`. It owns transient TUI-only slow-hook and shutdown diagnostics and must never create timing session entries, model context, print/RPC events, or lifecycle log files.
 
 ## Patch retirement
 
-When upstream merges equivalent behavior or an enabled downstream replacement supersedes a patch, verify the replacement, remove the retired patch from the configured order and README, rebuild and validate `main`, then move the source branch to `archive/<patch-name>` and delete its original `patch/<patch-name>` ref.
+Temporary retirement removes a patch from sync fetch/merge/test integration and enabled README features while retaining its source branch for re-evaluation. Do not archive or delete the source ref.
+
+Permanent retirement requires verified replacement evidence, removal from configured order and README, a validated rebuilt `main`, archival to `archive/<patch-name>`, then deletion of the original `patch/<patch-name>` ref.
