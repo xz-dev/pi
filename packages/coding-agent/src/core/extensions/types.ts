@@ -47,7 +47,7 @@ import type {
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { BashResult } from "../bash-executor.ts";
-import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
+import type { CompactionKind, CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
@@ -596,8 +596,8 @@ export interface SessionBeforeCompactEvent {
 	preparation: CompactionPreparation;
 	branchEntries: SessionEntry[];
 	customInstructions?: string;
-	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
-	reason: "manual" | "threshold" | "overflow";
+	/** What triggered the compaction: manual /compact, threshold, overflow recovery, or request-time migration */
+	reason: "manual" | "threshold" | "overflow" | "migration";
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
 	signal: AbortSignal;
@@ -607,9 +607,10 @@ export interface SessionBeforeCompactEvent {
 export interface SessionCompactEvent {
 	type: "session_compact";
 	compactionEntry: CompactionEntry;
+	kind: CompactionKind;
 	fromExtension: boolean;
-	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
-	reason: "manual" | "threshold" | "overflow";
+	/** What triggered the compaction: manual /compact, the context threshold, overflow recovery, or request-time migration */
+	reason: "manual" | "threshold" | "overflow" | "migration";
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
 }
