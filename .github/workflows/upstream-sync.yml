@@ -197,7 +197,21 @@ jobs:
           git merge --squash origin/patch/retry-non-retryable-patterns
           git commit -m "merge patch/retry-non-retryable-patterns branch"
 
-          git merge --squash origin/patch/slow-hook-tui-only
+          if ! git merge --squash origin/patch/slow-hook-tui-only; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            expected_conflicts=(
+              packages/coding-agent/src/core/agent-session.ts
+              packages/coding-agent/src/core/extensions/runner.ts
+            )
+            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )) ||
+              [[ ${conflicts[*]} != "${expected_conflicts[*]}" ]]; then
+              printf '::error::Unexpected slow-hook squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            python3 scripts/resolve-slow-hook-squash-conflicts.py
+          fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying TUI-only slow-hook diagnostics'
             exit 1
@@ -206,11 +220,29 @@ jobs:
             echo '::error::Empty patch integration for patch/slow-hook-tui-only'
             exit 1
           fi
+          grep -Fq 'if (ext.uninterruptibleHandlers?.has(handler) === true) continue;' packages/coding-agent/src/core/extensions/runner.ts
+          grep -Fq 'this.runHandler("message_end", ext, handlerIndex' packages/coding-agent/src/core/extensions/runner.ts
+          git diff --cached --check
           git commit -m "merge patch/slow-hook-tui-only branch"
 
-          if ! git merge --squash origin/patch/session-tree-splice; then
-            echo '::error::Unexpected session-tree splice conflict; refresh the source branch against its configured predecessor'
+          if ! git merge-base --is-ancestor origin/patch/slow-hook-tui-only origin/patch/session-tree-splice; then
+            echo '::error::patch/session-tree-splice must descend from patch/slow-hook-tui-only'
             exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/slow-hook-tui-only..origin/patch/session-tree-splice; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            expected_conflicts=(
+              packages/coding-agent/src/core/session-manager.ts
+              packages/coding-agent/test/suite/harness.ts
+            )
+            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )) ||
+              [[ ${conflicts[*]} != "${expected_conflicts[*]}" ]]; then
+              printf '::error::Unexpected session-tree splice conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            python3 scripts/resolve-session-tree-splice-conflicts.py
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying session-tree splice'
@@ -220,6 +252,11 @@ jobs:
             echo '::error::Empty patch integration for patch/session-tree-splice'
             exit 1
           fi
+          grep -Fq 'rmSync,' packages/coding-agent/src/core/session-manager.ts
+          grep -Fq 'unlinkSync,' packages/coding-agent/src/core/session-manager.ts
+          grep -Fq 'sessionManagerFactory?: (tempDir: string) => SessionManager;' packages/coding-agent/test/suite/harness.ts
+          grep -Fq 'persist?: boolean;' packages/coding-agent/test/suite/harness.ts
+          git diff --cached --check
           git commit -m "merge patch/session-tree-splice branch"
 
       - name: Install dependencies for pre-push gates
