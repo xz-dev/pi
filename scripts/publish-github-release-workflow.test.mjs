@@ -77,7 +77,7 @@ test("upstream sync restores provider-transparent compaction after session-tree 
   );
   assert.match(
     syncWorkflowText,
-    /python3 scripts\/resolve-provider-transparent-compaction-conflicts\.py/,
+    /python3 scripts\/resolve-provider-transparent-compaction-conflicts\.py\s+git cherry-pick --quit/,
   );
   assert.match(syncWorkflowText, /test\/openai-responses-compat\.test\.ts/);
   assert.match(syncWorkflowText, /test\/compaction-bounded-recovery\.test\.ts/);
@@ -108,7 +108,7 @@ test("upstream sync preserves bounded slow-hook and session-tree compatibility",
   );
   assert.match(
     syncWorkflowText,
-    /python3 scripts\/resolve-session-tree-splice-conflicts\.py/,
+    /python3 scripts\/resolve-session-tree-splice-conflicts\.py\s+git cherry-pick --quit/,
   );
   assert.match(
     syncWorkflowText,
