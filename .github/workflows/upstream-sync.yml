@@ -209,7 +209,8 @@ jobs:
           git commit -m "merge patch/slow-hook-tui-only branch"
 
           if ! git merge --squash origin/patch/session-tree-splice; then
-            scripts/resolve-session-tree-splice-conflicts.sh
+            echo '::error::Unexpected session-tree splice conflict; refresh the source branch against its configured predecessor'
+            exit 1
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying session-tree splice'
