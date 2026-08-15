@@ -1,16 +1,16 @@
 {
-	"version": "0.84.2-xz.99.1.gf85d040d",
+	"version": "0.84.2-xz.100.1.g4489f802",
 	"description": "Terminal coding agent with multi-provider LLM support",
 	"homepage": "https://github.com/xz-dev/pi",
 	"license": "MIT",
 	"architecture": {
 		"64bit": {
-			"url": "https://github.com/xz-dev/pi/releases/download/xz-v0.84.2-xz.99.1.gf85d040d/pi-windows-x64-modern.zip",
-			"hash": "65e73e7ae2761480cb4963c625e89ca1a53ef9bf158a236630ab794c1465f466"
+			"url": "https://github.com/xz-dev/pi/releases/download/xz-v0.84.2-xz.100.1.g4489f802/pi-windows-x64-modern.zip",
+			"hash": "4f0a1c6ca3ce6a9168ae562934e7a6d8753c498ce9679671286ed648b6b89e52"
 		},
 		"arm64": {
-			"url": "https://github.com/xz-dev/pi/releases/download/xz-v0.84.2-xz.99.1.gf85d040d/pi-windows-arm64.zip",
-			"hash": "b417e531e9ddaba3738b7554b26c83f68ba5f228d91537a326fd129b0ecb1302"
+			"url": "https://github.com/xz-dev/pi/releases/download/xz-v0.84.2-xz.100.1.g4489f802/pi-windows-arm64.zip",
+			"hash": "c7979f56bff6de5c3de5ec0fa888524f257c19e9f93f34e1e24872260a231660"
 		}
 	},
 	"bin": "pi.exe"
