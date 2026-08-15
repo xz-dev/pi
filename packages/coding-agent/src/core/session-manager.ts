@@ -12,6 +12,7 @@ import {
 	readdirSync,
 	readSync,
 	renameSync,
+	rmSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
@@ -22,6 +23,13 @@ import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import type { CompactionKind } from "./compaction/compaction.ts";
+import {
+	attachPrivateEnvelope,
+	extractPrivateRemoteState,
+	type PrivateRemoteState,
+	toOpenAIResponsesCompaction,
+} from "./compaction/remote-state.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -71,6 +79,7 @@ export interface ModelChangeEntry extends SessionEntryBase {
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
+	kind?: CompactionKind;
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
@@ -172,6 +181,18 @@ export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
+}
+
+export interface CompactionCommitExpectation {
+	sessionId: string;
+	generation: number;
+	leafId: string | null;
+	sourceEntries?: string;
+	rawSourceEntries?: string;
+	dependencies?: {
+		model: { provider: string; modelId: string } | null;
+		thinkingLevel: string;
+	};
 }
 
 export interface SessionInfo {
@@ -372,7 +393,10 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
+			model = {
+				provider: entry.message.provider,
+				modelId: entry.message.model,
+			};
 		}
 	}
 
@@ -383,6 +407,19 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
  * Project one selected session entry into LLM/runtime messages.
  * Plain custom entries are display/state entries and do not participate in context.
  */
+function publicCompactionKind(entry: CompactionEntry): CompactionKind {
+	return entry.kind ?? (entry.fromHook ? "extension" : "classic");
+}
+
+export function isCompactionDependencyEntry(entry: SessionEntry): boolean {
+	if (entry.type === "custom" || entry.type === "label" || entry.type === "session_info") return false;
+	return !(entry.type === "message" && entry.message.role === "bashExecution" && entry.message.excludeFromContext);
+}
+
+function compactionDependencySnapshot(entries: SessionEntry[]): string {
+	return JSON.stringify(entries.filter(isCompactionDependencyEntry));
+}
+
 export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage[] {
 	if (entry.type === "message") {
 		const message = entry.message;
@@ -405,7 +442,14 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
 	if (entry.type === "compaction") {
-		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
+		return [
+			createCompactionSummaryMessage(
+				entry.summary,
+				entry.tokensBefore,
+				entry.timestamp,
+				publicCompactionKind(entry),
+			),
+		];
 	}
 	return [];
 }
@@ -856,6 +900,33 @@ async function listSessionsFromDir(
  * Use buildSessionContext() to get the resolved message list for the LLM, which
  * handles compaction summaries and follows the path from root to current leaf.
  */
+const privateRemoteByEntry = new WeakMap<CompactionEntry, PrivateRemoteState>();
+
+function sanitizeCompactionEntry(entry: CompactionEntry): CompactionEntry {
+	const extracted = extractPrivateRemoteState(entry.details);
+	const kind = entry.kind ?? (extracted.remoteEnvelopePresent ? "remote" : entry.fromHook ? "extension" : "classic");
+	const sanitized: CompactionEntry = {
+		...entry,
+		kind,
+		details: extracted.publicDetails,
+	};
+	if (extracted.privateRemote) privateRemoteByEntry.set(sanitized, extracted.privateRemote);
+	return sanitized;
+}
+
+function sanitizeSessionEntry(entry: SessionEntry): SessionEntry {
+	return entry.type === "compaction" ? sanitizeCompactionEntry(entry) : entry;
+}
+
+export function getPrivateRemoteState(entry: CompactionEntry | undefined): PrivateRemoteState | undefined {
+	return entry ? privateRemoteByEntry.get(entry) : undefined;
+}
+
+export function getPrivateRemoteCompaction(entry: CompactionEntry | undefined) {
+	const state = getPrivateRemoteState(entry);
+	return state ? toOpenAIResponsesCompaction(state) : undefined;
+}
+
 export class SessionManager {
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
@@ -868,6 +939,14 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private generation = 0;
+	private persistenceOps = {
+		appendFileSync,
+		closeSync,
+		openSync,
+		rmSync,
+		writeFileSync,
+	};
 
 	private constructor(
 		cwd: string,
@@ -950,6 +1029,7 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
+		this.generation = 0;
 		this.flushed = false;
 
 		if (this.persist) {
@@ -964,10 +1044,13 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
-		for (const entry of this.fileEntries) {
-			if (entry.type === "session") continue;
+		this.generation = 0;
+		for (const raw of this.fileEntries) {
+			if (raw.type === "session") continue;
+			const entry = sanitizeSessionEntry(raw);
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
+			this.generation++;
 			if (entry.type === "label") {
 				if (entry.label) {
 					this.labelsById.set(entry.targetId, entry.label);
@@ -1047,40 +1130,67 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	_persist(entry: SessionEntry): void {
-		if (!this.persist || !this.sessionFile) return;
+	_persist(entry: SessionEntry): boolean {
+		if (!this.persist || !this.sessionFile) return this.flushed;
 
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
+		const prospectiveEntries = [...this.fileEntries, entry];
+		const hasAssistant = prospectiveEntries.some(
+			(candidate) => candidate.type === "message" && candidate.message.role === "assistant",
+		);
 		if (!hasAssistant) {
-			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-			} else {
-				// Mark as not flushed so when assistant arrives, all entries get written
-				this.flushed = false;
-			}
-			return;
+			if (this.flushed) this.persistenceOps.appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			return this.flushed;
 		}
 
 		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
+			const fd = this.persistenceOps.openSync(this.sessionFile, "wx");
 			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
+				for (const candidate of prospectiveEntries) {
+					this.persistenceOps.writeFileSync(fd, `${JSON.stringify(candidate)}\n`);
 				}
+			} catch (error) {
+				this.persistenceOps.rmSync(this.sessionFile, { force: true });
+				throw error;
 			} finally {
-				closeSync(fd);
+				this.persistenceOps.closeSync(fd);
 			}
-			this.flushed = true;
-		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			return true;
 		}
+		this.persistenceOps.appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+		return true;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		const nextFlushed = this._persist(entry);
+		const publicEntry = sanitizeSessionEntry(entry);
 		this.fileEntries.push(entry);
-		this.byId.set(entry.id, entry);
-		this.leafId = entry.id;
-		this._persist(entry);
+		this.byId.set(publicEntry.id, publicEntry);
+		this.leafId = publicEntry.id;
+		this.generation++;
+		this.flushed = nextFlushed;
+	}
+
+	getGeneration(): number {
+		return this.generation;
+	}
+
+	captureCompactionCommitExpectation(options?: { branch?: SessionEntry[] }): CompactionCommitExpectation {
+		const branch = options?.branch ?? this.getBranch();
+		const settings = options ? getSessionContextSettings(branch) : undefined;
+		return {
+			sessionId: this.sessionId,
+			generation: this.generation,
+			leafId: this.leafId,
+			sourceEntries: options ? compactionDependencySnapshot(branch) : undefined,
+			rawSourceEntries: options ? JSON.stringify(branch) : undefined,
+			dependencies:
+				options && settings
+					? {
+							model: settings.model,
+							thinkingLevel: settings.thinkingLevel,
+						}
+					: undefined,
+		};
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1136,16 +1246,65 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 		usage?: Usage,
+		kind?: CompactionKind,
+		privateRemote?: PrivateRemoteState,
+		expected?: CompactionCommitExpectation,
 	): string {
+		if (expected) {
+			if (expected.sessionId !== this.sessionId)
+				throw new Error("Session changed before compaction could be committed");
+			const branch = this.getBranch();
+			const expectedLeafIndex = expected.leafId ? branch.findIndex((entry) => entry.id === expected.leafId) : -1;
+			if (expected.leafId !== null && expectedLeafIndex < 0) {
+				throw new Error("Session branch changed before compaction could be committed");
+			}
+			const sourceBranch = branch.slice(0, expectedLeafIndex + 1);
+			if (!sourceBranch.some((entry) => entry.id === firstKeptEntryId)) {
+				throw new Error("Compaction first-kept entry is outside the source branch");
+			}
+			if (
+				(expected.sourceEntries !== undefined &&
+					compactionDependencySnapshot(sourceBranch) !== expected.sourceEntries) ||
+				(expected.rawSourceEntries !== undefined && JSON.stringify(sourceBranch) !== expected.rawSourceEntries)
+			) {
+				throw new Error("Session compaction dependencies changed before compaction could be committed");
+			}
+			if (!expected.dependencies) {
+				if (expected.generation !== this.generation)
+					throw new Error("Session generation changed before compaction could be committed");
+				if (expected.leafId !== this.leafId)
+					throw new Error("Session branch changed before compaction could be committed");
+			} else {
+				const settings = getSessionContextSettings(sourceBranch);
+				if (
+					settings.thinkingLevel !== expected.dependencies.thinkingLevel ||
+					settings.model?.provider !== expected.dependencies.model?.provider ||
+					settings.model?.modelId !== expected.dependencies.model?.modelId ||
+					branch.slice(expectedLeafIndex + 1).some(isCompactionDependencyEntry)
+				) {
+					throw new Error("Session compaction dependencies changed before compaction could be committed");
+				}
+			}
+		}
+		const extracted = extractPrivateRemoteState(details);
+		const resolvedPrivateRemote = privateRemote ?? extracted.privateRemote;
+		const resolvedKind =
+			kind ??
+			(extracted.remoteEnvelopePresent || resolvedPrivateRemote ? "remote" : fromHook ? "extension" : "classic");
+		const persistedDetails =
+			resolvedKind === "remote" && resolvedPrivateRemote
+				? attachPrivateEnvelope(undefined, resolvedPrivateRemote)
+				: extracted.publicDetails;
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
+			kind: resolvedKind,
 			summary,
 			firstKeptEntryId,
 			tokensBefore,
-			details,
+			details: persistedDetails as T | undefined,
 			usage,
 			fromHook,
 		};
@@ -1320,6 +1479,10 @@ export class SessionManager {
 		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
 	}
 
+	buildRawCompactionEntries(): SessionEntry[] {
+		return this.getBranch().filter((entry) => entry.type !== "compaction");
+	}
+
 	/**
 	 * Get session header.
 	 */
@@ -1334,7 +1497,9 @@ export class SessionManager {
 	 * spliceEntry() to remove one node and reparent its children.
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		return this.fileEntries
+			.filter((e): e is SessionEntry => e.type !== "session")
+			.map((entry) => this.byId.get(entry.id) ?? sanitizeSessionEntry(entry));
 	}
 
 	/**
@@ -1527,10 +1692,18 @@ export class SessionManager {
 
 		// Collect labels for entries in the path
 		const pathEntryIds = new Set(pathWithoutLabels.map((e) => e.id));
-		const labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }> = [];
+		const labelsToWrite: Array<{
+			targetId: string;
+			label: string;
+			timestamp: string;
+		}> = [];
 		for (const [targetId, label] of this.labelsById) {
 			if (pathEntryIds.has(targetId)) {
-				labelsToWrite.push({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! });
+				labelsToWrite.push({
+					targetId,
+					label,
+					timestamp: this.labelTimestampsById.get(targetId)!,
+				});
 			}
 		}
 
@@ -1701,7 +1874,9 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
+		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, {
+			flag: "wx",
+		});
 
 		// Copy all non-header entries from source
 		for (const entry of sourceEntries) {

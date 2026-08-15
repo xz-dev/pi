@@ -319,6 +319,13 @@ export class RpcClient {
 	}
 
 	/**
+	 * Set remote compaction enabled/disabled.
+	 */
+	async setRemoteCompaction(enabled: boolean): Promise<void> {
+		await this.send({ type: "set_remote_compaction", enabled });
+	}
+
+	/**
 	 * Set auto-retry enabled/disabled.
 	 */
 	async setAutoRetry(enabled: boolean): Promise<void> {

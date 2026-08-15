@@ -67,6 +67,26 @@ describe("v4 session context", () => {
 		expect(context.thinkingLevel).toBe("high");
 	});
 
+	it.each(["remote", "classic", "extension"] as const)("preserves truthful %s compaction kind", (kind) => {
+		const entries: Entry[] = [
+			entry({ type: "message", id: "old", parentId: null, message: userMessage("old") }, 1),
+			entry(
+				{
+					type: "compaction",
+					id: "compact",
+					parentId: "old",
+					kind,
+					summary: "summary",
+					retainedTail: [],
+					tokensBefore: 100,
+				},
+				2,
+			),
+		];
+
+		expect(buildSessionContext(entries).messages[0]).toMatchObject({ role: "compactionSummary", kind });
+	});
+
 	it("applies caller transforms after the compaction boundary", () => {
 		const entries: Entry[] = [
 			entry({ type: "message", id: "old", parentId: null, message: userMessage("old") }, 1),

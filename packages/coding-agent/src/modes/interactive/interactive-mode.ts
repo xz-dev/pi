@@ -3369,7 +3369,9 @@ export class InteractiveMode {
 				this.defaultEditor.onEscape = () => {
 					this.session.abortCompaction();
 				};
-				this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason));
+				this.showStatusIndicator(
+					new CompactionStatusIndicator(this.ui, event.reason === "migration" ? "threshold" : event.reason),
+				);
 				this.ui.requestRender();
 				break;
 			}
@@ -3397,6 +3399,7 @@ export class InteractiveMode {
 							event.result.summary,
 							event.result.tokensBefore,
 							new Date().toISOString(),
+							event.result.kind,
 						),
 					);
 					this.footer.invalidate();
@@ -3455,7 +3458,9 @@ export class InteractiveMode {
 				if (event.source === "branchSummary") {
 					this.showStatusIndicator(new BranchSummaryStatusIndicator(this.ui));
 				} else {
-					this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason));
+					this.showStatusIndicator(
+						new CompactionStatusIndicator(this.ui, event.reason === "migration" ? "threshold" : event.reason),
+					);
 				}
 				this.ui.requestRender();
 				break;
@@ -4486,6 +4491,7 @@ export class InteractiveMode {
 			selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
+					remoteCompaction: this.session.remoteCompactionEnabled,
 					showImages: this.settingsManager.getShowImages(),
 					imageWidthCells: this.settingsManager.getImageWidthCells(),
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
@@ -4524,6 +4530,9 @@ export class InteractiveMode {
 					onAutoCompactChange: (enabled) => {
 						this.session.setAutoCompactionEnabled(enabled);
 						this.footer.setAutoCompactEnabled(enabled);
+					},
+					onRemoteCompactionChange: (enabled) => {
+						this.session.setRemoteCompactionEnabled(enabled);
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
