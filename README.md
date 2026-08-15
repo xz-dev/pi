@@ -22,15 +22,9 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - Allow `settings.retry.nonRetryableErrorPatterns` to fail-fast on gateway-specific terminal quota/limit error messages without expanding the built-in retry classifier.
   - Use case: Stop retrying when a gateway returns a known terminal quota or limit message.
   - Patch branch: [`patch/retry-non-retryable-patterns`](https://github.com/xz-dev/pi/tree/patch/retry-non-retryable-patterns)
-- Record blocking extension startup and shutdown operations in a private lifecycle JSONL, and persist visible non-model reminders for individual awaited extension hooks that exceed the configurable threshold.
-  - Use case: Diagnose startup/shutdown or slow extension-hook stalls without adding diagnostics to model context.
-  - Patch branch: [`patch/shutdown-lifecycle-log`](https://github.com/xz-dev/pi/tree/patch/shutdown-lifecycle-log)
-- Label slow extension-hook reminders by synchronous or asynchronous execution while preserving historical unlabeled entries.
-  - Use case: Tell whether a visible slow-hook reminder came from synchronous or asynchronous extension work.
-  - Patch branch: [`patch/slow-hook-execution-kind`](https://github.com/xz-dev/pi/tree/patch/slow-hook-execution-kind)
-- Keep raw append-only history portable across provider/model switches while replaying private Responses compaction only for a compatible request target; incompatible requests migrate atomically to bounded classic compaction before provider dispatch.
-  - Use case: Compact repeatedly without losing earlier history, then safely switch providers or models without exposing provider-held checkpoint state.
-  - Patch branch: [`patch/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/patch/provider-transparent-compaction)
+- Show awaited extension handlers exceeding `slowHookThresholdMs` only in interactive TUI, with synchronous handlers in warning yellow and asynchronous handlers in default gray. During shutdown, show the current handler while waiting, clear fast handlers, and keep slow handlers on the terminal without writing timing diagnostics to session history, model context, RPC/print events, or disk.
+  - Use case: Diagnose slow extension hooks without persisting diagnostic records.
+  - Patch branch: [`patch/slow-hook-tui-only`](https://github.com/xz-dev/pi/tree/patch/slow-hook-tui-only)
 - Expose public `pi.spliceEntry(entryId)` so an extension can delete one non-root session-tree node and reparent its children, preserving descendants.
   - Use case: Remove a hidden watchdog decision node from session history without deleting later conversation descendants.
   - Patch branch: [`patch/session-tree-splice`](https://github.com/xz-dev/pi/tree/patch/session-tree-splice)
@@ -51,6 +45,10 @@ It tracks upstream `main` with a minimal downstream patch stack.
   - Patch branch: [`patch/tui-synchronized-cursor-fleet`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor-fleet)
 
 The integrated Esc and manual-retry patches both extend the Agent failure lifecycle. Their independent branches remain directly reviewable; [`tmp/patch/esc-manual-retry-compat`](https://github.com/xz-dev/pi/tree/tmp/patch/esc-manual-retry-compat) supplies only the downstream combined `handleRunFailure()` resolution and is merged immediately after them.
+
+### Temporarily disabled
+
+- Provider-transparent Responses remote compaction is not merged into generated `main`. Its source remains on [`patch/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/patch/provider-transparent-compaction) for later re-evaluation and re-enable.
 
 ### Maintenance
 
