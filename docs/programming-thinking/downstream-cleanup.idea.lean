@@ -279,20 +279,6 @@ theorem unsupported_retirement_finishes_retained
     simp [chooseDisposition, hunsupported]
   simp [runToCompletion, runSteps, initialState, step, hretain, oldRefDeleted]
 
--- Temporary disablement is an operational state: generated main excludes the feature while its source ref remains recoverable.
-structure TemporaryDisableState where
-  sourceRefRetained : Bool
-  integratedIntoGeneratedMain : Bool
-  deriving DecidableEq, Repr
-
-def temporarilyDisableProviderCompaction : TemporaryDisableState :=
-  { sourceRefRetained := true, integratedIntoGeneratedMain := false }
-
-theorem temporary_provider_compaction_disablement_is_recoverable :
-    temporarilyDisableProviderCompaction.sourceRefRetained = true ∧
-    temporarilyDisableProviderCompaction.integratedIntoGeneratedMain = false := by
-  decide
-
 -- Branch roles separate independently retireable features, cross-feature glue, and CI orchestration ownership.
 inductive BranchRole where
   | feature
@@ -473,12 +459,9 @@ theorem downstream_cleanup_is_correct
       (compatibilityRetirementTriggered plan →
         decideIntegration plan = .retire) ∧
       ¬(compatibilityEligible plan ∧
-        compatibilityRetirementTriggered plan)) ∧
-    (temporarilyDisableProviderCompaction.sourceRefRetained = true ∧
-      temporarilyDisableProviderCompaction.integratedIntoGeneratedMain = false) := by
+        compatibilityRetirementTriggered plan)) := by
   exact ⟨process_is_correct input hinput,
-    integration_governance_is_correct plan hplan,
-    temporary_provider_compaction_disablement_is_recoverable⟩
+    integration_governance_is_correct plan hplan⟩
 
 #print axioms downstream_cleanup_is_correct
 
@@ -525,7 +508,6 @@ def main : IO Unit := do
     allChangedRuntimePathsAllowed := true
   }
   IO.println s!"responses compaction without boundary proof: {repr (DownstreamCleanup.disposition (DownstreamCleanup.runToCompletion compactionWithoutBoundaryProof))}"
-  IO.println s!"provider compaction source retained: {DownstreamCleanup.temporarilyDisableProviderCompaction.sourceRefRetained}; integrated into main: {DownstreamCleanup.temporarilyDisableProviderCompaction.integratedIntoGeneratedMain}"
   IO.println s!"eligible compatibility: {repr (DownstreamCleanup.decideIntegration compatibility)}"
   IO.println s!"CI infrastructure without runtime semantics: {repr (DownstreamCleanup.decideIntegration ciInfrastructure)}"
-  IO.println "proved: release first, one feature per branch, temporary disablement retains source, governed compatibility, archive before permanent delete"
+  IO.println "proved: release first, one feature per branch, governed compatibility, archive before permanent delete"
