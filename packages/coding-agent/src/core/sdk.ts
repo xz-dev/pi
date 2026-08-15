@@ -1,5 +1,14 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type StreamFn,
+	setDefaultStreamFn,
+	type ThinkingLevel,
+} from "@earendil-works/pi-agent-core";
+import { replayAzureOpenAIResponsesCompaction } from "@earendil-works/pi-ai/api/azure-openai-responses";
+import { replayOpenAICodexResponsesCompaction } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { replayOpenAIResponsesCompaction } from "@earendil-works/pi-ai/api/openai-responses";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -13,7 +22,7 @@ import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
-import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
+import { getDefaultSessionDir, getPrivateRemoteCompaction, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { time } from "./timings.ts";
 import {
@@ -181,7 +190,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
-		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+		resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			settingsManager,
+		});
 		await resourceLoader.reload();
 		time("resourceLoader.reload");
 	}
@@ -254,6 +267,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	).filter((name) => !excludedToolNameSet?.has(name));
 
 	let agent: Agent;
+	let session: AgentSession | undefined;
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
@@ -271,7 +285,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					if (hasImages) {
 						const filteredContent = content
 							.map((c) =>
-								c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c,
+								c.type === "image"
+									? {
+											type: "text" as const,
+											text: "Image reading is disabled.",
+										}
+									: c,
 							)
 							.filter(
 								(c, i, arr) =>
@@ -294,15 +313,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	agent = new Agent({
-		initialState: {
-			systemPrompt: "",
-			model,
-			thinkingLevel,
-			tools: [],
-		},
-		convertToLlm: convertToLlmWithBlockImages,
-		streamFn: async (model, context, options) => {
+	const createRuntimeStreamFn =
+		(replayRemoteCompaction: boolean): StreamFn =>
+		async (model, context, options) => {
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 			// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
@@ -312,13 +325,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const headerRunner = extensionRunnerRef.current;
-			return modelRuntime.streamSimple(model, context, {
+			const latestCompaction = [...sessionManager.getEntries()]
+				.reverse()
+				.find((entry) => entry.type === "compaction");
+			const remoteCompaction =
+				latestCompaction && latestCompaction.type === "compaction"
+					? getPrivateRemoteCompaction(latestCompaction)
+					: undefined;
+			const requestContext = context;
+			// Classic recovery/fallback options omit callbacks; keep explicit options when present so
+			// agent-loop and remote-replay paths do not double-wrap Agent callbacks.
+			const requestOptions = {
 				...options,
 				timeoutMs,
 				websocketConnectTimeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-				transformHeaders: async (requestHeaders) => {
+				onPayload: options?.onPayload ?? agent.onPayload,
+				onResponse: options?.onResponse ?? agent.onResponse,
+				transformHeaders: async (requestHeaders: Record<string, string | null>) => {
 					const headers = mergeProviderAttributionHeaders(
 						model,
 						settingsManager,
@@ -329,8 +354,56 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						? headerRunner.emitBeforeProviderHeaders(headers ?? {})
 						: (headers ?? {});
 				},
-			});
+			};
+			if (replayRemoteCompaction && remoteCompaction && settingsManager.getRemoteCompactionEnabled()) {
+				const auth = await modelRuntime.getAuth(model, { signal: options?.signal });
+				if (!auth) throw new Error(`Provider is not configured: ${model.provider}`);
+				const replayModel = auth.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
+				const replayOptions = {
+					...requestOptions,
+					apiKey: requestOptions.apiKey ?? auth.auth.apiKey,
+					headers: { ...auth.auth.headers, ...requestOptions.headers },
+					env: { ...auth.env, ...requestOptions.env },
+				};
+				if (replayModel.api === "openai-responses") {
+					return replayOpenAIResponsesCompaction(
+						replayModel as Model<"openai-responses">,
+						remoteCompaction,
+						requestContext,
+						replayOptions,
+					);
+				}
+				if (replayModel.api === "azure-openai-responses") {
+					return replayAzureOpenAIResponsesCompaction(
+						replayModel as Model<"azure-openai-responses">,
+						remoteCompaction,
+						requestContext,
+						replayOptions,
+					);
+				}
+				if (replayModel.api === "openai-codex-responses") {
+					return replayOpenAICodexResponsesCompaction(
+						replayModel as Model<"openai-codex-responses">,
+						remoteCompaction,
+						requestContext,
+						replayOptions,
+					);
+				}
+			}
+			return modelRuntime.streamSimple(model, requestContext, requestOptions);
+		};
+	const runtimeStreamFn = createRuntimeStreamFn(true);
+	const classicRecoveryStreamFn = createRuntimeStreamFn(false);
+
+	agent = new Agent({
+		initialState: {
+			systemPrompt: "",
+			model,
+			thinkingLevel,
+			tools: [],
 		},
+		convertToLlm: convertToLlmWithBlockImages,
+		streamFn: runtimeStreamFn,
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner?.hasHandlers("before_provider_request")) {
@@ -350,10 +423,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		},
 		sessionId: sessionManager.getSessionId(),
-		transformContext: async (messages) => {
+		transformContext: async (messages, signal) => {
+			const recovered = await session?.recoverRemoteCompactionContext(messages, signal);
 			const runner = extensionRunnerRef.current;
-			if (!runner) return messages;
-			return runner.emitContext(messages);
+			if (!runner) return recovered ?? messages;
+			return runner.emitContext(recovered ?? messages);
 		},
 		steeringMode: settingsManager.getSteeringMode(),
 		followUpMode: settingsManager.getFollowUpMode(),
@@ -376,8 +450,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
-	const session = new AgentSession({
+	session = new AgentSession({
 		agent,
+		classicRecoveryStreamFn,
+		prepareRequestHeaders: async (requestModel, requestHeaders) => {
+			const headers = mergeProviderAttributionHeaders(
+				requestModel,
+				settingsManager,
+				sessionManager.getSessionId(),
+				requestHeaders,
+			);
+			const runner = extensionRunnerRef.current;
+			return runner?.hasHandlers("before_provider_headers")
+				? runner.emitBeforeProviderHeaders(headers ?? {})
+				: (headers ?? {});
+		},
 		sessionManager,
 		settingsManager,
 		cwd,
