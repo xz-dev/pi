@@ -311,6 +311,11 @@ export class RpcClient {
 		return this.getData(response);
 	}
 
+	/** Continue from the nearest protocol-safe conversation boundary. */
+	async retry(): Promise<void> {
+		await this.send({ type: "retry" });
+	}
+
 	/**
 	 * Set auto-compaction enabled/disabled.
 	 */
