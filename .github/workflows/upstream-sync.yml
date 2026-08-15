@@ -244,6 +244,7 @@ jobs:
               exit 1
             fi
             python3 scripts/resolve-session-tree-splice-conflicts.py
+            git cherry-pick --quit
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying session-tree splice'
@@ -279,6 +280,7 @@ jobs:
               exit 1
             fi
             python3 scripts/resolve-provider-transparent-compaction-conflicts.py
+            git cherry-pick --quit
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying provider-transparent compaction'
