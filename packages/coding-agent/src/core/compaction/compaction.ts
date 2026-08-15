@@ -9,7 +9,7 @@ import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-a
 import { contentText, type RetryCallbacks, type RetryPolicy, retryAssistantCall, uuidv7 } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
-import { convertToLlm } from "../messages.ts";
+import { convertToLlm, createCompactionSummaryMessage } from "../messages.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -84,8 +84,12 @@ function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | u
 	return sessionEntryToContextMessages(entry)[0];
 }
 
+export type CompactionKind = "remote" | "classic" | "extension";
+
 /** Result from compact() - SessionManager adds uuid/parentUuid when saving */
 export interface CompactionResult<T = unknown> {
+	/** Public origin. Omitted only on extension replacement input before Pi assigns "extension". */
+	kind?: CompactionKind;
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
@@ -619,6 +623,28 @@ export async function generateSummary(
 }
 
 /** Generate or update a conversation summary and return its provider usage. */
+function buildSummarizationPromptText(
+	currentMessages: AgentMessage[],
+	customInstructions?: string,
+	previousSummary?: string,
+): string {
+	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
+	if (customInstructions) basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
+	const conversationText = serializeConversation(convertToLlm(currentMessages));
+	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	if (previousSummary) promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+	return promptText + basePrompt;
+}
+
+function estimateSummarizationRequestTokens(currentMessages: AgentMessage[], previousSummary?: string): number {
+	const promptText = buildSummarizationPromptText(currentMessages, undefined, previousSummary);
+	return estimateTokens({
+		role: "user",
+		content: [{ type: "text", text: `${SUMMARIZATION_SYSTEM_PROMPT}\n${promptText}` }],
+		timestamp: 0,
+	});
+}
+
 export async function generateSummaryWithUsage(
 	currentMessages: AgentMessage[],
 	model: Model<any>,
@@ -639,23 +665,7 @@ export async function generateSummaryWithUsage(
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	);
 
-	// Use update prompt if we have a previous summary, otherwise initial prompt
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
-	if (customInstructions) {
-		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
-	}
-
-	// Serialize conversation to text so model doesn't try to continue it
-	// Convert to LLM messages first (handles custom types like bashExecution, custom, etc.)
-	const llmMessages = convertToLlm(currentMessages);
-	const conversationText = serializeConversation(llmMessages);
-
-	// Build the prompt with conversation wrapped in tags
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
-	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
-	}
-	promptText += basePrompt;
+	const promptText = buildSummarizationPromptText(currentMessages, customInstructions, previousSummary);
 
 	const summarizationMessages = [
 		{
@@ -910,10 +920,156 @@ export async function compact(
 	}
 
 	return {
+		kind: "classic",
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
 		usage: summaryUsage,
+		details: { readFiles, modifiedFiles } as CompactionDetails,
+	};
+}
+
+export async function compactRawHistoryInBounds(
+	pathEntries: SessionEntry[],
+	settings: CompactionSettings,
+	model: Model<any>,
+	apiKey: string | undefined,
+	headers: Record<string, string> | undefined,
+	env: Record<string, string> | undefined,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	streamFn: StreamFn | undefined,
+	retry?: RetryPolicy,
+	callbacks?: RetryCallbacks,
+): Promise<CompactionResult> {
+	const contextWindow = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+	const budget = Math.max(1, contextWindow - settings.reserveTokens);
+	const raw = pathEntries.filter((entry) => entry.type !== "compaction");
+	const preparation = prepareCompaction(raw, settings);
+	if (!preparation) throw new Error("Nothing to compact after rebuilding raw session history");
+	const firstKeptIndex = raw.findIndex((entry) => entry.id === preparation.firstKeptEntryId);
+	if (firstKeptIndex < 0) throw new Error("Raw compaction boundary is missing from session history");
+
+	const prefixMessages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+	const fileOps = extractFileOperations(prefixMessages, raw, -1);
+	let summary: string | undefined;
+	let usage: Usage | undefined;
+	let passes = 0;
+	let prefixCursor = 0;
+	let keptIndex = firstKeptIndex;
+
+	const runPass = async (messages: AgentMessage[]): Promise<void> => {
+		if (passes >= 32) throw new Error("Bounded classic recovery exceeded pass limit");
+		if (estimateSummarizationRequestTokens(messages, summary) > budget) {
+			throw new Error("Classic recovery summarization request exceeds destination context budget");
+		}
+		const before = summary;
+		const result = await generateSummaryWithUsage(
+			messages,
+			model,
+			settings.reserveTokens,
+			apiKey,
+			headers,
+			signal,
+			undefined,
+			summary,
+			thinkingLevel,
+			streamFn,
+			env,
+			retry,
+			callbacks,
+		);
+		passes++;
+		if (messages.length === 0 && result.text.length >= (before?.length ?? 0)) {
+			throw new Error("Bounded classic recovery made no progress");
+		}
+		summary = result.text;
+		usage = usage ? combineUsage(usage, result.usage) : result.usage;
+	};
+
+	const foldMessages = async (messages: AgentMessage[], cursor: number): Promise<number> => {
+		let end = cursor;
+		while (
+			end < messages.length &&
+			estimateSummarizationRequestTokens(messages.slice(cursor, end + 1), summary) <= budget
+		) {
+			end++;
+		}
+		if (end === cursor) {
+			if (!summary || estimateSummarizationRequestTokens([], summary) > budget) {
+				throw new Error("Raw history contains an indivisible entry larger than the destination context window");
+			}
+			await runPass([]);
+			return cursor;
+		}
+		await runPass(messages.slice(cursor, end));
+		return end;
+	};
+
+	while (prefixCursor < prefixMessages.length) {
+		prefixCursor = await foldMessages(prefixMessages, prefixCursor);
+	}
+	if (!summary || !usage) throw new Error("Bounded classic recovery produced no summary");
+
+	const projectedTokens = (): number => {
+		const summaryMessage = createCompactionSummaryMessage(
+			summary!,
+			preparation.tokensBefore,
+			new Date(0).toISOString(),
+			"classic",
+		);
+		const retained = raw.slice(keptIndex).flatMap((entry) => sessionEntryToContextMessages(entry));
+		return [summaryMessage, ...retained].reduce((total, message) => total + estimateTokens(message), 0);
+	};
+
+	while (projectedTokens() > budget) {
+		if (keptIndex < raw.length - 1) {
+			const messages: AgentMessage[] = [];
+			let nextKeptIndex = keptIndex;
+			while (nextKeptIndex < raw.length - 1) {
+				const next = getMessageFromEntryForCompaction(raw[nextKeptIndex]);
+				if (!next) {
+					nextKeptIndex++;
+					continue;
+				}
+				if (estimateSummarizationRequestTokens([...messages, next], summary) > budget) break;
+				messages.push(next);
+				nextKeptIndex++;
+			}
+			if (nextKeptIndex > keptIndex && messages.length > 0) {
+				for (const message of messages) extractFileOpsFromMessage(message, fileOps);
+				await runPass(messages);
+				keptIndex = nextKeptIndex;
+				continue;
+			}
+		}
+		if (estimateSummarizationRequestTokens([], summary) > budget) {
+			throw new Error("Generated classic summary exceeds destination context budget");
+		}
+		await runPass([]);
+	}
+
+	const firstKeptEntry = raw[keptIndex];
+	if (!firstKeptEntry) throw new Error("Classic recovery cannot retain a provider-ready suffix");
+	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+	const fileSummary = formatFileOperations(readFiles, modifiedFiles);
+	if (fileSummary) {
+		summary += fileSummary;
+		if (projectedTokens() > budget) {
+			if (estimateSummarizationRequestTokens([], summary) > budget) {
+				throw new Error("Classic recovery metadata exceeds destination context budget");
+			}
+			await runPass([]);
+			if (projectedTokens() > budget) throw new Error("Classic recovery final context exceeds destination budget");
+		}
+	}
+
+	return {
+		kind: "classic",
+		summary,
+		firstKeptEntryId: firstKeptEntry.id,
+		tokensBefore: preparation.tokensBefore,
+		usage,
 		details: { readFiles, modifiedFiles } as CompactionDetails,
 	};
 }

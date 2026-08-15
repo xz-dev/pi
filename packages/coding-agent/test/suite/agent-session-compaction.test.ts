@@ -1,11 +1,25 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	type Model,
+	type Provider,
+	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage } from "../../src/core/auth-storage.ts";
 import { estimateTokens } from "../../src/core/compaction/index.ts";
+import type { ExtensionUIContext } from "../../src/core/extensions/index.ts";
+import { convertToLlm } from "../../src/core/messages.ts";
+import { ModelRuntime } from "../../src/core/model-runtime.ts";
+import { createAgentSession } from "../../src/core/sdk.ts";
+import { getPrivateRemoteState, SessionManager } from "../../src/core/session-manager.ts";
+import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
@@ -67,12 +81,15 @@ function useSummaryStreamFn(harness: Harness, summary: string): () => number {
 	return () => callCount;
 }
 
-function seedCompactableSession(harness: Harness): void {
+function seedCompactableSession(
+	harness: Harness,
+	options?: { userText?: string; assistantText?: string; timestamp?: number },
+): void {
 	harness.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
-	const now = Date.now();
+	const now = options?.timestamp ?? Date.now();
 	harness.sessionManager.appendMessage({
 		role: "user",
-		content: [{ type: "text", text: "message to compact" }],
+		content: [{ type: "text", text: options?.userText ?? "message to compact" }],
 		timestamp: now - 1000,
 	});
 	const assistant = createAssistant(harness, {
@@ -80,9 +97,316 @@ function seedCompactableSession(harness: Harness): void {
 		totalTokens: 100,
 		timestamp: now - 500,
 	});
-	assistant.content = [{ type: "text", text: "assistant response to compact" }];
+	assistant.content = [{ type: "text", text: options?.assistantText ?? "assistant response to compact" }];
 	harness.sessionManager.appendMessage(assistant);
 	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+}
+
+function createUiContext(
+	onNotify: (message: string, type: "info" | "warning" | "error" | undefined) => void,
+): ExtensionUIContext {
+	return {
+		select: async () => undefined,
+		confirm: async () => false,
+		input: async () => undefined,
+		notify: onNotify,
+		onTerminalInput: () => () => {},
+		setStatus: () => {},
+		setWorkingMessage: () => {},
+		setWorkingVisible: () => {},
+		setWorkingIndicator: () => {},
+		setHiddenThinkingLabel: () => {},
+		setWidget: () => {},
+		setFooter: () => {},
+		setHeader: () => {},
+		setTitle: () => {},
+		custom: async <T>() => undefined as T,
+		pasteToEditor: () => {},
+		setEditorText: () => {},
+		getEditorText: () => "",
+		editor: async () => undefined,
+		addAutocompleteProvider: () => {},
+		setEditorComponent: () => {},
+		getEditorComponent: () => undefined,
+		get theme() {
+			throw new Error("theme not available in tests");
+		},
+		getAllThemes: () => [],
+		getTheme: () => undefined,
+		setTheme: () => ({ success: false, error: "Theme switching not available in tests" }),
+		getToolsExpanded: () => false,
+		setToolsExpanded: () => {},
+	} as unknown as ExtensionUIContext;
+}
+
+function configureRemoteOpenAIModel(
+	harness: Harness,
+	options?: { baseUrl?: string; id?: string; provider?: string },
+): Model<"openai-responses"> {
+	const model = {
+		...harness.getModel(),
+		api: "openai-responses" as const,
+		provider: options?.provider ?? "openai",
+		baseUrl: options?.baseUrl ?? "https://api.openai.com/v1",
+		id: options?.id ?? "gpt-5.4",
+	};
+	harness.session.agent.state.model = model;
+	harness.session.modelRuntime.registerNativeProvider({
+		id: model.provider,
+		name: "OpenAI",
+		auth: {
+			apiKey: {
+				name: "OpenAI API key",
+				resolve: async () => ({ auth: { apiKey: "test-key" }, source: "test" }),
+			},
+		},
+		getModels: () => [model],
+		stream: () => createAssistantMessageEventStream(),
+		streamSimple: () => createAssistantMessageEventStream(),
+	});
+	return model;
+}
+
+function configureRemoteCodexModel(harness: Harness): Model<"openai-codex-responses"> {
+	const model = {
+		...harness.getModel(),
+		api: "openai-codex-responses" as const,
+		provider: "openai-codex",
+		baseUrl: "https://codex.example/backend-api",
+		id: "gpt-5.4",
+	};
+	const token = `x.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct" } }))}.x`;
+	harness.session.agent.state.model = model;
+	harness.session.modelRuntime.registerNativeProvider({
+		id: model.provider,
+		name: "OpenAI Codex",
+		auth: {
+			apiKey: {
+				name: "Codex token",
+				resolve: async () => ({ auth: { apiKey: token }, source: "test" }),
+			},
+		},
+		getModels: () => [model],
+		stream: () => createAssistantMessageEventStream(),
+		streamSimple: () => createAssistantMessageEventStream(),
+	});
+	return model;
+}
+
+function remoteCompactOutput(marker = "opaque") {
+	return [
+		{ role: "user", content: [{ type: "input_text", text: "retained" }] },
+		{ type: "compaction", id: "cmp_1", encrypted_content: marker },
+	];
+}
+
+function mockRemoteCompactHttp(options: {
+	success?: boolean;
+	output?: unknown[];
+	status?: number;
+	body?: string;
+	onRequest?: (url: string, init?: RequestInit) => void;
+	waitForAbort?: boolean;
+	throwAbortError?: boolean;
+}): { requests: Array<{ url: string; body: string }> } {
+	const requests: Array<{ url: string; body: string }> = [];
+	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		const url = input instanceof Request ? input.url : String(input);
+		const body = String(init?.body ?? "");
+		requests.push({ url, body });
+		options.onRequest?.(url, init);
+		if (options.throwAbortError) {
+			const error = new Error("remote aborted");
+			error.name = "AbortError";
+			throw error;
+		}
+		if (options.waitForAbort) {
+			await new Promise<void>((_resolve, reject) => {
+				if (init?.signal?.aborted) {
+					reject(init.signal.reason ?? new DOMException("aborted", "AbortError"));
+					return;
+				}
+				init?.signal?.addEventListener(
+					"abort",
+					() => reject(init.signal?.reason ?? new DOMException("aborted", "AbortError")),
+					{ once: true },
+				);
+			});
+		}
+		if (options.success === false) {
+			return new Response(options.body ?? "remote compact failed: provider rejected", {
+				status: options.status ?? 500,
+				headers: { "content-type": "text/plain" },
+			});
+		}
+		return new Response(
+			JSON.stringify({
+				id: "resp_compact_1",
+				created_at: 1,
+				object: "response.compaction",
+				output: options.output ?? remoteCompactOutput(),
+				usage: {
+					input_tokens: 12,
+					input_tokens_details: { cached_tokens: 2 },
+					output_tokens: 3,
+					output_tokens_details: { reasoning_tokens: 1 },
+					total_tokens: 15,
+				},
+			}),
+			{ status: 200, headers: { "content-type": "application/json" } },
+		);
+	});
+	return { requests };
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+	if (!needle) return 0;
+	return haystack.split(needle).length - 1;
+}
+
+function seedProductionSession(
+	sessionManager: SessionManager,
+	model: Model<"openai-responses">,
+	userText: string,
+	assistantText: string,
+	timestamp = Date.now(),
+): void {
+	sessionManager.appendMessage({
+		role: "user",
+		content: [{ type: "text", text: userText }],
+		timestamp: timestamp - 1000,
+	});
+	sessionManager.appendMessage({
+		...fauxAssistantMessage(assistantText, { timestamp: timestamp - 500 }),
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: createUsage(100),
+	});
+}
+
+async function createProductionRemoteSession(options?: { sessionManager?: SessionManager }) {
+	const model: Model<"openai-responses"> = {
+		id: "current-model",
+		name: "Current model",
+		api: "openai-responses",
+		provider: "current-provider",
+		baseUrl: "https://current.example/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_000,
+	};
+	const credentials = AuthStorage.inMemory();
+	await credentials.modify(model.provider, async () => ({ type: "api_key", key: "runtime-key" }));
+	const modelRuntime = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false });
+	const classicRequests: Array<{ context: unknown; options?: SimpleStreamOptions; payload?: unknown }> = [];
+	const afterProviderResponses: Array<{ status: number; headers: Record<string, string> }> = [];
+	const compactEvents: Array<{
+		id: string;
+		kind?: string;
+		details?: unknown;
+		usage?: ReturnType<typeof createUsage>;
+	}> = [];
+	const provider: Provider = {
+		id: model.provider,
+		name: "Current provider",
+		auth: {
+			apiKey: {
+				name: "Current provider key",
+				check: async ({ credential }) => (credential?.key ? { type: "api_key", source: "test" } : undefined),
+				resolve: async ({ credential }) =>
+					credential?.key
+						? {
+								auth: {
+									apiKey: credential.key,
+									baseUrl: model.baseUrl,
+									headers: { "x-runtime-auth": "resolved" },
+								},
+								env: { RUNTIME_ENV: "resolved" },
+								source: "test",
+							}
+						: undefined,
+			},
+		},
+		getModels: () => [model],
+		stream: () => createAssistantMessageEventStream(),
+		streamSimple: (requestModel, context, requestOptions) => {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				void (async () => {
+					const basePayload = { kind: "classic-summary", messages: context.messages };
+					const nextPayload = requestOptions?.onPayload
+						? await requestOptions.onPayload(basePayload, requestModel)
+						: basePayload;
+					const payload = nextPayload === undefined ? basePayload : nextPayload;
+					classicRequests.push({ context, options: requestOptions, payload });
+					if (requestOptions?.onResponse) {
+						await requestOptions.onResponse({ status: 200, headers: { "x-classic": "1" } }, requestModel);
+					}
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: {
+							...fauxAssistantMessage("production classic summary"),
+							api: requestModel.api,
+							provider: requestModel.provider,
+							model: requestModel.id,
+							usage: createUsage(10),
+						},
+					});
+				})();
+			});
+			return stream;
+		},
+	};
+	modelRuntime.registerNativeProvider(provider);
+	const sessionManager = options?.sessionManager ?? SessionManager.inMemory();
+	const settingsManager = SettingsManager.inMemory({ compaction: { keepRecentTokens: 1 } });
+	const extensionsResult = await createTestExtensionsResult([
+		(pi) => {
+			pi.on("session_compact", (event) => {
+				compactEvents.push({
+					id: event.compactionEntry.id,
+					kind: event.kind ?? event.compactionEntry.kind,
+					details: event.compactionEntry.details,
+					usage: event.compactionEntry.usage,
+				});
+			});
+			pi.on("before_provider_request", (event) => {
+				if (event.payload && typeof event.payload === "object") {
+					return {
+						...(event.payload as Record<string, unknown>),
+						classicRecoveryMarker: "from-before-provider-request",
+					};
+				}
+				return {
+					original: event.payload,
+					classicRecoveryMarker: "from-before-provider-request",
+				};
+			});
+			pi.on("after_provider_response", (event) => {
+				afterProviderResponses.push({ status: event.status, headers: event.headers });
+			});
+		},
+	]);
+	const { session } = await createAgentSession({
+		model,
+		modelRuntime,
+		sessionManager,
+		settingsManager,
+		resourceLoader: createTestResourceLoader({ extensionsResult }),
+	});
+	return {
+		session,
+		sessionManager,
+		settingsManager,
+		model,
+		classicRequests,
+		afterProviderResponses,
+		compactEvents,
+	};
 }
 
 describe("AgentSession compaction characterization", () => {
@@ -190,6 +514,106 @@ describe("AgentSession compaction characterization", () => {
 		harness.session.agent.state.model = undefined as unknown as Model<any>;
 
 		await expect(harness.session.compact()).rejects.toThrow("No model selected");
+	});
+
+	it("uses remote replacement history for official OpenAI Responses compaction", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		configureRemoteOpenAIModel(harness);
+		let streamCalls = 0;
+		harness.session.agent.streamFunction = () => {
+			streamCalls++;
+			return createAssistantMessageEventStream();
+		};
+		const compactOutput = remoteCompactOutput();
+		const { requests } = mockRemoteCompactHttp({ output: compactOutput });
+
+		const result = await harness.session.compact();
+		const compactionEntry = harness.sessionManager
+			.getEntries()
+			.slice()
+			.reverse()
+			.find((entry) => entry.type === "compaction");
+
+		expect(streamCalls).toBe(0);
+		expect(requests[0]?.url).toBe("https://api.openai.com/v1/responses/compact");
+		expect(requests[0]?.body).toContain("message to compact");
+		expect(requests[0]?.body).not.toContain("assistant response to compact");
+		expect(result.summary).toBe("Remote compaction");
+		expect(result.kind).toBe("remote");
+		expect(result.details).toBeUndefined();
+		expect(compactionEntry).toMatchObject({ kind: "remote", details: undefined });
+		const summary = harness.session.messages.find((message) => message.role === "compactionSummary");
+		expect(summary).toMatchObject({ kind: "remote", summary: "Remote compaction" });
+		expect(JSON.stringify({ result, compactionEntry, summary })).not.toContain("encrypted_content");
+	});
+
+	it.each([
+		["legacy malformed", { type: "openaiResponses", compaction: { identity: "invalid", output: "not-an-array" } }],
+		["unsupported private schema", { _privateRemote: { schemaVersion: 99, identity: {}, output: [] } }],
+		[
+			"missing private output",
+			{
+				_privateRemote: {
+					schemaVersion: 1,
+					identity: {
+						api: "openai-responses",
+						provider: "openai",
+						model: "gpt-5.4",
+						endpoint: "https://api.openai.com/v1",
+					},
+				},
+			},
+		],
+	] as const)("reopens raw %s JSONL and migrates before provider dispatch", async (_case, details) => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-malformed-remote-reload-"));
+		try {
+			const seedManager = SessionManager.create(tempDir, tempDir);
+			const seedRuntime = await createProductionRemoteSession({ sessionManager: seedManager });
+			seedProductionSession(seedManager, seedRuntime.model, "MALFORMED_REMOTE_RAW_MARKER", "raw assistant");
+			const firstKeptEntryId = seedManager.getEntries()[1]!.id;
+			seedManager.appendCompaction(
+				"Remote compaction",
+				firstKeptEntryId,
+				100,
+				undefined,
+				false,
+				undefined,
+				"classic",
+			);
+			const sessionFile = seedManager.getSessionFile();
+			if (!sessionFile) throw new Error("expected persisted session file");
+			seedRuntime.session.dispose();
+
+			const lines = readFileSync(sessionFile, "utf8")
+				.trimEnd()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>);
+			const rawBoundary = lines.at(-1)!;
+			rawBoundary.kind = "remote";
+			rawBoundary.details = details;
+			writeFileSync(sessionFile, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+			const reopened = SessionManager.open(sessionFile, tempDir);
+			const remoteEntry = reopened.getEntries().at(-1);
+			expect(remoteEntry).toMatchObject({ type: "compaction", kind: "remote", details: undefined });
+			if (remoteEntry?.type !== "compaction") throw new Error("expected remote compaction entry");
+			expect(getPrivateRemoteState(remoteEntry)).toBeUndefined();
+			const runtime = await createProductionRemoteSession({ sessionManager: reopened });
+			runtime.session.agent.state.messages = reopened.buildSessionContext().messages;
+			runtime.session.setRemoteCompactionEnabled(false);
+
+			const recovered = await runtime.session.recoverRemoteCompactionContext(runtime.session.messages);
+
+			expect(runtime.classicRequests).toHaveLength(1);
+			expect(JSON.stringify(runtime.classicRequests[0]?.context)).toContain("MALFORMED_REMOTE_RAW_MARKER");
+			expect(recovered.find((message) => message.role === "compactionSummary")).toMatchObject({ kind: "classic" });
+			expect(JSON.stringify({ entries: reopened.getEntries(), recovered })).not.toContain("not-an-array");
+			runtime.session.dispose();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("throws when compacting without configured auth", async () => {
@@ -629,5 +1053,1142 @@ describe("AgentSession compaction characterization", () => {
 
 		expect(belowThresholdSpy).not.toHaveBeenCalled();
 		expect(disabledSpy).not.toHaveBeenCalled();
+	});
+
+	it("extension compaction preempts remote HTTP for a remote-capable model", async () => {
+		const harness = await createHarness({
+			withConfiguredAuth: false,
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "extension wins",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: { source: "extension" },
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		configureRemoteOpenAIModel(harness);
+		const getClassicCalls = useSummaryStreamFn(harness, "classic should not run");
+		const { requests } = mockRemoteCompactHttp({});
+
+		const result = await harness.session.compact();
+
+		expect(result.summary).toBe("extension wins");
+		expect(requests).toHaveLength(0);
+		expect(getClassicCalls()).toBe(0);
+	});
+
+	it("attempts remote compaction for third-party openai-responses baseUrl", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		configureRemoteOpenAIModel(harness, { baseUrl: "https://example-proxy.test/v1" });
+		const getClassicCalls = useSummaryStreamFn(harness, "classic should not run");
+		const { requests } = mockRemoteCompactHttp({});
+
+		const result = await harness.session.compact();
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.url).toBe("https://example-proxy.test/v1/responses/compact");
+		expect(getClassicCalls()).toBe(0);
+		expect(result.kind).toBe("remote");
+		expect(result.details).toBeUndefined();
+		expect(JSON.stringify(result)).not.toContain("encrypted_content");
+	});
+
+	it("falls back once to classic after remote failure and retries remote later", async () => {
+		const warnings: Array<{ message: string; type: "info" | "warning" | "error" | undefined }> = [];
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		await harness.session.bindExtensions({
+			uiContext: createUiContext((message, type) => warnings.push({ message, type })),
+			mode: "tui",
+		});
+		seedCompactableSession(harness);
+		configureRemoteOpenAIModel(harness);
+		const getClassicCalls = useSummaryStreamFn(harness, "classic fallback summary");
+		const { requests } = mockRemoteCompactHttp({
+			success: false,
+			body: "remote compact failed: no /responses/compact",
+		});
+
+		const first = await harness.session.compact();
+
+		expect(first.summary).toContain("classic fallback summary");
+		expect(requests).toHaveLength(1);
+		expect(getClassicCalls()).toBe(1);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.type).toBe("warning");
+		expect(warnings[0]?.message).toBe("Remote compaction unavailable; used classic compaction");
+
+		seedCompactableSession(harness, {
+			userText: "second wave user",
+			assistantText: "second wave assistant",
+			timestamp: Date.now() + 10_000,
+		});
+		vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+			const url = input instanceof Request ? input.url : String(input);
+			requests.push({ url, body: String(init?.body ?? "") });
+			return new Response(
+				JSON.stringify({
+					id: "resp_compact_2",
+					created_at: 2,
+					object: "response.compaction",
+					output: remoteCompactOutput("opaque-2"),
+					usage: {
+						input_tokens: 4,
+						input_tokens_details: { cached_tokens: 0 },
+						output_tokens: 1,
+						output_tokens_details: { reasoning_tokens: 0 },
+						total_tokens: 5,
+					},
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		});
+
+		const second = await harness.session.compact();
+
+		expect(requests).toHaveLength(2);
+		expect(requests[1]?.url).toBe("https://api.openai.com/v1/responses/compact");
+		expect(second.summary).toBe("Remote compaction");
+		expect(getClassicCalls()).toBe(1);
+		expect(warnings).toHaveLength(1);
+		// Classic fallback summary must be folded into the later remote retry input exactly once.
+		expect(countOccurrences(requests[1]?.body ?? "", "classic fallback summary")).toBe(1);
+		expect(requests[1]?.body).toContain(
+			"The conversation history before this point was compacted into the following summary",
+		);
+	});
+
+	it("folds classic previousSummary into subsequent remote compact input exactly once", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const classicSummary = "classic prior summary content unique-xyz";
+		const getClassicCalls = useSummaryStreamFn(harness, classicSummary);
+		const classicResult = await harness.session.compact();
+		expect(classicResult.summary).toContain(classicSummary);
+		expect(getClassicCalls()).toBe(1);
+
+		seedCompactableSession(harness, {
+			userText: "after classic user",
+			assistantText: "after classic assistant",
+			timestamp: Date.now() + 5_000,
+		});
+		configureRemoteOpenAIModel(harness);
+		const { requests } = mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-after-classic") });
+
+		const remoteResult = await harness.session.compact();
+
+		expect(remoteResult.summary).toBe("Remote compaction");
+		expect(requests).toHaveLength(1);
+		expect(countOccurrences(requests[0]?.body ?? "", classicSummary)).toBe(1);
+		expect(requests[0]?.body).toContain(
+			"The conversation history before this point was compacted into the following summary",
+		);
+		expect(requests[0]?.body).toContain("after classic user");
+		// New remote entry displaced classic from context; prior summary only lives in remote input.
+		const context = harness.sessionManager.buildSessionContext().messages;
+		const summaries = context.filter((message) => message.role === "compactionSummary");
+		expect(summaries).toHaveLength(1);
+		expect(summaries[0]?.summary).toBe("Remote compaction");
+		expect(summaries[0]?.kind).toBe("remote");
+	});
+
+	it("folds extension previousSummary into subsequent remote compact input exactly once", async () => {
+		const extensionSummary = "extension prior summary content unique-abc";
+		let extensionUses = 0;
+		const harness = await createHarness({
+			withConfiguredAuth: false,
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						if (extensionUses > 0) return undefined;
+						extensionUses++;
+						return {
+							compaction: {
+								summary: extensionSummary,
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: { source: "extension-prior" },
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		// Auth/model required before compact() even when extension supplies the result.
+		configureRemoteOpenAIModel(harness);
+		const extensionResult = await harness.session.compact();
+		expect(extensionResult.summary).toBe(extensionSummary);
+		expect(extensionUses).toBe(1);
+
+		seedCompactableSession(harness, {
+			userText: "after extension user",
+			assistantText: "after extension assistant",
+			timestamp: Date.now() + 5_000,
+		});
+		// Re-apply remote model after seed (assistant messages may rebind faux metadata only).
+		configureRemoteOpenAIModel(harness);
+		const getClassicCalls = useSummaryStreamFn(harness, "classic should not run");
+		const { requests } = mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-after-extension") });
+
+		const remoteResult = await harness.session.compact();
+
+		expect(remoteResult.summary).toBe("Remote compaction");
+		expect(requests).toHaveLength(1);
+		expect(getClassicCalls()).toBe(0);
+		expect(countOccurrences(requests[0]?.body ?? "", extensionSummary)).toBe(1);
+		expect(requests[0]?.body).toContain(
+			"The conversation history before this point was compacted into the following summary",
+		);
+		expect(requests[0]?.body).toContain("after extension user");
+	});
+
+	it("direct compact after disabling remote rebuilds raw history through the classic recovery stream", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model, classicRequests } = runtime;
+		seedProductionSession(sessionManager, model, "raw disabled prefix", "raw disabled assistant");
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		const remoteRequests = mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-disabled-direct") });
+		await session.compact();
+
+		seedProductionSession(
+			sessionManager,
+			model,
+			"raw disabled suffix",
+			"disabled suffix assistant",
+			Date.now() + 20_000,
+		);
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		session.setRemoteCompactionEnabled(false);
+
+		const result = await session.compact();
+		const requests = classicRequests.map((entry) => JSON.stringify(entry.context)).join("\n");
+
+		expect(result.summary).toContain("production classic summary");
+		expect(remoteRequests.requests).toHaveLength(1);
+		expect(classicRequests.length).toBeGreaterThanOrEqual(1);
+		expect(countOccurrences(requests, "raw disabled prefix")).toBe(1);
+		expect(countOccurrences(requests, "raw disabled suffix")).toBe(1);
+		expect(requests).not.toContain("opaque-disabled-direct");
+		expect(requests).not.toContain("Remote compaction");
+		session.dispose();
+	});
+
+	it("direct compact after remote identity mismatch uses classic raw recovery without remote HTTP", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model, classicRequests } = runtime;
+		seedProductionSession(sessionManager, model, "raw mismatch prefix", "raw mismatch assistant");
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		const remoteRequests = mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-mismatch-direct") });
+		await session.compact();
+
+		seedProductionSession(
+			sessionManager,
+			model,
+			"raw mismatch suffix",
+			"mismatch suffix assistant",
+			Date.now() + 20_000,
+		);
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		session.agent.state.model = { ...model, id: "changed-model" };
+
+		const result = await session.compact();
+		const requests = classicRequests.map((entry) => JSON.stringify(entry.context)).join("\n");
+
+		expect(result.summary).toContain("production classic summary");
+		expect(remoteRequests.requests).toHaveLength(1);
+		expect(classicRequests.length).toBeGreaterThanOrEqual(1);
+		expect(countOccurrences(requests, "raw mismatch prefix")).toBe(1);
+		expect(countOccurrences(requests, "raw mismatch suffix")).toBe(1);
+		expect(requests).not.toContain("opaque-mismatch-direct");
+		expect(requests).not.toContain("Remote compaction");
+		session.dispose();
+	});
+
+	it("auto-compaction after disabling remote rebuilds raw history through the classic recovery stream", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model, classicRequests } = runtime;
+		seedProductionSession(sessionManager, model, "raw auto-disabled prefix", "raw auto-disabled assistant");
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		const remoteRequests = mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-auto-disabled") });
+		await session.compact();
+
+		seedProductionSession(
+			sessionManager,
+			model,
+			"raw auto-disabled suffix",
+			"auto-disabled suffix assistant",
+			Date.now() + 20_000,
+		);
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		session.setRemoteCompactionEnabled(false);
+		const sessionInternals = session as unknown as SessionWithCompactionInternals;
+
+		await sessionInternals._runAutoCompaction("threshold", false);
+		const requests = classicRequests.map((entry) => JSON.stringify(entry.context)).join("\n");
+
+		expect(remoteRequests.requests).toHaveLength(1);
+		expect(classicRequests.length).toBeGreaterThanOrEqual(1);
+		expect(countOccurrences(requests, "raw auto-disabled prefix")).toBe(1);
+		expect(countOccurrences(requests, "raw auto-disabled suffix")).toBe(1);
+		expect(requests).not.toContain("opaque-auto-disabled");
+		expect(requests).not.toContain("Remote compaction");
+		session.dispose();
+	});
+
+	it("blocks provider dispatch when an extension cancels request-time migration", async () => {
+		const harness = await createHarness({
+			withConfiguredAuth: false,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => {
+						if (event.reason === "migration") return { cancel: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness, { userText: "CANCELLED_MIGRATION_RAW_MARKER" });
+		configureRemoteOpenAIModel(harness);
+		mockRemoteCompactHttp({ output: remoteCompactOutput("PRIVATE_CANCEL_SENTINEL") });
+		await harness.session.compact();
+		seedCompactableSession(harness, {
+			userText: "CANCELLED_MIGRATION_SUFFIX",
+			assistantText: "suffix assistant",
+			timestamp: Date.now() + 20_000,
+		});
+		harness.session.setRemoteCompactionEnabled(false);
+		let providerRequests = 0;
+		const providerStream = harness.session.agent.streamFunction;
+		harness.session.agent.streamFunction = (...args) => {
+			providerRequests++;
+			return providerStream(...args);
+		};
+
+		await expect(harness.session.recoverRemoteCompactionContext(harness.session.messages)).rejects.toThrow(
+			/Remote compaction migration could not prepare raw history|Compaction cancelled/,
+		);
+
+		expect(providerRequests).toBe(0);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("keeps migration retry lifecycle reason ordered and truthful", async () => {
+		const lifecycle: string[] = [];
+		let attempts = 0;
+		const harness = await createHarness({
+			withConfiguredAuth: false,
+			settings: {
+				compaction: { keepRecentTokens: 1 },
+				retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 },
+			},
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => {
+						lifecycle.push(`before:${event.reason}`);
+					});
+					pi.on("session_compact", (event) => {
+						lifecycle.push(`compact:${event.reason}`);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness, { userText: "MIGRATION_RETRY_RAW_MARKER" });
+		configureRemoteOpenAIModel(harness);
+		mockRemoteCompactHttp({ output: remoteCompactOutput("PRIVATE_MIGRATION_RETRY") });
+		await harness.session.compact();
+		lifecycle.length = 0;
+		seedCompactableSession(harness, {
+			userText: "MIGRATION_RETRY_SUFFIX",
+			assistantText: "suffix assistant",
+			timestamp: Date.now() + 20_000,
+		});
+		harness.session.setRemoteCompactionEnabled(false);
+		harness.session.agent.streamFunction = (model) => {
+			attempts++;
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (attempts === 1) {
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }),
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: createUsage(10),
+						},
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: {
+						...fauxAssistantMessage("migration retry summary"),
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: createUsage(10),
+					},
+				});
+			});
+			return stream;
+		};
+		harness.session.subscribe((event) => {
+			if (event.type === "compaction_start" || event.type === "compaction_end") {
+				lifecycle.push(`${event.type}:${event.reason}`);
+			}
+			if (event.type === "summarization_retry_attempt_start") {
+				lifecycle.push(`retry:${event.source === "compaction" ? event.reason : event.source}`);
+			}
+		});
+
+		await harness.session.recoverRemoteCompactionContext(harness.session.messages);
+
+		expect(attempts).toBe(2);
+		expect(lifecycle).toEqual([
+			"compaction_start:migration",
+			"before:migration",
+			"retry:migration",
+			"compact:migration",
+			"compaction_end:migration",
+		]);
+	});
+
+	it("rejects stale production migration without main provider dispatch", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model, classicRequests } = runtime;
+		seedProductionSession(sessionManager, model, "STALE_MIGRATION_RAW_MARKER", "raw assistant");
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		mockRemoteCompactHttp({ output: remoteCompactOutput("PRIVATE_STALE_MIGRATION") });
+		await session.compact();
+		seedProductionSession(sessionManager, model, "STALE_MIGRATION_SUFFIX", "suffix assistant", Date.now() + 20_000);
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		session.setRemoteCompactionEnabled(false);
+		let mutated = false;
+		const runner = Reflect.get(session as unknown as object, "_extensionRunner") as {
+			extensions: Array<{ handlers: Map<string, Array<(event: { reason?: string }) => void>> }>;
+		};
+		const extensions = Reflect.get(runner as unknown as object, "extensions") as Array<{
+			handlers: Map<string, Array<(event: { reason?: string }) => void>>;
+		}>;
+		const extension = extensions[0];
+		if (!extension) throw new Error("expected test extension");
+		const handlers = extension.handlers.get("session_before_compact") ?? [];
+		handlers.unshift((event) => {
+			if (event.reason === "migration" && !mutated) {
+				mutated = true;
+				sessionManager.appendCustomEntry("stale-migration-fence", { marker: "STALE_MIGRATION" });
+			}
+		});
+		extension.handlers.set("session_before_compact", handlers);
+		let mainProviderRequests = 0;
+		const mainProviderStream = session.agent.streamFunction;
+		session.agent.streamFunction = (...args) => {
+			mainProviderRequests++;
+			return mainProviderStream(...args);
+		};
+
+		await session.prompt("request after stale migration");
+
+		expect(session.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: expect.stringMatching(/generation changed|branch changed/),
+		});
+		expect(mutated).toBe(true);
+		expect(classicRequests.length).toBeGreaterThan(0);
+		expect(mainProviderRequests).toBe(0);
+		expect(sessionManager.getEntries()).toEqual(
+			expect.arrayContaining([expect.objectContaining({ type: "custom", customType: "stale-migration-fence" })]),
+		);
+		expect(sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		session.dispose();
+	});
+
+	it("rejects a compaction result derived before extension mutation", async () => {
+		let mutated = false;
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => {
+						if (!mutated) {
+							mutated = true;
+							harness.sessionManager.appendCustomEntry("stale-fence", { marker: "STALE_EXTENSION_MARKER" });
+						}
+						return {
+							compaction: {
+								summary: "stale extension result",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const beforeCompactions = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "compaction").length;
+
+		await expect(harness.session.compact()).rejects.toThrow(/generation changed|branch changed/);
+
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(
+			beforeCompactions,
+		);
+		expect(harness.sessionManager.getEntries().at(-1)).toMatchObject({ type: "custom", customType: "stale-fence" });
+	});
+
+	it("blocks provider dispatch when request-time migration cannot prepare raw history", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model, classicRequests } = runtime;
+		const userId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "NO_PREPARATION_RAW_MARKER" }],
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCompaction("Remote compaction", userId, 1, undefined, false, undefined, "remote");
+		session.agent.state.model = { ...model, id: "incompatible-no-preparation" };
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+
+		await expect(session.recoverRemoteCompactionContext(session.messages)).rejects.toThrow(
+			"Remote compaction migration could not prepare raw history",
+		);
+
+		expect(classicRequests).toHaveLength(0);
+		expect(sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		session.dispose();
+	});
+
+	it.each(["create", "first-flush-write"] as const)(
+		"keeps memory and durable state unchanged when %s persistence fails",
+		(failurePoint) => {
+			const tempDir = mkdtempSync(join(tmpdir(), `pi-persist-${failurePoint}-`));
+			try {
+				const manager = SessionManager.create(tempDir, tempDir);
+				manager.appendMessage({
+					role: "user",
+					content: [{ type: "text", text: "PERSISTENCE_FAULT_USER" }],
+					timestamp: 1,
+				});
+				const file = manager.getSessionFile();
+				if (!file) throw new Error("expected session file path");
+				const before = {
+					entries: structuredClone(manager.getEntries()),
+					leaf: manager.getLeafId(),
+					generation: manager.getGeneration(),
+				};
+				const ops = (
+					manager as unknown as {
+						persistenceOps: {
+							openSync: typeof import("node:fs").openSync;
+							writeFileSync: typeof import("node:fs").writeFileSync;
+						};
+					}
+				).persistenceOps;
+				if (failurePoint === "create") {
+					vi.spyOn(ops, "openSync").mockImplementation(() => {
+						throw new Error("FAULT_CREATE");
+					});
+				} else {
+					vi.spyOn(ops, "writeFileSync").mockImplementation(() => {
+						throw new Error("FAULT_FIRST_FLUSH_WRITE");
+					});
+				}
+				const assistant = {
+					...fauxAssistantMessage("must not persist", { timestamp: 2 }),
+					api: "faux" as const,
+					provider: "faux",
+					model: "faux-model",
+					usage: createUsage(10),
+				};
+
+				expect(() => manager.appendMessage(assistant)).toThrow(/FAULT_/);
+				expect(manager.getEntries()).toEqual(before.entries);
+				expect(manager.getLeafId()).toBe(before.leaf);
+				expect(manager.getGeneration()).toBe(before.generation);
+				expect(existsSync(file)).toBe(false);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("keeps memory, durable JSONL, and private remote state unchanged when append persistence fails", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-persist-append-"));
+		try {
+			const manager = SessionManager.create(tempDir, tempDir);
+			const userId = manager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "PERSIST_APPEND_USER" }],
+				timestamp: 1,
+			});
+			manager.appendMessage({
+				...fauxAssistantMessage("persisted assistant", { timestamp: 2 }),
+				api: "faux",
+				provider: "faux",
+				model: "faux-model",
+				usage: createUsage(10),
+			});
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("expected session file path");
+			const before = {
+				entries: structuredClone(manager.getEntries()),
+				leaf: manager.getLeafId(),
+				generation: manager.getGeneration(),
+				durable: readFileSync(file, "utf8"),
+			};
+			const ops = (
+				manager as unknown as {
+					persistenceOps: { appendFileSync: typeof import("node:fs").appendFileSync };
+				}
+			).persistenceOps;
+			vi.spyOn(ops, "appendFileSync").mockImplementation(() => {
+				throw new Error("FAULT_APPEND");
+			});
+
+			expect(() =>
+				manager.appendCompaction("Remote compaction", userId, 100, undefined, false, undefined, "remote", {
+					schemaVersion: 1,
+					identity: {
+						api: "openai-responses",
+						provider: "openai",
+						model: "gpt-5.4",
+						endpoint: "https://api.openai.com/v1",
+					},
+					output: [{ type: "compaction", encrypted_content: "PRIVATE_APPEND_SENTINEL" }],
+				}),
+			).toThrow("FAULT_APPEND");
+			expect(manager.getEntries()).toEqual(before.entries);
+			expect(manager.getLeafId()).toBe(before.leaf);
+			expect(manager.getGeneration()).toBe(before.generation);
+			expect(readFileSync(file, "utf8")).toBe(before.durable);
+			expect(manager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("publishes no compaction state when persistence fails", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "must not publish",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const before = {
+			entries: structuredClone(harness.sessionManager.getEntries()),
+			leaf: harness.sessionManager.getLeafId(),
+			generation: harness.sessionManager.getGeneration(),
+			messages: structuredClone(harness.session.messages),
+		};
+		vi.spyOn(harness.sessionManager, "_persist").mockImplementation(() => {
+			throw new Error("FAULT_INJECTED_PERSISTENCE_FAILURE");
+		});
+
+		await expect(harness.session.compact()).rejects.toThrow("FAULT_INJECTED_PERSISTENCE_FAILURE");
+
+		expect(harness.sessionManager.getEntries()).toEqual(before.entries);
+		expect(harness.sessionManager.getLeafId()).toBe(before.leaf);
+		expect(harness.sessionManager.getGeneration()).toBe(before.generation);
+		expect(harness.session.messages).toEqual(before.messages);
+	});
+
+	it("does not classic-fallback when remote compaction is aborted by signal", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		configureRemoteOpenAIModel(harness);
+		const getClassicCalls = useSummaryStreamFn(harness, "classic must not run");
+		mockRemoteCompactHttp({ waitForAbort: true });
+
+		const compactPromise = harness.session.compact();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		harness.session.abortCompaction();
+
+		await expect(compactPromise).rejects.toBeTruthy();
+		expect(getClassicCalls()).toBe(0);
+		const end = harness.eventsOfType("compaction_end").at(-1);
+		expect(end?.aborted).toBe(true);
+	});
+
+	it("does not classic-fallback when remote throws AbortError without signal abort", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		configureRemoteOpenAIModel(harness);
+		const getClassicCalls = useSummaryStreamFn(harness, "classic must not run");
+		// Exercise AgentSession abort classification directly: the OpenAI SDK remaps bare
+		// fetch AbortError into connection errors, so the public abort contract is the session seam.
+		const abortError = new Error("remote aborted");
+		abortError.name = "AbortError";
+		vi.spyOn(
+			harness.session as unknown as { _compactResponses: () => Promise<unknown> },
+			"_compactResponses",
+		).mockRejectedValue(abortError);
+
+		await expect(harness.session.compact()).rejects.toMatchObject({ name: "AbortError" });
+		expect(getClassicCalls()).toBe(0);
+	});
+
+	it("does not classic-fallback when auto remote compaction is aborted", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		configureRemoteOpenAIModel(harness);
+		const getClassicCalls = useSummaryStreamFn(harness, "classic must not run");
+		mockRemoteCompactHttp({ waitForAbort: true });
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		const autoPromise = sessionInternals._runAutoCompaction("overflow", true);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		harness.session.abortCompaction();
+
+		await expect(autoPromise).resolves.toBe(false);
+		expect(getClassicCalls()).toBe(0);
+		const end = harness.eventsOfType("compaction_end").at(-1);
+		expect(end?.aborted).toBe(true);
+	});
+
+	it("bypasses opaque replay through the production streamFn when persisted remote identity changes", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model, classicRequests, afterProviderResponses } = runtime;
+		const defaultStreamFn = session.agent.streamFunction;
+		seedProductionSession(sessionManager, model, "raw identity prefix", "raw identity assistant");
+		const firstKeptEntryId = sessionManager.getEntries()[1]!.id;
+		sessionManager.appendCompaction("Remote compaction", firstKeptEntryId, 100, {
+			type: "openaiResponses",
+			compaction: {
+				identity: {
+					api: "openai-responses",
+					provider: "old-provider",
+					model: "old-model",
+					endpoint: "https://old.example/v1",
+				},
+				output: remoteCompactOutput("opaque-identity-mismatch"),
+				usage: createUsage(15),
+			},
+		});
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+
+		const recovered = await session.recoverRemoteCompactionContext(session.messages);
+		const request = JSON.stringify(classicRequests[0]?.context);
+
+		expect(session.agent.streamFunction).toBe(defaultStreamFn);
+		expect(classicRequests).toHaveLength(1);
+		expect(countOccurrences(request, "raw identity prefix")).toBe(1);
+		expect(request).not.toContain("opaque-identity-mismatch");
+		expect(request).not.toContain("Remote compaction");
+		expect(classicRequests[0]?.options).toMatchObject({
+			apiKey: "runtime-key",
+			headers: { "x-runtime-auth": "resolved" },
+			env: { RUNTIME_ENV: "resolved" },
+		});
+		expect(classicRequests[0]?.options?.onPayload).toBeTypeOf("function");
+		expect(classicRequests[0]?.options?.onResponse).toBeTypeOf("function");
+		expect(classicRequests[0]?.payload).toMatchObject({
+			classicRecoveryMarker: "from-before-provider-request",
+		});
+		expect(afterProviderResponses).toEqual([{ status: 200, headers: { "x-classic": "1" } }]);
+		expect(recovered.find((message) => message.role === "compactionSummary")).toMatchObject({
+			kind: "classic",
+			summary: expect.stringContaining("production classic summary"),
+		});
+		session.dispose();
+	});
+
+	it("keeps exact Codex instructions on iterative remote compaction", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		const systemPrompt = "Exact real coding-agent instructions; never helper default.";
+		harness.session.agent.state.systemPrompt = systemPrompt;
+		seedCompactableSession(harness);
+		configureRemoteCodexModel(harness);
+		const { requests } = mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-codex-first") });
+
+		await harness.session.compact();
+		seedCompactableSession(harness, {
+			userText: "second Codex wave",
+			assistantText: "second Codex response",
+			timestamp: Date.now() + 20_000,
+		});
+		await harness.session.compact();
+
+		expect(requests).toHaveLength(2);
+		const secondBody = JSON.parse(requests[1]!.body) as { instructions?: string; input?: unknown[] };
+		expect(secondBody.instructions).toBe(systemPrompt);
+		expect(secondBody.instructions).not.toBe("You are a helpful assistant.");
+		expect(JSON.stringify(secondBody.input)).toContain("opaque-codex-first");
+	});
+
+	it("iterative remote session_compact event references the newly appended compaction", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model, compactEvents } = runtime;
+		seedProductionSession(sessionManager, model, "event prefix", "event assistant");
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-event-first") });
+
+		await session.compact();
+		seedProductionSession(sessionManager, model, "event suffix", "event suffix assistant", Date.now() + 20_000);
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-event-second") });
+
+		await session.compact();
+
+		expect(compactEvents).toHaveLength(2);
+		expect(compactEvents[1]?.id).not.toBe(compactEvents[0]?.id);
+		expect(compactEvents[0]?.kind).toBe("remote");
+		expect(compactEvents[0]?.details).toBeUndefined();
+		expect(compactEvents[1]?.kind).toBe("remote");
+		expect(compactEvents[1]?.details).toBeUndefined();
+		expect(JSON.stringify(compactEvents)).not.toContain("encrypted_content");
+		expect(compactEvents[1]?.usage).toEqual({
+			input: 10,
+			output: 3,
+			cacheRead: 2,
+			cacheWrite: 0,
+			totalTokens: 15,
+			reasoning: 1,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		});
+		session.dispose();
+	});
+
+	it("classic-falls back from iterative remote failure through the production streamFn using only raw history", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model, classicRequests, afterProviderResponses } = runtime;
+		const defaultStreamFn = session.agent.streamFunction;
+		seedProductionSession(sessionManager, model, "raw iterative prefix", "raw iterative assistant");
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-iterative-first") });
+
+		const remoteResult = await session.compact();
+		expect(remoteResult.summary).toBe("Remote compaction");
+		// Non-empty trailing assistant so keepRecentTokens=1 keeps it and leaves the suffix user in the summarize window.
+		seedProductionSession(
+			sessionManager,
+			model,
+			"raw iterative suffix",
+			"suffix assistant reply",
+			Date.now() + 20_000,
+		);
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		mockRemoteCompactHttp({ success: false, body: "iterative remote failed" });
+
+		const classicResult = await session.compact();
+		const request = classicRequests.map((entry) => JSON.stringify(entry.context)).join("\n");
+
+		expect(session.agent.streamFunction).toBe(defaultStreamFn);
+		expect(classicRequests.length).toBeGreaterThanOrEqual(1);
+		expect(classicResult.summary).toContain("production classic summary");
+		expect(countOccurrences(request, "raw iterative prefix")).toBe(1);
+		expect(countOccurrences(request, "raw iterative suffix")).toBe(1);
+		expect(request).not.toContain("opaque-iterative-first");
+		expect(request).not.toContain("Remote compaction");
+		for (const classicRequest of classicRequests) {
+			expect(classicRequest.options?.onPayload).toBeTypeOf("function");
+			expect(classicRequest.options?.onResponse).toBeTypeOf("function");
+			expect(classicRequest.payload).toMatchObject({
+				classicRecoveryMarker: "from-before-provider-request",
+			});
+		}
+		// Remote compact also emits after_provider_response; each classic recovery call must still fire once.
+		expect(afterProviderResponses.filter((event) => event.headers["x-classic"] === "1")).toEqual(
+			classicRequests.map(() => ({ status: 200, headers: { "x-classic": "1" } })),
+		);
+		expect(session.messages.find((message) => message.role === "compactionSummary")).not.toHaveProperty(
+			"remote",
+			expect.anything(),
+		);
+		session.dispose();
+	});
+
+	it("classic-rebuilds raw history after iterative remote success then remote failure", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness, {
+			userText: "old-prefix-message",
+			assistantText: "old-prefix-assistant",
+		});
+		configureRemoteOpenAIModel(harness);
+		mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-first") });
+
+		const remoteResult = await harness.session.compact();
+		expect(remoteResult.summary).toBe("Remote compaction");
+		const firstKeptEntryId = remoteResult.firstKeptEntryId;
+
+		seedCompactableSession(harness, {
+			userText: "suffix-to-summarize",
+			assistantText: "suffix-assistant",
+			timestamp: Date.now() + 20_000,
+		});
+
+		const classicBodies: string[] = [];
+		let classicCalls = 0;
+		harness.session.agent.streamFunction = (_model, context) => {
+			classicCalls++;
+			classicBodies.push(JSON.stringify(context.messages));
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					...fauxAssistantMessage("rebuilt classic summary"),
+					api: _model.api,
+					provider: _model.provider,
+					model: _model.id,
+					usage: createUsage(10),
+				};
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		mockRemoteCompactHttp({ success: false, body: "iterative remote failed" });
+
+		const classicResult = await harness.session.compact();
+		const joined = classicBodies.join("\n");
+
+		expect(classicCalls).toBeGreaterThanOrEqual(1);
+		expect(classicResult.summary).toContain("rebuilt classic summary");
+		expect(countOccurrences(joined, "old-prefix-message")).toBe(1);
+		expect(countOccurrences(joined, "suffix-to-summarize")).toBe(1);
+		expect(joined).not.toContain("encrypted_content");
+		expect(joined).not.toContain("<previous-summary>\nRemote compaction\n</previous-summary>");
+		expect(classicResult.firstKeptEntryId).toBeTruthy();
+		expect(classicResult.firstKeptEntryId).not.toBe(firstKeptEntryId);
+		const summaryMessage = harness.session.messages.find((message) => message.role === "compactionSummary");
+		expect(summaryMessage).toMatchObject({ summary: expect.stringContaining("rebuilt classic summary") });
+		expect(summaryMessage).not.toHaveProperty("remote", expect.anything());
+		expect((summaryMessage as { kind?: string } | undefined)?.kind).toBe("classic");
+	});
+
+	it("recovers classic context when remote is disabled without leaking opaque output", async () => {
+		const harness = await createHarness({
+			withConfiguredAuth: false,
+			// keepRecentTokens must live in base settings: setRemoteCompactionEnabled() save() rebuilds from storage and drops applyOverrides.
+			settings: { images: { blockImages: true }, compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("context", async (event) => ({
+						messages: event.messages.map((message) =>
+							message.role === "user" && Array.isArray(message.content)
+								? {
+										...message,
+										content: message.content.map((part) =>
+											part.type === "text" ? { ...part, text: `xformed:${part.text}` } : part,
+										),
+									}
+								: message,
+						),
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness, {
+			userText: "disable-remote-prefix",
+			assistantText: "disable-remote-assistant",
+		});
+		configureRemoteOpenAIModel(harness);
+		mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-disabled") });
+		await harness.session.compact();
+
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "post-remote kept" },
+				{
+					type: "image",
+					data: "AAAA",
+					mimeType: "image/png",
+				},
+			],
+			timestamp: Date.now() + 5_000,
+		});
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		harness.session.setRemoteCompactionEnabled(false);
+
+		useSummaryStreamFn(harness, "recovered classic after disable");
+		let transformCalls = 0;
+		let convertCalls = 0;
+		const originalTransform = harness.session.agent.transformContext;
+		harness.session.agent.transformContext = async (messages, signal) => {
+			transformCalls++;
+			const recovered = await harness.session.recoverRemoteCompactionContext(messages, signal);
+			return originalTransform ? originalTransform(recovered, signal) : recovered;
+		};
+		harness.session.agent.convertToLlm = (messages: AgentMessage[]) => {
+			convertCalls++;
+			return convertToLlm(messages).map((msg) => {
+				if ((msg.role === "user" || msg.role === "toolResult") && Array.isArray(msg.content)) {
+					const hasImages = msg.content.some((part) => part.type === "image");
+					if (!hasImages) return msg;
+					return {
+						...msg,
+						content: msg.content.map((part) =>
+							part.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : part,
+						),
+					};
+				}
+				return msg;
+			});
+		};
+
+		const recovered = await harness.session.agent.transformContext!(
+			harness.session.messages,
+			new AbortController().signal,
+		);
+		const forProvider = await harness.session.agent.convertToLlm!(recovered);
+		const serialized = JSON.stringify(forProvider);
+
+		expect(transformCalls).toBe(1);
+		expect(convertCalls).toBe(1);
+		expect(serialized).not.toContain("encrypted_content");
+		expect(serialized).not.toContain("opaque-disabled");
+		expect(serialized).toContain("Image reading is disabled.");
+		expect(serialized).toMatch(/xformed:post-remote kept|post-remote kept/);
+		const summary = recovered.find((message) => message.role === "compactionSummary");
+		expect(summary).toMatchObject({ summary: expect.stringContaining("recovered classic after disable") });
+		expect((summary as { kind?: string } | undefined)?.kind).not.toBe("remote");
+	});
+
+	it("recovers classic context when endpoint identity becomes incompatible", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness, {
+			userText: "identity-prefix",
+			assistantText: "identity-assistant",
+		});
+		const model = configureRemoteOpenAIModel(harness, { baseUrl: "https://first.example/v1" });
+		mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-identity") });
+		await harness.session.compact();
+
+		harness.session.agent.state.model = { ...model, baseUrl: "https://second.example/v1" };
+		useSummaryStreamFn(harness, "recovered after identity change");
+
+		const recovered = await harness.session.recoverRemoteCompactionContext(harness.session.messages);
+		const serialized = JSON.stringify(convertToLlm(recovered));
+
+		expect(serialized).not.toContain("encrypted_content");
+		expect(serialized).not.toContain("opaque-identity");
+		expect(serialized).toContain("recovered after identity change");
+		expect(recovered.find((message) => message.role === "compactionSummary")).toMatchObject({
+			kind: "classic",
+			summary: expect.stringContaining("recovered after identity change"),
+		});
+	});
+
+	it("replays compatible remote opaque output after persisted session reload", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-remote-compact-reload-"));
+		try {
+			const session = SessionManager.create(tempDir, tempDir);
+			const userId = session.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "reload-prefix" }],
+				timestamp: Date.now() - 1000,
+			});
+			session.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "reload-assistant" }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "gpt-5.4",
+				usage: createUsage(20),
+				stopReason: "stop",
+				timestamp: Date.now() - 500,
+			} as AssistantMessage);
+			const compactOutput = remoteCompactOutput("opaque-reload");
+			session.appendCompaction("Remote compaction", userId, 100, {
+				type: "openaiResponses",
+				compaction: {
+					identity: {
+						api: "openai-responses",
+						provider: "openai",
+						model: "gpt-5.4",
+						endpoint: "https://api.openai.com/v1",
+					},
+					output: compactOutput,
+					usage: createUsage(15),
+				},
+			});
+			const sessionFile = session.getSessionFile();
+			if (!sessionFile) throw new Error("expected session file");
+
+			const reopened = SessionManager.open(sessionFile, tempDir);
+			const context = reopened.buildSessionContext();
+			const summary = context.messages.find((message) => message.role === "compactionSummary");
+
+			expect(summary).toMatchObject({
+				summary: "Remote compaction",
+				kind: "remote",
+			});
+			expect(JSON.stringify(summary)).not.toContain("encrypted_content");
+			expect(JSON.stringify(reopened.getEntries())).not.toContain("encrypted_content");
+			expect(JSON.stringify(convertToLlm(context.messages))).not.toContain("encrypted_content");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps identity switching inert until the next provider request", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const first = configureRemoteOpenAIModel(harness);
+		mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-switch") });
+		await harness.session.compact();
+		const before = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		harness.session.agent.state.model = { ...first, id: "changed-model" };
+		const afterSwitch = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		expect(afterSwitch).toHaveLength(before.length);
+		expect(JSON.stringify(harness.session.messages)).not.toContain("opaque-switch");
+	});
+
+	it("migrates incompatible remote state to one classic boundary before dispatch", async () => {
+		const runtime = await createProductionRemoteSession();
+		const { session, sessionManager, model } = runtime;
+		seedProductionSession(sessionManager, model, "migrate prefix", "migrate assistant");
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		mockRemoteCompactHttp({ output: remoteCompactOutput("opaque-migrate") });
+		await session.compact();
+		session.agent.state.model = { ...model, id: "changed-model" };
+		const recovered = await session.recoverRemoteCompactionContext(session.messages);
+		const ends = (session as unknown as { events?: unknown[] }) && [];
+		void ends;
+		const compactEntries = sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		expect(compactEntries.at(-1)).toMatchObject({ kind: "classic" });
+		expect(recovered.find((message) => message.role === "compactionSummary")).toMatchObject({
+			kind: "classic",
+			summary: expect.stringContaining("production classic summary"),
+		});
+		expect(JSON.stringify(sessionManager.getEntries())).not.toContain("opaque-migrate");
+		session.dispose();
 	});
 });
