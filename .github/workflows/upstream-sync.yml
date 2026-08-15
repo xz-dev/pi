@@ -45,15 +45,17 @@ jobs:
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
-            +refs/heads/patch/provider-transparent-compaction:refs/remotes/origin/patch/provider-transparent-compaction \
-            +refs/heads/patch/shutdown-lifecycle-log:refs/remotes/origin/patch/shutdown-lifecycle-log \
-            +refs/heads/patch/slow-hook-execution-kind:refs/remotes/origin/patch/slow-hook-execution-kind \
-            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
-            +refs/heads/patch/shutdown-screen-log:refs/remotes/origin/patch/shutdown-screen-log
+            +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
+            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
-            scripts/resolve-ci-squash-conflicts.sh
+            echo '::error::Unexpected ci squash conflict; ci must merge cleanly onto current upstream'
+            exit 1
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying ci'
+            exit 1
           fi
           git commit -m "merge ci branch"
 
@@ -195,355 +197,16 @@ jobs:
           git merge --squash origin/patch/retry-non-retryable-patterns
           git commit -m "merge patch/retry-non-retryable-patterns branch"
 
-          if ! git merge --squash origin/patch/provider-transparent-compaction; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            expected_conflicts=(
-              packages/coding-agent/src/core/agent-session.ts
-              packages/coding-agent/src/core/session-manager.ts
-              packages/coding-agent/src/core/settings-manager.ts
-            )
-            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )); then
-              printf '::error::Unexpected Responses compaction squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            for i in "${!expected_conflicts[@]}"; do
-              if [[ ${conflicts[i]} != "${expected_conflicts[i]}" ]]; then
-                printf '::error::Unexpected Responses compaction squash conflicts:'
-                printf ' %q' "${conflicts[@]}"
-                printf '\n'
-                exit 1
-              fi
-            done
-            printf 'Resolving expected Responses compaction conflicts:'
-            printf ' %q' "${conflicts[@]}"
-            printf '\n'
-            python3 - <<'PY'
-          from pathlib import Path
-
-          def conflict_blocks(text: str) -> list[tuple[int, int, str, str]]:
-              lines = text.splitlines(keepends=True)
-              blocks: list[tuple[int, int, str, str]] = []
-              i = 0
-              while i < len(lines):
-                  if not lines[i].startswith("<<<<<<<"):
-                      i += 1
-                      continue
-                  start = i
-                  i += 1
-                  ours: list[str] = []
-                  while i < len(lines) and not lines[i].startswith(("|||||||", "=======")):
-                      ours.append(lines[i])
-                      i += 1
-                  if i < len(lines) and lines[i].startswith("|||||||"):
-                      i += 1
-                      while i < len(lines) and not lines[i].startswith("======="):
-                          i += 1
-                  if i >= len(lines) or not lines[i].startswith("======="):
-                      raise SystemExit("Responses resolver: malformed conflict block")
-                  i += 1
-                  theirs: list[str] = []
-                  while i < len(lines) and not lines[i].startswith(">>>>>>>"):
-                      theirs.append(lines[i])
-                      i += 1
-                  if i >= len(lines):
-                      raise SystemExit("Responses resolver: unterminated conflict block")
-                  blocks.append((start, i + 1, "".join(ours), "".join(theirs)))
-                  i += 1
-              return blocks
-
-          def resolve(path: str, expected_count: int, combine) -> None:
-              target = Path(path)
-              text = target.read_text()
-              lines = text.splitlines(keepends=True)
-              blocks = conflict_blocks(text)
-              if len(blocks) != expected_count:
-                  raise SystemExit(f"Responses resolver: expected {expected_count} conflicts in {path}, found {len(blocks)}")
-              for index, (start, end, ours, theirs) in reversed(list(enumerate(blocks))):
-                  lines[start:end] = [combine(index, ours, theirs)]
-              resolved = "".join(lines)
-              if any(line.startswith(("<<<<<<<", "|||||||", "=======", ">>>>>>>")) for line in resolved.splitlines()):
-                  raise SystemExit(f"Responses resolver: conflict marker remains in {path}")
-              target.write_text(resolved)
-
-          agent_conflicts = [
-              (
-                  'import { contentText, type Message } from "@earendil-works/pi-ai";\n',
-                  'import { contentText } from "@earendil-works/pi-ai";\n'
-                  'import {\n'
-                  '\tcompactAzureOpenAIResponses,\n'
-                  '\tgetAzureOpenAIResponsesCompactionIdentity,\n'
-                  '} from "@earendil-works/pi-ai/api/azure-openai-responses";\n'
-                  'import {\n'
-                  '\tcompactOpenAICodexResponses,\n'
-                  '\tgetOpenAICodexResponsesCompactionIdentity,\n'
-                  '} from "@earendil-works/pi-ai/api/openai-codex-responses";\n'
-                  'import {\n'
-                  '\tcompactOpenAIResponses,\n'
-                  '\tgetOpenAIResponsesCompactionIdentity,\n'
-                  '\ttype OpenAIResponsesCompaction,\n'
-                  '\ttype ResponsesCompactionIdentity,\n'
-                  '} from "@earendil-works/pi-ai/api/openai-responses";\n',
-              ),
-              (
-                  'import { planContinuation } from "./manual-retry.ts";\n'
-                  'import type { BashExecutionMessage, CustomMessage, ManualRetryRecoveryMessage } from "./messages.ts";\n',
-                  'import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";\n',
-              ),
-              (
-                  '\tprivate _unsubscribeModelsChanged: () => void;\n',
-                  '\tprivate _classicRecoveryStreamFn?: StreamFn;\n'
-                  '\tprivate _prepareRequestHeaders?: AgentSessionConfig["prepareRequestHeaders"];\n',
-              ),
-              (
-                  '\t\tthis._unsubscribeModelsChanged = this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime());\n',
-                  '\t\tthis._classicRecoveryStreamFn = config.classicRecoveryStreamFn;\n'
-                  '\t\tthis._prepareRequestHeaders = config.prepareRequestHeaders;\n',
-              ),
-          ]
-          session_conflicts = [
-              (
-                  '\trenameSync,\n',
-                  '',
-              ),
-              (
-                  '\t/** @internal Fault-injection seam for continuation publication tests. */\n'
-                  '\tcontinuationFileWriter: ContinuationFileWriter = writeContinuationFile;\n',
-                  '\tprivate persistenceOps = {\n'
-                  '\t\tappendFileSync,\n'
-                  '\t\tcloseSync,\n'
-                  '\t\topenSync,\n'
-                  '\t\trmSync,\n'
-                  '\t\twriteFileSync,\n'
-                  '\t};\n',
-              ),
-              (
-                  '\t\tthis.byId.set(entry.id, entry);\n'
-                  '\t\tthis.leafId = entry.id;\n'
-                  '\t\tthis.generation++;\n'
-                  '\t\tthis._persist(entry);\n',
-                  '\t\tthis.byId.set(publicEntry.id, publicEntry);\n'
-                  '\t\tthis.leafId = publicEntry.id;\n'
-                  '\t\tthis.generation++;\n'
-                  '\t\tthis.flushed = nextFlushed;\n'
-                  '\t}\n'
-                  '\n'
-                  '\tgetGeneration(): number {\n'
-                  '\t\treturn this.generation;\n'
-                  '\t}\n'
-                  '\n'
-                  '\tcaptureCompactionCommitExpectation(): CompactionCommitExpectation {\n'
-                  '\t\treturn {\n'
-                  '\t\t\tsessionId: this.sessionId,\n'
-                  '\t\t\tgeneration: this.generation,\n'
-                  '\t\t\tleafId: this.leafId,\n'
-                  '\t\t};\n',
-              ),
-          ]
-          settings_conflict = (
-              '\t\tnonRetryableErrorPatterns?: string[];\n'
-              '\t} {\n'
-              '\t\tconst nonRetryableErrorPatterns = normalizeNonRetryableErrorPatterns(\n'
-              '\t\t\tthis.settings.retry?.nonRetryableErrorPatterns,\n'
-              '\t\t);\n',
-              '\t} {\n',
-          )
-
-          def combine_agent(index: int, ours: str, theirs: str) -> str:
-              if index >= len(agent_conflicts) or (ours, theirs) != agent_conflicts[index]:
-                  raise SystemExit(f"Responses resolver: unexpected agent-session conflict {index + 1}")
-              if index == 0:
-                  return ours + theirs.split("\n", 1)[1]
-              if index == 1:
-                  return (
-                      ours.splitlines(keepends=True)[0]
-                      + 'import {\n'
-                      + '\ttype BashExecutionMessage,\n'
-                      + '\ttype CustomMessage,\n'
-                      + '\tconvertToLlm,\n'
-                      + '\ttype ManualRetryRecoveryMessage,\n'
-                      + '} from "./messages.ts";\n'
-                  )
-              return ours + theirs
-
-          def combine_session(index: int, ours: str, theirs: str) -> str:
-              if index >= len(session_conflicts) or (ours, theirs) != session_conflicts[index]:
-                  raise SystemExit(f"Responses resolver: unexpected session-manager conflict {index + 1}")
-              if index == 0:
-                  return ours
-              if index == 1:
-                  return ours + theirs
-              return theirs
-
-          def combine_settings(index: int, ours: str, theirs: str) -> str:
-              if index != 0 or (ours, theirs) != settings_conflict:
-                  raise SystemExit("Responses resolver: unexpected retry settings conflict")
-              return ours
-
-          resolve("packages/coding-agent/src/core/agent-session.ts", 4, combine_agent)
-          resolve("packages/coding-agent/src/core/session-manager.ts", 3, combine_session)
-          resolve("packages/coding-agent/src/core/settings-manager.ts", 1, combine_settings)
-
-          session_path = Path("packages/coding-agent/src/core/session-manager.ts")
-          session_text = session_path.read_text()
-          generation_method = "\tgetGeneration(): number {\n\t\treturn this.generation;\n\t}\n\n"
-          if session_text.count(generation_method) != 2:
-              raise SystemExit("Responses resolver: expected exactly two getGeneration methods before deduplication")
-          session_text = session_text.replace(generation_method, "", 1)
-          generation_anchor = (
-              "\tcreateBranchedSession(leafId: string): string | undefined {\n"
-              "\t\tconst previousSessionFile = this.sessionFile;\n"
-          )
-          generation_replacement = (
-              "\tcreateBranchedSession(leafId: string): string | undefined {\n"
-              "\t\tconst previousGeneration = this.generation;\n"
-              "\t\tconst previousSessionFile = this.sessionFile;\n"
-          )
-          persisted_scope = (
-              "\t\t\tthis.sessionFile = newSessionFile;\n"
-              "\t\t\tthis._buildIndex();\n"
-              "\t\t\tthis.generation++;\n"
-          )
-          persisted_replacement = (
-              "\t\t\tthis.sessionFile = newSessionFile;\n"
-              "\t\t\tthis._buildIndex();\n"
-              "\t\t\tthis.generation = previousGeneration + 1;\n"
-          )
-          memory_scope = (
-              "\t\tthis.sessionId = newSessionId;\n"
-              "\t\tthis._buildIndex();\n"
-              "\t\tthis.generation++;\n"
-              "\t\treturn undefined;\n"
-          )
-          memory_replacement = (
-              "\t\tthis.sessionId = newSessionId;\n"
-              "\t\tthis._buildIndex();\n"
-              "\t\tthis.generation = previousGeneration + 1;\n"
-              "\t\treturn undefined;\n"
-          )
-          if session_text.count(generation_anchor) != 1:
-              raise SystemExit("Responses resolver: createBranchedSession generation anchor is missing or ambiguous")
-          if session_text.count(persisted_scope) != 1 or session_text.count(memory_scope) != 1:
-              raise SystemExit("Responses resolver: branch generation scopes are missing or ambiguous")
-          session_text = session_text.replace(generation_anchor, generation_replacement, 1)
-          session_text = session_text.replace(persisted_scope, persisted_replacement, 1)
-          session_text = session_text.replace(memory_scope, memory_replacement, 1)
-          session_path.write_text(session_text)
-          PY
-            test $? -eq 0 || exit 1
-            git add \
-              packages/coding-agent/src/core/agent-session.ts \
-              packages/coding-agent/src/core/session-manager.ts \
-              packages/coding-agent/src/core/settings-manager.ts
-          fi
+          git merge --squash origin/patch/slow-hook-tui-only
           if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying Responses compaction conflict staging'
-            exit 1
-          fi
-          git commit -m "merge patch/provider-transparent-compaction branch"
-
-          if ! git merge --squash origin/patch/shutdown-lifecycle-log; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/src/core/agent-session.ts ]]; then
-              printf '::error::Unexpected lifecycle diagnostics squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            python3 - <<'PY_LIFECYCLE'
-          from pathlib import Path
-
-          path = Path("packages/coding-agent/src/core/agent-session.ts")
-          text = path.read_text()
-          old = (
-              "<<<<<<< HEAD\n"
-              'import { emitSessionShutdownEvent } from "./extensions/runner.ts";\n'
-              'import { planContinuation } from "./manual-retry.ts";\n'
-              'import {\n'
-              '\ttype BashExecutionMessage,\n'
-              '\ttype CustomMessage,\n'
-              '\tconvertToLlm,\n'
-              '\ttype ManualRetryRecoveryMessage,\n'
-              '} from "./messages.ts";\n'
-              "=======\n"
-              'import { emitSessionShutdownEvent, SLOW_EXTENSION_HOOK_ENTRY_TYPE } from "./extensions/runner.ts";\n'
-              'import type { BashExecutionMessage, CustomMessage } from "./messages.ts";\n'
-              ">>>>>>> origin/patch/shutdown-lifecycle-log\n"
-          )
-          new = (
-              'import { emitSessionShutdownEvent, SLOW_EXTENSION_HOOK_ENTRY_TYPE } from "./extensions/runner.ts";\n'
-              'import { planContinuation } from "./manual-retry.ts";\n'
-              'import {\n'
-              '\ttype BashExecutionMessage,\n'
-              '\ttype CustomMessage,\n'
-              '\tconvertToLlm,\n'
-              '\ttype ManualRetryRecoveryMessage,\n'
-              '} from "./messages.ts";\n'
-          )
-          if text.count(old) != 1:
-              raise SystemExit("Lifecycle resolver: expected import conflict block not found exactly once")
-          text = text.replace(old, new, 1)
-          if any(line.startswith(("<<<<<<<", "|||||||", "=======", ">>>>>>>")) for line in text.splitlines()):
-              raise SystemExit("Lifecycle resolver: conflict marker remains")
-          for needle in (
-              "SLOW_EXTENSION_HOOK_ENTRY_TYPE",
-              "planContinuation",
-              "convertToLlm",
-              "reportSlowExtensionHook",
-          ):
-              if needle not in text:
-                  raise SystemExit(f"Lifecycle resolver: missing invariant {needle}")
-          path.write_text(text)
-          PY_LIFECYCLE
-            git add packages/coding-agent/src/core/agent-session.ts
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying lifecycle diagnostics conflict staging'
+            echo '::error::Unresolved conflicts remain after applying TUI-only slow-hook diagnostics'
             exit 1
           fi
           if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/shutdown-lifecycle-log'
+            echo '::error::Empty patch integration for patch/slow-hook-tui-only'
             exit 1
           fi
-          git commit -m "merge patch/shutdown-lifecycle-log branch"
-
-          if ! git merge-base --is-ancestor origin/patch/shutdown-lifecycle-log origin/patch/slow-hook-execution-kind; then
-            echo '::error::patch/slow-hook-execution-kind must descend from patch/shutdown-lifecycle-log'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/shutdown-lifecycle-log..origin/patch/slow-hook-execution-kind; then
-            echo '::error::Failed to apply slow-hook execution labels'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying slow-hook execution labels'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/slow-hook-execution-kind'
-            exit 1
-          fi
-          git commit -m "merge patch/slow-hook-execution-kind branch"
-
-          git fetch origin +refs/heads/patch/shutdown-screen-log:refs/remotes/origin/patch/shutdown-screen-log
-          if ! git merge-base --is-ancestor origin/patch/slow-hook-execution-kind origin/patch/shutdown-screen-log; then
-            echo '::error::patch/shutdown-screen-log must descend from patch/slow-hook-execution-kind'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/slow-hook-execution-kind..origin/patch/shutdown-screen-log; then
-            echo '::error::Failed to apply shutdown screen log'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying shutdown screen log'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/shutdown-screen-log'
-            exit 1
-          fi
-          git commit -m "merge patch/shutdown-screen-log branch"
+          git commit -m "merge patch/slow-hook-tui-only branch"
 
           if ! git merge --squash origin/patch/session-tree-splice; then
             scripts/resolve-session-tree-splice-conflicts.sh
@@ -596,7 +259,6 @@ jobs:
               test/model-runtime-cloudflare-compat.test.ts \
               test/extensions-runner.test.ts \
               test/lifecycle-diagnostics.test.ts \
-              test/slow-extension-hook-entry.test.ts \
               test/shutdown-screen-log.test.ts \
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \

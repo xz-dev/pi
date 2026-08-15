@@ -279,6 +279,162 @@ theorem unsupported_retirement_finishes_retained
     simp [chooseDisposition, hunsupported]
   simp [runToCompletion, runSteps, initialState, step, hretain, oldRefDeleted]
 
+-- Temporary disablement is an operational state: generated main excludes the feature while its source ref remains recoverable.
+structure TemporaryDisableState where
+  sourceRefRetained : Bool
+  integratedIntoGeneratedMain : Bool
+  deriving DecidableEq, Repr
+
+def temporarilyDisableProviderCompaction : TemporaryDisableState :=
+  { sourceRefRetained := true, integratedIntoGeneratedMain := false }
+
+theorem temporary_provider_compaction_disablement_is_recoverable :
+    temporarilyDisableProviderCompaction.sourceRefRetained = true ∧
+    temporarilyDisableProviderCompaction.integratedIntoGeneratedMain = false := by
+  decide
+
+-- Branch roles separate independently retireable features, cross-feature glue, and CI orchestration ownership.
+inductive BranchRole where
+  | feature
+  | compatibility
+  | ciInfrastructure
+  deriving DecidableEq, Repr
+
+structure IntegrationPlan where
+  role : BranchRole
+  standaloneFeatureCount : Nat
+  compatibilityObligationCount : Nat
+  dependencyCount : Nat
+  dependenciesIntegrated : Bool
+  dependencyRetired : Bool
+  glueRequired : Bool
+  publicSeamEvidencePasses : Bool
+  ownsRuntimeOrTestSemantics : Bool
+  allChangedRuntimePathsAllowed : Bool
+  deriving DecidableEq, Repr
+
+inductive IntegrationDecision where
+  | retain
+  | integrate
+  | retire
+  | reject
+  deriving DecidableEq, Repr
+
+-- Role contracts forbid compatibility branches from owning standalone features and forbid CI from owning runtime or test semantics.
+def branchRoleContract (plan : IntegrationPlan) : Prop :=
+  match plan.role with
+  | .feature =>
+      plan.standaloneFeatureCount = 1 ∧
+      plan.compatibilityObligationCount = 0
+  | .compatibility =>
+      plan.standaloneFeatureCount = 0 ∧
+      plan.compatibilityObligationCount = 1 ∧
+      plan.dependencyCount = 2 ∧
+      plan.allChangedRuntimePathsAllowed = true
+  | .ciInfrastructure =>
+      plan.standaloneFeatureCount = 0 ∧
+      plan.compatibilityObligationCount = 0 ∧
+      plan.ownsRuntimeOrTestSemantics = false
+
+-- Compatibility guards require named dependencies, a still-needed obligation, public-seam evidence, and an allowed path boundary.
+def compatibilityEligible (plan : IntegrationPlan) : Prop :=
+  plan.role = .compatibility ∧
+  plan.dependenciesIntegrated = true ∧
+  plan.dependencyRetired = false ∧
+  plan.glueRequired = true ∧
+  plan.publicSeamEvidencePasses = true ∧
+  plan.allChangedRuntimePathsAllowed = true
+
+def compatibilityRetirementTriggered (plan : IntegrationPlan) : Prop :=
+  plan.role = .compatibility ∧
+  (plan.dependencyRetired = true ∨
+    (plan.glueRequired = false ∧ plan.publicSeamEvidencePasses = true))
+
+def decideIntegration (plan : IntegrationPlan) : IntegrationDecision :=
+  match plan.role with
+  | .feature => .retain
+  | .ciInfrastructure =>
+      if plan.ownsRuntimeOrTestSemantics then .reject else .retain
+  | .compatibility =>
+      if plan.dependencyRetired then
+        .retire
+      else if !plan.glueRequired && plan.publicSeamEvidencePasses then
+        .retire
+      else if plan.dependenciesIntegrated && plan.glueRequired &&
+          plan.publicSeamEvidencePasses && plan.allChangedRuntimePathsAllowed then
+        .integrate
+      else
+        .reject
+
+-- Governance lemmas establish CI ownership limits, compatibility ordering, and safe retirement triggers.
+theorem ci_contract_forbids_runtime_and_test_semantics
+    (plan : IntegrationPlan)
+    (hrole : plan.role = .ciInfrastructure)
+    (hcontract : branchRoleContract plan) :
+    plan.ownsRuntimeOrTestSemantics = false := by
+  simp [branchRoleContract, hrole] at hcontract
+  exact hcontract.2.2
+
+theorem compatibility_contract_preserves_feature_boundary
+    (plan : IntegrationPlan)
+    (hrole : plan.role = .compatibility)
+    (hcontract : branchRoleContract plan) :
+    plan.standaloneFeatureCount = 0 ∧
+    plan.compatibilityObligationCount = 1 ∧
+    plan.dependencyCount = 2 := by
+  simp [branchRoleContract, hrole] at hcontract
+  exact ⟨hcontract.1, hcontract.2.1, hcontract.2.2.1⟩
+
+theorem eligible_compatibility_integrates_after_dependencies
+    (plan : IntegrationPlan)
+    (heligible : compatibilityEligible plan) :
+    plan.dependenciesIntegrated = true ∧
+    plan.publicSeamEvidencePasses = true ∧
+    decideIntegration plan = .integrate := by
+  rcases heligible with ⟨hrole, hdependencies, hactive, hrequired,
+    hevidence, hpaths⟩
+  exact ⟨hdependencies, hevidence, by
+    simp [decideIntegration, hrole, hdependencies, hactive, hrequired,
+      hevidence, hpaths]⟩
+
+theorem triggered_compatibility_retires
+    (plan : IntegrationPlan)
+    (htriggered : compatibilityRetirementTriggered plan) :
+    decideIntegration plan = .retire := by
+  rcases htriggered with ⟨hrole, hretired | ⟨hnotRequired, hevidence⟩⟩
+  · simp [decideIntegration, hrole, hretired]
+  · cases hretired : plan.dependencyRetired <;>
+      simp [decideIntegration, hrole, hretired, hnotRequired, hevidence]
+
+theorem eligible_compatibility_has_no_retirement_trigger
+    (plan : IntegrationPlan)
+    (heligible : compatibilityEligible plan) :
+    ¬compatibilityRetirementTriggered plan := by
+  rcases heligible with ⟨hrole, hdependencies, hactive, hrequired,
+    hevidence, hpaths⟩
+  simp [compatibilityRetirementTriggered, hrole, hactive, hrequired]
+
+-- This theorem combines all branch-role guarantees into one integration-governance contract.
+theorem integration_governance_is_correct
+    (plan : IntegrationPlan)
+    (hcontract : branchRoleContract plan) :
+    branchRoleContract plan ∧
+    (plan.role = .ciInfrastructure →
+      plan.ownsRuntimeOrTestSemantics = false) ∧
+    (compatibilityEligible plan →
+      decideIntegration plan = .integrate) ∧
+    (compatibilityRetirementTriggered plan →
+      decideIntegration plan = .retire) ∧
+    ¬(compatibilityEligible plan ∧
+      compatibilityRetirementTriggered plan) := by
+  exact ⟨
+    hcontract,
+    fun hrole => ci_contract_forbids_runtime_and_test_semantics plan hrole hcontract,
+    fun heligible => (eligible_compatibility_integrates_after_dependencies plan heligible).2.2,
+    triggered_compatibility_retires plan,
+    fun hboth => eligible_compatibility_has_no_retirement_trigger plan hboth.1 hboth.2
+  ⟩
+
 -- The top-level theorem combines invariant preservation, termination, postconditions, safety, and the one-feature boundary.
 theorem process_is_correct
     (input : CleanupInput) (h : admitted input) :
@@ -300,7 +456,31 @@ theorem process_is_correct
     hinvariant.1
   ⟩
 
-#print axioms process_is_correct
+-- The authoritative top-level theorem combines feature cleanup correctness with compatibility and CI governance.
+theorem downstream_cleanup_is_correct
+    (input : CleanupInput) (hinput : admitted input)
+    (plan : IntegrationPlan) (hplan : branchRoleContract plan) :
+    (processInvariant (runToCompletion input) ∧
+      terminal (runToCompletion input) ∧
+      allowedFinalState (runToCompletion input) ∧
+      ¬forbiddenState (runToCompletion input) ∧
+      (runToCompletion input).input.branch.featureCount = 1) ∧
+    (branchRoleContract plan ∧
+      (plan.role = .ciInfrastructure →
+        plan.ownsRuntimeOrTestSemantics = false) ∧
+      (compatibilityEligible plan →
+        decideIntegration plan = .integrate) ∧
+      (compatibilityRetirementTriggered plan →
+        decideIntegration plan = .retire) ∧
+      ¬(compatibilityEligible plan ∧
+        compatibilityRetirementTriggered plan)) ∧
+    (temporarilyDisableProviderCompaction.sourceRefRetained = true ∧
+      temporarilyDisableProviderCompaction.integratedIntoGeneratedMain = false) := by
+  exact ⟨process_is_correct input hinput,
+    integration_governance_is_correct plan hplan,
+    temporary_provider_compaction_disablement_is_recoverable⟩
+
+#print axioms downstream_cleanup_is_correct
 
 end DownstreamCleanup
 
@@ -320,5 +500,32 @@ def main : IO Unit := do
     boundaryInvariantsProved := false
   }
   IO.println s!"ordinary behavior: {repr (DownstreamCleanup.disposition (DownstreamCleanup.runToCompletion ordinary))}"
+  let compatibility : DownstreamCleanup.IntegrationPlan := {
+    role := .compatibility
+    standaloneFeatureCount := 0
+    compatibilityObligationCount := 1
+    dependencyCount := 2
+    dependenciesIntegrated := true
+    dependencyRetired := false
+    glueRequired := true
+    publicSeamEvidencePasses := true
+    ownsRuntimeOrTestSemantics := true
+    allChangedRuntimePathsAllowed := true
+  }
+  let ciInfrastructure : DownstreamCleanup.IntegrationPlan := {
+    role := .ciInfrastructure
+    standaloneFeatureCount := 0
+    compatibilityObligationCount := 0
+    dependencyCount := 0
+    dependenciesIntegrated := true
+    dependencyRetired := false
+    glueRequired := false
+    publicSeamEvidencePasses := true
+    ownsRuntimeOrTestSemantics := false
+    allChangedRuntimePathsAllowed := true
+  }
   IO.println s!"responses compaction without boundary proof: {repr (DownstreamCleanup.disposition (DownstreamCleanup.runToCompletion compactionWithoutBoundaryProof))}"
-  IO.println "proved: release first, one feature per branch, archive before delete"
+  IO.println s!"provider compaction source retained: {DownstreamCleanup.temporarilyDisableProviderCompaction.sourceRefRetained}; integrated into main: {DownstreamCleanup.temporarilyDisableProviderCompaction.integratedIntoGeneratedMain}"
+  IO.println s!"eligible compatibility: {repr (DownstreamCleanup.decideIntegration compatibility)}"
+  IO.println s!"CI infrastructure without runtime semantics: {repr (DownstreamCleanup.decideIntegration ciInfrastructure)}"
+  IO.println "proved: release first, one feature per branch, temporary disablement retains source, governed compatibility, archive before permanent delete"
