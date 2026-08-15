@@ -1715,6 +1715,7 @@ export interface SlowExtensionHookEntry {
 	extensionPath: string;
 	handlerIndex: number;
 	elapsedMs: number;
+	executionKind: "sync" | "async";
 }
 
 export interface LoadExtensionsResult {

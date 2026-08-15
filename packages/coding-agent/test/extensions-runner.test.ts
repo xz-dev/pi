@@ -164,15 +164,17 @@ describe("ExtensionRunner", () => {
 			expect(result.errors).toEqual([]);
 		});
 
-		it("queues a slow failed project_trust reminder until the session runner exists", async () => {
-			vi.useFakeTimers();
+		it("classifies slow project_trust handlers by returned value", async () => {
 			const extensionPath = path.join(extensionsDir, "slow-project-trust.ts");
 			fs.writeFileSync(
 				extensionPath,
-				`export default function(pi) { pi.on("project_trust", async () => { await new Promise((resolve) => setTimeout(resolve, 101)); throw new Error("private trust detail"); }); }`,
+				`export default function(pi) {
+	pi.on("project_trust", () => Promise.resolve({ trusted: "undecided" }));
+	pi.on("project_trust", () => { throw new Error("private trust detail"); });
+}`,
 			);
 			const extensionsResult = await loadExtensions([extensionPath], tempDir);
-			const trust = emitProjectTrustEvent(
+			const result = await emitProjectTrustEvent(
 				extensionsResult,
 				{ type: "project_trust", cwd: tempDir },
 				{
@@ -186,19 +188,27 @@ describe("ExtensionRunner", () => {
 						notify: () => {},
 					},
 				},
-				100,
+				-1,
 			);
-			await vi.advanceTimersByTimeAsync(101);
-			const result = await trust;
 
 			expect(result.errors).toHaveLength(1);
 			expect(extensionsResult.pendingSlowHooks).toEqual([
-				{ event: "project_trust", extensionPath, handlerIndex: 0, elapsedMs: 101 },
+				expect.objectContaining({
+					event: "project_trust",
+					extensionPath,
+					handlerIndex: 0,
+					executionKind: "async",
+				}),
+				expect.objectContaining({
+					event: "project_trust",
+					extensionPath,
+					handlerIndex: 1,
+					executionKind: "sync",
+				}),
 			]);
 			expect(fs.readFileSync(path.join(tempDir, "logs", "extension-lifecycle.jsonl"), "utf8")).not.toContain(
 				"private trust detail",
 			);
-			vi.useRealTimers();
 		});
 	});
 
