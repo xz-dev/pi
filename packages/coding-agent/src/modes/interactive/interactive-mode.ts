@@ -158,6 +158,7 @@ import { UserMessageSelectorComponent } from "./components/user-message-selector
 import { editInExternalEditor } from "./external-editor.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
+import { createInteractiveShutdownProgressWriter } from "./shutdown-progress.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -3874,7 +3875,19 @@ export class InteractiveMode {
 		await this.ui.terminal.drainInput(1000);
 
 		this.stop();
-		await this.runtimeHost.dispose();
+		const runner = this.runtimeHost.session.extensionRunner;
+		const writer = createInteractiveShutdownProgressWriter(
+			(chunk) => {
+				process.stdout.write(chunk);
+			},
+			() => process.stdout.columns ?? 80,
+		);
+		runner.setShutdownProgressListener((entry) => writer.write(entry));
+		try {
+			await this.runtimeHost.dispose();
+		} finally {
+			runner.setShutdownProgressListener(undefined);
+		}
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
