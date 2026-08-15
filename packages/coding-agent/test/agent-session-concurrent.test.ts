@@ -225,6 +225,97 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(providerCalled).toBe(false);
 	});
 
+	it("runs abort-safe message_end cleanup after abort interrupts an ordinary handler", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let ordinaryStarted = false;
+		let releaseOrdinary: (() => void) | undefined;
+		const ordinaryRelease = new Promise<void>((resolve) => {
+			releaseOrdinary = resolve;
+		});
+		let ordinaryCompleted = false;
+		let cleanupCalls = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("private") });
+				});
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = await createModelRegistry(authStorage, tempDir);
+		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
+		const extensionsResult = await createTestExtensionsResult([
+			(pi) => {
+				pi.on("message_end", async (event) => {
+					if (event.message.role !== "assistant") return;
+					ordinaryStarted = true;
+					await ordinaryRelease;
+					event.message.content = [{ type: "text", text: "direct late mutation" }];
+					ordinaryCompleted = true;
+					return {
+						message: {
+							...event.message,
+							content: [{ type: "text", text: "late private replacement" }],
+							stopReason: "stop",
+							errorMessage: "late",
+						},
+					};
+				});
+				pi.on(
+					"message_end",
+					(event) => {
+						if (event.message.role !== "assistant") return;
+						cleanupCalls += 1;
+						return {
+							message: {
+								...event.message,
+								content: [],
+								stopReason: "stop",
+								errorMessage: "cleaned",
+							},
+						};
+					},
+					{ uninterruptible: true },
+				);
+			},
+		]);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRuntime: getModelRuntime(modelRegistry),
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+
+		const promptPromise = session.prompt("hello");
+		await expect.poll(() => ordinaryStarted).toBe(true);
+		await session.abort();
+		await promptPromise;
+		await session.agent.waitForIdle();
+		await expect.poll(() => cleanupCalls).toBe(1);
+		releaseOrdinary?.();
+		await expect.poll(() => ordinaryCompleted).toBe(true);
+
+		const persistedAssistant = sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
+		expect(persistedAssistant?.type).toBe("message");
+		if (persistedAssistant?.type === "message" && persistedAssistant.message.role === "assistant") {
+			expect(persistedAssistant.message.content).toEqual([]);
+			expect(persistedAssistant.message.stopReason).toBe("stop");
+			expect(persistedAssistant.message.errorMessage).toBe("cleaned");
+		}
+		expect(session.messages.find((message) => message.role === "assistant")?.content).toEqual([]);
+	});
+
 	for (const stuckEvent of ["message_end", "turn_end", "agent_end"] as const) {
 		it(`should keep single terminal assistant and session persistence when aborting stuck ${stuckEvent}`, async () => {
 			const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -643,6 +734,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				hasHandlers: (eventType: string) => boolean;
 				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
 				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
+				emitUninterruptibleMessageEnd: () => undefined;
 				emitToolCall: (event: { type: string; toolCallId: string }) => Promise<undefined>;
 				emitInput: (
 					text: string,
@@ -663,6 +755,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			hasHandlers: (eventType) => eventType === "tool_call",
 			emit: async () => {},
 			emitMessageEnd: async () => undefined,
+			emitUninterruptibleMessageEnd: () => undefined,
 			emitToolCall: async () => {
 				snapshots.push(
 					sessionManager
@@ -789,6 +882,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				hasHandlers: (eventType: string) => boolean;
 				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
 				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
+				emitUninterruptibleMessageEnd: () => undefined;
 				emitInput: (
 					text: string,
 					images: unknown,
@@ -813,6 +907,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				}
 				return undefined;
 			},
+			emitUninterruptibleMessageEnd: () => undefined,
 			emitInput: async () => ({ action: "continue" }),
 			emitBeforeAgentStart: async () => undefined,
 			invalidate: () => {},

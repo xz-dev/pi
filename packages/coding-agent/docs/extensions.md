@@ -592,6 +592,7 @@ Fired for message lifecycle updates.
 - `message_start` and `message_end` fire for user, assistant, and toolResult messages.
 - `message_update` fires for assistant streaming updates.
 - `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role`.
+- Pass `{ uninterruptible: true }` only for bounded synchronous terminal cleanup that must still run after abort, such as redacting private finalized content. These handlers run separately from ordinary `message_end` handlers; TypeScript rejects async handlers for this registration.
 
 ```typescript
 pi.on("message_start", async (event, ctx) => {
@@ -619,6 +620,11 @@ pi.on("message_end", async (event, ctx) => {
     },
   };
 });
+
+pi.on("message_end", (event) => {
+  if (event.message.role !== "assistant" || !isPrivateRun(event.message)) return;
+  return { message: { ...event.message, content: [] } };
+}, { uninterruptible: true });
 ```
 
 #### tool_execution_start / tool_execution_update / tool_execution_end
