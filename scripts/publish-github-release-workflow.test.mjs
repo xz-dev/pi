@@ -77,12 +77,23 @@ test("upstream sync carries the unified TUI-only slow-hook patch", () => {
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
 
-test("upstream sync requires session-tree splice to merge cleanly after slow-hook diagnostics", () => {
+test("upstream sync preserves bounded slow-hook and session-tree compatibility", () => {
   assert.match(
     syncWorkflowText,
-    /if ! git merge --squash origin\/patch\/session-tree-splice; then\s+echo '::error::Unexpected session-tree splice conflict; refresh the source branch against its configured predecessor'\s+exit 1\s+fi/,
+    /python3 scripts\/resolve-slow-hook-squash-conflicts\.py/,
   );
-  assert.doesNotMatch(syncWorkflowText, /resolve-session-tree-splice-conflicts/);
+  assert.match(
+    syncWorkflowText,
+    /git cherry-pick --no-commit origin\/patch\/slow-hook-tui-only\.\.origin\/patch\/session-tree-splice/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /python3 scripts\/resolve-session-tree-splice-conflicts\.py/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /patch\/session-tree-splice must descend from patch\/slow-hook-tui-only/,
+  );
 });
 
 test("esc abort integration builds the workspace dependency graph before focused regressions", () => {
