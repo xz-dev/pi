@@ -68,6 +68,8 @@ describe("extension lifecycle diagnostics", () => {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		cryptoState.failRandomUUID = false;
+		Reflect.deleteProperty(globalThis, "__piThenReads");
+		Reflect.deleteProperty(globalThis, "__piThrowingThenReads");
 		vi.useRealTimers();
 	});
 
@@ -119,15 +121,108 @@ describe("extension lifecycle diagnostics", () => {
 		await expect(runner.emitInput("original", undefined, "interactive")).resolves.toEqual({ action: "handled" });
 	});
 
-	it("reports one slow entry per awaited handler and preserves hook results", async () => {
-		vi.useFakeTimers();
+	it("classifies slow handlers by returned value and preserves results and errors", async () => {
 		const extensionPath = path.join(tempDir, "slow.ts");
 		fs.writeFileSync(
 			extensionPath,
 			`export default function(pi) {
-				pi.on("input", async () => { await new Promise((resolve) => setTimeout(resolve, 101)); return { action: "transform", text: "transformed" }; });
-				pi.on("input", async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
+				pi.on("input", () => ({ action: "transform", text: "sync" }));
+				pi.on("input", () => Promise.resolve({ action: "transform", text: "thenable" }));
+				pi.on("input", async () => ({ action: "transform", text: "async" }));
+				pi.on("input", () => { throw new Error("sync failure"); });
 			}`,
+		);
+		const result = await loadExtensions([extensionPath], tempDir);
+		const sessionManager = SessionManager.inMemory();
+		const errors: string[] = [];
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir,
+			sessionManager,
+			await createInMemoryModelRegistry(AuthStorage.inMemory()),
+			() => -1,
+		);
+		runner.bindCore(extensionActions, extensionContextActions);
+		runner.onError((error) => errors.push(error.error));
+
+		await expect(runner.emitInput("original", undefined, "interactive")).resolves.toMatchObject({
+			action: "transform",
+			text: "async",
+		});
+
+		const entries = sessionManager.getEntries().filter((entry) => entry.type === "custom");
+		expect(entries).toHaveLength(4);
+		expect(entries.map((entry) => entry.data)).toEqual([
+			expect.objectContaining({ event: "input", extensionPath, handlerIndex: 0, executionKind: "sync" }),
+			expect.objectContaining({ event: "input", extensionPath, handlerIndex: 1, executionKind: "async" }),
+			expect.objectContaining({ event: "input", extensionPath, handlerIndex: 2, executionKind: "async" }),
+			expect.objectContaining({ event: "input", extensionPath, handlerIndex: 3, executionKind: "sync" }),
+		]);
+		expect(errors).toEqual(["sync failure"]);
+		expect(sessionManager.buildSessionContext().messages).toEqual([]);
+	});
+
+	it("assimilates custom thenables once without changing results or errors", async () => {
+		const extensionPath = path.join(tempDir, "custom-thenable.ts");
+		fs.writeFileSync(
+			extensionPath,
+			`export default function(pi) {
+				pi.on("input", () => ({
+					get then() {
+						Reflect.set(globalThis, "__piThenReads", Reflect.get(globalThis, "__piThenReads") + 1);
+						return (resolve) => resolve({ action: "transform", text: "assimilated" });
+					},
+				}));
+				pi.on("input", () => ({
+					get then() {
+						Reflect.set(globalThis, "__piThrowingThenReads", Reflect.get(globalThis, "__piThrowingThenReads") + 1);
+						throw new Error("then getter failure");
+					},
+				}));
+			}`,
+		);
+		Reflect.set(globalThis, "__piThenReads", 0);
+		Reflect.set(globalThis, "__piThrowingThenReads", 0);
+		const result = await loadExtensions([extensionPath], tempDir);
+		const sessionManager = SessionManager.inMemory();
+		const errors: string[] = [];
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir,
+			sessionManager,
+			await createInMemoryModelRegistry(AuthStorage.inMemory()),
+			() => -1,
+		);
+		runner.bindCore(extensionActions, extensionContextActions);
+		runner.onError((error) => errors.push(error.error));
+
+		await expect(runner.emitInput("original", undefined, "interactive")).resolves.toMatchObject({
+			action: "transform",
+			text: "assimilated",
+		});
+
+		expect(Reflect.get(globalThis, "__piThenReads")).toBe(1);
+		expect(Reflect.get(globalThis, "__piThrowingThenReads")).toBe(1);
+		expect(errors).toEqual(["then getter failure"]);
+		expect(
+			sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom")
+				.map((entry) => entry.data),
+		).toEqual([
+			expect.objectContaining({ handlerIndex: 0, executionKind: "async" }),
+			expect.objectContaining({ handlerIndex: 1, executionKind: "async" }),
+		]);
+	});
+
+	it("keeps strict slow-hook threshold", async () => {
+		vi.useFakeTimers();
+		const extensionPath = path.join(tempDir, "threshold.ts");
+		fs.writeFileSync(
+			extensionPath,
+			`export default function(pi) { pi.on("input", async () => { await new Promise((resolve) => setTimeout(resolve, 100)); }); }`,
 		);
 		const result = await loadExtensions([extensionPath], tempDir);
 		const sessionManager = SessionManager.inMemory();
@@ -142,17 +237,10 @@ describe("extension lifecycle diagnostics", () => {
 		runner.bindCore(extensionActions, extensionContextActions);
 
 		const input = runner.emitInput("original", undefined, "interactive");
-		await vi.advanceTimersByTimeAsync(201);
-		await expect(input).resolves.toMatchObject({ action: "transform", text: "transformed" });
+		await vi.advanceTimersByTimeAsync(100);
+		await input;
 
-		const entries = sessionManager.getEntries().filter((entry) => entry.type === "custom");
-		expect(entries).toHaveLength(1);
-		expect(entries[0]).toMatchObject({
-			type: "custom",
-			customType: "pi.extension_hook_slow",
-			data: { event: "input", extensionPath, handlerIndex: 0, elapsedMs: 101 },
-		});
-		expect(sessionManager.buildSessionContext().messages).toEqual([]);
+		expect(sessionManager.getEntries().filter((entry) => entry.type === "custom")).toEqual([]);
 	});
 
 	it("logs and reports startup handlers through the normal runner", async () => {
