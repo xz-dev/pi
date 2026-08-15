@@ -85,6 +85,7 @@ test("upstream sync restores provider-transparent compaction after session-tree 
   assert.match(syncWorkflowText, /test\/suite\/regressions\/5724-sigterm-signal-exit\.test\.ts/);
   assert.match(syncWorkflowText, /lake env lean docs\/programming-thinking\/provider-transparent-compaction\.idea\.lean/);
   assert.match(syncWorkflowText, /lake env lean docs\/programming-thinking\/slow-hook-tui-only\.idea\.lean/);
+  assert.equal(readFileSync(join(ROOT, "lean-toolchain"), "utf8"), "leanprover/lean4:v4.33.0\n");
 });
 
 test("upstream sync carries the unified TUI-only slow-hook patch", () => {
