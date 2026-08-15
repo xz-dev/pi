@@ -28,6 +28,9 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - Expose public `pi.spliceEntry(entryId)` so an extension can delete one non-root session-tree node and reparent its children, preserving descendants.
   - Use case: Remove a hidden watchdog decision node from session history without deleting later conversation descendants.
   - Patch branch: [`patch/session-tree-splice`](https://github.com/xz-dev/pi/tree/patch/session-tree-splice)
+- Keep raw append-only history portable across provider/model switches while attempting remote Responses compaction for every Responses API target. Unsupported or failed remote compaction falls back to bounded classic compaction; stale producer snapshots never publish.
+  - Use case: Reuse provider-held checkpoints where supported without making compaction provider-specific or risking stale session summaries.
+  - Patch branch: [`patch/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/patch/provider-transparent-compaction)
 
 ### Fixes
 
@@ -45,10 +48,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
   - Patch branch: [`patch/tui-synchronized-cursor-fleet`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor-fleet)
 
 The integrated Esc and manual-retry patches both extend the Agent failure lifecycle. Their independent branches remain directly reviewable; [`tmp/patch/esc-manual-retry-compat`](https://github.com/xz-dev/pi/tree/tmp/patch/esc-manual-retry-compat) supplies only the downstream combined `handleRunFailure()` resolution and is merged immediately after them.
-
-### Temporarily disabled
-
-- Provider-transparent Responses remote compaction is not merged into generated `main`. Its source remains on [`patch/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/patch/provider-transparent-compaction) for later re-evaluation and re-enable.
 
 ### Maintenance
 

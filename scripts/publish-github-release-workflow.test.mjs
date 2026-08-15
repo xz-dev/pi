@@ -62,9 +62,29 @@ test("upstream sync requires ci to merge cleanly without source rewriting", () =
   assert.doesNotMatch(syncWorkflowText, /resolve-ci-squash-conflicts/);
 });
 
-test("upstream sync keeps remote compaction temporarily retired", () => {
-  assert.doesNotMatch(syncWorkflowText, /patch\/provider-transparent-compaction/);
-  assert.doesNotMatch(syncWorkflowText, /Responses compaction/);
+test("upstream sync restores provider-transparent compaction after session-tree splice", () => {
+  assert.match(
+    syncWorkflowText,
+    /\+refs\/heads\/patch\/provider-transparent-compaction:refs\/remotes\/origin\/patch\/provider-transparent-compaction/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /patch\/provider-transparent-compaction must descend from patch\/session-tree-splice/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /git cherry-pick --no-commit origin\/patch\/session-tree-splice\.\.origin\/patch\/provider-transparent-compaction/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /python3 scripts\/resolve-provider-transparent-compaction-conflicts\.py/,
+  );
+  assert.match(syncWorkflowText, /test\/openai-responses-compat\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/compaction-bounded-recovery\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/suite\/agent-session-compaction\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/suite\/regressions\/5724-sigterm-signal-exit\.test\.ts/);
+  assert.match(syncWorkflowText, /lake env lean docs\/programming-thinking\/provider-transparent-compaction\.idea\.lean/);
+  assert.match(syncWorkflowText, /lake env lean docs\/programming-thinking\/slow-hook-tui-only\.idea\.lean/);
 });
 
 test("upstream sync carries the unified TUI-only slow-hook patch", () => {
@@ -93,6 +113,14 @@ test("upstream sync preserves bounded slow-hook and session-tree compatibility",
   assert.match(
     syncWorkflowText,
     /patch\/session-tree-splice must descend from patch\/slow-hook-tui-only/,
+  );
+  assert.ok(
+    syncWorkflowText.indexOf('git commit -m "merge patch/slow-hook-tui-only branch"') <
+      syncWorkflowText.indexOf('git commit -m "merge patch/session-tree-splice branch"'),
+  );
+  assert.ok(
+    syncWorkflowText.indexOf('git commit -m "merge patch/session-tree-splice branch"') <
+      syncWorkflowText.indexOf('git commit -m "merge patch/provider-transparent-compaction branch"'),
   );
 });
 
