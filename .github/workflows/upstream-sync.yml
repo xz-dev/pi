@@ -46,7 +46,8 @@ jobs:
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
-            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice
+            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
+            +refs/heads/patch/provider-transparent-compaction:refs/remotes/origin/patch/provider-transparent-compaction
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -259,6 +260,41 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/session-tree-splice branch"
 
+          if ! git merge-base --is-ancestor origin/patch/session-tree-splice origin/patch/provider-transparent-compaction; then
+            echo '::error::patch/provider-transparent-compaction must descend from patch/session-tree-splice'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/session-tree-splice..origin/patch/provider-transparent-compaction; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            expected_conflicts=(
+              packages/coding-agent/src/core/agent-session.ts
+              packages/coding-agent/src/core/session-manager.ts
+              packages/coding-agent/src/core/settings-manager.ts
+            )
+            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )) ||
+              [[ ${conflicts[*]} != "${expected_conflicts[*]}" ]]; then
+              printf '::error::Unexpected provider-compaction conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            python3 scripts/resolve-provider-transparent-compaction-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying provider-transparent compaction'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/provider-transparent-compaction'
+            exit 1
+          fi
+          grep -Fq 'convertToLlm' packages/coding-agent/src/core/agent-session.ts
+          grep -Fq 'type ExtensionShutdownProgressListener' packages/coding-agent/src/core/agent-session.ts
+          grep -Fq 'renameSync,' packages/coding-agent/src/core/session-manager.ts
+          grep -Fq 'rmSync,' packages/coding-agent/src/core/session-manager.ts
+          git diff --cached --check
+          git commit -m "merge patch/provider-transparent-compaction branch"
+
       - name: Install dependencies for pre-push gates
         run: npm ci --ignore-scripts
 
@@ -281,6 +317,7 @@ jobs:
             cd packages/ai
             node ../../node_modules/vitest/dist/cli.js --run \
               test/event-stream.test.ts \
+              test/openai-responses-compat.test.ts \
               test/providers.test.ts \
               test/retry.test.ts
           )
@@ -298,6 +335,8 @@ jobs:
               test/extensions-runner.test.ts \
               test/lifecycle-diagnostics.test.ts \
               test/shutdown-screen-log.test.ts \
+              test/compaction-bounded-recovery.test.ts \
+              test/interactive-mode-compaction.test.ts \
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
               test/agent-session-concurrent.test.ts \
@@ -319,15 +358,33 @@ jobs:
               test/tools-manager-timeout.test.ts \
               test/xz-release-update.test.ts \
               test/interactive-mode-queue-tui.test.ts \
+              test/suite/agent-session-compaction.test.ts \
               test/suite/manual-retry.test.ts \
               test/suite/session-tree-splice.test.ts \
               test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts \
+              test/suite/regressions/5724-sigterm-signal-exit.test.ts \
               test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
               test/suite/regressions/6949-unavailable-scoped-model.test.ts \
               test/suite/regressions/7209-model-selector-filter-resets-selection.test.ts
           )
           node --test --test-reporter=dot \
             packages/tui/test/tui-render.test.ts
+
+      - name: Setup Lean
+        uses: leanprover/lean-action@8dd5d0978ba1c4ec4ae0835a93f88d946799944f
+        with:
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+
+      - name: Validate programming-thinking models
+        run: |
+          lake env lean docs/programming-thinking/provider-transparent-compaction.idea.lean
+          lake env lean --run docs/programming-thinking/provider-transparent-compaction.idea.lean
+          lake env lean docs/programming-thinking/slow-hook-tui-only.idea.lean
+          lake env lean --run docs/programming-thinking/slow-hook-tui-only.idea.lean
 
       - name: Smoke test packed npm release
         run: |
