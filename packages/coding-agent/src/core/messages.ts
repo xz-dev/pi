@@ -7,6 +7,7 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
+import type { CompactionKind } from "./compaction/compaction.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -76,6 +77,7 @@ export interface BranchSummaryMessage {
 
 export interface CompactionSummaryMessage {
 	role: "compactionSummary";
+	kind?: CompactionKind;
 	summary: string;
 	tokensBefore: number;
 	timestamp: number;
@@ -126,10 +128,12 @@ export function createCompactionSummaryMessage(
 	summary: string,
 	tokensBefore: number,
 	timestamp: string,
+	kind?: CompactionKind,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
-		summary: summary,
+		kind,
+		summary,
 		tokensBefore,
 		timestamp: new Date(timestamp).getTime(),
 	};
@@ -196,6 +200,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				case "compactionSummary":
+					if (m.kind === "remote") return undefined;
 					return {
 						role: "user",
 						content: [

@@ -43,6 +43,7 @@ export interface ActiveToolsEntry extends EntryBase {
 
 export interface CompactionEntry extends EntryBase {
 	type: "compaction";
+	kind?: "remote" | "classic" | "extension";
 	summary: string;
 	retainedTail: AgentMessage[];
 	tokensBefore: number;
