@@ -1192,6 +1192,11 @@ export interface ResolvedCommand extends RegisteredCommand {
 // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
+export interface UninterruptibleMessageEndHandlerOptions {
+	/** Run terminal cleanup even when the active agent signal has been aborted. */
+	uninterruptible: true;
+}
+
 /**
  * ExtensionAPI passed to extension factory functions.
  */
@@ -1232,6 +1237,11 @@ export interface ExtensionAPI {
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): void;
+	on(
+		event: "message_end",
+		handler: (event: MessageEndEvent, ctx: ExtensionContext) => MessageEndEventResult | undefined,
+		options: UninterruptibleMessageEndHandlerOptions,
+	): void;
 	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent, MessageEndEventResult>): void;
 	on(event: "tool_execution_start", handler: ExtensionHandler<ToolExecutionStartEvent>): void;
 	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): void;
@@ -1552,7 +1562,7 @@ export interface ExtensionShortcut {
 	extensionPath: string;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+type HandlerFn = (...args: unknown[]) => unknown;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
@@ -1699,6 +1709,7 @@ export interface Extension {
 	hidden?: boolean;
 	sourceInfo: SourceInfo;
 	handlers: Map<string, HandlerFn[]>;
+	uninterruptibleHandlers?: WeakSet<HandlerFn>;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
