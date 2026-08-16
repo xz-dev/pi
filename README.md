@@ -31,6 +31,9 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - Keep raw append-only history portable across provider/model switches while attempting remote Responses compaction for every Responses API target. Unsupported or failed remote compaction falls back to bounded classic compaction; stale producer snapshots never publish.
   - Use case: Reuse provider-held checkpoints where supported without making compaction provider-specific or risking stale session summaries.
   - Patch branch: [`patch/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/patch/provider-transparent-compaction)
+- Compact persisted tool results before the next provider request in the same agent run, replacing active context without repeating tool execution or committing a second boundary.
+  - Use case: Prevent oversized tool results from reaching the immediate follow-up provider request unchanged.
+  - Patch branch: [`patch/pre-provider-compaction`](https://github.com/xz-dev/pi/tree/patch/pre-provider-compaction)
 
 ### Fixes
 
