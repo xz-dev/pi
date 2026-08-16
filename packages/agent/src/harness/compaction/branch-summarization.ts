@@ -119,7 +119,7 @@ function getMessageFromEntry(entry: Entry): AgentMessage | undefined {
 			return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
 
 		case "compaction":
-			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
+			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp, entry.kind);
 		case "thinking_level_change":
 		case "model_change":
 		case "active_tools_change":

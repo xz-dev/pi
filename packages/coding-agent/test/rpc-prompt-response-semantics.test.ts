@@ -190,6 +190,43 @@ describe("RPC prompt response semantics", () => {
 		rpcIo.lineHandler = undefined;
 	});
 
+	it("gets and writes remote compaction state", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+
+		try {
+			lineHandler(JSON.stringify({ id: "remote-get-1", type: "get_state" }));
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({
+						id: "remote-get-1",
+						command: "get_state",
+						data: expect.objectContaining({ remoteCompactionEnabled: true }),
+					}),
+				);
+			});
+
+			lineHandler(JSON.stringify({ id: "remote-set", type: "set_remote_compaction", enabled: false }));
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({ id: "remote-set", command: "set_remote_compaction", success: true }),
+				);
+			});
+
+			lineHandler(JSON.stringify({ id: "remote-get-2", type: "get_state" }));
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({
+						id: "remote-get-2",
+						command: "get_state",
+						data: expect.objectContaining({ remoteCompactionEnabled: false }),
+					}),
+				);
+			});
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("emits one failure response when prompt preflight rejects", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({
 			withAuth: false,
