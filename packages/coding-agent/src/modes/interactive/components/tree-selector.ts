@@ -340,9 +340,15 @@ class TreeList implements Component {
 			const entry = flatNode.node.entry;
 			const isCurrentLeaf = entry.id === this.currentLeafId;
 
-			// Skip assistant messages with only tool calls (no text) unless error/aborted
-			// Always show current leaf so active position is visible
-			if (entry.type === "message" && entry.message.role === "assistant" && !isCurrentLeaf) {
+			// Skip assistant messages with only tool calls in concise modes. The all
+			// filter exposes protocol boundaries so they can be selected for /retry.
+			// Always show current leaf so active position is visible.
+			if (
+				this.filterMode !== "all" &&
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				!isCurrentLeaf
+			) {
 				const msg = entry.message as { stopReason?: string; content?: unknown };
 				const hasText = this.hasTextContent(msg.content);
 				const isErrorOrAborted = msg.stopReason && msg.stopReason !== "stop" && msg.stopReason !== "toolUse";
