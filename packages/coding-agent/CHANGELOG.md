@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- After interactive TUI stop, show the current `session_shutdown` handler in place and keep only handlers slower than `slowHookThresholdMs` on the terminal. Shutdown timing is TUI-only and is not written to the session or disk.
+
+### Changed
+
+- Slow extension-hook diagnostics are now interactive TUI notices only. They no longer append session custom entries, write `extension-lifecycle.jsonl`, or emit print/RPC diagnostic events.
+
 ### Fixed
 
 - Fixed Z.AI Coding Plan defaults referencing the removed GLM-5.1 model ([#8096](https://github.com/earendil-works/pi/issues/8096)).
