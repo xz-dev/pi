@@ -74,7 +74,7 @@ export function sessionEntryToContextMessages(
 	}
 	if (entry.type === "compaction") {
 		return [
-			createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp),
+			createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp, entry.kind),
 			...entry.retainedTail,
 		];
 	}
