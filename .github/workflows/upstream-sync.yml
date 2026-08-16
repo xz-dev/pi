@@ -47,7 +47,8 @@ jobs:
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
-            +refs/heads/patch/provider-transparent-compaction:refs/remotes/origin/patch/provider-transparent-compaction
+            +refs/heads/patch/provider-transparent-compaction:refs/remotes/origin/patch/provider-transparent-compaction \
+            +refs/heads/patch/pre-provider-compaction:refs/remotes/origin/patch/pre-provider-compaction
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -297,6 +298,28 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/provider-transparent-compaction branch"
 
+          if ! git merge-base --is-ancestor origin/patch/provider-transparent-compaction origin/patch/pre-provider-compaction; then
+            echo '::error::patch/pre-provider-compaction must descend from patch/provider-transparent-compaction'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/provider-transparent-compaction..origin/patch/pre-provider-compaction; then
+            echo '::error::Failed to apply patch/pre-provider-compaction descendant range'
+            exit 1
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying pre-provider compaction'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/pre-provider-compaction'
+            exit 1
+          fi
+          grep -Fq 'this._preProviderCompactionAttempted = true;' packages/coding-agent/src/core/agent-session.ts
+          grep -Fq 'currentContext.messages.splice(0, currentContext.messages.length' packages/agent/src/agent-loop.ts
+          test -f packages/coding-agent/test/suite/regressions/pre-provider-tool-result-compaction.test.ts
+          git diff --cached --check
+          git commit -m "merge patch/pre-provider-compaction branch"
+
       - name: Install dependencies for pre-push gates
         run: npm ci --ignore-scripts
 
@@ -362,6 +385,7 @@ jobs:
               test/interactive-mode-queue-tui.test.ts \
               test/suite/agent-session-compaction.test.ts \
               test/suite/manual-retry.test.ts \
+              test/suite/regressions/pre-provider-tool-result-compaction.test.ts \
               test/suite/session-tree-splice.test.ts \
               test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts \
               test/suite/regressions/5724-sigterm-signal-exit.test.ts \
