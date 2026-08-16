@@ -1,114 +1,138 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
-</p>
+# xz-dev/pi
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
-# Pi Agent Harness
+It tracks upstream `main` with a minimal downstream patch stack.
 
-This is the home of the Pi agent harness project including our self extensible coding agent.
+> [!WARNING]
+> This fork relies heavily on vibe coding. Logic changes are manually reviewed, and tests are also written by AI under human direction before the full test gate is run.
+>
+> Almost none of the code in this fork is handwritten by xz-dev. Do not use this distribution if you are uncomfortable with AI-assisted development.
 
-* **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
-* **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
-* **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
+## Downstream changes
 
-To learn more about Pi:
+### Features
 
-* [Visit pi.dev](https://pi.dev), the project website with demos
-* [Read the documentation](https://pi.dev/docs/latest), but you can also ask the agent to explain itself
+- Continue from the nearest protocol-safe conversation boundary with `/retry` or RPC `retry`, preserving superseded history as an append-only sibling branch, retaining completed tool results, and synthesizing explicit unknown-outcome errors only for missing results without replaying old tool calls.
+  - Use case: Resume after Pi or its provider was interrupted, without replaying completed tool calls.
+  - Patch branch: [`patch/manual-retry`](https://github.com/xz-dev/pi/tree/patch/manual-retry)
+- Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
+  - Use case: Keep a skill available to `/skill:<name>` while preventing automatic model invocation.
+  - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
+- Allow `settings.retry.nonRetryableErrorPatterns` to fail-fast on gateway-specific terminal quota/limit error messages without expanding the built-in retry classifier.
+  - Use case: Stop retrying when a gateway returns a known terminal quota or limit message.
+  - Patch branch: [`patch/retry-non-retryable-patterns`](https://github.com/xz-dev/pi/tree/patch/retry-non-retryable-patterns)
+- Show awaited extension handlers exceeding `slowHookThresholdMs` only in interactive TUI, with synchronous handlers in warning yellow and asynchronous handlers in default gray. During shutdown, show the current handler while waiting, clear fast handlers, and keep slow handlers on the terminal without writing timing diagnostics to session history, model context, RPC/print events, or disk.
+  - Use case: Diagnose slow extension hooks without persisting diagnostic records.
+  - Patch branch: [`patch/slow-hook-tui-only`](https://github.com/xz-dev/pi/tree/patch/slow-hook-tui-only)
+- Expose public `pi.spliceEntry(entryId)` so an extension can delete one non-root session-tree node and reparent its children, preserving descendants.
+  - Use case: Remove a hidden watchdog decision node from session history without deleting later conversation descendants.
+  - Patch branch: [`patch/session-tree-splice`](https://github.com/xz-dev/pi/tree/patch/session-tree-splice)
+- Keep raw append-only history portable across provider/model switches while attempting remote Responses compaction for every Responses API target. Unsupported or failed remote compaction falls back to bounded classic compaction; stale producer snapshots never publish.
+  - Use case: Reuse provider-held checkpoints where supported without making compaction provider-specific or risking stale session summaries.
+  - Patch branch: [`patch/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/patch/provider-transparent-compaction)
+- Compact persisted tool results before the next provider request in the same agent run, replacing active context without repeating tool execution or committing a second boundary.
+  - Use case: Prevent oversized tool results from reaching the immediate follow-up provider request unchanged.
+  - Patch branch: [`patch/pre-provider-compaction`](https://github.com/xz-dev/pi/tree/patch/pre-provider-compaction)
 
-## All Packages
+### Fixes
 
-| Package | Description |
-|---------|-------------|
-| **[@earendil-works/pi-telemetry](packages/telemetry)** | Vendor-neutral telemetry contracts, reference adapter, conformance tests, and typed schemas |
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+- Wait for extension-provider registration refreshes before startup resolves configured models, while preserving synchronous registration and caller-owned cancellation.
+  - Use case: Start with models an extension registered asynchronously instead of resolving a stale catalog.
+  - Patch branch: [`patch/model-startup-refresh-barrier`](https://github.com/xz-dev/pi/tree/patch/model-startup-refresh-barrier)
+- Rebind active and scoped sessions to refreshed same-ID model metadata so context percentages and automatic compaction use the current context window.
+  - Use case: Keep context percentages and compaction limits correct after a provider refreshes model metadata.
+  - Patch branch: [`patch/model-refresh-session-rebind`](https://github.com/xz-dev/pi/tree/patch/model-refresh-session-rebind)
+- [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
+  - Use case: Recover control when Esc is pressed during a hook, provider setup, stream, or listener that does not settle.
+  - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
+- Keep content and hardware-cursor state in one synchronized terminal release so tmux cannot redraw centered overlays from an intermediate cursor position.
+  - Use case: Prevent tmux from redrawing overlays from an intermediate cursor position.
+  - Patch branch: [`patch/tui-synchronized-cursor-fleet`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor-fleet)
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
+The integrated Esc and manual-retry patches both extend the Agent failure lifecycle. Their independent branches remain directly reviewable; [`tmp/patch/esc-manual-retry-compat`](https://github.com/xz-dev/pi/tree/tmp/patch/esc-manual-retry-compat) supplies only the downstream combined `handleRunFailure()` resolution and is merged immediately after them.
 
-## Permissions & Containerization
+### Maintenance
 
-Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
+- Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
+  - Use case: Keep downstream prerelease display and changelog lookup correct when package and release versions differ.
+  - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
+- Remove old managed binary bundles with `pi update --clean` while keeping the current bundle and `.update-*` staging directories.
+  - Use case: Free disk after several `pi update --self` cycles without deleting the active version or an in-progress update.
+  - Patch branch: [`patch/update-clean`](https://github.com/xz-dev/pi/tree/patch/update-clean)
 
-If you need stronger boundaries, containerize or sandbox Pi. See [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) for three patterns:
+## Installation
 
-- **Gondolin extension**: keep `pi` and provider auth on the host while routing built-in tools and `!` commands into a local Linux micro-VM.
-- **Plain Docker**: run the whole `pi` process in a local container for simple isolation.
-- **OpenShell**: run the whole `pi` process in a policy-controlled sandbox.
+xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 12 ZIP bundles: Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64. Choose `modern` on an AVX2-capable x64 CPU and `baseline` otherwise; on Linux, choose `gnu` for glibc systems and `musl` for musl systems. Each ZIP contains `pi` plus `pi-native` (`.exe` on Windows) and all version-matched runtime assets. No Node.js, Bun, npm, package manager, or generated installer script is required.
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).  Longer term plans for Pi can also be found in [RFCs](https://rfc.earendil.com/keyword/pi/).
-
-## Development
+### Linux and macOS
 
 ```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build         # Refresh model data, then build all packages
-npm run build:offline # Rebuild using existing model data without network access
-npm run check         # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+# Download the matching pi-<target>.zip from the latest Release, then:
+unzip pi-<target>.zip -d pi
+chmod +x pi/pi pi/pi-native
+./pi/pi --version
 ```
 
-## Building standalone binaries from release source
+### Windows Scoop
 
-GitHub releases include a versioned source archive covered by the release's `SHA256SUMS` file. Extract it and run the same build script used for the official standalone binaries:
+```powershell
+$scoopRoot = (Resolve-Path (Join-Path (scoop prefix scoop) '..\..\..')).Path
+$bucket = Join-Path $scoopRoot 'buckets\xz-dev'
+git clone --branch scoop --single-branch https://github.com/xz-dev/pi.git $bucket
+scoop install xz-dev/pi
+```
+
+Scoop installs the AVX2-optimized x64 build, or the native arm64 build on Windows arm64. Update with `scoop update pi`. Use the manual method below for an x64 baseline build.
+
+### Windows PowerShell
+
+```powershell
+# Download the matching pi-<target>.zip from the latest Release, then:
+Expand-Archive .\pi-<target>.zip -DestinationPath .\pi
+.\pi\pi.exe --version
+```
+
+### Exact Release installation
+
+Download `pi-<target>.zip` from the exact `xz-v<VERSION>` Release instead of Latest, then extract it using the same commands above.
+
+Release assets include `SHA256SUMS` and GitHub build-provenance attestations for independent verification.
+
+### Update
+
+An extracted binary updates itself directly from the matching target ZIP:
 
 ```bash
-VERSION="<release-version>"
-tar -xzf "pi-${VERSION}-source.tar.gz"
-cd "pi-${VERSION}"
-./scripts/build-binaries.sh --offline-model-data --platform linux-x64 --out "$PWD/out"
+pi update --self
 ```
 
-The source archive includes the generated provider model data used for the release. `--offline-model-data` builds with that snapshot instead of refreshing it from live provider catalogs. The script still installs dependencies, builds the monorepo, compiles the Bun executable, and stages its runtime assets. Package maintainers who provide dependencies separately can pass `--skip-install --skip-deps`.
+The first update converts the extracted directory into a managed layout: the complete ZIP is staged under `bundles/<version>`, then `current` is atomically replaced. On POSIX, the root wrapper is also atomically refreshed. On Windows, `pi.exe` remains stable, waits for `pi-native.exe`, and returns its exit status without overwriting the running wrapper. A new invocation reads `current` and starts the activated bundle.
 
-## Supply-chain hardening
+`pi update --clean` keeps only `bundles/<current>`, deletes other ordinary bundle directories and the top-level `previous` pointer, and leaves `.update-*` staging directories untouched.
 
-We treat npm dependency changes as reviewed code changes.
+### Source checkout
 
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent shrinkwrap.
-- The published CLI package includes `packages/coding-agent/npm-shrinkwrap.json`, generated from the root lockfile, to pin transitive deps for npm users.
-- Release smoke tests use `npm run release:local` to build, pack, and create isolated npm and Bun installs outside the repo before tagging a release.
-- Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
-- Shrinkwrap generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
+A documented source installation uses the xz-dev checkout and is user-managed:
 
-## Share your OSS coding agent sessions
+```bash
+git clone https://github.com/xz-dev/pi.git
+cd pi
+npm ci --ignore-scripts
+npm run build
+cd packages/coding-agent
+npm link
+```
 
-If you use Pi or other coding agents for open source work, please share your sessions.
+For this installation, `pi update --self` never runs a package-manager update and never queries official upstream Release/update sources; it prints xz-dev source-checkout update instructions that you run yourself.
 
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
+## Automation upstream sync
 
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
+See [`MAINTAIN.md`](MAINTAIN.md) for the authoritative downstream branch ownership, rebuild, publication, recovery, and patch-retirement rules.
 
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
+Twice daily, [Upstream Sync](https://github.com/xz-dev/pi/actions/workflows/upstream-sync.yml) rebuilds `main` from the latest `https://github.com/earendil-works/pi.git` `main`, then integrates the maintenance overlay, feature and fix branches, and temporary compatibility branches in a fixed order:
 
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
+- 01:28 Asia/Shanghai
+- 13:28 Asia/Shanghai
 
-I regularly publish my own `pi-mono` work sessions here:
-
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
-
-## License
-
-MIT
-
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+Before a lease-protected update of `main`, the workflow installs dependencies, hydrates model data, builds, checks, runs focused integration regressions, validates the exact GitHub Release candidate, audits production and development dependencies, and verifies production dependency signatures. Conflicts, empty integrations, failed gates, or a changed remote lease leave `main` unchanged. A successful push triggers the full [CI](https://github.com/xz-dev/pi/actions/workflows/ci.yml), [Esc Abort Integration](https://github.com/xz-dev/pi/actions/workflows/esc-abort-integration.yml), and [Publish GitHub Release](https://github.com/xz-dev/pi/actions/workflows/publish-github-release.yml) workflows for the rebuilt commit.
