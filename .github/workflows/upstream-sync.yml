@@ -385,6 +385,7 @@ jobs:
               test/interactive-mode-queue-tui.test.ts \
               test/suite/agent-session-compaction.test.ts \
               test/suite/manual-retry.test.ts \
+              test/suite/regressions/7253-manual-compact-during-response.test.ts \
               test/suite/regressions/pre-provider-tool-result-compaction.test.ts \
               test/suite/session-tree-splice.test.ts \
               test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts \
