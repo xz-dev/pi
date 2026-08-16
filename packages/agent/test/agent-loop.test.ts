@@ -1101,6 +1101,62 @@ describe("agentLoop with AgentMessage", () => {
 		expect(convertedSecondTurnSystemPrompt).toBe("second prompt");
 	});
 
+	it("should replace the active message array before continuing", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareNextTurn: ({ context: currentContext }) => ({
+				context: {
+					...currentContext,
+					messages: [createUserMessage("compacted")],
+				},
+			}),
+		};
+		const secondTurnRoles: string[][] = [];
+		let llmCalls = 0;
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, (_model, currentContext) => {
+			llmCalls++;
+			if (llmCalls === 2) secondTurnRoles.push(currentContext.messages.map((message) => message.role));
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				mockStream.push(
+					llmCalls === 1
+						? {
+								type: "done",
+								reason: "toolUse",
+								message: createAssistantMessage(
+									[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+									"toolUse",
+								),
+							}
+						: {
+								type: "done",
+								reason: "stop",
+								message: createAssistantMessage([{ type: "text", text: "done" }]),
+							},
+				);
+			});
+			return mockStream;
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(secondTurnRoles).toEqual([["user"]]);
+	});
+
 	it("should stop after the current turn when shouldStopAfterTurn returns true", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];
