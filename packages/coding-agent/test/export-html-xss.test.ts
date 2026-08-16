@@ -37,6 +37,14 @@ describe("export HTML markdown link sanitization", () => {
 		expect(templateJs).toMatch(/;base64,\$\{escapeHtml\(img\.data \|\| (?:''|"")\)\}"/);
 	});
 
+	it("renders public compaction kinds without opaque remote details", () => {
+		expect(templateJs).toMatch(/\[\$\{entry\.kind \|\| 'classic'\} compaction\]/);
+		expect(templateJs).toMatch(
+			/\[\$\{entry\.kind \|\| 'classic'\} compaction: \$\{Math\.round\(entry\.tokensBefore\/1000\)\}k tokens\]/,
+		);
+		expect(templateJs).not.toContain("encrypted_content");
+	});
+
 	it("escapes entry IDs before inserting them into attributes", () => {
 		// Session entry IDs are embedded in id and data-entry-id attributes.
 		expect(templateJs).not.toMatch(/id="\$\{entryId\}"/);

@@ -1,12 +1,14 @@
 import type * as NodeZlib from "node:zlib";
 import type {
+	CompactedResponse,
 	Tool as OpenAITool,
+	ResponseCompactParams,
 	ResponseCreateParamsStreaming,
 	ResponseInput,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 
-import { clampThinkingLevel } from "../models.ts";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -35,6 +37,12 @@ import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { uuidv7 } from "../utils/uuid.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import {
+	type OpenAIResponsesCompaction,
+	type OpenAIResponsesCompactionOptions,
+	type ResponsesCompactionIdentity,
+	responsesCompactionIdentitiesEqual,
+} from "./openai-responses.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
@@ -98,7 +106,9 @@ interface RequestBody {
 	[key: string]: unknown;
 }
 
-type SuccessfulAssistantMessage = AssistantMessage & { stopReason: "stop" | "length" | "toolUse" };
+type SuccessfulAssistantMessage = AssistantMessage & {
+	stopReason: "stop" | "length" | "toolUse";
+};
 
 function assertSuccessfulOutput(output: AssistantMessage): asserts output is SuccessfulAssistantMessage {
 	if (output.stopReason === "pending") {
@@ -215,7 +225,9 @@ function compressRequestBodyZstd(bodyJson: string): Uint8Array | null {
 	}
 	try {
 		const compressed = zlib.zstdCompressSync(bodyJson, {
-			params: { [zlib.constants.ZSTD_c_compressionLevel]: REQUEST_COMPRESSION_ZSTD_LEVEL },
+			params: {
+				[zlib.constants.ZSTD_c_compressionLevel]: REQUEST_COMPRESSION_ZSTD_LEVEL,
+			},
 		});
 		return new Uint8Array(compressed.buffer, compressed.byteOffset, compressed.byteLength);
 	} catch {
@@ -404,7 +416,10 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						combinedSignal.cleanup();
 					}
 					await options?.onResponse?.(
-						{ status: response.status, headers: headersToRecord(response.headers) },
+						{
+							status: response.status,
+							headers: headersToRecord(response.headers),
+						},
 						model,
 					);
 
@@ -512,6 +527,130 @@ export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStream
 // ============================================================================
 // Request Building
 // ============================================================================
+
+export function getOpenAICodexResponsesCompactionIdentity(
+	model: Model<"openai-codex-responses">,
+): ResponsesCompactionIdentity {
+	return {
+		api: "openai-codex-responses",
+		provider: model.provider,
+		model: model.id,
+		endpoint: `${resolveCodexUrl(model.baseUrl).replace(/\/+$/, "")}/compact`,
+	};
+}
+
+export async function compactOpenAICodexResponses(
+	model: Model<"openai-codex-responses">,
+	context: Context,
+	options?: OpenAIResponsesCompactionOptions<"openai-codex-responses">,
+): Promise<OpenAIResponsesCompaction> {
+	const apiKey = options?.apiKey;
+	if (!apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+	const identity = getOpenAICodexResponsesCompactionIdentity(model);
+	if (options?.previous && !responsesCompactionIdentitiesEqual(options.previous.identity, identity)) {
+		throw new Error("Responses compaction is not compatible with this provider identity");
+	}
+	// Codex places the system prompt in top-level `instructions` (not input).
+	// ResponseCompactParams supports instructions; compact output does not carry them.
+	const previousOutput = options?.previous ? structuredClone(options.previous.output) : undefined;
+	const input = buildRequestBody(model, context, undefined, undefined).input ?? [];
+	let body: ResponseCompactParams = {
+		model: model.id,
+		input,
+		// Never substitute the stream helper default; only send the real system prompt.
+		...(context.systemPrompt ? { instructions: context.systemPrompt } : {}),
+	};
+	const nextBody = await options?.onPayload?.(body, model);
+	if (nextBody !== undefined) body = nextBody as ResponseCompactParams;
+	if (previousOutput) {
+		body = {
+			...body,
+			input: [...previousOutput, ...((body.input as ResponseInput | undefined) ?? [])] as ResponseInput,
+		};
+	}
+	const headers = buildSSEHeaders(model.headers, options.headers, extractAccountId(apiKey), apiKey);
+	headers.set("accept", "application/json");
+	const timeoutMs = normalizeTimeoutMs(options.timeoutMs);
+	const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+	let response: Response | undefined;
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		if (options.signal?.aborted) throw options.signal.reason ?? new Error("Request was aborted");
+		const timeoutSignal = timeoutMs !== undefined && timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+		const combinedSignal = combineAbortSignals([options.signal, timeoutSignal]);
+		try {
+			response = await (options.fetch ?? globalThis.fetch)(identity.endpoint, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(body),
+				signal: combinedSignal.signal,
+			});
+		} catch (error) {
+			if (options.signal?.aborted) throw options.signal.reason ?? error;
+			if (timeoutSignal?.aborted) throw new Error(`Codex compaction timed out after ${timeoutMs}ms`);
+			if (attempt >= maxRetries) throw error;
+			await sleep(BASE_DELAY_MS * 2 ** attempt, options.signal);
+			continue;
+		} finally {
+			combinedSignal.cleanup();
+		}
+		await options.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+		if (response.ok) break;
+		const errorText = await response.text();
+		if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
+			const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
+			const delayMs =
+				retryAfterDelayMs === undefined
+					? BASE_DELAY_MS * 2 ** attempt
+					: validateRetryDelayMs(retryAfterDelayMs, {
+							maxRetryDelayMs: options.maxRetryDelayMs,
+						});
+			await sleep(delayMs, options.signal);
+			continue;
+		}
+		throw new Error(errorText || `Codex compaction failed (${response.status})`);
+	}
+	if (!response?.ok) throw new Error("Codex compaction failed after retries");
+	const data = (await response.json()) as CompactedResponse;
+	const cachedTokens = data.usage.input_tokens_details.cached_tokens || 0;
+	const cacheWrite = (data.usage.input_tokens_details as { cache_write_tokens?: number }).cache_write_tokens || 0;
+	const usage: Usage = {
+		input: Math.max(0, data.usage.input_tokens - cachedTokens - cacheWrite),
+		output: data.usage.output_tokens,
+		cacheRead: cachedTokens,
+		cacheWrite,
+		reasoning: data.usage.output_tokens_details?.reasoning_tokens || 0,
+		totalTokens: data.usage.total_tokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, usage);
+	return { identity, output: structuredClone(data.output), usage };
+}
+
+export function replayOpenAICodexResponsesCompaction(
+	model: Model<"openai-codex-responses">,
+	compaction: OpenAIResponsesCompaction,
+	context: Context,
+	options?: OpenAICodexResponsesOptions,
+): AssistantMessageEventStream {
+	const identity = getOpenAICodexResponsesCompactionIdentity(model);
+	if (!responsesCompactionIdentitiesEqual(compaction.identity, identity)) {
+		throw new Error("Responses compaction is not compatible with this provider identity");
+	}
+	// CompactedResponse.output is user messages + compaction item only — no instructions.
+	// Keep the live system prompt so replay does not fall back to the helper default.
+	return stream(model, context, {
+		...options,
+		onPayload: async (payload, requestModel) => {
+			const publicPayload = structuredClone(payload) as RequestBody;
+			const next = await options?.onPayload?.(publicPayload, requestModel);
+			const afterHook = (next !== undefined ? next : publicPayload) as RequestBody;
+			return {
+				...afterHook,
+				input: [...structuredClone(compaction.output), ...(afterHook.input ?? [])] as ResponseInput,
+			};
+		},
+	});
+}
 
 function buildRequestBody(
 	model: Model<"openai-codex-responses">,
@@ -666,7 +805,14 @@ class CodexApiError extends Error {
 	readonly code?: string;
 	readonly payload?: Record<string, unknown>;
 
-	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
+	constructor(
+		message: string,
+		options?: {
+			code?: string;
+			payload?: Record<string, unknown>;
+			cause?: unknown;
+		},
+	) {
 		super(message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
@@ -698,7 +844,10 @@ function isPreviousResponseNotFoundError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 }
 
-function extractCodexEventError(event: Record<string, unknown>): { code?: string; message?: string } {
+function extractCodexEventError(event: Record<string, unknown>): {
+	code?: string;
+	message?: string;
+} {
 	const nested = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>) : undefined;
 	return {
 		code: typeof event.code === "string" ? event.code : typeof nested?.code === "string" ? nested.code : undefined,
@@ -731,7 +880,10 @@ async function* mapCodexEvents(
 			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
 			const code = response?.error?.code;
 			const message = response?.error?.message;
-			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
+			throw new CodexApiError(message || "Codex response failed", {
+				code,
+				payload: event,
+			});
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
@@ -742,7 +894,11 @@ async function* mapCodexEvents(
 			const normalizedResponse = response
 				? { ...response, status: normalizeCodexStatus(response.status) }
 				: response;
-			yield { ...event, type: "response.completed", response: normalizedResponse } as ResponseStreamEvent;
+			yield {
+				...event,
+				type: "response.completed",
+				response: normalizedResponse,
+			} as ResponseStreamEvent;
 			return;
 		}
 
@@ -970,7 +1126,10 @@ async function getWebSocketConstructor(env?: ProviderEnv): Promise<WebSocketCons
 					url.toString().replace(/^wss:/, "https:").replace(/^ws:/, "http:"),
 					env,
 				);
-				super(url, { ..._opts, ...(proxyUrl ? { proxy: proxyUrl.toString() } : {}) } as any);
+				super(url, {
+					..._opts,
+					...(proxyUrl ? { proxy: proxyUrl.toString() } : {}),
+				} as any);
 			}
 		};
 		if (!env) {
@@ -1181,7 +1340,11 @@ async function acquireWebSocket(
 	}
 
 	const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs, env);
-	const entry: CachedWebSocketConnection = { socket, busy: true, createdAt: Date.now() };
+	const entry: CachedWebSocketConnection = {
+		socket,
+		busy: true,
+		createdAt: Date.now(),
+	};
 	accountEntries = websocketSessionCache.get(sessionId);
 	if (!accountEntries) {
 		accountEntries = new Map();
@@ -1550,7 +1713,13 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 
 	try {
 		const parsed = JSON.parse(raw) as {
-			error?: { code?: string; type?: string; message?: string; plan_type?: string; resets_at?: number };
+			error?: {
+				code?: string;
+				type?: string;
+				message?: string;
+				plan_type?: string;
+				resets_at?: number;
+			};
 		};
 		const err = parsed?.error;
 		if (err) {
