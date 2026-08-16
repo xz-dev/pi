@@ -184,7 +184,7 @@ async function runLoop(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 ): Promise<void> {
-	let currentContext = initialContext;
+	const currentContext = initialContext;
 	let config = initialConfig;
 	let firstTurn = true;
 	// Check for steering messages at start (user may have typed while waiting)
@@ -257,7 +257,11 @@ async function runLoop(
 			throwIfAborted(signal);
 			const nextTurnSnapshot = await callAbortable(() => config.prepareNextTurn?.(nextTurnContext), signal);
 			if (nextTurnSnapshot) {
-				currentContext = nextTurnSnapshot.context ?? currentContext;
+				if (nextTurnSnapshot.context) {
+					currentContext.systemPrompt = nextTurnSnapshot.context.systemPrompt;
+					currentContext.messages.splice(0, currentContext.messages.length, ...nextTurnSnapshot.context.messages);
+					currentContext.tools = nextTurnSnapshot.context.tools;
+				}
 				config = {
 					...config,
 					model: nextTurnSnapshot.model ?? config.model,
