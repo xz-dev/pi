@@ -17,6 +17,32 @@ inductive Trigger where
   | providerRequest
   deriving DecidableEq, Repr
 
+-- Same-run continuation vocabulary models the checkpoint after tool results and before provider dispatch.
+inductive ContinuationDecision where
+  | dispatchCurrent
+  | compactThenDispatch
+  | stopWithoutDispatch
+  deriving DecidableEq, Repr
+
+structure ContinuationInput where
+  hasNextProviderRequest : Bool
+  liveContextTokens : Nat
+  contextWindow : Nat
+  reserveTokens : Nat
+  compactionEnabled : Bool
+  compactionPrepared : Bool
+  compactionCommitted : Bool
+  rebuiltContextMatchesCommittedBoundary : Bool
+  deriving DecidableEq, Repr
+
+structure ContinuationResult where
+  decision : ContinuationDecision
+  providerRequestAllowed : Bool
+  usedRebuiltContext : Bool
+  toolExecutionRepeated : Bool
+  committedBoundaryCount : Nat
+  deriving DecidableEq, Repr
+
 inductive Boundary where
   | none
   | compacted (kind : CompactionKind) (coveredPrefix : Nat)
@@ -154,6 +180,26 @@ structure OperationResult where
   deriving DecidableEq, Repr
 
 -- Guards and range selectors choose compatible replay, full raw re-derivation, or prior-boundary-plus-delta exactly once.
+def compactionThresholdReached (input : ContinuationInput) : Bool :=
+  input.compactionEnabled && input.hasNextProviderRequest &&
+    decide (input.contextWindow ≤ input.liveContextTokens + input.reserveTokens)
+
+def runContinuation (input : ContinuationInput) : ContinuationResult :=
+  if !input.hasNextProviderRequest then
+    { decision := .stopWithoutDispatch, providerRequestAllowed := false,
+      usedRebuiltContext := false, toolExecutionRepeated := false, committedBoundaryCount := 0 }
+  else if _thresholdReached : compactionThresholdReached input then
+    if input.compactionPrepared && input.compactionCommitted &&
+        input.rebuiltContextMatchesCommittedBoundary then
+      { decision := .compactThenDispatch, providerRequestAllowed := true,
+        usedRebuiltContext := true, toolExecutionRepeated := false, committedBoundaryCount := 1 }
+    else
+      { decision := .stopWithoutDispatch, providerRequestAllowed := false,
+        usedRebuiltContext := false, toolExecutionRepeated := false, committedBoundaryCount := 0 }
+  else
+    { decision := .dispatchCurrent, providerRequestAllowed := true,
+      usedRebuiltContext := false, toolExecutionRepeated := false, committedBoundaryCount := 0 }
+
 def normalizedReasoningTokens (details : CompactUsageDetails) : Nat :=
   details.outputReasoningTokens.getD 0
 
@@ -507,6 +553,53 @@ theorem bounded_auth_model_churn_rejects (auth : AuthResolution)
     (churnProof : 1 < auth.modelChangesDuringResolution) :
     authSnapshotCoherent auth = false := by
   simp [authSnapshotCoherent, Nat.not_le.mpr churnProof]
+
+theorem threshold_continuation_dispatches_only_rebuilt_context
+    (input : ContinuationInput)
+    (thresholdProof : compactionThresholdReached input = true)
+    (preparedProof : input.compactionPrepared = true)
+    (committedProof : input.compactionCommitted = true)
+    (rebuiltProof : input.rebuiltContextMatchesCommittedBoundary = true) :
+    let result := runContinuation input
+    result.decision = .compactThenDispatch ∧
+    result.providerRequestAllowed = true ∧
+    result.usedRebuiltContext = true ∧
+    result.toolExecutionRepeated = false ∧
+    result.committedBoundaryCount = 1 := by
+  have thresholdParts :
+      (input.compactionEnabled = true ∧ input.hasNextProviderRequest = true) ∧
+        input.contextWindow ≤ input.liveContextTokens + input.reserveTokens := by
+    simpa [compactionThresholdReached] using thresholdProof
+  have nextProof : input.hasNextProviderRequest = true := thresholdParts.1.2
+  simp [runContinuation, thresholdProof, nextProof, preparedProof, committedProof, rebuiltProof]
+
+theorem failed_threshold_compaction_never_dispatches
+    (input : ContinuationInput)
+    (thresholdProof : compactionThresholdReached input = true)
+    (failureProof : input.compactionPrepared = false ∨ input.compactionCommitted = false ∨
+      input.rebuiltContextMatchesCommittedBoundary = false) :
+    let result := runContinuation input
+    result.decision = .stopWithoutDispatch ∧
+    result.providerRequestAllowed = false ∧
+    result.committedBoundaryCount = 0 := by
+  have thresholdParts :
+      (input.compactionEnabled = true ∧ input.hasNextProviderRequest = true) ∧
+        input.contextWindow ≤ input.liveContextTokens + input.reserveTokens := by
+    simpa [compactionThresholdReached] using thresholdProof
+  have nextProof : input.hasNextProviderRequest = true := thresholdParts.1.2
+  rcases failureProof with preparedProof | committedProof | rebuiltProof
+  · simp [runContinuation, thresholdProof, nextProof, preparedProof]
+  · simp [runContinuation, thresholdProof, nextProof, committedProof]
+  · simp [runContinuation, thresholdProof, nextProof, rebuiltProof]
+
+theorem no_continuation_never_compacts_or_dispatches
+    (input : ContinuationInput)
+    (nextProof : input.hasNextProviderRequest = false) :
+    let result := runContinuation input
+    result.decision = .stopWithoutDispatch ∧
+    result.providerRequestAllowed = false ∧
+    result.committedBoundaryCount = 0 := by
+  simp [runContinuation, nextProof]
 
 theorem missing_usage_details_normalize_to_zero :
     normalizedReasoningTokens { outputReasoningTokens := none } = 0 := by
@@ -1021,6 +1114,22 @@ theorem process_is_correct :
       let result := runClassic input true false
       result.decision = .failed ∧ result.providerRequestAllowed = false ∧ result.finalState = input.state) ∧
     normalizedReasoningTokens { outputReasoningTokens := none } = 0 ∧
+    (∀ input, compactionThresholdReached input = true → input.compactionPrepared = true →
+      input.compactionCommitted = true → input.rebuiltContextMatchesCommittedBoundary = true →
+      let result := runContinuation input
+      result.decision = .compactThenDispatch ∧ result.providerRequestAllowed = true ∧
+      result.usedRebuiltContext = true ∧ result.toolExecutionRepeated = false ∧
+      result.committedBoundaryCount = 1) ∧
+    (∀ input, compactionThresholdReached input = true →
+      (input.compactionPrepared = false ∨ input.compactionCommitted = false ∨
+        input.rebuiltContextMatchesCommittedBoundary = false) →
+      let result := runContinuation input
+      result.decision = .stopWithoutDispatch ∧ result.providerRequestAllowed = false ∧
+      result.committedBoundaryCount = 0) ∧
+    (∀ input, input.hasNextProviderRequest = false →
+      let result := runContinuation input
+      result.decision = .stopWithoutDispatch ∧ result.providerRequestAllowed = false ∧
+      result.committedBoundaryCount = 0) ∧
     (∀ input, ∃ result, runOperation input = result) := by
   constructor
   · exact every_operation_preserves_core
@@ -1056,6 +1165,12 @@ theorem process_is_correct :
   · exact thirty_three_passes_cannot_commit
   constructor
   · exact missing_usage_details_normalize_to_zero
+  constructor
+  · exact threshold_continuation_dispatches_only_rebuilt_context
+  constructor
+  · exact failed_threshold_compaction_never_dispatches
+  constructor
+  · exact no_continuation_never_compacts_or_dispatches
   · exact process_terminates_with_one_result
 
 #print axioms process_is_correct
@@ -1077,4 +1192,4 @@ def main : IO Unit := do
   let result := ProviderTransparentCompaction.migrationResult
   IO.println s!"Example: {ProviderTransparentCompaction.describeDecision result.decision}"
   IO.println s!"Boundary count: {result.finalState.committedBoundaryCount}; classic passes: {result.classicProviderPasses}; request allowed: {result.providerRequestAllowed}"
-  IO.println "Proved: producer-aware freshness, bounded auth/model coherence, inert target switching, request-boundary migration, compatible remote replay, exact range coverage, request/final-context fit with 1..32 classic passes, invalid-fold no-commit/no-dispatch, persist-before-publish single-boundary commit, public kind consistency, opaque-state privacy, and zero-default optional usage details."
+  IO.println "Proved: producer-aware freshness, bounded auth/model coherence, inert target switching, request-boundary migration, compatible remote replay, exact range coverage, request/final-context fit with 1..32 classic passes, invalid-fold no-commit/no-dispatch, persist-before-publish single-boundary commit, pre-provider threshold compaction with rebuilt-context dispatch, no repeated tool execution, public kind consistency, opaque-state privacy, and zero-default optional usage details."

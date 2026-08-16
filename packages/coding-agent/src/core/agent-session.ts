@@ -441,6 +441,7 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _preProviderCompactionAttempted = false;
 	private _overflowRecoveryAttempted = false;
 
 	// Branch summarization state
@@ -708,6 +709,7 @@ export class AgentSession {
 		willRetry: boolean,
 		customInstructions: string | undefined,
 		controller: AbortController,
+		preparationOverride?: NonNullable<ReturnType<typeof prepareCompaction>>,
 	): Promise<CompactionExecutionOutcome> {
 		if (!this.model) throw new Error(formatNoModelSelectedMessage());
 		let authModel = this.model;
@@ -727,7 +729,7 @@ export class AgentSession {
 		const rawPathEntries = reason === "migration" ? this.sessionManager.buildRawCompactionEntries() : pathEntries;
 		const settings = this.settingsManager.getCompactionSettings();
 		const thinkingLevel = this.thinkingLevel;
-		let preparation = prepareCompaction(pathEntries, settings);
+		let preparation = preparationOverride ?? prepareCompaction(pathEntries, settings);
 		if (reason === "migration") preparation = prepareCompaction(rawPathEntries, settings);
 		if (!preparation) {
 			if (reason === "manual") {
@@ -851,7 +853,7 @@ export class AgentSession {
 			commitExpectation,
 		);
 		const sessionContext = this.sessionManager.buildSessionContext();
-		this.agent.state.messages = sessionContext.messages;
+		this.agent.state.messages.splice(0, this.agent.state.messages.length, ...sessionContext.messages);
 		const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
 		const savedCompactionEntry = this.sessionManager.getEntry(compactionEntryId);
 		const committedKind = produced.kind;
@@ -1023,7 +1025,53 @@ export class AgentSession {
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
-			const previousContext = previousSnapshot?.context ?? turn.context;
+			let previousContext = previousSnapshot?.context ?? turn.context;
+			const settings = this.settingsManager.getCompactionSettings();
+			const contextWindow = this.model?.contextWindow ?? 0;
+			const hasNextProviderRequest = turn.message.stopReason === "toolUse" || turn.toolResults.length > 0;
+
+			if (
+				hasNextProviderRequest &&
+				!this._preProviderCompactionAttempted &&
+				shouldCompact(estimateContextTokens(previousContext.messages).tokens, contextWindow, settings)
+			) {
+				this._preProviderCompactionAttempted = true;
+				const controller = new AbortController();
+				const abort = () => controller.abort();
+				if (signal?.aborted) abort();
+				else signal?.addEventListener("abort", abort, { once: true });
+				this._autoCompactionAbortController = controller;
+				try {
+					const preparation = prepareCompaction(this.sessionManager.getBranch(), settings);
+					if (!preparation) throw new Error("Compaction preparation unavailable");
+					const outcome = await this._coordinateCompaction("threshold", false, undefined, controller, preparation);
+					if (outcome !== "committed") {
+						throw new DOMException("Pre-provider compaction cancelled", "AbortError");
+					}
+					previousContext = {
+						...previousContext,
+						messages: this.agent.state.messages,
+					};
+				} catch (error) {
+					if (controller.signal.aborted) {
+						this._emit({
+							type: "compaction_end",
+							reason: "threshold",
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						});
+					}
+					const errorMessage = error instanceof Error ? error.message : String(error);
+					const failureMessage = controller.signal.aborted
+						? "Pre-provider compaction was cancelled before the next model request."
+						: `Pre-provider compaction failed before the next model request: ${errorMessage}`;
+					throw new Error(failureMessage, { cause: error });
+				} finally {
+					signal?.removeEventListener("abort", abort);
+					if (this._autoCompactionAbortController === controller) this._autoCompactionAbortController = undefined;
+				}
+			}
 
 			return {
 				...previousSnapshot,
@@ -1770,6 +1818,7 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		this._preProviderCompactionAttempted = false;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -2585,6 +2634,7 @@ export class AgentSession {
 		}
 
 		// Case 2: Threshold - context is getting large
+		if (this._preProviderCompactionAttempted) return false;
 		// For error messages or all-zero usage messages, estimate from the last valid response.
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
 		// responses can still compact and do not reset context accounting.
