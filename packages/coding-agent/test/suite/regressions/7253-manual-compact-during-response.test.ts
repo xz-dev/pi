@@ -23,7 +23,7 @@ describe("issue #7253: manual compaction during an active response", () => {
 		}
 	});
 
-	it("runs only the requested manual compaction when the previous turn crossed the threshold", async () => {
+	it("runs pre-provider compaction before a later requested manual compaction", async () => {
 		let markSecondResponseStarted = () => {};
 		const secondResponseStarted = new Promise<void>((resolve) => {
 			markSecondResponseStarted = resolve;
@@ -68,8 +68,8 @@ describe("issue #7253: manual compaction during an active response", () => {
 		releaseSecondResponse();
 		await Promise.all([promptPromise, compactExpectation]);
 
-		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toEqual(["manual"]);
-		expect(harness.eventsOfType("compaction_end").map((event) => event.reason)).toEqual(["manual"]);
-		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toEqual(["threshold", "manual"]);
+		expect(harness.eventsOfType("compaction_end").map((event) => event.reason)).toEqual(["threshold", "manual"]);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(2);
 	});
 });
