@@ -28,12 +28,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - Expose public `pi.spliceEntry(entryId)` so an extension can delete one non-root session-tree node and reparent its children, preserving descendants.
   - Use case: Remove a hidden watchdog decision node from session history without deleting later conversation descendants.
   - Patch branch: [`patch/session-tree-splice`](https://github.com/xz-dev/pi/tree/patch/session-tree-splice)
-- Keep raw append-only history portable across provider/model switches while attempting remote Responses compaction for every Responses API target. Unsupported or failed remote compaction falls back to bounded classic compaction; stale producer snapshots never publish.
-  - Use case: Reuse provider-held checkpoints where supported without making compaction provider-specific or risking stale session summaries.
-  - Patch branch: [`patch/provider-transparent-compaction`](https://github.com/xz-dev/pi/tree/patch/provider-transparent-compaction)
-- Compact persisted tool results before the next provider request in the same agent run, replacing active context without repeating tool execution or committing a second boundary.
-  - Use case: Prevent oversized tool results from reaching the immediate follow-up provider request unchanged.
-  - Patch branch: [`patch/pre-provider-compaction`](https://github.com/xz-dev/pi/tree/patch/pre-provider-compaction)
 
 ### Fixes
 
@@ -51,6 +45,10 @@ It tracks upstream `main` with a minimal downstream patch stack.
   - Patch branch: [`patch/tui-synchronized-cursor-fleet`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor-fleet)
 
 The integrated Esc and manual-retry patches both extend the Agent failure lifecycle. Their independent branches remain directly reviewable; [`tmp/patch/esc-manual-retry-compat`](https://github.com/xz-dev/pi/tree/tmp/patch/esc-manual-retry-compat) supplies only the downstream combined `handleRunFailure()` resolution and is merged immediately after them.
+
+### Temporarily disabled
+
+- Provider-transparent Responses remote compaction and its dependent pre-provider compaction patch are temporarily retired from generated `main`. Classic compaction remains the default path; both source branches remain retained for re-evaluation. A third-party extension such as [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions) can provide Codex-native remote compaction without adding provider-specific behavior to core.
 
 ### Maintenance
 

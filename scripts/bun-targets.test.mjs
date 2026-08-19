@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, BUN_VERSION, GITHUB_HOSTED_RUNNERS, SMOKE_LIMITS, binaryArchiveName, githubBuildMatrix, githubSmokeMatrix } from "./lib/bun-targets.mjs";
+import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, BUN_VERSION, GITHUB_HOSTED_RUNNERS, RELEASE_BUILD, SMOKE_LIMITS, binaryArchiveName, githubBuildMatrix, githubSmokeMatrix } from "./lib/bun-targets.mjs";
 
 const EXPECTED = [
 	"darwin-x64-baseline", "darwin-x64-modern", "darwin-arm64",
@@ -39,7 +39,10 @@ test("authoritative Bun target descriptors contain the exact supported matrix", 
 
 test("release compiler settings and smoke descriptors cover every target", () => {
 	assert.equal(BUN_VERSION, "1.3.14");
-	assert.deepEqual(BUN_BUILD_FLAGS, ["--minify"]);
+	assert.deepEqual(BUN_BUILD_FLAGS, ["--minify", "--bytecode", "--format=esm"]);
+	assert.equal(RELEASE_BUILD.bytecode, true);
+	assert.match(RELEASE_BUILD.bytecodeReason, /asynchronously without top-level await/);
+	assert.match(RELEASE_BUILD.bytecodeReason, /ESM format avoids Bun 1\.3\.14's CJS bytecode failure/);
 	assert.equal(SMOKE_LIMITS.coldVersionMs, 5000);
 	assert.equal(SMOKE_LIMITS.versionMs, 2500);
 	assert.ok(BUN_TARGETS.every(({ requiredCommands }) => requiredCommands.includes("cold-version") && requiredCommands.includes("version")));

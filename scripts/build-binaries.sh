@@ -95,10 +95,11 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	rm -rf "$target_dir"
 	mkdir -p "$target_dir"
 
-	# Authoritative production flags: minified, no sourcemap/debug/profile and no
-	# bytecode (Bun 1.3.14 rejects this top-level-await entrypoint with --bytecode).
+	# Keep the executable flags in the authoritative target descriptor so local,
+	# CI, and release builds cannot silently diverge.
+	mapfile -t bun_build_flags < <(node ../../scripts/lib/bun-targets.mjs --build-flags)
 	# Do not load project .env files into the standalone process (upstream #10473).
-	bun build --compile --minify --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$target_dir/$executable"
+	bun build --compile "${bun_build_flags[@]}" --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$target_dir/$executable"
 	(cd ../.. && scripts/build-pi-wrapper.sh "$target" "$target_dir/$wrapper")
 	cp package.json README.md CHANGELOG.md "$target_dir/"
 	if [[ -n "$DISTRIBUTION_VERSION" ]]; then

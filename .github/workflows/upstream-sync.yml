@@ -35,6 +35,7 @@ jobs:
             +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
             +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
+            +refs/heads/patch/bun-bytecode-entrypoint:refs/remotes/origin/patch/bun-bytecode-entrypoint \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
             +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
@@ -46,9 +47,7 @@ jobs:
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
-            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
-            +refs/heads/patch/provider-transparent-compaction:refs/remotes/origin/patch/provider-transparent-compaction \
-            +refs/heads/patch/pre-provider-compaction:refs/remotes/origin/patch/pre-provider-compaction
+            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
@@ -81,6 +80,9 @@ jobs:
 
           git merge --squash origin/patch/model-refresh-session-rebind
           git commit -m "merge patch/model-refresh-session-rebind branch"
+
+          git merge --squash origin/patch/bun-bytecode-entrypoint
+          git commit -m "merge patch/bun-bytecode-entrypoint branch"
 
           if ! git merge --squash origin/patch/startup-benchmark-exit; then
             scripts/resolve-startup-benchmark-squash-conflicts.sh
@@ -262,63 +264,6 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/session-tree-splice branch"
 
-          if ! git merge-base --is-ancestor origin/patch/session-tree-splice origin/patch/provider-transparent-compaction; then
-            echo '::error::patch/provider-transparent-compaction must descend from patch/session-tree-splice'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/session-tree-splice..origin/patch/provider-transparent-compaction; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            expected_conflicts=(
-              packages/coding-agent/src/core/agent-session.ts
-              packages/coding-agent/src/core/session-manager.ts
-              packages/coding-agent/src/core/settings-manager.ts
-            )
-            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )) ||
-              [[ ${conflicts[*]} != "${expected_conflicts[*]}" ]]; then
-              printf '::error::Unexpected provider-compaction conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            python3 scripts/resolve-provider-transparent-compaction-conflicts.py
-            git cherry-pick --quit
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying provider-transparent compaction'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/provider-transparent-compaction'
-            exit 1
-          fi
-          grep -Fq 'convertToLlm' packages/coding-agent/src/core/agent-session.ts
-          grep -Fq 'type ExtensionShutdownProgressListener' packages/coding-agent/src/core/agent-session.ts
-          grep -Fq 'renameSync,' packages/coding-agent/src/core/session-manager.ts
-          grep -Fq 'rmSync,' packages/coding-agent/src/core/session-manager.ts
-          git diff --cached --check
-          git commit -m "merge patch/provider-transparent-compaction branch"
-
-          if ! git merge-base --is-ancestor origin/patch/provider-transparent-compaction origin/patch/pre-provider-compaction; then
-            echo '::error::patch/pre-provider-compaction must descend from patch/provider-transparent-compaction'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/provider-transparent-compaction..origin/patch/pre-provider-compaction; then
-            echo '::error::Failed to apply patch/pre-provider-compaction descendant range'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying pre-provider compaction'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/pre-provider-compaction'
-            exit 1
-          fi
-          grep -Fq 'this._preProviderCompactionAttempted = true;' packages/coding-agent/src/core/agent-session.ts
-          grep -Fq 'currentContext.messages.splice(0, currentContext.messages.length' packages/agent/src/agent-loop.ts
-          test -f packages/coding-agent/test/suite/regressions/pre-provider-tool-result-compaction.test.ts
-          git diff --cached --check
-          git commit -m "merge patch/pre-provider-compaction branch"
 
       - name: Install dependencies for pre-push gates
         run: npm ci --ignore-scripts
@@ -360,7 +305,6 @@ jobs:
               test/extensions-runner.test.ts \
               test/lifecycle-diagnostics.test.ts \
               test/shutdown-screen-log.test.ts \
-              test/compaction-bounded-recovery.test.ts \
               test/interactive-mode-compaction.test.ts \
               test/agent-session-retry.test.ts \
               test/agent-session-runtime-events.test.ts \
@@ -386,7 +330,6 @@ jobs:
               test/suite/agent-session-compaction.test.ts \
               test/suite/manual-retry.test.ts \
               test/suite/regressions/7253-manual-compact-during-response.test.ts \
-              test/suite/regressions/pre-provider-tool-result-compaction.test.ts \
               test/suite/session-tree-splice.test.ts \
               test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts \
               test/suite/regressions/5724-sigterm-signal-exit.test.ts \
@@ -408,8 +351,6 @@ jobs:
 
       - name: Validate programming-thinking models
         run: |
-          lake env lean docs/programming-thinking/provider-transparent-compaction.idea.lean
-          lake env lean --run docs/programming-thinking/provider-transparent-compaction.idea.lean
           lake env lean docs/programming-thinking/slow-hook-tui-only.idea.lean
           lake env lean --run docs/programming-thinking/slow-hook-tui-only.idea.lean
 

@@ -2,12 +2,12 @@
 
 /** Authoritative xz-dev binary Release target and acceptance matrix. */
 export const BUN_VERSION = "1.3.14";
-export const BUN_BUILD_FLAGS = Object.freeze(["--minify"]);
+export const BUN_BUILD_FLAGS = Object.freeze(["--minify", "--bytecode", "--format=esm"]);
 export const RELEASE_BUILD = Object.freeze({
 	nodeEnv: "production",
 	minify: true,
-	bytecode: false,
-	bytecodeReason: "Bun 1.3.14 rejects bytecode compilation of Pi's top-level-await entrypoint",
+	bytecode: true,
+	bytecodeReason: "Pi's Bun entrypoint bootstraps asynchronously without top-level await; ESM format avoids Bun 1.3.14's CJS bytecode failure on this module graph",
 	sourcemap: false,
 	debug: false,
 	profile: false,
@@ -85,6 +85,7 @@ if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
 	if (command === "--ids") process.stdout.write(`${BUN_TARGET_IDS.join("\n")}\n`);
 	else if (command === "--matrix") process.stdout.write(JSON.stringify(githubBuildMatrix()));
 	else if (command === "--smoke-matrix") process.stdout.write(JSON.stringify(githubSmokeMatrix()));
+	else if (command === "--build-flags") process.stdout.write(`${BUN_BUILD_FLAGS.join("\n")}\n`);
 	else if (command === "--get" && id && field) { const value = bunTarget(id)[field]; if (value === undefined) process.exitCode = 2; else process.stdout.write(String(value)); }
-	else throw new Error("Usage: bun-targets.mjs --ids | --matrix | --smoke-matrix | --get <target> <field>");
+	else throw new Error("Usage: bun-targets.mjs --ids | --matrix | --smoke-matrix | --build-flags | --get <target> <field>");
 }
