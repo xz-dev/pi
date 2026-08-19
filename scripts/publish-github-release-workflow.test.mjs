@@ -42,6 +42,17 @@ test("upstream sync fetches every merged patch explicitly", () => {
   assert.match(syncWorkflowText, /git merge --squash origin\/patch\/tui-synchronized-cursor-fleet/);
 });
 
+test("upstream sync rejects patch branches that touch upstream changelogs", () => {
+  assert.match(syncWorkflowText, /changelog_offenders=\(\)/);
+  assert.match(syncWorkflowText, /git diff --name-only "\$base\.\./);  assert.match(syncWorkflowText, /\^packages\/\.\*\/CHANGELOG\.md\$/);
+  assert.match(syncWorkflowText, /modifies an upstream-maintained packages\/\*\/CHANGELOG\.md/);
+  assert.ok(
+    syncWorkflowText.indexOf("changelog_offenders") < syncWorkflowText.indexOf('git merge --squash origin/ci'),
+    "changelog guard must run before any squash merge",
+  );
+  assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /never carry `packages\/\*\/CHANGELOG\.md` hunks/);
+});
+
 test("upstream sync carries the Bun bytecode entrypoint patch", () => {
   assert.match(
     syncWorkflowText,

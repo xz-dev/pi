@@ -48,6 +48,38 @@ jobs:
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice
+
+          # Upstream-maintained changelogs move every release cycle, so patch
+          # branches must never carry packages/*/CHANGELOG.md hunks; downstream
+          # notes live in README/MAINTAIN on ci. Fail before merging anything.
+          changelog_offenders=()
+          for ref in \
+            origin/patch/contributor-approval \
+            origin/patch/model-startup-refresh-barrier \
+            origin/patch/model-refresh-session-rebind \
+            origin/patch/bun-bytecode-entrypoint \
+            origin/patch/startup-benchmark-exit \
+            origin/patch/native-wrapper-release \
+            origin/patch/update-clean \
+            origin/patch/tui-synchronized-cursor-fleet \
+            origin/patch/esc-abort \
+            origin/patch/manual-retry \
+            origin/tmp/patch/esc-manual-retry-compat \
+            origin/patch/changelog-prerelease \
+            origin/patch/skill-overrides \
+            origin/patch/retry-non-retryable-patterns \
+            origin/patch/slow-hook-tui-only \
+            origin/patch/session-tree-splice; do
+            base=$(git merge-base upstream/main "$ref")
+            if git diff --name-only "$base..$ref" | grep -q '^packages/.*/CHANGELOG.md$'; then
+              changelog_offenders+=("$ref")
+            fi
+          done
+          if (( ${#changelog_offenders[@]} )); then
+            printf '::error::%s modifies an upstream-maintained packages/*/CHANGELOG.md; keep downstream notes in README/MAINTAIN on ci\n' "${changelog_offenders[@]}"
+            exit 1
+          fi
+
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
