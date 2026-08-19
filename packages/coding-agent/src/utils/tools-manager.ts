@@ -201,7 +201,7 @@ function getWindowsTarCommand(): string {
 	return "tar.exe";
 }
 
-function extractZipArchive(archivePath: string, extractDir: string, assetName: string): void {
+export function extractZipArchive(archivePath: string, extractDir: string, assetName: string): void {
 	const failures: string[] = [];
 
 	if (platform() === "win32") {
