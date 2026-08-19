@@ -96,8 +96,10 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	mkdir -p "$target_dir"
 
 	# Keep the executable flags in the authoritative target descriptor so local,
-	# CI, and release builds cannot silently diverge.
-	mapfile -t bun_build_flags < <(node ../../scripts/lib/bun-targets.mjs --build-flags)
+	# CI, and release builds cannot silently diverge. macOS runners ship bash 3.2,
+	# so read the flags with a portable while loop instead of mapfile.
+	bun_build_flags=()
+	while IFS= read -r flag; do bun_build_flags+=("$flag"); done < <(node ../../scripts/lib/bun-targets.mjs --build-flags)
 	# Do not load project .env files into the standalone process (upstream #10473).
 	bun build --compile "${bun_build_flags[@]}" --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$target_dir/$executable"
 	(cd ../.. && scripts/build-pi-wrapper.sh "$target" "$target_dir/$wrapper")
