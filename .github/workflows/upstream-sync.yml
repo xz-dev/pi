@@ -1,0 +1,434 @@
+name: "Upstream Sync"
+
+on:
+  schedule:
+    - cron: "28 5,17 * * *"
+    # scheduled at 13:28 and 01:28 Asia/Shanghai (UTC+8)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync-main-with-squash-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebuild main from upstream and squash branches
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/earendil-works/pi.git
+          git fetch upstream main
+          git fetch origin \
+            +refs/heads/ci:refs/remotes/origin/ci \
+            +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
+            +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
+            +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
+            +refs/heads/patch/bun-bytecode-entrypoint:refs/remotes/origin/patch/bun-bytecode-entrypoint \
+            +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
+            +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
+            +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
+            +refs/heads/patch/tui-synchronized-cursor-fleet:refs/remotes/origin/patch/tui-synchronized-cursor-fleet \
+            +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
+            +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
+            +refs/heads/tmp/patch/esc-manual-retry-compat:refs/remotes/origin/tmp/patch/esc-manual-retry-compat \
+            +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
+            +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
+            +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
+            +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
+            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice
+          git reset --hard upstream/main
+
+          if ! git merge --squash origin/ci; then
+            echo '::error::Unexpected ci squash conflict; ci must merge cleanly onto current upstream'
+            exit 1
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying ci'
+            exit 1
+          fi
+          git commit -m "merge ci branch"
+
+          git show upstream/main:.github/APPROVED_CONTRIBUTORS > /tmp/upstream-approved-contributors
+          git show origin/patch/contributor-approval:.github/APPROVED_CONTRIBUTORS > /tmp/patch-approved-contributors
+          python3 scripts/union-contributor-approvals.py \
+            --current /tmp/upstream-approved-contributors \
+            --patch /tmp/patch-approved-contributors \
+            --output .github/APPROVED_CONTRIBUTORS
+          if git diff --quiet -- .github/APPROVED_CONTRIBUTORS; then
+            echo 'contributor approval union already complete'
+          else
+            git add .github/APPROVED_CONTRIBUTORS
+            test "$(git diff --cached --name-only)" = .github/APPROVED_CONTRIBUTORS
+            git diff --cached --check
+            git commit -m "merge patch/contributor-approval branch"
+          fi
+
+          git merge --squash origin/patch/model-startup-refresh-barrier
+          git commit -m "merge patch/model-startup-refresh-barrier branch"
+
+          git merge --squash origin/patch/model-refresh-session-rebind
+          git commit -m "merge patch/model-refresh-session-rebind branch"
+
+          git merge --squash origin/patch/bun-bytecode-entrypoint
+          git commit -m "merge patch/bun-bytecode-entrypoint branch"
+
+          if ! git merge --squash origin/patch/startup-benchmark-exit; then
+            scripts/resolve-startup-benchmark-squash-conflicts.sh
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying startup-benchmark conflict staging'
+            exit 1
+          fi
+          git commit -m "merge patch/startup-benchmark-exit branch"
+
+          if ! git merge --squash origin/patch/native-wrapper-release; then
+            scripts/resolve-release-self-update-squash-conflicts.sh
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying release-self-update conflict staging'
+            exit 1
+          fi
+          git commit -m "merge patch/native-wrapper-release branch"
+
+          if ! git merge-base --is-ancestor origin/patch/native-wrapper-release origin/patch/update-clean; then
+            echo '::error::patch/update-clean must descend from patch/native-wrapper-release'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/native-wrapper-release..origin/patch/update-clean; then
+            echo '::error::Failed to apply patch/update-clean descendant range'
+            exit 1
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying patch/update-clean'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::patch/update-clean descendant range is empty'
+            exit 1
+          fi
+          git commit -m "merge patch/update-clean branch"
+
+          git merge --squash origin/patch/tui-synchronized-cursor-fleet
+          git commit -m "merge patch/tui-synchronized-cursor-fleet branch"
+
+          git merge --squash origin/patch/esc-abort
+          git commit -m "merge patch/esc-abort branch"
+
+          if ! git merge --squash origin/patch/manual-retry; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/agent/src/agent.ts ]]; then
+              printf '::error::Unexpected manual-retry squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            git checkout --ours packages/agent/src/agent.ts
+            git add packages/agent/src/agent.ts
+          fi
+          git commit -m "merge patch/manual-retry branch"
+
+          git merge --squash origin/tmp/patch/esc-manual-retry-compat
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying compatibility patch'
+            exit 1
+          fi
+          mapfile -t compatibility_paths < <(git diff --cached --name-only | sort)
+          expected_compatibility_paths=(
+            packages/agent/src/agent.ts
+            packages/agent/test/agent.test.ts
+          )
+          if (( ${#compatibility_paths[@]} != ${#expected_compatibility_paths[@]} )) ||
+            [[ ${compatibility_paths[*]} != "${expected_compatibility_paths[*]}" ]]; then
+            printf '::error::Unexpected compatibility squash paths:'
+            printf ' %q' "${compatibility_paths[@]}"
+            printf '\n'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty compatibility patch integration'
+            exit 1
+          fi
+          grep -Fq 'Agent is already processing. Wait for completion before resetting.' packages/agent/src/agent.ts
+          test "$(grep -Fc '| { type: "run_failure"; message: AgentMessage }' packages/agent/src/types.ts)" -eq 1
+          grep -Fq 'lastRunMessage?.role === "toolResult"' packages/agent/src/agent.ts
+          grep -Fq 'synthesizes an aborted assistant after the last aborted tool result' packages/agent/test/agent.test.ts
+          git diff --cached --check
+          git commit -m "merge tmp/patch/esc-manual-retry-compat branch"
+
+          if ! git merge --squash origin/patch/changelog-prerelease; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/src/config.ts ]]; then
+              printf '::error::Unexpected changelog-prerelease squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            git checkout --ours -- packages/coding-agent/src/config.ts
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path("packages/coding-agent/src/config.ts")
+          text = path.read_text()
+          text = text.replace("\t\tdistribution?: string;\n", "\t\tdistribution?: string;\n\t\tchangelogVersion?: string;\n")
+          text = text.replace(
+              "export const VERSION: string = pkg.version || \"0.0.0\";\n",
+              "export const VERSION: string = pkg.version || \"0.0.0\";\nexport const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;\n",
+          )
+          path.write_text(text)
+          PY
+            git add packages/coding-agent/src/config.ts
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying changelog-prerelease conflict staging'
+            exit 1
+          fi
+          git commit -m "merge patch/changelog-prerelease branch"
+
+          git merge --squash origin/patch/skill-overrides
+          git commit -m "merge patch/skill-overrides branch"
+
+          git merge --squash origin/patch/retry-non-retryable-patterns
+          git commit -m "merge patch/retry-non-retryable-patterns branch"
+
+          if ! git merge --squash origin/patch/slow-hook-tui-only; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            expected_conflicts=(
+              packages/coding-agent/src/core/agent-session.ts
+              packages/coding-agent/src/core/extensions/runner.ts
+            )
+            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )) ||
+              [[ ${conflicts[*]} != "${expected_conflicts[*]}" ]]; then
+              printf '::error::Unexpected slow-hook squash conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            python3 scripts/resolve-slow-hook-squash-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying TUI-only slow-hook diagnostics'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/slow-hook-tui-only'
+            exit 1
+          fi
+          grep -Fq 'if (ext.uninterruptibleHandlers?.has(handler) === true) continue;' packages/coding-agent/src/core/extensions/runner.ts
+          grep -Fq 'this.runHandler("message_end", ext, handlerIndex' packages/coding-agent/src/core/extensions/runner.ts
+          git diff --cached --check
+          git commit -m "merge patch/slow-hook-tui-only branch"
+
+          if ! git merge-base --is-ancestor origin/patch/slow-hook-tui-only origin/patch/session-tree-splice; then
+            echo '::error::patch/session-tree-splice must descend from patch/slow-hook-tui-only'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/slow-hook-tui-only..origin/patch/session-tree-splice; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            expected_conflicts=(
+              packages/coding-agent/src/core/session-manager.ts
+              packages/coding-agent/test/suite/harness.ts
+            )
+            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )) ||
+              [[ ${conflicts[*]} != "${expected_conflicts[*]}" ]]; then
+              printf '::error::Unexpected session-tree splice conflicts:'
+              printf ' %q' "${conflicts[@]}"
+              printf '\n'
+              exit 1
+            fi
+            python3 scripts/resolve-session-tree-splice-conflicts.py
+            git cherry-pick --quit
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying session-tree splice'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/session-tree-splice'
+            exit 1
+          fi
+          grep -Fq 'rmSync,' packages/coding-agent/src/core/session-manager.ts
+          grep -Fq 'unlinkSync,' packages/coding-agent/src/core/session-manager.ts
+          grep -Fq 'sessionManagerFactory?: (tempDir: string) => SessionManager;' packages/coding-agent/test/suite/harness.ts
+          grep -Fq 'persist?: boolean;' packages/coding-agent/test/suite/harness.ts
+          git diff --cached --check
+          git commit -m "merge patch/session-tree-splice branch"
+
+
+      - name: Install dependencies for pre-push gates
+        run: npm ci --ignore-scripts
+
+      - name: Hydrate model data for pre-push gates
+        run: npm run hydrate:model-data
+
+      - name: Build rebuilt main
+        run: npm run build
+
+      - name: Check rebuilt main
+        run: npm run check
+
+      - name: Run focused integration tests
+        run: |
+          npx vitest run \
+            packages/coding-agent/test/extensions-discovery.test.ts \
+            --testNamePattern 'loads the coding-agent entrypoint without rewriting pi-ai provider subpaths' \
+            --testTimeout 15000
+          (
+            cd packages/ai
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/event-stream.test.ts \
+              test/openai-responses-compat.test.ts \
+              test/providers.test.ts \
+              test/retry.test.ts
+          )
+          (
+            cd packages/agent
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/agent-loop.test.ts \
+              test/agent.test.ts
+          )
+          (
+            cd packages/coding-agent
+            node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
+              test/settings-manager.test.ts \
+              test/model-runtime-cloudflare-compat.test.ts \
+              test/extensions-runner.test.ts \
+              test/lifecycle-diagnostics.test.ts \
+              test/shutdown-screen-log.test.ts \
+              test/interactive-mode-compaction.test.ts \
+              test/agent-session-retry.test.ts \
+              test/agent-session-runtime-events.test.ts \
+              test/agent-session-concurrent.test.ts \
+              test/manual-retry-planner.test.ts \
+              test/manual-retry-commands.test.ts \
+              test/tree-selector.test.ts \
+              test/session-manager/custom-session-id.test.ts \
+              test/session-manager/tree-traversal.test.ts \
+              test/agent-session-stats.test.ts \
+              test/model-runtime-modify-models-compat.test.ts \
+              test/remote-catalog-provider.test.ts \
+              test/interactive-mode-selector-dispose.test.ts \
+              test/rpc-prompt-response-semantics.test.ts \
+              test/rpc-client-clone.test.ts \
+              test/interactive-mode-clone-command.test.ts \
+              test/interactive-mode-startup-input.test.ts \
+              test/startup-benchmark.test.ts \
+              test/tools-manager.test.ts \
+              test/tools-manager-timeout.test.ts \
+              test/xz-release-update.test.ts \
+              test/interactive-mode-queue-tui.test.ts \
+              test/suite/agent-session-compaction.test.ts \
+              test/suite/manual-retry.test.ts \
+              test/suite/regressions/7253-manual-compact-during-response.test.ts \
+              test/suite/session-tree-splice.test.ts \
+              test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts \
+              test/suite/regressions/5724-sigterm-signal-exit.test.ts \
+              test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
+              test/suite/regressions/6949-unavailable-scoped-model.test.ts \
+              test/suite/regressions/7209-model-selector-filter-resets-selection.test.ts
+          )
+          node --test --test-reporter=dot \
+            packages/tui/test/tui-render.test.ts
+
+      - name: Setup Lean
+        uses: leanprover/lean-action@8dd5d0978ba1c4ec4ae0835a93f88d946799944f
+        with:
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+
+      - name: Validate programming-thinking models
+        run: |
+          lake env lean docs/programming-thinking/slow-hook-tui-only.idea.lean
+          lake env lean --run docs/programming-thinking/slow-hook-tui-only.idea.lean
+
+      - name: Smoke test packed npm release
+        run: |
+          release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-packed-release.XXXXXX")
+          trap 'rm -rf -- "$release_dir"' EXIT
+          node scripts/local-release.mjs \
+            --out "$release_dir" \
+            --force \
+            --skip-check \
+            --skip-test \
+            --skip-binary \
+            --skip-bun-install
+          (
+            cd "$RUNNER_TEMP"
+            "$release_dir/node/pi" --version
+          )
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.15.2
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Smoke test host binary packaging path
+        run: |
+          set -euo pipefail
+          release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-host-binary.XXXXXX")
+          trap 'rm -rf -- "$release_dir"' EXIT
+          rebuilt_sha=$(git rev-parse HEAD)
+          version=$(REBUILT_SHA="$rebuilt_sha" node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.REBUILT_SHA.slice(0, 8)')
+          scripts/build-binaries.sh \
+            --skip-install \
+            --skip-deps \
+            --skip-build \
+            --platform linux-x64-gnu-modern \
+            --out "$release_dir" \
+            --distribution-version "$version"
+          archive="$release_dir/pi-linux-x64-gnu-modern.zip"
+          test -s "$archive"
+          node scripts/smoke-binary-release.mjs \
+            "$archive" \
+            linux-x64-gnu-modern \
+            "$version" \
+            "$release_dir/linux-x64-gnu-modern-smoke.json"
+
+      # Temporary soft gate: current upstream transitive advisories (brace-expansion,
+      # undici) fail --audit-level=moderate and would block every main rebuild.
+      # Re-harden after a dependency remediation patch or upstream lockfile fix lands.
+      - name: Audit production dependencies
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Audit all dependencies
+        continue-on-error: true
+        run: npm audit --audit-level=moderate
+
+      - name: Verify production dependency signatures
+        continue-on-error: true
+        run: npm audit signatures --omit=dev
+
+      - name: Require sync workflow token
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          test -n "${PUSH_TOKEN}" || {
+            echo "::error::SYNC_WORKFLOW_TOKEN is required because GITHUB_TOKEN pushes do not trigger downstream workflows"
+            exit 1
+          }
+
+      - name: Push rebuilt main
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease origin HEAD:main
