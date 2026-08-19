@@ -99,7 +99,7 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	# CI, and release builds cannot silently diverge. macOS runners ship bash 3.2,
 	# so read the flags with a portable while loop instead of mapfile.
 	bun_build_flags=()
-	while IFS= read -r flag; do bun_build_flags+=("$flag"); done < <(node ../../scripts/lib/bun-targets.mjs --build-flags)
+	while IFS= read -r flag; do bun_build_flags+=("$flag"); done < <(node ../../scripts/lib/bun-targets.mjs --build-flags "$target")
 	bun build --compile "${bun_build_flags[@]}" --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$target_dir/$executable"
 	(cd ../.. && scripts/build-pi-wrapper.sh "$target" "$target_dir/$wrapper")
 	cp package.json README.md CHANGELOG.md "$target_dir/"

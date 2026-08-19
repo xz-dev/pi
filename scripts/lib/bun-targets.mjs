@@ -8,10 +8,20 @@ export const RELEASE_BUILD = Object.freeze({
 	minify: true,
 	bytecode: true,
 	bytecodeReason: "Pi's Bun entrypoint bootstraps asynchronously without top-level await; ESM format avoids Bun 1.3.14's CJS bytecode failure on this module graph",
+	bytecodeExcludedTargets: "windows",
+	bytecodeExcludedReason: "Bun 1.3.14 cross-compiled --bytecode executables segfault on the target OS (oven-sh/bun#18416); Windows targets are cross-compiled from Ubuntu runners, so they keep plain --minify builds",
 	sourcemap: false,
 	debug: false,
 	profile: false,
 });
+
+/** Per-target executable flags: bytecode only where the build runner is native to the target OS. */
+export function bunBuildFlags(id) {
+	if (id !== undefined && bunTarget(id).bunTarget.startsWith("bun-windows")) {
+		return BUN_BUILD_FLAGS.filter((flag) => flag !== "--bytecode");
+	}
+	return BUN_BUILD_FLAGS;
+}
 export const SMOKE_LIMITS = Object.freeze({
 	archiveBytes: 100 * 1024 * 1024,
 	extractedBytes: 250 * 1024 * 1024,
@@ -85,7 +95,7 @@ if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
 	if (command === "--ids") process.stdout.write(`${BUN_TARGET_IDS.join("\n")}\n`);
 	else if (command === "--matrix") process.stdout.write(JSON.stringify(githubBuildMatrix()));
 	else if (command === "--smoke-matrix") process.stdout.write(JSON.stringify(githubSmokeMatrix()));
-	else if (command === "--build-flags") process.stdout.write(`${BUN_BUILD_FLAGS.join("\n")}\n`);
+	else if (command === "--build-flags") process.stdout.write(`${bunBuildFlags(id).join("\n")}\n`);
 	else if (command === "--get" && id && field) { const value = bunTarget(id)[field]; if (value === undefined) process.exitCode = 2; else process.stdout.write(String(value)); }
-	else throw new Error("Usage: bun-targets.mjs --ids | --matrix | --smoke-matrix | --build-flags | --get <target> <field>");
+	else throw new Error("Usage: bun-targets.mjs --ids | --matrix | --smoke-matrix | --build-flags [target] | --get <target> <field>");
 }
