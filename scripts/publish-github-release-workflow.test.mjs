@@ -262,6 +262,9 @@ test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.3.
   assert.match(builder, /tar -xzf \/inputs\/musl-dev\.apk/);
   const packager = readFileSync(join(ROOT, "scripts", "build-binaries.sh"), "utf8");
   assert.match(packager, /--hydrate-target-deps/);
+  assert.match(packager, /bun-targets\.mjs --build-flags/);
+  // macOS runners ship bash 3.2 without mapfile; keep flag reading portable.
+  assert.doesNotMatch(packager, /^\s*mapfile\s/m);
   assert.match(packager, /require\('\.\/package-lock\.json'\)\.packages/);
   assert.match(packager, /clipboard tarball integrity mismatch/);
   assert.match(packager, /tarball="\$\(pwd\)\/\$\(npm pack/);
