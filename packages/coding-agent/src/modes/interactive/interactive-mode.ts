@@ -109,6 +109,7 @@ import { openBrowser } from "../../utils/open-browser.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { markStartupBenchmarkStage } from "../../utils/startup-benchmark.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { ArminComponent } from "./components/armin.ts";
@@ -950,6 +951,7 @@ export class InteractiveMode {
 
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
+		markStartupBenchmarkStage("init-entered");
 
 		this.registerSignalHandlers();
 
@@ -1010,8 +1012,10 @@ export class InteractiveMode {
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
 		this.isInitialized = true;
+		markStartupBenchmarkStage("tui-started");
 
 		await this.themeController.applyFromSettings();
+		markStartupBenchmarkStage("theme-applied");
 
 		// Add header with keybindings from config (unless silenced)
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
@@ -1083,6 +1087,7 @@ export class InteractiveMode {
 			ensureTool("rg", (status) => this.showManagedToolStatus(status)),
 		]);
 		this.fdPath = fdPath;
+		markStartupBenchmarkStage("tools-ready");
 
 		// Enable the remaining input handlers only after managed-tool setup completes.
 		this.setupKeyHandlers();
@@ -1091,6 +1096,7 @@ export class InteractiveMode {
 
 		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
+		markStartupBenchmarkStage("session-rebound");
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
@@ -1109,6 +1115,7 @@ export class InteractiveMode {
 
 		// Initialize available provider count for footer display
 		await this.updateAvailableProviderCount();
+		markStartupBenchmarkStage("providers-counted");
 	}
 
 	/**
