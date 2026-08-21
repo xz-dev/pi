@@ -1,8 +1,11 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { createProvider, type Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR, PACKAGE_NAME, VERSION } from "../src/config.ts";
+import { createAgentSessionServices } from "../src/core/agent-session-services.ts";
+import type { InlineExtension } from "../src/core/extensions/types.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import type { ResolvedPaths } from "../src/core/package-manager.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
@@ -11,6 +14,48 @@ import { main } from "../src/main.ts";
 import { ConfigSelectorComponent } from "../src/modes/interactive/components/config-selector.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
 import { allowNetwork } from "./test-network-env.ts";
+
+const discoveredCatalogModel: Model<"openai-completions"> = {
+	id: "discovered-model",
+	name: "Discovered model",
+	api: "openai-completions",
+	provider: "extension-catalog-test",
+	baseUrl: "https://example.test/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 1_000,
+	maxTokens: 100,
+};
+
+function catalogExtension(
+	providerId: string,
+	fetchModels: () => Promise<readonly Model<"openai-completions">[]>,
+): InlineExtension {
+	return (pi) => {
+		pi.registerProvider(
+			createProvider({
+				id: providerId,
+				auth: {
+					apiKey: {
+						name: "Test API key",
+						resolve: async () => ({ auth: { apiKey: "test-key" }, source: "test" }),
+					},
+				},
+				models: [],
+				fetchModels,
+				api: {
+					stream: () => {
+						throw new Error("not used");
+					},
+					streamSimple: () => {
+						throw new Error("not used");
+					},
+				},
+			}),
+		);
+	};
+}
 
 describe("package commands", () => {
 	let tempDir: string;
@@ -374,28 +419,57 @@ describe("package commands", () => {
 		}
 	});
 
-	it("refreshes only model catalogs with update --models", async () => {
-		const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
-		const create = vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh } as unknown as ModelRuntime);
+	it("loads extensions and persists their catalogs with update --models", async () => {
+		const extensionFactory = catalogExtension(discoveredCatalogModel.provider, async () => [discoveredCatalogModel]);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await expect(runPackageCommandDirectly(["update", "--models"])).resolves.toBeUndefined();
+		await expect(main(["update", "--models"], { extensionFactories: [extensionFactory] })).resolves.toBeUndefined();
 
-		expect(create).toHaveBeenCalledWith({
-			authPath: join(agentDir, "auth.json"),
-			modelsPath: join(agentDir, "models.json"),
-			allowModelNetwork: false,
-			signal: expect.any(AbortSignal),
+		const services = await createAgentSessionServices({
+			cwd: projectDir,
+			agentDir,
+			modelRuntimeSignal: AbortSignal.timeout(1_000),
+			resourceLoaderOptions: { extensionFactories: [extensionFactory] },
 		});
-		expect(refresh).toHaveBeenCalledWith({
-			allowNetwork: true,
-			force: true,
-			signal: expect.any(AbortSignal),
-		});
+		expect(services.modelRuntime.getModel(discoveredCatalogModel.provider, discoveredCatalogModel.id)).toMatchObject(
+			discoveredCatalogModel,
+		);
 		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Model catalogs refreshed");
 		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("reports extension catalog failures instead of model refresh success", async () => {
+		const extensionFactory = catalogExtension("failing-extension-catalog", async () => {
+			throw new Error("catalog unavailable");
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["update", "--models"], { extensionFactories: [extensionFactory] })).resolves.toBeUndefined();
+
+		const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		expect(stdout).not.toContain("Model catalogs refreshed");
+		expect(stderr).toContain("failing-extension-catalog: catalog unavailable");
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("reports extension load failures instead of model refresh success", async () => {
+		const extensionFactory: InlineExtension = () => {
+			throw new Error("extension failed to load");
+		};
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(main(["update", "--models"], { extensionFactories: [extensionFactory] })).resolves.toBeUndefined();
+
+		const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		expect(stdout).not.toContain("Model catalogs refreshed");
+		expect(stderr).toContain("extension failed to load");
+		expect(process.exitCode).toBe(1);
 	});
 
 	it("rejects update --models combined with another update target", async () => {

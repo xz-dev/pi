@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { selectConfig } from "./cli/config-selector.ts";
@@ -16,8 +15,8 @@ import {
 	type SelfUpdatePackageTarget,
 	VERSION,
 } from "./config.ts";
+import { createAgentSessionServices } from "./core/agent-session-services.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
-import { ModelRuntime } from "./core/model-runtime.ts";
 import { DefaultPackageManager } from "./core/package-manager.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import { DefaultResourceLoader } from "./core/resource-loader.ts";
@@ -394,17 +393,34 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 	return target.type === "all" || target.type === "extensions";
 }
 
-async function refreshModelCatalogs(agentDir: string): Promise<void> {
+async function refreshModelCatalogs(options: {
+	cwd: string;
+	agentDir: string;
+	settingsManager: SettingsManager;
+	extensionFactories?: InlineExtension[];
+}): Promise<void> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 15_000);
 	try {
-		const modelRuntime = await ModelRuntime.create({
-			authPath: join(agentDir, "auth.json"),
-			modelsPath: join(agentDir, "models.json"),
-			allowModelNetwork: false,
-			signal: controller.signal,
+		const services = await createAgentSessionServices({
+			cwd: options.cwd,
+			agentDir: options.agentDir,
+			settingsManager: options.settingsManager,
+			modelRuntimeSignal: controller.signal,
+			resourceLoaderOptions: { extensionFactories: options.extensionFactories },
 		});
-		const result = await modelRuntime.refresh({
+		const extensionErrors = [
+			...services.diagnostics
+				.filter((diagnostic) => diagnostic.type === "error")
+				.map((diagnostic) => diagnostic.message),
+			...services.resourceLoader
+				.getExtensions()
+				.errors.map(({ path, error }) => `Failed to load extension "${path}": ${error}`),
+		];
+		if (extensionErrors.length > 0) {
+			throw new Error(`Could not load model catalog extensions: ${extensionErrors.join("; ")}`);
+		}
+		const result = await services.modelRuntime.refresh({
 			allowNetwork: true,
 			force: true,
 			signal: controller.signal,
@@ -725,17 +741,6 @@ export async function handlePackageCommand(
 		return true;
 	}
 
-	if (options.command === "update" && options.updateTarget?.type === "models") {
-		try {
-			await refreshModelCatalogs(getAgentDir());
-		} catch (error: unknown) {
-			const message = error instanceof Error ? error.message : "Unknown model catalog refresh error";
-			console.error(chalk.red(`Error: ${message}`));
-			process.exitCode = 1;
-		}
-		return true;
-	}
-
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
 	const writesProjectPackageConfig = (options.command === "install" || options.command === "remove") && options.local;
@@ -753,6 +758,21 @@ export async function handlePackageCommand(
 		return true;
 	}
 	reportSettingsErrors(settingsManager, "package command");
+	if (options.command === "update" && options.updateTarget?.type === "models") {
+		try {
+			await refreshModelCatalogs({
+				cwd,
+				agentDir,
+				settingsManager,
+				extensionFactories: runtimeOptions.extensionFactories,
+			});
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : "Unknown model catalog refresh error";
+			console.error(chalk.red(`Error: ${message}`));
+			process.exitCode = 1;
+		}
+		return true;
+	}
 	const selfUpdateNpmCommand = settingsManager.getGlobalSettings().npmCommand;
 
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
