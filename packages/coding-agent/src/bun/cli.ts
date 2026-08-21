@@ -11,5 +11,9 @@ import { restoreSandboxEnv } from "./restore-sandbox-env.ts";
 
 restoreSandboxEnv();
 
-await import("./register-bedrock.ts");
-await import("../cli.ts");
+async function bootstrap(): Promise<void> {
+	await import("./register-bedrock.ts");
+	await import("../cli.ts");
+}
+
+void bootstrap();
