@@ -68,6 +68,11 @@ import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/inte
 import { validateThemeJson } from "./modes/interactive/theme/theme-json.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
+import {
+	completeStartupBenchmark,
+	isStartupBenchmarkEnabled,
+	markStartupBenchmarkStage,
+} from "./utils/startup-benchmark.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;
@@ -561,6 +566,7 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	markStartupBenchmarkStage("main-entered");
 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
@@ -696,6 +702,7 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager.appendSessionInfo(name);
 	}
 	time("createSessionManager");
+	markStartupBenchmarkStage("session-manager-ready");
 
 	const trustStore = new ProjectTrustStore(agentDir);
 	const sessionCwd = sessionManager.getCwd();
@@ -844,6 +851,7 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager,
 	});
 	time("createAgentSessionRuntime");
+	markStartupBenchmarkStage("runtime-ready");
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRuntime, resourceLoader } = services;
 	setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides());
@@ -875,6 +883,7 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("readPipedStdin");
+	markStartupBenchmarkStage("input-ready");
 
 	const { initialMessage, initialImages } = await prepareInitialMessage(
 		parsed,
@@ -911,7 +920,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
+	const startupBenchmark = isStartupBenchmarkEnabled();
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
@@ -943,6 +952,7 @@ export async function main(args: string[], options?: MainOptions) {
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
 		});
+		markStartupBenchmarkStage("interactive-created");
 		if (startupBenchmark) {
 			await interactiveMode.init();
 			time("interactiveMode.init");
@@ -952,13 +962,7 @@ export async function main(args: string[], options?: MainOptions) {
 			interactiveMode.stop();
 			stopThemeWatcher();
 			printTimings();
-			if (process.stdout.writableLength > 0) {
-				await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
-			}
-			if (process.stderr.writableLength > 0) {
-				await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
-			}
-			return;
+			completeStartupBenchmark();
 		}
 
 		printTimings();
