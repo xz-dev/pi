@@ -55,6 +55,8 @@ For a built-in AI provider, run `/login` inside Pi to connect a subscription or 
 
 See the [documentation](docs/index.md) for full setup and usage instructions.
 
+Use `pi --list-models --refresh` to load extension providers, refresh loaded provider catalogs, and print the updated model list. `pi update --models` refreshes Pi-managed catalogs without loading extensions.
+
 ## Share your OSS coding agent sessions
 
 If you use Pi for open source work, please share your coding agent sessions.
