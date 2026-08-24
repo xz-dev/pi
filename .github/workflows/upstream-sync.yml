@@ -354,6 +354,8 @@ jobs:
               test/agent-session-stats.test.ts \
               test/model-runtime-modify-models-compat.test.ts \
               test/remote-catalog-provider.test.ts \
+              test/args.test.ts \
+              test/list-models-refresh.test.ts \
               test/interactive-mode-selector-dispose.test.ts \
               test/rpc-prompt-response-semantics.test.ts \
               test/rpc-client-clone.test.ts \
