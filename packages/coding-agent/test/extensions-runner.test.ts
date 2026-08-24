@@ -26,10 +26,13 @@ describe("ExtensionRunner", () => {
 	let extensionsDir: string;
 	let sessionManager: SessionManager;
 	let modelRegistry: ModelRegistry;
+	let previousAgentDir: string | undefined;
 	const defaultKeybindings = new KeybindingsManager().getEffectiveConfig();
 
 	beforeEach(async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-runner-test-"));
+		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = tempDir;
 		extensionsDir = path.join(tempDir, "extensions");
 		fs.mkdirSync(extensionsDir);
 		sessionManager = SessionManager.inMemory();
@@ -38,6 +41,11 @@ describe("ExtensionRunner", () => {
 
 	afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
+		if (previousAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		}
 	});
 
 	const providerModelConfig: ProviderConfig = {
@@ -154,6 +162,84 @@ describe("ExtensionRunner", () => {
 
 			expect(result.result).toEqual({ trusted: "no", remember: true });
 			expect(result.errors).toEqual([]);
+		});
+
+		it("emits no project_trust timing diagnostics without an interactive UI", async () => {
+			const extensionPath = path.join(extensionsDir, "slow-project-trust.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`export default function(pi) {
+	pi.on("project_trust", () => Promise.resolve({ trusted: "undecided" }));
+	pi.on("project_trust", () => { throw new Error("private trust detail"); });
+}`,
+			);
+			const extensionsResult = await loadExtensions([extensionPath], tempDir);
+			const notices: Array<{ event: string; executionKind: string }> = [];
+			const result = await emitProjectTrustEvent(
+				extensionsResult,
+				{ type: "project_trust", cwd: tempDir },
+				{
+					cwd: tempDir,
+					mode: "tui",
+					hasUI: false,
+					ui: {
+						select: async () => undefined,
+						confirm: async () => false,
+						input: async () => undefined,
+						notify: () => {},
+					},
+					onSlowHook: (entry) => notices.push({ event: entry.event, executionKind: entry.executionKind }),
+				},
+				-1,
+			);
+
+			expect(result.errors).toHaveLength(1);
+			expect(notices).toEqual([]);
+			expect(fs.existsSync(path.join(tempDir, "logs", "extension-lifecycle.jsonl"))).toBe(false);
+		});
+
+		it("notifies slow project_trust handlers only when a real TUI context exists", async () => {
+			const extensionPath = path.join(extensionsDir, "slow-project-trust-tui.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`export default function(pi) {
+	pi.on("project_trust", () => Promise.resolve({ trusted: "undecided" }));
+	pi.on("project_trust", () => ({ trusted: "yes" }));
+}`,
+			);
+			const extensionsResult = await loadExtensions([extensionPath], tempDir);
+			const notices: Array<{ event: string; handlerIndex: number; executionKind: string }> = [];
+			const result = await emitProjectTrustEvent(
+				extensionsResult,
+				{ type: "project_trust", cwd: tempDir },
+				{
+					cwd: tempDir,
+					mode: "tui",
+					hasUI: true,
+					ui: {
+						select: async () => undefined,
+						confirm: async () => false,
+						input: async () => undefined,
+						notify: () => {
+							throw new Error("notify must not be used for hook timing");
+						},
+					},
+					onSlowHook: (entry) =>
+						notices.push({
+							event: entry.event,
+							handlerIndex: entry.handlerIndex,
+							executionKind: entry.executionKind,
+						}),
+				},
+				-1,
+			);
+
+			expect(result.result).toEqual({ trusted: "yes" });
+			expect(notices).toEqual([
+				{ event: "project_trust", handlerIndex: 0, executionKind: "async" },
+				{ event: "project_trust", handlerIndex: 1, executionKind: "sync" },
+			]);
+			expect(fs.existsSync(path.join(tempDir, "logs", "extension-lifecycle.jsonl"))).toBe(false);
 		});
 	});
 
