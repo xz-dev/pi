@@ -53,6 +53,18 @@ test("upstream sync rejects patch branches that touch upstream changelogs", () =
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /never carry `packages\/\*\/CHANGELOG\.md` hunks/);
 });
 
+test("upstream sync carries and tests the model catalog list refresh patch", () => {
+  assert.match(
+    syncWorkflowText,
+    /\+refs\/heads\/patch\/model-catalog-extension-refresh:refs\/remotes\/origin\/patch\/model-catalog-extension-refresh/,
+  );
+  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/model-catalog-extension-refresh/);
+  assert.match(syncWorkflowText, /test\/list-models-refresh\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/args\.test\.ts/);
+  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi --list-models`/);
+  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
+});
+
 test("upstream sync carries the Bun bytecode entrypoint patch", () => {
   assert.match(
     syncWorkflowText,
