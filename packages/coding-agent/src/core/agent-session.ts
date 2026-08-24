@@ -86,6 +86,7 @@ import {
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
+	type SlowExtensionHookEntry,
 	type ToolDefinition,
 	type ToolExecutionEndEvent,
 	type ToolExecutionStartEvent,
@@ -96,7 +97,7 @@ import {
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
-import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { type ExtensionShutdownProgressListener, emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -243,6 +244,8 @@ export interface ExtensionBindings {
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
+	onSlowHook?: (entry: SlowExtensionHookEntry) => void;
+	onShutdownProgress?: ExtensionShutdownProgressListener;
 }
 
 /** Options for AgentSession.prompt() */
@@ -370,6 +373,8 @@ export class AgentSession {
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
+	private _extensionSlowHookSink?: (entry: SlowExtensionHookEntry) => void;
+	private _extensionShutdownProgressListener?: ExtensionShutdownProgressListener;
 
 	private _modelRuntime: ModelRuntime;
 
@@ -2536,6 +2541,12 @@ export class AgentSession {
 		if (bindings.onError !== undefined) {
 			this._extensionErrorListener = bindings.onError;
 		}
+		if (bindings.onSlowHook !== undefined) {
+			this._extensionSlowHookSink = bindings.onSlowHook;
+		}
+		if (bindings.onShutdownProgress !== undefined) {
+			this._extensionShutdownProgressListener = bindings.onShutdownProgress;
+		}
 
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
@@ -2596,6 +2607,8 @@ export class AgentSession {
 
 	private _applyExtensionBindings(runner: ExtensionRunner): void {
 		runner.setUIContext(this._extensionUIContext, this._extensionMode);
+		runner.setSlowHookSink(this._extensionSlowHookSink);
+		runner.setShutdownProgressListener(this._extensionShutdownProgressListener);
 		runner.bindCommandContext(this._extensionCommandContextActions);
 
 		this._extensionErrorUnsubscriber?.();
@@ -2872,6 +2885,7 @@ export class AgentSession {
 			this._cwd,
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
+			() => this.settingsManager.getSlowHookThresholdMs(),
 		);
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
@@ -2908,7 +2922,9 @@ export class AgentSession {
 			this._extensionUIContext ||
 			this._extensionCommandContextActions ||
 			this._extensionShutdownHandler ||
-			this._extensionErrorListener;
+			this._extensionErrorListener ||
+			this._extensionSlowHookSink ||
+			this._extensionShutdownProgressListener;
 		if (hasBindings) {
 			await options?.beforeSessionStart?.();
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
