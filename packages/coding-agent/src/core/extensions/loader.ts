@@ -146,7 +146,7 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+type HandlerFn = (...args: unknown[]) => unknown;
 
 let extensionCacheCwd: string | undefined;
 let extensionCacheGeneration = 0;
@@ -279,10 +279,16 @@ function createExtensionAPI(
 
 	const api = {
 		// Registration methods - write to extension
-		on(event: string, handler: HandlerFn): void {
+		on(event: string, handler: HandlerFn, options?: { uninterruptible?: boolean }): void {
 			assertActive();
 			const list = extension.handlers.get(event) ?? [];
-			list.push(handler);
+			if (event === "message_end" && options?.uninterruptible === true) {
+				const terminalHandler: HandlerFn = (...args) => handler(...args);
+				list.push(terminalHandler);
+				extension.uninterruptibleHandlers?.add(terminalHandler);
+			} else {
+				list.push(handler);
+			}
 			extension.handlers.set(event, list);
 		},
 
@@ -533,6 +539,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		resolvedPath,
 		sourceInfo: createSyntheticSourceInfo(extensionPath, { source, baseDir }),
 		handlers: new Map(),
+		uninterruptibleHandlers: new WeakSet(),
 		tools: new Map(),
 		messageRenderers: new Map(),
 		entryRenderers: new Map(),
