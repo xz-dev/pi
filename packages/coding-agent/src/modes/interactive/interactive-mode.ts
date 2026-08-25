@@ -78,8 +78,10 @@ import type {
 	ExtensionWidgetOptions,
 	MarkdownTransformer,
 	ProjectTrustContext,
+	SlowExtensionHookEntry,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { formatSlowExtensionHook } from "../../core/extensions/runner.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -159,6 +161,7 @@ import { editInExternalEditor } from "./external-editor.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
 import { shareSession } from "./session-share.ts";
+import { createInteractiveShutdownProgressWriter, formatShutdownProgressLine } from "./shutdown-progress.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -514,6 +517,8 @@ export class InteractiveMode {
 
 	// Shutdown state
 	private shutdownRequested = false;
+	// Transient TUI-only: survive exactly one chat reconstruction after reload/replacement.
+	private pendingRetainedShutdownSlowLines: string[] = [];
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -1913,6 +1918,8 @@ export class InteractiveMode {
 		await this.session.bindExtensions({
 			uiContext,
 			mode: "tui",
+			onSlowHook: (entry) => this.showSlowExtensionHook(entry),
+			onShutdownProgress: (entry) => this.showShutdownProgress(entry),
 			abortHandler: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
@@ -2057,6 +2064,7 @@ export class InteractiveMode {
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
 		this.renderInitialMessages();
+		this.flushRetainedShutdownSlowLines();
 	}
 
 	/**
@@ -2432,6 +2440,7 @@ export class InteractiveMode {
 				input: ui.input,
 				notify: ui.notify,
 			},
+			onSlowHook: (entry) => this.showSlowExtensionHook(entry),
 		};
 	}
 
@@ -2747,6 +2756,39 @@ export class InteractiveMode {
 		} else {
 			this.showStatus(message);
 		}
+	}
+
+	private showShutdownProgress(entry: Parameters<typeof formatShutdownProgressLine>[0]): void {
+		this.statusContainer.clear();
+		if (entry.status === "start") {
+			this.statusContainer.addChild(new Text(theme.fg("muted", formatShutdownProgressLine(entry)), 1, 0));
+		} else if (entry.slow) {
+			this.pendingRetainedShutdownSlowLines.push(formatShutdownProgressLine(entry));
+			this.lastStatusSpacer = undefined;
+			this.lastStatusText = undefined;
+		}
+		this.ui.requestRender();
+	}
+
+	private flushRetainedShutdownSlowLines(): void {
+		const lines = this.pendingRetainedShutdownSlowLines;
+		if (lines.length === 0) {
+			return;
+		}
+		this.pendingRetainedShutdownSlowLines = [];
+		for (const line of lines) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("warning", line), 1, 0));
+		}
+	}
+
+	private showSlowExtensionHook(entry: SlowExtensionHookEntry): void {
+		const color = entry.executionKind === "sync" ? "warning" : "muted";
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg(color, formatSlowExtensionHook(entry)), 1, 0));
+		this.lastStatusSpacer = undefined;
+		this.lastStatusText = undefined;
+		this.ui.requestRender();
 	}
 
 	/** Show a custom component with keyboard focus. Overlay mode renders on top of existing content. */
@@ -3909,6 +3951,7 @@ export class InteractiveMode {
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
 		this.renderSessionEntries(this.sessionManager.buildContextEntries());
+		this.flushRetainedShutdownSlowLines();
 	}
 
 	// =========================================================================
@@ -3945,8 +3988,11 @@ export class InteractiveMode {
 		// dispatch and re-sends the signal if only its own listeners remain.
 
 		if (options?.fromSignal) {
-			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
-			// (session_shutdown) BEFORE touching the terminal. Extension teardown
+			// Signal-triggered shutdown (SIGTERM/SIGHUP) cannot safely render progress:
+			// suppress the already-bound TUI listener and generic slow-hook fallback.
+			// Emit extension cleanup (session_shutdown) BEFORE touching the terminal.
+			this.runtimeHost.session.extensionRunner.setShutdownProgressListener(() => {});
+			// Extension teardown
 			// such as removing sockets does not write to the tty, so it must not be
 			// skipped if a later terminal-restore write fails on a dead or stalled
 			// terminal. If the terminal is gone, the restore writes below emit EIO,
@@ -3968,7 +4014,19 @@ export class InteractiveMode {
 		await this.ui.terminal.drainInput(1000);
 
 		this.stop();
-		await this.runtimeHost.dispose();
+		const runner = this.runtimeHost.session.extensionRunner;
+		const writer = createInteractiveShutdownProgressWriter(
+			(chunk) => {
+				process.stdout.write(chunk);
+			},
+			() => process.stdout.columns ?? 80,
+		);
+		runner.setShutdownProgressListener((entry) => writer.write(entry));
+		try {
+			await this.runtimeHost.dispose();
+		} finally {
+			runner.setShutdownProgressListener(undefined);
+		}
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
@@ -6554,6 +6612,7 @@ export class InteractiveMode {
 	}
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
+		this.pendingRetainedShutdownSlowLines = [];
 		this.disposeActiveSelector();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
