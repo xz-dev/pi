@@ -135,5 +135,12 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	node ../../scripts/generate-third-party-notices.mjs "$target_dir" "$target_dir/THIRD_PARTY_NOTICES.md"
 
 	[[ "$archive" == zip ]]
-	(cd "$target_dir" && zip -qr "$OUTPUT_DIR/pi-$target.zip" .)
+	archive_path="$OUTPUT_DIR/pi-$target.zip"
+	rm -f "$archive_path"
+	if command -v cygpath >/dev/null 2>&1; then
+		archive_path=$(cygpath -w "$archive_path")
+		(cd "$target_dir" && 7z a -bd -tzip -mm=Deflate "$archive_path" .)
+	else
+		(cd "$target_dir" && zip -qr "$archive_path" .)
+	fi
 done

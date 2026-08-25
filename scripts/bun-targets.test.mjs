@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import * as path from "node:path";
 import test from "node:test";
-import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, BUN_VERSION, GITHUB_HOSTED_RUNNERS, RELEASE_BUILD, SMOKE_LIMITS, binaryArchiveName, bunBuildFlags, githubBuildMatrix, githubSmokeMatrix } from "./lib/bun-targets.mjs";
+import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, BUN_VERSION, GITHUB_HOSTED_RUNNERS, RELEASE_BUILD, SMOKE_LIMITS, binaryArchiveName, bunBuildFlags, githubBuildMatrix, githubSmokeMatrix, isMainModulePath } from "./lib/bun-targets.mjs";
 
 const EXPECTED = [
 	"darwin-x64-baseline", "darwin-x64-modern", "darwin-arm64",
@@ -9,15 +10,21 @@ const EXPECTED = [
 	"windows-x64-baseline", "windows-x64-modern", "windows-arm64",
 ];
 
+test("target descriptor CLI recognizes native Windows paths", () => {
+	assert.equal(isMainModulePath("D:\\a\\pi\\pi\\scripts\\lib\\bun-targets.mjs", "D:\\a\\pi\\pi\\scripts\\lib\\bun-targets.mjs", path.win32), true);
+	assert.equal(isMainModulePath("D:\\A\\PI\\scripts\\lib\\bun-targets.mjs", "d:\\a\\pi\\scripts\\lib\\bun-targets.mjs", path.win32), true);
+	assert.equal(isMainModulePath("D:\\a\\pi\\scripts\\lib\\bun-targets.mjs", "D:\\a\\pi\\scripts\\other.mjs", path.win32), false);
+});
+
 test("authoritative Bun target descriptors contain the exact supported matrix", () => {
 	assert.deepEqual(BUN_TARGET_IDS, EXPECTED);
 	assert.equal(new Set(BUN_TARGET_IDS).size, 12);
 	const matrix = githubBuildMatrix();
 	assert.deepEqual(matrix.include.map(({ id }) => id), EXPECTED);
-	assert.ok(matrix.include.every(({ id, runner, arch }) => id && runner && arch));
+	assert.ok(matrix.include.every(({ id, runner, arch, runnerOs, runnerArch }) => id && runner && arch && runnerOs && runnerArch));
 	assert.deepEqual(
 		matrix.include.filter(({ id }) => id.startsWith("windows-")).map(({ id, runner }) => [id, runner]),
-		[["windows-x64-baseline", "ubuntu-24.04"], ["windows-x64-modern", "ubuntu-24.04"], ["windows-arm64", "ubuntu-24.04"]],
+		[["windows-x64-baseline", "windows-2022"], ["windows-x64-modern", "windows-2022"], ["windows-arm64", "windows-11-arm"]],
 	);
 	assert.equal(BUN_TARGETS.find(({ id }) => id === "darwin-x64-baseline").runner, "macos-15-intel");
 	assert.deepEqual(new Set(BUN_TARGETS.filter(({ os, arch }) => os === "darwin" && arch === "x64").map(({ runner }) => runner)), new Set(["macos-15-intel"]));
@@ -52,16 +59,19 @@ test("release compiler settings and smoke descriptors cover every target", () =>
 	assert.equal(RELEASE_BUILD.bytecode, true);
 	assert.match(RELEASE_BUILD.bytecodeReason, /ESM bytecode/);
 	assert.match(RELEASE_BUILD.bytecodeReason, /Release build time/);
-	assert.equal(RELEASE_BUILD.bytecodeExcludedTargets, "windows");
-	assert.match(RELEASE_BUILD.bytecodeExcludedReason, /oven-sh\/bun#18416/);
-	for (const { id, bunTarget } of BUN_TARGETS) {
-		const flags = bunBuildFlags(id);
-		if (bunTarget.startsWith("bun-windows")) assert.deepEqual(flags, ["--minify", "--format=esm"]);
-		else assert.deepEqual(flags, BUN_BUILD_FLAGS);
+	assert.equal(RELEASE_BUILD.bytecodeRequiresNativeBuild, true);
+	assert.match(RELEASE_BUILD.bytecodeCrossCompileReason, /oven-sh\/bun#18416/);
+	assert.match(RELEASE_BUILD.bytecodeCrossCompileReason, /matching native OS and architecture/);
+	for (const target of BUN_TARGETS) {
+		assert.deepEqual(bunBuildFlags(target.id, { os: target.os, arch: target.arch }), BUN_BUILD_FLAGS);
+		const otherOs = target.os === "windows" ? "linux" : "windows";
+		assert.deepEqual(bunBuildFlags(target.id, { os: otherOs, arch: target.arch }), ["--minify", "--format=esm"]);
+		const otherArch = target.arch === "x64" ? "arm64" : "x64";
+		assert.deepEqual(bunBuildFlags(target.id, { os: target.os, arch: otherArch }), ["--minify", "--format=esm"]);
 	}
 	assert.equal(SMOKE_LIMITS.coldVersionMs, 5000);
 	assert.equal(SMOKE_LIMITS.versionMs, 2500);
-	assert.ok(BUN_TARGETS.every(({ requiredCommands }) => requiredCommands.includes("cold-version") && requiredCommands.includes("version")));
+	assert.ok(BUN_TARGETS.every(({ requiredCommands }) => requiredCommands.includes("bytecode") && requiredCommands.includes("cold-version") && requiredCommands.includes("version")));
 	const smoke = githubSmokeMatrix().include;
 	assert.deepEqual(smoke.map(({ target }) => target), EXPECTED);
 	assert.ok(smoke.every(({ runner, executor }) => runner && ["native", "pinned-musl-container"].includes(executor)));

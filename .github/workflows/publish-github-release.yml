@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   release-matrix:
-    if: github.repository == 'xz-dev/pi' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: github.repository == 'xz-dev/pi' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     permissions: { contents: read }
     outputs:
@@ -25,7 +25,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = xz-dev/pi && test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = xz-dev/pi
+          case "$GITHUB_REF:$GITHUB_EVENT_NAME" in
+            refs/heads/main:push|refs/heads/*:workflow_dispatch) ;;
+            *) echo "unsupported Release workflow context: $GITHUB_REF:$GITHUB_EVENT_NAME" >&2; exit 1 ;;
+          esac
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           echo "matrix=$(node scripts/lib/bun-targets.mjs --matrix)" >> "$GITHUB_OUTPUT"
           echo "smoke-matrix=$(node scripts/lib/bun-targets.mjs --smoke-matrix)" >> "$GITHUB_OUTPUT"
@@ -60,6 +64,12 @@ jobs:
         with: { version: "0.15.2" }
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with: { bun-version: "1.4.0" }
+      - name: Assert native build runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = '${{ matrix.runnerOs }}'
+          test "$RUNNER_ARCH" = '${{ matrix.runnerArch }}'
       - run: npm ci --ignore-scripts
       - run: npm run hydrate:model-data && npm run build
       - name: Build architecture-matched downstream musl clipboard addon
@@ -223,6 +233,7 @@ jobs:
           timeout --foreground --signal=TERM --kill-after=10s 150s docker run --name "$container" --rm --network none -v "$PWD:/repo:ro" -v "$candidate:/release:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/e2e-binary-self-update.mjs /release '${{ matrix.target }}' "$version"
 
   publish-release:
+    if: github.ref == 'refs/heads/main'
     needs: update-release-candidate
     runs-on: ubuntu-24.04
     permissions: { contents: write, id-token: write, attestations: write }

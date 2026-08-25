@@ -103,6 +103,7 @@ test("external TUI evidence contributes the authoritative pseudoterminal command
 	try {
 		const stage = join(root, "stage"); mkdirSync(join(stage, "node_modules", "@mariozechner", "clipboard"), { recursive: true });
 		const pi = join(stage, "pi"); writeFileSync(pi, "#!/bin/sh\ncase \"$1\" in --version) echo 1.2.3;; --help) echo Usage: pi;; --list-models) echo model;; *) exit 1;; esac\n"); chmodSync(pi, 0o755);
+		const piNative = join(stage, "pi-native"); writeFileSync(piNative, "#!/bin/sh\necho '[Disk Cache] Cache hit for sourceCode' >&2\n[ \"$1\" = --version ] && echo 1.2.3\n"); chmodSync(piNative, 0o755);
 		writeFileSync(join(stage, "node_modules", "@mariozechner", "clipboard", "package.json"), JSON.stringify({ name: "@mariozechner/clipboard", version: "1.0.0", license: "MIT" }));
 		writeFileSync(join(stage, "node_modules", "@mariozechner", "clipboard", "LICENSE"), "fixture clipboard license\n");
 		writeFileSync(join(stage, "node_modules", "@mariozechner", "clipboard", "clipboard.linux-x64-gnu.node"), "native");
@@ -118,7 +119,7 @@ test("external TUI evidence contributes the authoritative pseudoterminal command
 		const recordPath = join(root, "record.json");
 		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), archive, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_XZ_TUI_EVIDENCE: evidence, RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
 		const record = JSON.parse(readFileSync(recordPath, "utf8"));
-		assert.deepEqual(record.commands.map(({ name }) => name), ["extract", "measure-extracted-size", "cold-version", "version", "help", "list-models", "clipboard", "tui-pseudoterminal"]);
+		assert.deepEqual(record.commands.map(({ name }) => name), ["extract", "measure-extracted-size", "cold-version", "bytecode", "version", "help", "list-models", "clipboard", "tui-pseudoterminal"]);
 		assert.deepEqual(record.commands.at(-1), { name: "tui-pseudoterminal", command: `external:${evidence}`, status: 0, elapsedMs: 37 });
 		assert.ok(Number.isSafeInteger(record.timingsMs.coldVersion));
 		assert.ok(Number.isSafeInteger(record.timingsMs.version));
