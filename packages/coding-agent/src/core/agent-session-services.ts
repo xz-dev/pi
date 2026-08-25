@@ -39,7 +39,10 @@ export interface CreateAgentSessionServicesOptions {
 	agentDir?: string;
 	settingsManager?: SettingsManager;
 	modelRuntime?: ModelRuntime;
+	/** Caller cancellation shared by model-runtime startup phases. */
 	modelRuntimeSignal?: AbortSignal;
+	/** Per-phase model-runtime startup deadline. */
+	modelRuntimeTimeoutMs?: number;
 	extensionFlagValues?: Map<string, boolean | string>;
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
 	resourceLoaderReloadOptions?: ResourceLoaderReloadOptions;
@@ -127,6 +130,16 @@ function applyExtensionFlagValues(
 	return diagnostics;
 }
 
+function createModelRuntimePhaseSignal(
+	callerSignal: AbortSignal | undefined,
+	timeoutMs: number | undefined,
+): { signal: AbortSignal | undefined; timeoutSignal: AbortSignal | undefined } {
+	const timeoutSignal = timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
+	if (!callerSignal) return { signal: timeoutSignal, timeoutSignal };
+	if (!timeoutSignal) return { signal: callerSignal, timeoutSignal };
+	return { signal: AbortSignal.any([callerSignal, timeoutSignal]), timeoutSignal };
+}
+
 /**
  * Create cwd-bound runtime services.
  *
@@ -137,13 +150,20 @@ export async function createAgentSessionServices(
 ): Promise<AgentSessionServices> {
 	const cwd = resolvePath(options.cwd);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getAgentDir();
-	const modelRuntime =
-		options.modelRuntime ??
-		(await ModelRuntime.create({
+	let modelRuntime = options.modelRuntime;
+	if (!modelRuntime) {
+		const initialModelPhase = createModelRuntimePhaseSignal(
+			options.modelRuntimeSignal,
+			options.modelRuntimeTimeoutMs,
+		);
+		modelRuntime = await ModelRuntime.create({
 			authPath: join(agentDir, "auth.json"),
 			modelsPath: join(agentDir, "models.json"),
-			signal: options.modelRuntimeSignal,
-		}));
+			signal: initialModelPhase.signal,
+		});
+		options.modelRuntimeSignal?.throwIfAborted();
+		initialModelPhase.signal?.throwIfAborted();
+	}
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
@@ -179,10 +199,24 @@ export async function createAgentSessionServices(
 		}
 	}
 	extensionsResult.runtime.pendingNativeProviderRegistrations = [];
-	await modelRuntime.refreshAfterRegistrationConvergence({
-		allowNetwork: false,
-		signal: options.modelRuntimeSignal,
-	});
+	const registrationPhase = createModelRuntimePhaseSignal(options.modelRuntimeSignal, options.modelRuntimeTimeoutMs);
+	try {
+		const refreshResult = await modelRuntime.refreshAfterRegistrationConvergence({
+			allowNetwork: false,
+			signal: registrationPhase.signal,
+		});
+		if (refreshResult.aborted) registrationPhase.signal?.throwIfAborted();
+	} catch (error) {
+		options.modelRuntimeSignal?.throwIfAborted();
+		if (registrationPhase.timeoutSignal?.aborted && error === registrationPhase.timeoutSignal.reason) {
+			diagnostics.push({
+				type: "warning",
+				message: `Model startup refresh timed out after ${options.modelRuntimeTimeoutMs}ms; continuing with cached model state.`,
+			});
+		} else {
+			throw error;
+		}
+	}
 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
 
 	return {
