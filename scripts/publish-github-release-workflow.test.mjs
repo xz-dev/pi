@@ -65,6 +65,13 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
 });
 
+test("upstream sync validates the startup and Bun process contracts", () => {
+  for (const model of ["startup-deadline-scope.idea.lean", "bun-runtime-upgrade.idea.lean"]) {
+    assert.match(syncWorkflowText, new RegExp(`lake env lean docs/programming-thinking/${model.replaceAll(".", "\\.")}`));
+    assert.match(syncWorkflowText, new RegExp(`lake env lean --run docs/programming-thinking/${model.replaceAll(".", "\\.")}`));
+  }
+});
+
 test("upstream sync carries the Bun bytecode entrypoint patch", () => {
   assert.match(
     syncWorkflowText,
@@ -247,10 +254,10 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.deepEqual(workflow.jobs["publish-release"].needs, "update-release-candidate");
 });
 
-test("Windows ConPTY uses Bun 1.3.14's native Terminal implementation", () => {
+test("Windows ConPTY uses Bun 1.4.0's native Terminal implementation", () => {
   const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
   const harness = readFileSync(join(ROOT, "scripts", "smoke-bun-tui.mjs"), "utf8");
-  assert.match(workflowText, /bun-version: ["']?1\.3\.14/);
+  assert.match(workflowText, /bun-version: ["']?1\.4\.0/);
   assert.match(smoke, /platform\(\) === "win32" \? "tui-pseudoconsole" : "tui-pseudoterminal"/);
   assert.match(smoke, /"bun", \[join\(process\.cwd\(\), "scripts", "smoke-bun-tui\.mjs"\), executable\]/);
   assert.doesNotMatch(smoke, /smoke-windows-tui\.ps1/);
@@ -270,10 +277,10 @@ test("Windows ConPTY uses Bun 1.3.14's native Terminal implementation", () => {
   assert.match(harness, /if \(!startupBenchmark\)/);
 });
 
-test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.3.14", () => {
+test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.4.0", () => {
   assert.match(workflowText, /build-musl-clipboard\.sh/);
   assert.match(workflowText, /--clipboard-musl-dir/);
-  assert.match(workflowText, /bun-version: ["']?1\.3\.14/);
+  assert.match(workflowText, /bun-version: ["']?1\.4\.0/);
   assert.match(workflowText, /NODE_ENV: production/);
   const builder = readFileSync(join(ROOT, "scripts", "build-musl-clipboard.sh"), "utf8");
   assert.doesNotMatch(builder, /curl|apk add --no-cache|apk update/);
