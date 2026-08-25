@@ -425,11 +425,24 @@ jobs:
         with:
           bun-version: 1.4.0
 
+      - name: Install Linux smoke display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
       - name: Smoke test host binary packaging path
         run: |
           set -euo pipefail
           release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-host-binary.XXXXXX")
-          trap 'rm -rf -- "$release_dir"' EXIT
+          xvfb_pid=""
+          cleanup() {
+            if [[ -n "$xvfb_pid" ]]; then
+              kill "$xvfb_pid" >/dev/null 2>&1 || true
+              wait "$xvfb_pid" >/dev/null 2>&1 || true
+            fi
+            rm -rf -- "$release_dir"
+          }
+          trap cleanup EXIT
           rebuilt_sha=$(git rev-parse HEAD)
           version=$(REBUILT_SHA="$rebuilt_sha" node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.REBUILT_SHA.slice(0, 8)')
           scripts/build-binaries.sh \
@@ -441,7 +454,14 @@ jobs:
             --distribution-version "$version"
           archive="$release_dir/pi-linux-x64-gnu-modern.zip"
           test -s "$archive"
-          node scripts/smoke-binary-release.mjs \
+          Xvfb :99 -screen 0 1024x768x24 -nolisten tcp -ac >"$RUNNER_TEMP/pi-host-xvfb.log" 2>&1 &
+          xvfb_pid=$!
+          for _ in {1..50}; do
+            [[ -S /tmp/.X11-unix/X99 ]] && break
+            sleep 0.1
+          done
+          test -S /tmp/.X11-unix/X99
+          DISPLAY=:99 node scripts/smoke-binary-release.mjs \
             "$archive" \
             linux-x64-gnu-modern \
             "$version" \
