@@ -188,11 +188,16 @@ const ZIP_TYPE_REGULAR = 0x8000;
 const ZIP_METHOD_STORED = 0;
 const ZIP_METHOD_DEFLATED = 8;
 
+function zipEntryType(record) {
+	return record.typeBits === 0 ? (record.name.endsWith("/") ? ZIP_TYPE_DIRECTORY : ZIP_TYPE_REGULAR) : record.typeBits;
+}
+
 /**
  * Parse a zip archive's central directory into entry records. Each record
- * carries the name, POSIX file-type bits (external_attributes high 16 bits),
+ * carries the name, external-attribute POSIX file-type bits when present,
  * the compression method, the local header offset, and the compressed size.
- * Reads only raw bytes; no extraction and no third-party dependency.
+ * Windows ZIP tools may omit POSIX bits; those entries are classified from
+ * their trailing directory separator and remain subject to path/top-level checks.
  */
 export function zipCentralDirectoryEntries(buffer) {
 	if (buffer.length < 22) throw new Error("Zip archive is too small to contain an end-of-central-directory record");
@@ -248,7 +253,7 @@ export function readZipFileBuffer(zipPath, entryName) {
 	const entries = zipCentralDirectoryEntries(buffer);
 	const record = entries.find((entry) => entry.name === entryName);
 	if (!record) throw new Error(`Could not find ${entryName} in ${zipPath}`);
-	if (record.typeBits !== ZIP_TYPE_REGULAR) {
+	if (zipEntryType(record) !== ZIP_TYPE_REGULAR) {
 		throw new Error(`${entryName} in ${zipPath} is not a regular file`);
 	}
 	const local = record.localOffset;
@@ -266,17 +271,20 @@ export function readZipFileBuffer(zipPath, entryName) {
 
 /**
  * List entries of a Windows zip bundle and reject unsafe/unknown paths and
- * unsafe entry types (symlink, hardlink, device, FIFO). Inspects the central
- * directory metadata directly so non-regular/non-directory entries are rejected
- * before any extraction. Zip bundles have no wrapper directory: files live at
- * the archive root. Returns normalized forward-slash paths.
+ * unsafe entry types (symlink, hardlink, device, FIFO). Inspects central
+ * directory metadata directly. Unix-created archives must identify regular
+ * files/directories explicitly; DOS-only entries are inferred from the path
+ * shape because that metadata cannot encode a Unix link type. Zip bundles have
+ * no wrapper directory: files live at the archive root. Returns normalized
+ * forward-slash paths.
  */
 export function listZipBundleEntries(zipPath) {
 	const records = zipCentralDirectoryEntries(readFileSync(zipPath));
 	const seen = new Set();
 	for (const record of records) {
 		const safe = assertSafeArchiveEntry(record.name, zipPath);
-		if (record.typeBits !== ZIP_TYPE_REGULAR && record.typeBits !== ZIP_TYPE_DIRECTORY) {
+		const inferredType = zipEntryType(record);
+		if (inferredType !== ZIP_TYPE_REGULAR && inferredType !== ZIP_TYPE_DIRECTORY) {
 			throw new Error(
 				`Unsafe zip entry type 0x${record.typeBits.toString(16).padStart(4, "0")} for ${JSON.stringify(record.name)} in ${zipPath}`,
 			);

@@ -23,7 +23,7 @@ function run(name, command, args, options = {}) {
 	commands.push({ name, command: [command, ...args].join(" "), status: result.status, elapsedMs });
 	if (result.status !== 0) throw new Error(`${name} failed (${result.status ?? result.signal ?? result.error?.message ?? "unknown"}): ${result.stdout ?? ""}${result.stderr ?? ""}`);
 	if (options.maxMs && elapsedMs > options.maxMs) throw new Error(`${name} ${elapsedMs}ms exceeds ${options.maxMs}ms`);
-	return { stdout: result.stdout ?? "", elapsedMs };
+	return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", elapsedMs };
 }
 function directoryBytes(root) {
 	const script = "const fs=require('node:fs'),p=require('node:path');let n=0;for(const d of fs.readdirSync(process.argv[1],{recursive:true,withFileTypes:true})){if(d.isFile())n+=fs.statSync(p.join(d.parentPath??d.path,d.name)).size}console.log(n)";
@@ -38,10 +38,14 @@ try {
 	const extractedBytes = directoryBytes(root);
 	if (extractedBytes > SMOKE_LIMITS.extractedBytes) throw new Error(`extracted size ${extractedBytes} exceeds ${SMOKE_LIMITS.extractedBytes}`);
 	const executable = join(root, target.wrapper);
+	const nativeExecutable = join(root, target.executable);
 	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color" };
 	const tuiEnv = target.os === "windows" ? { ...env, PI_STARTUP_BENCHMARK: "1" } : env;
 	const coldVersion = run("cold-version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.coldVersionMs });
 	if (coldVersion.stdout.trim() !== expectedVersion) throw new Error(`cold version mismatch: ${coldVersion.stdout.trim()}`);
+	const bytecode = run("bytecode", nativeExecutable, ["--version"], { env: { ...env, BUN_JSC_verboseDiskCache: "1" }, maxMs: SMOKE_LIMITS.versionMs });
+	if (bytecode.stdout.trim() !== expectedVersion) throw new Error(`bytecode version mismatch: ${bytecode.stdout.trim()}`);
+	if (!bytecode.stderr.includes("[Disk Cache] Cache hit for sourceCode")) throw new Error("native executable did not load its entrypoint from embedded bytecode");
 	const version = run("version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.versionMs });
 	if (version.stdout.trim() !== expectedVersion) throw new Error(`version mismatch: ${version.stdout.trim()}`);
 	const help = run("help", executable, ["--help"], { env, maxMs: SMOKE_LIMITS.helpMs });
