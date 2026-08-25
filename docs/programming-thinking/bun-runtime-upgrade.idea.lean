@@ -60,6 +60,12 @@ def compilerTarget (target : ReleaseTarget) : String :=
 def bytecodeEnabled (target : ReleaseTarget) : Bool :=
   target.os != .windows
 
+def headlessDisplayRequired (target : ReleaseTarget) : Bool :=
+  target.os == .linux
+
+def clipboardProbeRequired (_target : ReleaseTarget) : Bool :=
+  true
+
 def legacyX64Targets (os : OperatingSystem) : List ReleaseTarget :=
   [{ os := os, arch := .x64, variant := .baseline }, { os := os, arch := .x64, variant := .modern }]
 
@@ -80,6 +86,14 @@ theorem non_windows_bytecode_stays_enabled
     (h : os != .windows) :
     bytecodeEnabled { os := os, arch := arch, variant := variant } = true := by
   cases os <;> simp_all [bytecodeEnabled]
+
+theorem linux_headless_smoke_requires_display (arch : Architecture) (variant : PublicVariant) :
+    headlessDisplayRequired { os := .linux, arch := arch, variant := variant } = true := by
+  rfl
+
+theorem clipboard_probe_is_never_skipped (target : ReleaseTarget) :
+    clipboardProbeRequired target = true := by
+  rfl
 
 inductive UpgradeStage where
   | releaseVerified
@@ -111,6 +125,9 @@ structure ReleaseContract : Prop where
     compilerTarget { os := os, arch := .x64, variant := .modern }
   windowsBytecodeExcluded : ∀ arch variant,
     bytecodeEnabled { os := .windows, arch := arch, variant := variant } = false
+  linuxSmokeHasDisplay : ∀ arch variant,
+    headlessDisplayRequired { os := .linux, arch := arch, variant := variant } = true
+  clipboardProbePreserved : ∀ target, clipboardProbeRequired target = true
   processCompletes : runUpgrade .releaseVerified = .complete
 
 -- Top-level correctness assembles every declared Release guarantee without additional assumptions.
@@ -120,6 +137,8 @@ theorem bun_runtime_upgrade_is_correct : ReleaseContract := by
     publicAssetNamesPreserved := rfl
     unifiedX64Runtime := x64_public_variants_share_runtime
     windowsBytecodeExcluded := windows_bytecode_stays_disabled
+    linuxSmokeHasDisplay := linux_headless_smoke_requires_display
+    clipboardProbePreserved := clipboard_probe_is_never_skipped
     processCompletes := upgrade_terminates
   }
 
@@ -129,4 +148,4 @@ end BunRuntimeUpgrade
 
 -- Executable output summarizes the proved Release policy for human verification.
 def main : IO Unit :=
-  IO.println "Bun 1.4 release contract: unified x64 runtime, preserved public assets, Windows bytecode excluded."
+  IO.println "Bun 1.4 release contract: unified x64 runtime, preserved public assets, headless Linux clipboard smoke, Windows bytecode excluded."
