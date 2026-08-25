@@ -335,6 +335,7 @@ test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.4.
   assert.match(packager, /bun-targets\.mjs --build-flags/);
   assert.match(packager, /command -v cygpath/);
   assert.match(packager, /7z a -bd -tzip -mm=Deflate/);
+  assert.match(packager, /normalize-windows-zip\.mjs "\$archive_path"/);
   assert.match(packager, /zip -qr/);
   assert.match(packager, /rm -f "\$archive_path"/);
   // macOS runners ship bash 3.2 without mapfile; keep flag reading portable.
