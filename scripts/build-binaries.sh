@@ -140,6 +140,7 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	if command -v cygpath >/dev/null 2>&1; then
 		archive_path=$(cygpath -w "$archive_path")
 		(cd "$target_dir" && 7z a -bd -tzip -mm=Deflate "$archive_path" .)
+		node ../../scripts/normalize-windows-zip.mjs "$archive_path"
 	else
 		(cd "$target_dir" && zip -qr "$archive_path" .)
 	fi
