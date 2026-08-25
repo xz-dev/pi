@@ -23,26 +23,35 @@ test("authoritative Bun target descriptors contain the exact supported matrix", 
 	assert.deepEqual(new Set(BUN_TARGETS.filter(({ os, arch }) => os === "darwin" && arch === "x64").map(({ runner }) => runner)), new Set(["macos-15-intel"]));
 	assert.ok(BUN_TARGETS.every(({ runner }) => GITHUB_HOSTED_RUNNERS.includes(runner)));
 	assert.ok(BUN_TARGETS.every(({ runner }) => !["macos-10.15", "macos-11", "macos-12", "macos-13"].includes(runner)));
-	const bunTargetFor = (os, arch, cpu, libc = "") => {
-		const modern = cpu === "modern" ? "" : cpu === "baseline" ? "-baseline" : "";
+	const bunTargetFor = (os, arch, libc = "") => {
 		const libcSuffix = libc === "musl" ? "-musl" : "";
-		return `bun-${os}-${arch}${libcSuffix}${modern}`;
+		return `bun-${os}-${arch}${libcSuffix}`;
 	};
 	for (const target of BUN_TARGETS) {
 		const os = target.os;
 		const base = os === "darwin" ? "darwin" : os === "windows" ? "windows" : "linux";
-		assert.equal(target.bunTarget, bunTargetFor(base, target.arch, target.cpu, target.libc ?? ""));
+		assert.equal(target.bunTarget, bunTargetFor(base, target.arch, target.libc ?? ""));
 		assert.equal(binaryArchiveName(target.id), `pi-${target.id}.${target.archive}`);
 		assert.match(target.clipboardNativePackage, target.libc ? new RegExp(`${target.libc}$`) : /clipboard-/);
+	}
+	for (const group of [
+		BUN_TARGETS.filter((target) => target.os === "darwin" && target.arch === "x64"),
+		BUN_TARGETS.filter((target) => target.os === "linux" && target.arch === "x64" && target.libc === "gnu"),
+		BUN_TARGETS.filter((target) => target.os === "linux" && target.arch === "x64" && target.libc === "musl"),
+		BUN_TARGETS.filter((target) => target.os === "windows" && target.arch === "x64"),
+	]) {
+		assert.equal(group.length, 2);
+		assert.equal(new Set(group.map((target) => target.bunTarget)).size, 1);
+		assert.ok(group.every((target) => target.requiredCpuFeatures.includes("sse4_2")));
 	}
 });
 
 test("release compiler settings and smoke descriptors cover every target", () => {
-	assert.equal(BUN_VERSION, "1.3.14");
+	assert.equal(BUN_VERSION, "1.4.0");
 	assert.deepEqual(BUN_BUILD_FLAGS, ["--minify", "--bytecode", "--format=esm"]);
 	assert.equal(RELEASE_BUILD.bytecode, true);
-	assert.match(RELEASE_BUILD.bytecodeReason, /asynchronously without top-level await/);
-	assert.match(RELEASE_BUILD.bytecodeReason, /ESM format avoids Bun 1\.3\.14's CJS bytecode failure/);
+	assert.match(RELEASE_BUILD.bytecodeReason, /ESM bytecode/);
+	assert.match(RELEASE_BUILD.bytecodeReason, /Release build time/);
 	assert.equal(RELEASE_BUILD.bytecodeExcludedTargets, "windows");
 	assert.match(RELEASE_BUILD.bytecodeExcludedReason, /oven-sh\/bun#18416/);
 	for (const { id, bunTarget } of BUN_TARGETS) {
