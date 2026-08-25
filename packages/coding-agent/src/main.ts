@@ -828,7 +828,7 @@ export async function main(cliArgs: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
-			modelRuntimeSignal: AbortSignal.timeout(15_000),
+			modelRuntimeTimeoutMs: 15_000,
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
 				? {
