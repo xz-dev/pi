@@ -74,6 +74,7 @@ export interface HarnessOptions {
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
 	sessionManagerFactory?: (tempDir: string) => SessionManager;
+	persist?: boolean;
 }
 
 export interface Harness {
@@ -112,7 +113,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = options.sessionManagerFactory?.(tempDir) ?? SessionManager.inMemory();
+	const sessionManager =
+		options.sessionManagerFactory?.(tempDir) ??
+		(options.persist ? SessionManager.create(tempDir, join(tempDir, "sessions")) : SessionManager.inMemory());
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
