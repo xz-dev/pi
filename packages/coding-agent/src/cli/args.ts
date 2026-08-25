@@ -46,6 +46,7 @@ export interface Args {
 	noThemes?: boolean;
 	noContextFiles?: boolean;
 	listModels?: string | true;
+	refreshModels?: boolean;
 	offline?: boolean;
 	tuiMode?: TuiMode;
 	verbose?: boolean;
@@ -75,6 +76,9 @@ export function parseArgs(args: string[]): Args {
 		unknownFlags: new Map(),
 		diagnostics: [],
 	};
+	const optionTerminator = args.indexOf("--");
+	const optionArgs = optionTerminator === -1 ? args : args.slice(0, optionTerminator);
+	const listModelsRequested = optionArgs.includes("--list-models");
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -200,6 +204,8 @@ export function parseArgs(args: string[]): Args {
 			} else {
 				result.listModels = true;
 			}
+		} else if (arg === "--refresh" && listModelsRequested) {
+			result.refreshModels = true;
 		} else if (arg === "--tui-mode") {
 			const mode = args[i + 1];
 			if (mode === "regular" || mode === "fullscreen") {
@@ -268,7 +274,7 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} install <source> [-l]     Install extension source and add to settings
   ${APP_NAME} remove <source> [-l]      Remove extension source from settings
   ${APP_NAME} uninstall <source> [-l]   Alias for remove
-  ${APP_NAME} update [source|self|pi]   Update pi, extensions, or model catalogs
+  ${APP_NAME} update [source|self|pi]   Update pi, extensions, or Pi-managed model catalogs
   ${APP_NAME} list                      List installed extensions from settings
   ${APP_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
   ${APP_NAME} auth <command>            Print credentials or check provider readiness
@@ -311,6 +317,7 @@ ${chalk.bold("Options:")}
   --no-context-files, -nc        Disable AGENTS.md and CLAUDE.md discovery and loading
   --export <file>                Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
+  --refresh                      Refresh loaded provider catalogs before --list-models output
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --tui-mode <mode>              TUI mode: regular (default) or fullscreen
   --approve, -a                  Trust project-local files for this run
