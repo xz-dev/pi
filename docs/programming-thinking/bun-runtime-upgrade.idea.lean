@@ -57,8 +57,11 @@ def compilerTarget (target : ReleaseTarget) : String :=
   | .windows, .x64 => "bun-windows-x64"
   | .windows, .arm64 => "bun-windows-arm64"
 
-def bytecodeEnabled (target : ReleaseTarget) : Bool :=
-  target.os != .windows
+def bytecodeEnabled (buildHost target : ReleaseTarget) : Bool :=
+  buildHost.os == target.os && buildHost.arch == target.arch
+
+def nativeBuildHost (target : ReleaseTarget) : ReleaseTarget :=
+  target
 
 def headlessDisplayRequired (target : ReleaseTarget) : Bool :=
   target.os == .linux
@@ -69,23 +72,27 @@ def clipboardProbeRequired (_target : ReleaseTarget) : Bool :=
 def legacyX64Targets (os : OperatingSystem) : List ReleaseTarget :=
   [{ os := os, arch := .x64, variant := .baseline }, { os := os, arch := .x64, variant := .modern }]
 
--- These invariants prove unified x64 compilation and the platform-specific bytecode boundary.
+-- These invariants prove unified x64 compilation and that bytecode never crosses an OS or architecture boundary.
 theorem x64_public_variants_share_runtime (os : OperatingSystem) :
     compilerTarget { os := os, arch := .x64, variant := .baseline } =
       compilerTarget { os := os, arch := .x64, variant := .modern } := by
   cases os <;> rfl
 
-theorem windows_bytecode_stays_disabled (arch : Architecture) (variant : PublicVariant) :
-    bytecodeEnabled { os := .windows, arch := arch, variant := variant } = false := by
-  rfl
+theorem native_build_enables_bytecode (target : ReleaseTarget) :
+    bytecodeEnabled (nativeBuildHost target) target = true := by
+  simp [bytecodeEnabled, nativeBuildHost]
 
-theorem non_windows_bytecode_stays_enabled
-    (os : OperatingSystem)
-    (arch : Architecture)
-    (variant : PublicVariant)
-    (h : os != .windows) :
-    bytecodeEnabled { os := os, arch := arch, variant := variant } = true := by
-  cases os <;> simp_all [bytecodeEnabled]
+theorem cross_os_build_disables_bytecode
+    (buildHost target : ReleaseTarget)
+    (h : buildHost.os ≠ target.os) :
+    bytecodeEnabled buildHost target = false := by
+  simp [bytecodeEnabled, h]
+
+theorem cross_arch_build_disables_bytecode
+    (buildHost target : ReleaseTarget)
+    (h : buildHost.arch ≠ target.arch) :
+    bytecodeEnabled buildHost target = false := by
+  simp [bytecodeEnabled, h]
 
 theorem linux_headless_smoke_requires_display (arch : Architecture) (variant : PublicVariant) :
     headlessDisplayRequired { os := .linux, arch := arch, variant := variant } = true := by
@@ -123,8 +130,12 @@ structure ReleaseContract : Prop where
   publicAssetNamesPreserved : publicAssetNames.length = 12
   unifiedX64Runtime : ∀ os, compilerTarget { os := os, arch := .x64, variant := .baseline } =
     compilerTarget { os := os, arch := .x64, variant := .modern }
-  windowsBytecodeExcluded : ∀ arch variant,
-    bytecodeEnabled { os := .windows, arch := arch, variant := variant } = false
+  nativeBuildEnablesBytecode : ∀ target,
+    bytecodeEnabled (nativeBuildHost target) target = true
+  crossOsBuildExcludesBytecode : ∀ buildHost target,
+    buildHost.os ≠ target.os → bytecodeEnabled buildHost target = false
+  crossArchBuildExcludesBytecode : ∀ buildHost target,
+    buildHost.arch ≠ target.arch → bytecodeEnabled buildHost target = false
   linuxSmokeHasDisplay : ∀ arch variant,
     headlessDisplayRequired { os := .linux, arch := arch, variant := variant } = true
   clipboardProbePreserved : ∀ target, clipboardProbeRequired target = true
@@ -136,7 +147,9 @@ theorem bun_runtime_upgrade_is_correct : ReleaseContract := by
     latestStablePinned := rfl
     publicAssetNamesPreserved := rfl
     unifiedX64Runtime := x64_public_variants_share_runtime
-    windowsBytecodeExcluded := windows_bytecode_stays_disabled
+    nativeBuildEnablesBytecode := native_build_enables_bytecode
+    crossOsBuildExcludesBytecode := cross_os_build_disables_bytecode
+    crossArchBuildExcludesBytecode := cross_arch_build_disables_bytecode
     linuxSmokeHasDisplay := linux_headless_smoke_requires_display
     clipboardProbePreserved := clipboard_probe_is_never_skipped
     processCompletes := upgrade_terminates
@@ -148,4 +161,4 @@ end BunRuntimeUpgrade
 
 -- Executable output summarizes the proved Release policy for human verification.
 def main : IO Unit :=
-  IO.println "Bun 1.4 release contract: unified x64 runtime, preserved public assets, headless Linux clipboard smoke, Windows bytecode excluded."
+  IO.println "Bun 1.4 release contract: unified x64 runtime, preserved public assets, native bytecode builds on every OS, cross-build bytecode excluded, headless Linux clipboard smoke."

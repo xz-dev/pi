@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BUN_TARGET_IDS, binaryArchiveName } from "./lib/bun-targets.mjs";
+import { listZipBundleEntries, readZipFile } from "./lib/github-release.mjs";
 import { publishGitHubRelease } from "./publish-github-release.mjs";
 
 const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -122,6 +124,30 @@ async function withFetch(mock, body) {
     globalThis.fetch = original;
   }
 }
+
+test("zip verifier accepts DOS regular-file attributes while retaining path checks", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-dos-zip-"));
+  try {
+    const stage = join(root, "stage");
+    mkdirSync(stage);
+    writeFileSync(join(stage, "package.json"), "{}\n");
+    const archive = join(root, "bundle.zip");
+    execFileSync("zip", ["-qr", archive, "."], { cwd: stage });
+    const bytes = readFileSync(archive);
+    for (let offset = 0; offset + 46 <= bytes.length; offset += 1) {
+      if (bytes.readUInt32LE(offset) !== 0x02014b50) continue;
+      const nameLength = bytes.readUInt16LE(offset + 28);
+      const name = bytes.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
+      if (!name.endsWith("/")) bytes.writeUInt32LE(bytes.readUInt32LE(offset + 38) & 0xffff, offset + 38);
+    }
+    writeFileSync(archive, bytes);
+    assert.deepEqual(listZipBundleEntries(archive), ["package.json"]);
+    assert.equal(readZipFile(archive, "package.json"), "{}\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
 test("creates a draft, uploads every bundle asset plus subjects, then publishes after latest ref recheck", async () => {
   const candidate = fixture();

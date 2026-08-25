@@ -177,6 +177,9 @@ test("Release publication workflow has trusted triggers, exact checkout, and lea
   });
   assert.match(workflowText, /github\.repository == 'xz-dev\/pi'/);
   assert.match(workflowText, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(workflowText, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(workflowText, /refs\/heads\/main:push\|refs\/heads\/\*:workflow_dispatch/);
+  assert.equal(workflow.jobs["publish-release"].if, "github.ref == 'refs/heads/main'");
   assert.match(workflowText, /git rev-parse HEAD[^\n]*GITHUB_SHA/);
   assert.match(workflowText, /git status --porcelain=v1 --untracked-files=all/);
   for (const uses of pinnedUses()) {
@@ -206,6 +209,10 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
   }
   assert.match(workflowText, /--prebuilt/);
   assert.match(workflowText, /-eq 12/);
+  const nativeRunnerStep = workflow.jobs["build-target"].steps.find((step) => step.name === "Assert native build runner");
+  assert.equal(nativeRunnerStep?.shell, "bash");
+  assert.match(nativeRunnerStep?.run ?? "", /test "\$RUNNER_OS" = '\$\{\{ matrix\.runnerOs \}\}'/);
+  assert.match(nativeRunnerStep?.run ?? "", /test "\$RUNNER_ARCH" = '\$\{\{ matrix\.runnerArch \}\}'/);
   const aggregateRun = workflow.jobs["aggregate-release-candidate"].steps.find((step) => step.run)?.run;
   assert.ok(aggregateRun.indexOf("-eq 12") < aggregateRun.indexOf("prepare-github-release.mjs"));
   assert.doesNotMatch(workflowText, /macos-13/);
@@ -280,6 +287,13 @@ test("Linux archive smoke provisions a headless display without bypassing clipbo
   assert.doesNotMatch(`${syncWorkflowText}\n${workflowText}\n${smoke}`, /skip[-_]clipboard|PI_XZ_SKIP_CLIPBOARD/i);
 });
 
+test("final native smoke proves every executable contains bytecode", () => {
+  const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
+  assert.match(smoke, /run\("bytecode", nativeExecutable/);
+  assert.match(smoke, /BUN_JSC_verboseDiskCache: "1"/);
+  assert.match(smoke, /\[Disk Cache\] Cache hit for sourceCode/);
+  assert.match(smoke, /did not load its entrypoint from embedded bytecode/);
+});
 test("Windows ConPTY uses Bun 1.4.0's native Terminal implementation", () => {
   const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
   const harness = readFileSync(join(ROOT, "scripts", "smoke-bun-tui.mjs"), "utf8");
@@ -319,6 +333,10 @@ test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.4.
   const packager = readFileSync(join(ROOT, "scripts", "build-binaries.sh"), "utf8");
   assert.match(packager, /--hydrate-target-deps/);
   assert.match(packager, /bun-targets\.mjs --build-flags/);
+  assert.match(packager, /command -v cygpath/);
+  assert.match(packager, /7z a -bd -tzip -mm=Deflate/);
+  assert.match(packager, /zip -qr/);
+  assert.match(packager, /rm -f "\$archive_path"/);
   // macOS runners ship bash 3.2 without mapfile; keep flag reading portable.
   assert.doesNotMatch(packager, /^\s*mapfile\s/m);
   assert.match(packager, /require\('\.\/package-lock\.json'\)\.packages/);
