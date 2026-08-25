@@ -254,6 +254,32 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.deepEqual(workflow.jobs["publish-release"].needs, "update-release-candidate");
 });
 
+test("Linux archive smoke provisions a headless display without bypassing clipboard", () => {
+  const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
+  const syncSteps = syncWorkflow.jobs["sync-main-with-squash-branches"].steps;
+  const syncDisplay = syncSteps.find((step) => step.name === "Install Linux smoke display");
+  const syncSmoke = syncSteps.find((step) => step.name === "Smoke test host binary packaging path");
+  assert.match(syncDisplay?.run ?? "", /apt-get install -y xvfb/);
+  assert.match(syncSmoke?.run ?? "", /Xvfb :99[^\n]*-nolisten tcp -ac/);
+  assert.match(syncSmoke?.run ?? "", /test -S \/tmp\/\.X11-unix\/X99/);
+  assert.match(syncSmoke?.run ?? "", /DISPLAY=:99 node scripts\/smoke-binary-release\.mjs/);
+
+  const acceptSteps = workflow.jobs["accept-release-candidate"].steps;
+  const displayInstall = acceptSteps.find((step) => step.name === "Install Linux smoke display");
+  const nativeSmoke = acceptSteps.find((step) => step.name === "Execute final native archive");
+  const muslSmoke = acceptSteps.find((step) => step.name === "Execute final archive in immutable native musl userspace");
+  assert.equal(displayInstall?.if, "runner.os == 'Linux'");
+  assert.match(displayInstall?.run ?? "", /apt-get install -y xvfb/);
+  assert.match(nativeSmoke?.run ?? "", /if \[\[ "\$RUNNER_OS" == Linux \]\]/);
+  assert.match(nativeSmoke?.run ?? "", /Xvfb :99[^\n]*-nolisten tcp -ac/);
+  assert.match(nativeSmoke?.run ?? "", /export DISPLAY=:99/);
+  assert.match(muslSmoke?.run ?? "", /Xvfb :99[^\n]*-nolisten tcp -ac/);
+  assert.match(muslSmoke?.run ?? "", /-e DISPLAY=:99/);
+  assert.match(muslSmoke?.run ?? "", /-v \/tmp\/\.X11-unix:\/tmp\/\.X11-unix:ro/);
+  assert.match(smoke, /typeof c\.hasImage!==['"]function['"]/);
+  assert.doesNotMatch(`${syncWorkflowText}\n${workflowText}\n${smoke}`, /skip[-_]clipboard|PI_XZ_SKIP_CLIPBOARD/i);
+});
+
 test("Windows ConPTY uses Bun 1.4.0's native Terminal implementation", () => {
   const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
   const harness = readFileSync(join(ROOT, "scripts", "smoke-bun-tui.mjs"), "utf8");
