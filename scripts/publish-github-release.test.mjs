@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BUN_TARGET_IDS, binaryArchiveName } from "./lib/bun-targets.mjs";
-import { listZipBundleEntries, readZipFile } from "./lib/github-release.mjs";
+import { listZipBundleEntries, normalizeWindowsZipMetadata, readZipFile, zipCentralDirectoryEntries } from "./lib/github-release.mjs";
 import { publishGitHubRelease } from "./publish-github-release.mjs";
 
 const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -148,6 +148,46 @@ test("zip verifier accepts DOS regular-file attributes while retaining path chec
   }
 });
 
+
+test("normalizes Windows 7z DOS metadata without changing archive contents", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-windows-zip-"));
+  try {
+    const stage = join(root, "stage");
+    mkdirSync(join(stage, "assets", "nested"), { recursive: true });
+    writeFileSync(join(stage, "package.json"), "{}\n");
+    writeFileSync(join(stage, "assets", "nested", "file.txt"), "asset\n");
+    const archive = join(root, "bundle.zip");
+    execFileSync("zip", ["-qr", archive, "."], { cwd: stage });
+    const dosBytes = readFileSync(archive);
+    for (const record of zipCentralDirectoryEntries(dosBytes)) {
+      dosBytes.writeUInt16LE(record.versionMadeBy & 0xff, record.centralOffset + 4);
+      dosBytes.writeUInt32LE(record.name.endsWith("/") ? 0x10 : 0x20, record.centralOffset + 38);
+    }
+    writeFileSync(archive, dosBytes);
+    const dosRecords = zipCentralDirectoryEntries(dosBytes);
+    assert.ok(dosRecords.some((record) => record.name.endsWith("/")));
+    assert.ok(dosRecords.every((record) => record.creatorOs === 0 && record.typeBits === 0));
+
+    assert.equal(normalizeWindowsZipMetadata(archive), dosRecords.length);
+    const normalizedRecords = zipCentralDirectoryEntries(readFileSync(archive));
+    assert.deepEqual(normalizedRecords.map((record) => record.name), dosRecords.map((record) => record.name));
+    assert.ok(normalizedRecords.every((record) => record.creatorOs === 3));
+    assert.ok(normalizedRecords.every((record) => record.typeBits === (record.name.endsWith("/") ? 0x4000 : 0x8000)));
+    assert.equal(readZipFile(archive, "package.json"), "{}\n");
+    assert.equal(readZipFile(archive, "assets/nested/file.txt"), "asset\n");
+
+    const unsafe = join(root, "unsafe.zip");
+    const unsafeBytes = Buffer.from(dosBytes);
+    const fileRecord = zipCentralDirectoryEntries(unsafeBytes).find((record) => !record.name.endsWith("/"));
+    assert.ok(fileRecord);
+    unsafeBytes.writeUInt16LE((3 << 8) | (fileRecord.versionMadeBy & 0xff), fileRecord.centralOffset + 4);
+    unsafeBytes.writeUInt32LE(((0xa1ff << 16) | 0x20) >>> 0, fileRecord.centralOffset + 38);
+    writeFileSync(unsafe, unsafeBytes);
+    assert.throws(() => normalizeWindowsZipMetadata(unsafe), /Unsafe zip entry type/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("creates a draft, uploads every bundle asset plus subjects, then publishes after latest ref recheck", async () => {
   const candidate = fixture();

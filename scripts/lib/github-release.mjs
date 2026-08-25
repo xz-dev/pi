@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { inflateRawSync } from "node:zlib";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { BUN_TARGET_IDS, binaryArchiveName as targetArchiveName, bunTarget } from "./bun-targets.mjs";
 
 export const ENTRY_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -229,11 +229,16 @@ export function zipCentralDirectoryEntries(buffer) {
 		const extraLength = buffer.readUInt16LE(offset + 30);
 		const commentLength = buffer.readUInt16LE(offset + 32);
 		const localOffset = buffer.readUInt32LE(offset + 42);
+		const versionMadeBy = buffer.readUInt16LE(offset + 4);
 		const externalAttributes = buffer.readUInt32LE(offset + 38);
 		const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
 		entries.push({
 			name,
+			versionMadeBy,
+			creatorOs: versionMadeBy >>> 8,
+			externalAttributes,
 			typeBits: (externalAttributes >>> 16) & 0xf000,
+			centralOffset: offset,
 			method,
 			localOffset,
 			compressedSize,
@@ -241,6 +246,33 @@ export function zipCentralDirectoryEntries(buffer) {
 		offset += 46 + nameLength + extraLength + commentLength;
 	}
 	return entries;
+}
+
+/**
+ * Normalize DOS-only metadata emitted by native Windows 7z into explicit Unix
+ * regular-file/directory modes. Only central-directory metadata changes; entry
+ * names, compressed bytes, CRCs, and local headers remain untouched. Existing
+ * unsafe POSIX types are rejected rather than rewritten.
+ */
+export function normalizeWindowsZipMetadata(zipPath) {
+	const buffer = readFileSync(zipPath);
+	const records = zipCentralDirectoryEntries(buffer);
+	for (const record of records) {
+		const safe = assertSafeArchiveEntry(record.name, zipPath);
+		const type = zipEntryType(record);
+		if (type !== ZIP_TYPE_REGULAR && type !== ZIP_TYPE_DIRECTORY) {
+			throw new Error(
+				`Unsafe zip entry type 0x${record.typeBits.toString(16).padStart(4, "0")} for ${JSON.stringify(record.name)} in ${zipPath}`,
+			);
+		}
+		const bare = safe.replace(/\/$/u, "");
+		if (bare) assertAllowedTopLevel(bare, zipPath);
+		const mode = type === ZIP_TYPE_DIRECTORY ? 0x41ed : 0x81a4;
+		buffer.writeUInt16LE((3 << 8) | (record.versionMadeBy & 0xff), record.centralOffset + 4);
+		buffer.writeUInt32LE(((mode << 16) | (record.externalAttributes & 0xffff)) >>> 0, record.centralOffset + 38);
+	}
+	writeFileSync(zipPath, buffer);
+	return records.length;
 }
 
 /**
