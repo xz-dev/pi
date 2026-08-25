@@ -31,7 +31,7 @@ for (const id of BUN_TARGET_IDS) {
 	if (record.runner?.os !== descriptor.runnerOs || normalizeRunnerArch(record.runner?.arch) !== descriptor.arch || record.runner?.osArchitecture !== descriptor.arch) throw new Error(`${id} runner OS/architecture does not match authoritative descriptor`);
 	if (record.executor?.kind !== descriptor.executor || record.executor?.emulated !== false) throw new Error(`${id} executor does not match authoritative descriptor`);
 	if ((record.executor.containerDigest ?? null) !== (descriptor.containerImage ?? null)) throw new Error(`${id} container digest does not match authoritative descriptor`);
-	const features = String(record.runner.cpuFeatures ?? "").toLowerCase();
+	const features = String(record.runner.cpuFeatures ?? "").toLowerCase().replaceAll(".", "_");
 	for (const feature of descriptor.requiredCpuFeatures) if (!features.includes(feature)) throw new Error(`${id} CPU lacks required ${feature}`);
 	const commands = record.commands ?? [];
 	if (JSON.stringify(commands.map(({ name }) => name)) !== JSON.stringify(descriptor.requiredCommands)) throw new Error(`${id} command inventory does not match authoritative descriptor`);

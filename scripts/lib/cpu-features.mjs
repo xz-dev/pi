@@ -3,11 +3,11 @@ import { readFileSync } from "node:fs";
 import { arch, cpus, platform } from "node:os";
 
 // Microsoft IsProcessorFeaturePresent constants:
-//10 = PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2),40 = PF_AVX2_INSTRUCTIONS_AVAILABLE.
+// 38 = PF_SSE4_2_INSTRUCTIONS_AVAILABLE, 40 = PF_AVX2_INSTRUCTIONS_AVAILABLE.
 const WINDOWS_FEATURE_SCRIPT = `
 Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class PiCpuFeatures { [DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(uint feature); }'
 $features = @()
-if ([PiCpuFeatures]::IsProcessorFeaturePresent(10)) { $features += 'sse2' }
+if ([PiCpuFeatures]::IsProcessorFeaturePresent(38)) { $features += 'sse4_2' }
 if ([PiCpuFeatures]::IsProcessorFeaturePresent(40)) { $features += 'avx2' }
 $features -join ' '
 `;

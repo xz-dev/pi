@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
 /** Authoritative xz-dev binary Release target and acceptance matrix. */
-export const BUN_VERSION = "1.3.14";
+export const BUN_VERSION = "1.4.0";
 export const BUN_BUILD_FLAGS = Object.freeze(["--minify", "--bytecode", "--format=esm"]);
 export const RELEASE_BUILD = Object.freeze({
 	nodeEnv: "production",
 	minify: true,
 	bytecode: true,
-	bytecodeReason: "Pi's Bun entrypoint bootstraps asynchronously without top-level await; ESM format avoids Bun 1.3.14's CJS bytecode failure on this module graph",
+	bytecodeReason: "Pi's Bun entrypoint uses ESM bytecode to move parsing work from runtime to Release build time",
 	bytecodeExcludedTargets: "windows",
-	bytecodeExcludedReason: "Bun 1.3.14 cross-compiled --bytecode executables segfault on the target OS (oven-sh/bun#18416); Windows targets are cross-compiled from Ubuntu runners, so they keep plain --minify builds",
+	bytecodeExcludedReason: "Cross-compiled --bytecode executables still segfault on the target OS (oven-sh/bun#18416); Windows targets are cross-compiled from Ubuntu runners, so they keep plain --minify builds",
 	sourcemap: false,
 	debug: false,
 	profile: false,
@@ -35,8 +35,8 @@ export const SMOKE_LIMITS = Object.freeze({
 export const GITHUB_HOSTED_RUNNERS = Object.freeze(["macos-15-intel", "macos-15", "ubuntu-24.04", "ubuntu-24.04-arm", "windows-2022", "windows-2025", "windows-11-arm"]);
 
 const MUSL_IMAGES = Object.freeze({
-	x64: "docker.io/oven/bun@sha256:efc5e42c7bedc1661ab0b7272c74c3ebf794f054297f530a62055f2d1a0eb662",
-	arm64: "docker.io/oven/bun@sha256:3c9ab1a521c82144dff537125695017a0480d3a13088fba7e012cfae0f63146f",
+	x64: "docker.io/oven/bun@sha256:8aac45197595035f697ea6b11cd73ce2401d82503fcb2540b5fac606973b242b",
+	arm64: "docker.io/oven/bun@sha256:b707d91190be7e8d5dee8dd7dbe9e7dfecfd26a632266b69335d7a9082814f8b",
 });
 
 function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runner, clipboardNativePackage, clipboardNativeFile, nativeHelperDir, nativeHelperFile }) {
@@ -55,7 +55,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 		runnerArch: arch === "arm64" ? "ARM64" : "X64",
 		executor,
 		...(executor === "pinned-musl-container" ? { containerImage: MUSL_IMAGES[arch] } : {}),
-		requiredCpuFeatures: cpu === "modern" && arch === "x64" ? ["avx2"] : cpu === "baseline" && arch === "x64" ? ["sse2"] : [],
+		requiredCpuFeatures: arch === "x64" ? ["sse4_2"] : [],
 		requiredCommands: ["extract", "measure-extracted-size", "cold-version", "version", "help", "list-models", "clipboard", ...(libc === "musl" ? ["musl-provenance"] : []), os === "windows" ? "tui-pseudoconsole" : "tui-pseudoterminal"],
 		executable: os === "windows" ? "pi-native.exe" : "pi-native",
 		wrapper: os === "windows" ? "pi.exe" : "pi",
@@ -69,16 +69,16 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 const darwinHelper = (arch) => ({ nativeHelperDir: `native/darwin/prebuilds/darwin-${arch}`, nativeHelperFile: "darwin-modifiers.node" });
 const windowsHelper = (arch) => ({ nativeHelperDir: `native/win32/prebuilds/win32-${arch}`, nativeHelperFile: "win32-console-mode.node" });
 export const BUN_TARGETS = Object.freeze([
-	target({ id: "darwin-x64-baseline", bunTarget: "bun-darwin-x64-baseline", os: "darwin", arch: "x64", cpu: "baseline", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
+	target({ id: "darwin-x64-baseline", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "baseline", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-x64-modern", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "modern", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-arm64", bunTarget: "bun-darwin-arm64", os: "darwin", arch: "arm64", cpu: "arm64", runner: "macos-15", clipboardNativePackage: "clipboard-darwin-arm64", clipboardNativeFile: "clipboard.darwin-arm64.node", ...darwinHelper("arm64") }),
-	target({ id: "linux-x64-gnu-baseline", bunTarget: "bun-linux-x64-baseline", os: "linux", arch: "x64", libc: "gnu", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-gnu", clipboardNativeFile: "clipboard.linux-x64-gnu.node" }),
+	target({ id: "linux-x64-gnu-baseline", bunTarget: "bun-linux-x64", os: "linux", arch: "x64", libc: "gnu", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-gnu", clipboardNativeFile: "clipboard.linux-x64-gnu.node" }),
 	target({ id: "linux-x64-gnu-modern", bunTarget: "bun-linux-x64", os: "linux", arch: "x64", libc: "gnu", cpu: "modern", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-gnu", clipboardNativeFile: "clipboard.linux-x64-gnu.node" }),
 	target({ id: "linux-arm64-gnu", bunTarget: "bun-linux-arm64", os: "linux", arch: "arm64", libc: "gnu", cpu: "arm64", runner: "ubuntu-24.04-arm", clipboardNativePackage: "clipboard-linux-arm64-gnu", clipboardNativeFile: "clipboard.linux-arm64-gnu.node" }),
-	target({ id: "linux-x64-musl-baseline", bunTarget: "bun-linux-x64-musl-baseline", os: "linux", arch: "x64", libc: "musl", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-musl", clipboardNativeFile: "clipboard.linux-x64-musl.node" }),
+	target({ id: "linux-x64-musl-baseline", bunTarget: "bun-linux-x64-musl", os: "linux", arch: "x64", libc: "musl", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-musl", clipboardNativeFile: "clipboard.linux-x64-musl.node" }),
 	target({ id: "linux-x64-musl-modern", bunTarget: "bun-linux-x64-musl", os: "linux", arch: "x64", libc: "musl", cpu: "modern", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-musl", clipboardNativeFile: "clipboard.linux-x64-musl.node" }),
 	target({ id: "linux-arm64-musl", bunTarget: "bun-linux-arm64-musl", os: "linux", arch: "arm64", libc: "musl", cpu: "arm64", runner: "ubuntu-24.04-arm", clipboardNativePackage: "clipboard-linux-arm64-musl", clipboardNativeFile: "clipboard.linux-arm64-musl.node" }),
-	target({ id: "windows-x64-baseline", bunTarget: "bun-windows-x64-baseline", os: "windows", arch: "x64", cpu: "baseline", runner: "windows-2022", buildRunner: "ubuntu-24.04", clipboardNativePackage: "clipboard-win32-x64-msvc", clipboardNativeFile: "clipboard.win32-x64-msvc.node", ...windowsHelper("x64") }),
+	target({ id: "windows-x64-baseline", bunTarget: "bun-windows-x64", os: "windows", arch: "x64", cpu: "baseline", runner: "windows-2022", buildRunner: "ubuntu-24.04", clipboardNativePackage: "clipboard-win32-x64-msvc", clipboardNativeFile: "clipboard.win32-x64-msvc.node", ...windowsHelper("x64") }),
 	target({ id: "windows-x64-modern", bunTarget: "bun-windows-x64", os: "windows", arch: "x64", cpu: "modern", runner: "windows-2025", buildRunner: "ubuntu-24.04", clipboardNativePackage: "clipboard-win32-x64-msvc", clipboardNativeFile: "clipboard.win32-x64-msvc.node", ...windowsHelper("x64") }),
 	target({ id: "windows-arm64", bunTarget: "bun-windows-arm64", os: "windows", arch: "arm64", cpu: "arm64", runner: "windows-11-arm", buildRunner: "ubuntu-24.04", clipboardNativePackage: "clipboard-win32-arm64-msvc", clipboardNativeFile: "clipboard.win32-arm64-msvc.node", ...windowsHelper("arm64") }),
 ]);
