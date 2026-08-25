@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type Api,
 	InMemoryModelsStore,
@@ -10,7 +13,7 @@ import { expect, it, vi } from "vitest";
 import { createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
-import type { LoadExtensionsResult } from "../src/core/extensions/types.ts";
+import type { ExtensionAPI, LoadExtensionsResult } from "../src/core/extensions/types.ts";
 import { ModelConfig } from "../src/core/model-config.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -90,6 +93,159 @@ function extensionResultWithNativeProvider(provider: Provider): LoadExtensionsRe
 	runtime.pendingNativeProviderRegistrations.push({ provider, extensionPath: "<startup-native>" });
 	return { extensions: [], errors: [], runtime };
 }
+
+it("uses a fresh registration deadline after extension loading", async () => {
+	const timeoutControllers: AbortController[] = [];
+	const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+		const controller = new AbortController();
+		timeoutControllers.push(controller);
+		return controller.signal;
+	});
+	const provider = makeNativeProvider({ current: [] });
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-startup-deadline-"));
+
+	try {
+		const services = await createAgentSessionServices({
+			cwd: agentDir,
+			agentDir,
+			modelRuntimeTimeoutMs: 15_000,
+			settingsManager: SettingsManager.inMemory(),
+			resourceLoaderOptions: {
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				extensionFactories: [
+					async (pi: ExtensionAPI) => {
+						expect(timeoutControllers).toHaveLength(1);
+						timeoutControllers[0].abort(new DOMException("The operation timed out.", "TimeoutError"));
+						pi.registerProvider(provider);
+					},
+				],
+			},
+		});
+
+		expect(timeoutControllers).toHaveLength(2);
+		expect(timeoutControllers[1].signal.aborted).toBe(false);
+		expect(services.diagnostics).toEqual([]);
+	} finally {
+		timeoutSpy.mockRestore();
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+it("keeps the initial model deadline fatal", async () => {
+	const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+		const controller = new AbortController();
+		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+		return controller.signal;
+	});
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-initial-model-deadline-"));
+
+	try {
+		await expect(
+			createAgentSessionServices({
+				cwd: agentDir,
+				agentDir,
+				modelRuntimeTimeoutMs: 15_000,
+				settingsManager: SettingsManager.inMemory(),
+				resourceLoaderOptions: {
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+				},
+			}),
+		).rejects.toMatchObject({ name: "TimeoutError" });
+	} finally {
+		timeoutSpy.mockRestore();
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+it("continues with cached model state when registration convergence reaches its own deadline", async () => {
+	const runtime = await ModelRuntime.create({
+		credentials: AuthStorage.inMemory(),
+		modelsPath: null,
+		allowModelNetwork: false,
+	});
+	const timeoutControllers: AbortController[] = [];
+	const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+		const controller = new AbortController();
+		timeoutControllers.push(controller);
+		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+		return controller.signal;
+	});
+	const provider = makeNativeProvider({ current: [] });
+
+	try {
+		const services = await createAgentSessionServices({
+			cwd: process.cwd(),
+			agentDir: process.cwd(),
+			modelRuntime: runtime,
+			modelRuntimeTimeoutMs: 15_000,
+			settingsManager: SettingsManager.inMemory(),
+			resourceLoaderOptions: {
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				extensionFactories: [(pi: ExtensionAPI) => pi.registerProvider(provider)],
+			},
+		});
+
+		expect(services.diagnostics).toEqual([
+			{
+				type: "warning",
+				message: "Model startup refresh timed out after 15000ms; continuing with cached model state.",
+			},
+		]);
+	} finally {
+		timeoutSpy.mockRestore();
+	}
+});
+
+it("continues with cached model state when the registration refresh itself reaches its deadline", async () => {
+	const runtime = await ModelRuntime.create({
+		credentials: AuthStorage.inMemory(),
+		modelsPath: null,
+		allowModelNetwork: false,
+	});
+	const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+		const controller = new AbortController();
+		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+		return controller.signal;
+	});
+
+	try {
+		const services = await createAgentSessionServices({
+			cwd: process.cwd(),
+			agentDir: process.cwd(),
+			modelRuntime: runtime,
+			modelRuntimeTimeoutMs: 15_000,
+			settingsManager: SettingsManager.inMemory(),
+			resourceLoaderOptions: {
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+			},
+		});
+
+		expect(services.diagnostics).toEqual([
+			{
+				type: "warning",
+				message: "Model startup refresh timed out after 15000ms; continuing with cached model state.",
+			},
+		]);
+	} finally {
+		timeoutSpy.mockRestore();
+	}
+});
 
 it("makes a stored native model visible before the startup-awaited refresh resolves", async () => {
 	const modelsStore = new BarrierModelsStore();
