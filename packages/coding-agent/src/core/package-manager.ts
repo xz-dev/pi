@@ -44,7 +44,7 @@ import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath 
 import { stripBom } from "../utils/text.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { type PiManifest, readPiManifest } from "./pi-manifest.ts";
-import type { PackageSource, SettingsManager } from "./settings-manager.ts";
+import type { PackageSource, SettingsManager, SkillOverrides } from "./settings-manager.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
 const UPDATE_CHECK_CONCURRENCY = 4;
@@ -69,6 +69,7 @@ export interface PathMetadata {
 	scope: SourceScope;
 	origin: "package" | "top-level";
 	baseDir?: string;
+	skillOverrides?: SkillOverrides;
 }
 
 export interface ResolvedResource {
@@ -195,6 +196,7 @@ interface PackageFilter {
 	autoload?: boolean;
 	extensions?: string[];
 	skills?: string[];
+	skillOverrides?: SkillOverrides;
 	prompts?: string[];
 	themes?: string[];
 }
@@ -1260,7 +1262,12 @@ export class DefaultPackageManager implements PackageManager {
 			const resolvedSource = deltaBase?.source ?? sourceStr;
 			const resolvedScope = deltaBase?.scope ?? scope;
 			const parsed = this.parseSource(resolvedSource);
-			const metadata: PathMetadata = { source: sourceStr, scope, origin: "package" };
+			const metadata: PathMetadata = {
+				source: sourceStr,
+				scope,
+				origin: "package",
+				skillOverrides: filter?.skillOverrides,
+			};
 
 			if (parsed.type === "local") {
 				const baseDir = this.getBaseDirForScope(resolvedScope);
@@ -1720,7 +1727,14 @@ export class DefaultPackageManager implements PackageManager {
 			}
 			const existing = result[index];
 			if (existing?.scope === "project" && entry.scope === "user") {
-				if (typeof existing.pkg === "object" && existing.pkg.autoload === false) result.push(entry);
+				if (typeof existing.pkg === "object" && existing.pkg.autoload === false) {
+					const userPackage = typeof entry.pkg === "string" ? { source: entry.pkg } : { ...entry.pkg };
+					userPackage.skillOverrides = {
+						...userPackage.skillOverrides,
+						...existing.pkg.skillOverrides,
+					};
+					result.push({ ...entry, pkg: userPackage });
+				}
 			} else if (entry.scope === "project") {
 				result[index] = entry;
 			}
