@@ -80,6 +80,14 @@ jobs:
             exit 1
           fi
 
+          # Skip the full rebuild when main already integrates every
+          # upstream/main commit. Checked-out main HEAD is the rebuild result,
+          # so merge-base equality with upstream/main head means nothing new.
+          if [[ "$(git merge-base HEAD upstream/main)" == "$(git rev-parse upstream/main)" ]]; then
+            echo 'No new upstream commits since last rebuild; skipping sync'
+            exit 0
+          fi
+
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
