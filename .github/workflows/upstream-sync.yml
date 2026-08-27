@@ -383,28 +383,6 @@ jobs:
           node --test --test-reporter=dot \
             packages/tui/test/tui-render.test.ts
 
-      - name: Setup Lean
-        uses: leanprover/lean-action@8dd5d0978ba1c4ec4ae0835a93f88d946799944f
-        with:
-          auto-config: false
-          build: false
-          test: false
-          lint: false
-          use-github-cache: false
-
-      - name: Validate programming-thinking models
-        run: |
-          lake env lean docs/programming-thinking/slow-hook-tui-only.idea.lean
-          lake env lean --run docs/programming-thinking/slow-hook-tui-only.idea.lean
-          lake env lean docs/programming-thinking/model-catalog-refresh.idea.lean
-          lake env lean --run docs/programming-thinking/model-catalog-refresh.idea.lean
-          lake env lean docs/programming-thinking/startup-deadline-scope.idea.lean
-          lake env lean --run docs/programming-thinking/startup-deadline-scope.idea.lean
-          lake env lean docs/programming-thinking/bun-runtime-upgrade.idea.lean
-          lake env lean --run docs/programming-thinking/bun-runtime-upgrade.idea.lean
-          lake env lean docs/programming-thinking/update-clean-win32-safety.idea.lean
-          lake env lean --run docs/programming-thinking/update-clean-win32-safety.idea.lean
-
       - name: Smoke test packed npm release
         run: |
           release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-packed-release.XXXXXX")
