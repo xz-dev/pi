@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runMain } from "./cli-entry.ts";
 /**
  * CLI entry point for the refactored coding agent.
  * Uses main.ts with AgentSession and new mode modules.
@@ -18,4 +19,4 @@ process.emitWarning = (() => {}) as typeof process.emitWarning;
 // Runtime settings are applied once SettingsManager has loaded global/project settings.
 configureHttpDispatcher();
 
-main(process.argv.slice(2));
+void runMain(() => main(process.argv.slice(2)));
