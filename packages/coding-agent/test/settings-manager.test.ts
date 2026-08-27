@@ -621,4 +621,42 @@ describe("SettingsManager", () => {
 			expect(manager.getShellPath()).toBe(homedir());
 		});
 	});
+
+	describe("getRetrySettings", () => {
+		it("omits empty or invalid nonRetryableErrorPatterns", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					retry: {
+						nonRetryableErrorPatterns: ["  ", "", 1, null],
+					},
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getRetrySettings()).toEqual({
+				enabled: true,
+				maxRetries: 3,
+				baseDelayMs: 2000,
+			});
+		});
+
+		it("returns trimmed nonRetryableErrorPatterns", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					retry: {
+						maxRetries: 10,
+						nonRetryableErrorPatterns: [" quota threshold ", "", "reset after"],
+					},
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getRetrySettings()).toEqual({
+				enabled: true,
+				maxRetries: 10,
+				baseDelayMs: 2000,
+				nonRetryableErrorPatterns: ["quota threshold", "reset after"],
+			});
+		});
+	});
 });
