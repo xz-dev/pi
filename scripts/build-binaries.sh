@@ -101,7 +101,7 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	bun_build_flags=()
 	while IFS= read -r flag; do bun_build_flags+=("$flag"); done < <(node ../../scripts/lib/bun-targets.mjs --build-flags "$target")
 	bun build --compile "${bun_build_flags[@]}" --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$target_dir/$executable"
-	(cd ../.. && scripts/build-pi-wrapper.sh "$target" "$target_dir/$wrapper")
+	(cd ../.. && scripts/build-pi-wrapper.sh "$target" "$target_dir/$wrapper" "$DISTRIBUTION_VERSION")
 	cp package.json README.md CHANGELOG.md "$target_dir/"
 	if [[ -n "$DISTRIBUTION_VERSION" ]]; then
 		node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const base=p.version;p.version=process.argv[2];p.piConfig={...(p.piConfig??{}),distribution:'xz-dev',releaseTarget:process.argv[3],changelogVersion:p.piConfig?.changelogVersion??base};fs.writeFileSync(process.argv[1],JSON.stringify(p,null,2)+'\n')" "$target_dir/package.json" "$DISTRIBUTION_VERSION" "$target"
