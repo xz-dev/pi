@@ -117,11 +117,11 @@ function createReleaseBundle(root: string): Uint8Array {
 function writeInstalledBundle(
 	installRoot: string,
 	version: string,
-	overrides: { name?: string; distribution?: string; releaseTarget?: string } = {},
+	overrides: { name?: string; distribution?: string; releaseTarget?: string; wrapper?: string } = {},
 ): string {
 	const bundleDirectory = join(installRoot, "bundles", version);
 	mkdirSync(bundleDirectory, { recursive: true });
-	writeFileSync(join(bundleDirectory, WRAPPER_NAME), "wrapper\n");
+	writeFileSync(join(bundleDirectory, WRAPPER_NAME), overrides.wrapper ?? `wrapper-${version}\n`);
 	writeFileSync(join(bundleDirectory, EXECUTABLE_NAME), "binary\n");
 	writeFileSync(
 		join(bundleDirectory, "package.json"),
@@ -142,18 +142,14 @@ function createCleanupFixture(prefix: string): {
 	currentBundle: string;
 	previousBundle: string;
 	staleBundle: string;
-	currentPointer: string;
-	previousPointer: string;
 } {
 	const root = join(tmpdir(), `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	const currentBundle = writeInstalledBundle(root, NEXT_VERSION);
 	const previousBundle = writeInstalledBundle(root, CURRENT_VERSION);
 	const staleBundle = writeInstalledBundle(root, STALE_VERSION);
-	const currentPointer = `${NEXT_VERSION}\n`;
-	const previousPointer = `${CURRENT_VERSION}\n`;
-	writeFileSync(join(root, "current"), currentPointer);
-	writeFileSync(join(root, "previous"), previousPointer);
-	return { root, currentBundle, previousBundle, staleBundle, currentPointer, previousPointer };
+	// The root launcher byte-matches the "current" bundle's launcher.
+	writeFileSync(join(root, WRAPPER_NAME), readFileSync(join(currentBundle, WRAPPER_NAME)));
+	return { root, currentBundle, previousBundle, staleBundle };
 }
 
 function cleanupQuarantines(root: string): string[] {
@@ -193,8 +189,7 @@ it("fails closed before normal startup for an invalid internal Windows snapshot 
 
 describe("xz-dev native Release cleanup and activation safety", () => {
 	it("runs update --clean through main and reports success", async () => {
-		const { root, currentBundle, previousBundle, staleBundle, currentPointer, previousPointer } =
-			createCleanupFixture("pi-xz-clean-main");
+		const { root, currentBundle, previousBundle, staleBundle } = createCleanupFixture("pi-xz-clean-main");
 		Object.defineProperty(process, "execPath", {
 			value: join(currentBundle, EXECUTABLE_NAME),
 			configurable: true,
@@ -205,15 +200,15 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
 			await expect(main(["update", "--clean"])).resolves.toBeUndefined();
-			expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Removed 1 old bundle");
+			expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Removed 2 old bundles");
 			expect(errorSpy).not.toHaveBeenCalled();
 			if (process.platform === "win32") expect(exitSpy).not.toHaveBeenCalled();
 			else expect(exitSpy).toHaveBeenCalledWith(0);
 			expect(process.exitCode).toBeUndefined();
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(currentPointer);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(previousPointer);
 			expect(existsSync(currentBundle)).toBe(true);
-			expect(existsSync(previousBundle)).toBe(true);
+			// The launcher-matched version is protected even though it is not
+			// the executing one; the executing version is protected too.
+			expect(existsSync(previousBundle)).toBe(false);
 			expect(existsSync(staleBundle)).toBe(false);
 			expect(cleanupQuarantines(root)).toEqual([]);
 			expect(existsSync(join(root, "update.lock"))).toBe(false);
@@ -226,8 +221,8 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		const root = join(tmpdir(), `pi-xz-clean-command-error-${process.pid}-${Date.now()}`);
 		const currentBundle = writeInstalledBundle(root, NEXT_VERSION);
 		const staleBundle = writeInstalledBundle(root, CURRENT_VERSION);
-		writeFileSync(join(root, "current"), `${NEXT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), "../outside\n");
+		writeFileSync(join(root, WRAPPER_NAME), readFileSync(join(currentBundle, WRAPPER_NAME)));
+		rmSync(join(staleBundle, EXECUTABLE_NAME));
 		Object.defineProperty(process, "execPath", {
 			value: join(currentBundle, EXECUTABLE_NAME),
 			configurable: true,
@@ -235,13 +230,13 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		process.exitCode = undefined;
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
+			// Removing a required file from the executing bundle fails closed.
+			rmSync(join(currentBundle, WRAPPER_NAME));
 			await expect(handlePackageCommand(["update", "--clean"])).resolves.toBe(true);
 			expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
-				"Invalid previous bundle pointer",
+				"Release bundle is missing required path",
 			);
 			expect(process.exitCode).toBe(1);
-			expect(existsSync(currentBundle)).toBe(true);
-			expect(existsSync(staleBundle)).toBe(true);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -269,14 +264,12 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		mkdirSync(detached);
 		mkdirSync(foreign);
 		writeFileSync(join(foreign, "notes.txt"), "keep\n");
-		writeFileSync(join(root, "current"), `${currentVersion}\n`);
-		writeFileSync(join(root, "previous"), `${previousVersion}\n`);
+		writeFileSync(join(root, WRAPPER_NAME), readFileSync(join(currentBundle, WRAPPER_NAME)));
 		try {
-			expect(cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toBe(1);
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${currentVersion}\n`);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(`${previousVersion}\n`);
+			expect(cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toBe(2);
 			expect(existsSync(currentBundle)).toBe(true);
-			expect(existsSync(previousBundle)).toBe(true);
+			// Only the executing (launcher-matched) version survives.
+			expect(existsSync(previousBundle)).toBe(false);
 			expect(existsSync(staleBundle)).toBe(false);
 			expect(existsSync(wrongPackage)).toBe(true);
 			expect(existsSync(wrongDistribution)).toBe(true);
@@ -291,51 +284,25 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		}
 	});
 
-	it("preserves the executing bundle even when activation pointers reference other versions", () => {
+	it("preserves the executing and launcher-matched bundles, removes others", () => {
 		const root = join(tmpdir(), `pi-xz-clean-executing-${process.pid}-${Date.now()}`);
 		const executingBundle = writeInstalledBundle(root, CURRENT_VERSION);
-		const currentBundle = writeInstalledBundle(root, NEXT_VERSION);
-		const previousVersion = "0.84.1-xz.67.1.g00000000";
-		const previousBundle = writeInstalledBundle(root, previousVersion);
-		writeFileSync(join(root, "current"), `${NEXT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), `${previousVersion}\n`);
+		const launcherBundle = writeInstalledBundle(root, NEXT_VERSION);
+		const staleVersion = "0.84.1-xz.67.1.g00000000";
+		const staleBundle = writeInstalledBundle(root, staleVersion);
+		writeFileSync(join(root, WRAPPER_NAME), readFileSync(join(launcherBundle, WRAPPER_NAME)));
 		try {
-			expect(cleanXzBundles(join(executingBundle, EXECUTABLE_NAME))).toBe(0);
+			expect(cleanXzBundles(join(executingBundle, EXECUTABLE_NAME))).toBe(1);
 			expect(existsSync(executingBundle)).toBe(true);
-			expect(existsSync(currentBundle)).toBe(true);
-			expect(existsSync(previousBundle)).toBe(true);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("rejects pointer replacement before quarantining a stale bundle", () => {
-		const { root, currentBundle, staleBundle, currentPointer } = createCleanupFixture("pi-xz-clean-pointer-race");
-		const currentPath = join(root, "current");
-		let pointerReplaced = false;
-		fsMocks.lstatSync.mockImplementation((path, options) => {
-			if (!pointerReplaced && path === currentPath && cleanupQuarantines(root).length > 0) {
-				pointerReplaced = true;
-				const replacement = join(root, "current.replacement");
-				writeFileSync(replacement, currentPointer);
-				fsMocks.realRenameSync!(replacement, currentPath);
-			}
-			return fsMocks.realLstatSync!(path, options as never);
-		});
-		try {
-			expect(() => cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toThrow(
-				"Release bundle pointers changed before quarantine",
-			);
-			expect(existsSync(staleBundle)).toBe(true);
-			expect(fsMocks.renameSync).not.toHaveBeenCalled();
+			expect(existsSync(launcherBundle)).toBe(true);
+			expect(existsSync(staleBundle)).toBe(false);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
 	it("restores a quarantined bundle when post-rename revalidation fails", () => {
-		const { root, currentBundle, previousBundle, staleBundle, currentPointer, previousPointer } =
-			createCleanupFixture("pi-xz-clean-restore");
+		const { root, currentBundle, staleBundle } = createCleanupFixture("pi-xz-clean-restore");
 		const validationError = new Error("detached validation failed");
 		let detachedBundle = "";
 		let validationFailed = false;
@@ -364,11 +331,7 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 			expect((error as Error & { cause?: unknown }).cause).toBe(validationError);
 			expect(fsMocks.renameSync).toHaveBeenNthCalledWith(1, staleBundle, detachedBundle);
 			expect(fsMocks.renameSync).toHaveBeenNthCalledWith(2, detachedBundle, staleBundle);
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(currentPointer);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(previousPointer);
 			expect(existsSync(currentBundle)).toBe(true);
-			expect(existsSync(previousBundle)).toBe(true);
-			expect(existsSync(staleBundle)).toBe(true);
 			expect(existsSync(detachedBundle)).toBe(false);
 			expect(cleanupQuarantines(root)).toEqual([]);
 			expect(existsSync(join(root, "update.lock"))).toBe(false);
@@ -378,8 +341,7 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 	});
 
 	it("retains quarantine and both errors when restoration fails", () => {
-		const { root, currentBundle, previousBundle, staleBundle, currentPointer, previousPointer } =
-			createCleanupFixture("pi-xz-clean-restore-error");
+		const { root, currentBundle, staleBundle } = createCleanupFixture("pi-xz-clean-restore-error");
 		const validationError = new Error("detached validation failed");
 		const restoreError = new Error("restore rename failed");
 		let detachedBundle = "";
@@ -414,12 +376,7 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 			expect((error as AggregateError).errors).toHaveLength(2);
 			expect((error as AggregateError).errors[0]).toMatchObject({ cause: validationError });
 			expect((error as AggregateError).errors[1]).toBe(restoreError);
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(currentPointer);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(previousPointer);
 			expect(existsSync(currentBundle)).toBe(true);
-			expect(existsSync(previousBundle)).toBe(true);
-			expect(existsSync(staleBundle)).toBe(false);
-			expect(existsSync(detachedBundle)).toBe(true);
 			expect(cleanupQuarantines(root)).toEqual([dirname(detachedBundle)]);
 			expect(existsSync(join(root, "update.lock"))).toBe(false);
 		} finally {
@@ -428,8 +385,7 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 	});
 
 	it("does not overwrite an original-path conflict while restoring quarantine", () => {
-		const { root, currentBundle, previousBundle, staleBundle, currentPointer, previousPointer } =
-			createCleanupFixture("pi-xz-clean-restore-conflict");
+		const { root, currentBundle, staleBundle } = createCleanupFixture("pi-xz-clean-restore-conflict");
 		const validationError = new Error("detached validation failed");
 		const conflictMarker = join(staleBundle, "conflict-marker");
 		let detachedBundle = "";
@@ -465,11 +421,7 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 			expect((error as Error & { cause?: unknown }).cause).toMatchObject({ cause: validationError });
 			expect(fsMocks.renameSync).toHaveBeenCalledOnce();
 			expect(readFileSync(conflictMarker, "utf8")).toBe("keep\n");
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(currentPointer);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(previousPointer);
 			expect(existsSync(currentBundle)).toBe(true);
-			expect(existsSync(previousBundle)).toBe(true);
-			expect(existsSync(detachedBundle)).toBe(true);
 			expect(cleanupQuarantines(root)).toEqual([dirname(detachedBundle)]);
 			expect(existsSync(join(root, "update.lock"))).toBe(false);
 		} finally {
@@ -477,23 +429,18 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		}
 	});
 
-	it("leaves activation pointers and their targets unchanged when detaching a stale bundle fails", () => {
+	it("leaves the installation unchanged when detaching a stale bundle fails", () => {
 		if (process.platform === "win32") return;
 		const root = join(tmpdir(), `pi-xz-clean-error-${process.pid}-${Date.now()}`);
 		const currentBundle = writeInstalledBundle(root, NEXT_VERSION);
 		const previousBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		const staleBundle = writeInstalledBundle(root, "0.84.1-xz.67.1.g00000000");
-		const currentBefore = `${NEXT_VERSION}\n`;
-		const previousBefore = `${CURRENT_VERSION}\n`;
-		writeFileSync(join(root, "current"), currentBefore);
-		writeFileSync(join(root, "previous"), previousBefore);
+		writeFileSync(join(root, WRAPPER_NAME), readFileSync(join(currentBundle, WRAPPER_NAME)));
 		const bundlesRoot = join(root, "bundles");
 		statSync(bundlesRoot);
 		try {
 			chmodSync(bundlesRoot, 0o500);
 			expect(() => cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toThrow();
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(currentBefore);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(previousBefore);
 			expect(existsSync(currentBundle)).toBe(true);
 			expect(existsSync(previousBundle)).toBe(true);
 			expect(existsSync(staleBundle)).toBe(true);
@@ -532,26 +479,19 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		}
 	});
 
-	it("leaves activation pointers and their targets unchanged when post-lock quarantine deletion fails", () => {
+	it("leaves the launcher-matched bundle unchanged when post-lock quarantine deletion fails", () => {
 		if (process.platform === "win32") return;
 		const root = join(tmpdir(), `pi-xz-clean-delete-error-${process.pid}-${Date.now()}`);
 		const currentBundle = writeInstalledBundle(root, NEXT_VERSION);
-		const previousBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		const staleBundle = writeInstalledBundle(root, "0.84.1-xz.67.1.g00000000");
-		const currentBefore = `${NEXT_VERSION}\n`;
-		const previousBefore = `${CURRENT_VERSION}\n`;
-		writeFileSync(join(root, "current"), currentBefore);
-		writeFileSync(join(root, "previous"), previousBefore);
+		writeFileSync(join(root, WRAPPER_NAME), readFileSync(join(currentBundle, WRAPPER_NAME)));
 		const lockedDirectory = join(staleBundle, "locked");
 		mkdirSync(lockedDirectory);
 		writeFileSync(join(lockedDirectory, "keep"), "keep\n");
 		chmodSync(lockedDirectory, 0o500);
 		try {
 			expect(() => cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toThrow();
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(currentBefore);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(previousBefore);
 			expect(existsSync(currentBundle)).toBe(true);
-			expect(existsSync(previousBundle)).toBe(true);
 			expect(existsSync(staleBundle)).toBe(false);
 			expect(existsSync(join(root, "update.lock"))).toBe(false);
 			const quarantine = readdirSync(join(root, "bundles"), { withFileTypes: true }).find((entry) =>
@@ -574,56 +514,6 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 				}
 			}
 			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("rejects unsafe activation pointers before deleting bundles", () => {
-		for (const pointer of ["current", "previous"] as const) {
-			for (const unsafe of ["../outside", "0.84.1-xz.63.1.gbbbbbbbb"] as const) {
-				const root = join(tmpdir(), `pi-xz-clean-pointer-${pointer}-${process.pid}-${Date.now()}`);
-				const currentBundle = writeInstalledBundle(root, CURRENT_VERSION);
-				const previousBundle = writeInstalledBundle(root, NEXT_VERSION);
-				const staleBundle = writeInstalledBundle(root, "0.84.1-xz.67.1.g00000000");
-				writeFileSync(join(root, "current"), `${pointer === "current" ? unsafe : CURRENT_VERSION}\n`);
-				writeFileSync(join(root, "previous"), `${pointer === "previous" ? unsafe : NEXT_VERSION}\n`);
-				try {
-					expect(() => cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toThrow(
-						`Invalid ${pointer} bundle pointer`,
-					);
-					expect(existsSync(currentBundle)).toBe(true);
-					expect(existsSync(previousBundle)).toBe(true);
-					expect(existsSync(staleBundle)).toBe(true);
-				} finally {
-					rmSync(root, { recursive: true, force: true });
-				}
-			}
-		}
-	});
-
-	it("rejects symlinked activation pointers before deleting bundles", () => {
-		if (process.platform === "win32") return;
-		for (const pointer of ["current", "previous"] as const) {
-			const root = join(tmpdir(), `pi-xz-clean-pointer-link-${pointer}-${process.pid}-${Date.now()}`);
-			const currentBundle = writeInstalledBundle(root, CURRENT_VERSION);
-			const previousBundle = writeInstalledBundle(root, NEXT_VERSION);
-			const staleBundle = writeInstalledBundle(root, "0.84.1-xz.67.1.g00000000");
-			const target = join(root, `${pointer}.target`);
-			writeFileSync(target, `${pointer === "current" ? CURRENT_VERSION : NEXT_VERSION}\n`);
-			writeFileSync(
-				join(root, pointer === "current" ? "previous" : "current"),
-				`${pointer === "current" ? NEXT_VERSION : CURRENT_VERSION}\n`,
-			);
-			symlinkSync(target, join(root, pointer));
-			try {
-				expect(() => cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toThrow(
-					`Invalid ${pointer} bundle pointer`,
-				);
-				expect(existsSync(currentBundle)).toBe(true);
-				expect(existsSync(previousBundle)).toBe(true);
-				expect(existsSync(staleBundle)).toBe(true);
-			} finally {
-				rmSync(root, { recursive: true, force: true });
-			}
 		}
 	});
 
@@ -654,7 +544,6 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		if (process.platform === "win32") return;
 		const root = join(tmpdir(), `pi-xz-clean-lock-${process.pid}-${Date.now()}`);
 		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		writeFileSync(join(root, "update"), "");
 		const release = lockfile.lockSync(join(root, "update"), { realpath: false });
 		try {
@@ -662,7 +551,6 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 				"Another Pi update or cleanup is already running",
 			);
 			expect(existsSync(oldBundle)).toBe(true);
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
 		} finally {
 			release();
 			rmSync(root, { recursive: true, force: true });
@@ -675,8 +563,6 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		const root = join(tmpdir(), `pi-xz-update-lock-${process.pid}-${Date.now()}`);
 		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), "0.84.1-xz.67.1.g00000000\n");
 		try {
 			const bytes = createReleaseBundle(root);
 			const value = manifest({
@@ -712,92 +598,6 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 			}
 			expect(existsSync(join(root, "bundles", NEXT_VERSION))).toBe(false);
 			expect(readFileSync(join(root, WRAPPER_NAME), "utf8")).toBe("old root wrapper\n");
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe("0.84.1-xz.67.1.g00000000\n");
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("rejects invalid updater current pointers before publication", async () => {
-		allowNetwork();
-		for (const invalid of ["0.84.1-xz.63.1.gbbbbbbbb", "attacker"] as const) {
-			const root = join(tmpdir(), `pi-xz-update-pointer-${process.pid}-${Date.now()}`);
-			const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
-			writeFileSync(join(root, "current"), `${invalid}\n`);
-			writeFileSync(join(root, "previous"), "0.84.1-xz.67.1.g00000000\n");
-			try {
-				const bytes = createReleaseBundle(root);
-				const value = manifest({
-					bundles: {
-						[TARGET]: {
-							file: BUNDLE,
-							bytes: bytes.byteLength,
-							sha256: createHash("sha256").update(bytes).digest("hex"),
-						},
-					},
-				});
-				const { manifestBytes, sums } = discoveryFiles(value);
-				vi.stubGlobal(
-					"fetch",
-					vi.fn(async (input: string | URL) => {
-						if (String(input) === SUMS_URL) return new Response(sums);
-						if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
-						return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
-					}),
-				);
-				const latest = await getLatestXzRelease(CURRENT_VERSION);
-				await expect(
-					runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
-						executablePath: join(oldBundle, EXECUTABLE_NAME),
-						writeProgress: () => {},
-					}),
-				).rejects.toThrow("Invalid current bundle pointer");
-				expect(existsSync(join(root, "bundles", NEXT_VERSION))).toBe(false);
-				expect(readFileSync(join(root, "current"), "utf8")).toBe(`${invalid}\n`);
-			} finally {
-				rmSync(root, { recursive: true, force: true });
-			}
-		}
-	});
-
-	it("rejects invalid updater previous pointers before publication", async () => {
-		allowNetwork();
-		const root = join(tmpdir(), `pi-xz-update-previous-pointer-${process.pid}-${Date.now()}`);
-		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), "attacker\n");
-		try {
-			const bytes = createReleaseBundle(root);
-			const value = manifest({
-				bundles: {
-					[TARGET]: {
-						file: BUNDLE,
-						bytes: bytes.byteLength,
-						sha256: createHash("sha256").update(bytes).digest("hex"),
-					},
-				},
-			});
-			const { manifestBytes, sums } = discoveryFiles(value);
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (input: string | URL) => {
-					if (String(input) === SUMS_URL) return new Response(sums);
-					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
-					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
-				}),
-			);
-
-			const latest = await getLatestXzRelease(CURRENT_VERSION);
-			await expect(
-				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
-					executablePath: join(oldBundle, EXECUTABLE_NAME),
-					writeProgress: () => {},
-				}),
-			).rejects.toThrow("Invalid previous bundle pointer");
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe("attacker\n");
-			expect(existsSync(join(root, "bundles", NEXT_VERSION))).toBe(false);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -808,7 +608,6 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		const root = join(tmpdir(), `pi-xz-update-executing-${process.pid}-${Date.now()}`);
 		const executingBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		const activeBundle = writeInstalledBundle(root, STALE_VERSION);
-		writeFileSync(join(root, "current"), `${STALE_VERSION}\n`);
 		rmSync(join(executingBundle, WRAPPER_NAME));
 		try {
 			const bytes = createReleaseBundle(root);
@@ -838,239 +637,8 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 					writeProgress: () => {},
 				}),
 			).rejects.toThrow(`Release bundle is missing required path ${WRAPPER_NAME}`);
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${STALE_VERSION}\n`);
 			expect(existsSync(activeBundle)).toBe(true);
 			expect(existsSync(join(root, "bundles", NEXT_VERSION))).toBe(false);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("rejects pointer replacement before activation publication", async () => {
-		if (process.platform === "win32") return;
-		allowNetwork();
-		const root = join(tmpdir(), `pi-xz-update-pointer-race-${process.pid}-${Date.now()}`);
-		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
-		writeInstalledBundle(root, STALE_VERSION);
-		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), `${STALE_VERSION}\n`);
-		const previousPath = join(root, "previous");
-		let pointerReplaced = false;
-		fsMocks.lstatSync.mockImplementation((path, options) => {
-			if (
-				!pointerReplaced &&
-				path === previousPath &&
-				readdirSync(root, { withFileTypes: true }).some(
-					(entry) => entry.isDirectory() && entry.name.startsWith(".update-pointers-"),
-				)
-			) {
-				pointerReplaced = true;
-				const replacement = join(root, "previous.replacement");
-				writeFileSync(replacement, `${STALE_VERSION}\n`);
-				fsMocks.realRenameSync!(replacement, previousPath);
-			}
-			return fsMocks.realLstatSync!(path, options as never);
-		});
-		try {
-			const bytes = createReleaseBundle(root);
-			const value = manifest({
-				bundles: {
-					[TARGET]: {
-						file: BUNDLE,
-						bytes: bytes.byteLength,
-						sha256: createHash("sha256").update(bytes).digest("hex"),
-					},
-				},
-			});
-			const { manifestBytes, sums } = discoveryFiles(value);
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (input: string | URL) => {
-					if (String(input) === SUMS_URL) return new Response(sums);
-					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
-					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
-				}),
-			);
-
-			const latest = await getLatestXzRelease(CURRENT_VERSION);
-			await expect(
-				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
-					executablePath: join(oldBundle, EXECUTABLE_NAME),
-					writeProgress: () => {},
-				}),
-			).rejects.toThrow("Pi activation pointers changed before publication");
-			expect(pointerReplaced).toBe(true);
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(`${STALE_VERSION}\n`);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("restores previous when publishing its replacement fails", async () => {
-		if (process.platform === "win32") return;
-		allowNetwork();
-		const root = join(tmpdir(), `pi-xz-update-previous-publish-${process.pid}-${Date.now()}`);
-		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
-		writeInstalledBundle(root, STALE_VERSION);
-		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), `${STALE_VERSION}\n`);
-		const publicationError = new Error("previous publication failed");
-		fsMocks.renameSync.mockImplementation((source, destination) => {
-			if (basename(String(source)) === "previous.next" && destination === join(root, "previous")) {
-				throw publicationError;
-			}
-			fsMocks.realRenameSync!(source, destination);
-		});
-		try {
-			const bytes = createReleaseBundle(root);
-			const value = manifest({
-				bundles: {
-					[TARGET]: {
-						file: BUNDLE,
-						bytes: bytes.byteLength,
-						sha256: createHash("sha256").update(bytes).digest("hex"),
-					},
-				},
-			});
-			const { manifestBytes, sums } = discoveryFiles(value);
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (input: string | URL) => {
-					if (String(input) === SUMS_URL) return new Response(sums);
-					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
-					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
-				}),
-			);
-
-			const latest = await getLatestXzRelease(CURRENT_VERSION);
-			await expect(
-				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
-					executablePath: join(oldBundle, EXECUTABLE_NAME),
-					writeProgress: () => {},
-				}),
-			).rejects.toBe(publicationError);
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(`${STALE_VERSION}\n`);
-			expect(readdirSync(root).filter((name) => name.startsWith(".update-pointers-"))).toEqual([]);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("restores previous when publishing current fails", async () => {
-		if (process.platform === "win32") return;
-		allowNetwork();
-		const root = join(tmpdir(), `pi-xz-update-current-publish-${process.pid}-${Date.now()}`);
-		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
-		writeInstalledBundle(root, STALE_VERSION);
-		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), `${STALE_VERSION}\n`);
-		const publicationError = new Error("current publication failed");
-		fsMocks.renameSync.mockImplementation((source, destination) => {
-			if (basename(String(source)) === "current.next" && destination === join(root, "current")) {
-				throw publicationError;
-			}
-			fsMocks.realRenameSync!(source, destination);
-		});
-		try {
-			const bytes = createReleaseBundle(root);
-			const value = manifest({
-				bundles: {
-					[TARGET]: {
-						file: BUNDLE,
-						bytes: bytes.byteLength,
-						sha256: createHash("sha256").update(bytes).digest("hex"),
-					},
-				},
-			});
-			const { manifestBytes, sums } = discoveryFiles(value);
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (input: string | URL) => {
-					if (String(input) === SUMS_URL) return new Response(sums);
-					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
-					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
-				}),
-			);
-
-			const latest = await getLatestXzRelease(CURRENT_VERSION);
-			await expect(
-				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
-					executablePath: join(oldBundle, EXECUTABLE_NAME),
-					writeProgress: () => {},
-				}),
-			).rejects.toBe(publicationError);
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(`${STALE_VERSION}\n`);
-			expect(readdirSync(root).filter((name) => name.startsWith(".update-pointers-"))).toEqual([]);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("retains activation recovery data and both errors when restoring previous fails", async () => {
-		if (process.platform === "win32") return;
-		allowNetwork();
-		const root = join(tmpdir(), `pi-xz-update-pointer-restore-${process.pid}-${Date.now()}`);
-		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
-		writeInstalledBundle(root, STALE_VERSION);
-		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), `${STALE_VERSION}\n`);
-		const publicationError = new Error("current publication failed");
-		const restoreError = new Error("previous restoration failed");
-		fsMocks.renameSync.mockImplementation((source, destination) => {
-			if (basename(String(source)) === "current.next" && destination === join(root, "current")) {
-				throw publicationError;
-			}
-			if (basename(String(source)) === "previous.original" && destination === join(root, "previous")) {
-				throw restoreError;
-			}
-			fsMocks.realRenameSync!(source, destination);
-		});
-		try {
-			const bytes = createReleaseBundle(root);
-			const value = manifest({
-				bundles: {
-					[TARGET]: {
-						file: BUNDLE,
-						bytes: bytes.byteLength,
-						sha256: createHash("sha256").update(bytes).digest("hex"),
-					},
-				},
-			});
-			const { manifestBytes, sums } = discoveryFiles(value);
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (input: string | URL) => {
-					if (String(input) === SUMS_URL) return new Response(sums);
-					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
-					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
-				}),
-			);
-
-			const latest = await getLatestXzRelease(CURRENT_VERSION);
-			const error = await runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
-				executablePath: join(oldBundle, EXECUTABLE_NAME),
-				writeProgress: () => {},
-			}).then(
-				() => undefined,
-				(error: unknown) => error,
-			);
-			expect(error).toBeInstanceOf(AggregateError);
-			expect((error as AggregateError).errors).toEqual([publicationError, restoreError]);
-			expect((error as AggregateError).message).toContain("recovery data retained at");
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
-			expect(existsSync(join(root, "previous"))).toBe(false);
-			const recoveryDirectories = readdirSync(root).filter((name) => name.startsWith(".update-pointers-"));
-			expect(recoveryDirectories).toHaveLength(1);
-			const recovery = join(root, recoveryDirectories[0]);
-			expect(readFileSync(join(recovery, "previous.original"), "utf8")).toBe(`${STALE_VERSION}\n`);
-			expect(readFileSync(join(recovery, "previous.failed"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -1081,14 +649,12 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		for (const kind of ["symlink", "file"] as const) {
 			const root = join(tmpdir(), `pi-xz-lock-anchor-${kind}-${process.pid}-${Date.now()}`);
 			const bundle = writeInstalledBundle(root, CURRENT_VERSION);
-			writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 			const anchor = join(root, "update.lock");
-			if (kind === "symlink") symlinkSync(join(root, "current"), anchor);
+			if (kind === "symlink") symlinkSync(join(bundle, EXECUTABLE_NAME), anchor);
 			else writeFileSync(anchor, "not a lock directory\n");
 			try {
 				expect(() => cleanXzBundles(join(bundle, EXECUTABLE_NAME))).toThrow();
 				expect(existsSync(bundle)).toBe(true);
-				expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
 			} finally {
 				rmSync(root, { recursive: true, force: true });
 			}
@@ -1101,7 +667,6 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		const root = join(tmpdir(), `pi-xz-update-rejected-destination-${process.pid}-${Date.now()}`);
 		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		const invalidDestination = writeInstalledBundle(root, NEXT_VERSION);
 		rmSync(join(invalidDestination, EXECUTABLE_NAME));
 		try {
@@ -1133,7 +698,6 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 				}),
 			).resolves.toBeUndefined();
 
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${NEXT_VERSION}\n`);
 			expect(existsSync(join(root, "bundles", NEXT_VERSION, EXECUTABLE_NAME))).toBe(true);
 			const rejected = readdirSync(join(root, "bundles"), { withFileTypes: true }).filter(
 				(entry) => entry.isDirectory() && entry.name.startsWith(".update-rejected-"),
@@ -1146,66 +710,12 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		}
 	});
 
-	it("does not publish previous on the first flat-to-managed activation", async () => {
-		if (process.platform === "win32") return;
-		allowNetwork();
-		const root = join(tmpdir(), `pi-xz-update-first-managed-${process.pid}-${Date.now()}`);
-		mkdirSync(root);
-		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
-		writeFileSync(join(root, EXECUTABLE_NAME), "old root binary\n");
-		writeFileSync(
-			join(root, "package.json"),
-			`${JSON.stringify({
-				name: "@earendil-works/pi-coding-agent",
-				version: CURRENT_VERSION,
-				piConfig: { distribution: "xz-dev", releaseTarget: TARGET },
-			})}\n`,
-		);
-		try {
-			const bytes = createReleaseBundle(root);
-			const value = manifest({
-				bundles: {
-					[TARGET]: {
-						file: BUNDLE,
-						bytes: bytes.byteLength,
-						sha256: createHash("sha256").update(bytes).digest("hex"),
-					},
-				},
-			});
-			const { manifestBytes, sums } = discoveryFiles(value);
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (input: string | URL) => {
-					if (String(input) === SUMS_URL) return new Response(sums);
-					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
-					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
-				}),
-			);
-
-			const latest = await getLatestXzRelease(CURRENT_VERSION);
-			await expect(
-				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
-					executablePath: join(root, EXECUTABLE_NAME),
-					writeProgress: () => {},
-				}),
-			).resolves.toBeUndefined();
-
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${NEXT_VERSION}\n`);
-			expect(existsSync(join(root, "previous"))).toBe(false);
-			expect(existsSync(join(root, "bundles", CURRENT_VERSION))).toBe(false);
-			expect(existsSync(join(root, "bundles", NEXT_VERSION))).toBe(true);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
 	it("installs a release-builder bundle and atomically activates its layout", async () => {
 		if (process.platform === "win32") return;
 		allowNetwork();
 		const root = join(tmpdir(), `pi-xz-update-success-${process.pid}-${Date.now()}`);
 		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
-		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		try {
 			const bytes = createReleaseBundle(root);
 			const value = manifest({
@@ -1246,14 +756,56 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 				version: NEXT_VERSION,
 				piConfig: { distribution: "xz-dev", releaseTarget: TARGET },
 			});
-			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${NEXT_VERSION}\n`);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
 			expect(readFileSync(join(root, WRAPPER_NAME), "utf8")).toBe("next wrapper\n");
 			expect(readFileSync(join(destination, EXECUTABLE_NAME), "utf8")).toBe("next binary\n");
 			expect(existsSync(oldBundle)).toBe(true);
 			expect(existsSync(destination)).toBe(true);
 			expect(statSync(join(root, WRAPPER_NAME)).mode & 0o111).not.toBe(0);
 			expect(statSync(join(destination, EXECUTABLE_NAME)).mode & 0o111).not.toBe(0);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("skips copying the root launcher when the new bundle ships an identical one", async () => {
+		if (process.platform === "win32") return;
+		allowNetwork();
+		const root = join(tmpdir(), `pi-xz-update-same-wrapper-${process.pid}-${Date.now()}`);
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
+		// Root launcher already byte-matches the incoming bundle's launcher.
+		writeFileSync(join(root, WRAPPER_NAME), "next wrapper\n");
+		try {
+			const bytes = createReleaseBundle(root);
+			const value = manifest({
+				bundles: {
+					[TARGET]: {
+						file: BUNDLE,
+						bytes: bytes.byteLength,
+						sha256: createHash("sha256").update(bytes).digest("hex"),
+					},
+				},
+			});
+			const { manifestBytes, sums } = discoveryFiles(value);
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL) => {
+					if (String(input) === SUMS_URL) return new Response(sums);
+					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
+				}),
+			);
+
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			await expect(
+				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+					executablePath: join(oldBundle, EXECUTABLE_NAME),
+					writeProgress: () => {},
+				}),
+			).resolves.toBeUndefined();
+
+			expect(readFileSync(join(root, WRAPPER_NAME), "utf8")).toBe("next wrapper\n");
+			expect(existsSync(join(root, "bundles", NEXT_VERSION))).toBe(true);
+			expect(existsSync(oldBundle)).toBe(true);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
