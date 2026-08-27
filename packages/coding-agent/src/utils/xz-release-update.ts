@@ -45,7 +45,6 @@ const BUNDLE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10000;
 const BUNDLE_INACTIVITY_TIMEOUT_MS = 30000;
 const DOWNLOAD_PROGRESS_INTERVAL_MS = 1000;
-const BUNDLE_POINTER_MAX_BYTES = 256;
 const BUNDLE_PACKAGE_MAX_BYTES = 64 * 1024;
 const BUNDLE_WRAPPER_MAX_BYTES = 16 * 1024 * 1024;
 const BUNDLE_FILESYSTEM_HELPER_MAX_BYTES = 16 * 1024 * 1024;
@@ -126,13 +125,6 @@ interface ActivationDestinationSnapshot {
 	bundle: InstalledBundleSnapshot;
 }
 
-interface BundlePointerSnapshot {
-	version: string;
-	contents: Buffer;
-	fileIdentity: string;
-	target: InstalledBundleSnapshot;
-}
-
 interface QuarantinedBundleSnapshot {
 	root: string;
 	rootIdentity: string;
@@ -166,6 +158,22 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 		helper,
 		requireFilesystemHelper: process.platform === "win32",
 	});
+	// The root launcher is version-embedded. Identify which bundle the user
+	// actually launches by byte-comparing the root launcher with each bundle's
+	// bundled launcher, and protect that version from cleanup.
+	let launcherVersion = executableVersion;
+	const rootWrapperPath = join(installRoot, BUNDLE_WRAPPER_NAME);
+	if (existsSync(rootWrapperPath)) {
+		const rootWrapper = readFileSync(rootWrapperPath);
+		for (const entry of readdirSync(bundlesRoot, { withFileTypes: true })) {
+			if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+			const wrapperPath = join(bundlesRoot, entry.name, BUNDLE_WRAPPER_NAME);
+			if (existsSync(wrapperPath) && rootWrapper.equals(readFileSync(wrapperPath))) {
+				launcherVersion = entry.name;
+				break;
+			}
+		}
+	}
 	const candidates = readdirSync(bundlesRoot, { withFileTypes: true })
 		.filter(
 			(entry) =>
@@ -191,9 +199,7 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 			) {
 				fail("Pi managed installation changed before cleanup");
 			}
-			const currentPointer = readBundlePointer(installRoot, bundlesRoot, "current", target, true, helper);
-			const previousPointer = readBundlePointer(installRoot, bundlesRoot, "previous", target, false, helper);
-			const protectedVersions = new Set([executableVersion, currentPointer?.version, previousPointer?.version]);
+			const protectedVersions = new Set([executableVersion, launcherVersion]);
 			if (protectedVersions.has(candidate)) return undefined;
 			const bundleDirectory = join(bundlesRoot, candidate);
 			let before: InstalledBundleSnapshot;
@@ -205,14 +211,6 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 			const quarantine = mkdtempSync(join(bundlesRoot, ".cleanup-"));
 			const detachedBundle = join(quarantine, candidate);
 			try {
-				const currentAtQuarantine = readBundlePointer(installRoot, bundlesRoot, "current", target, true, helper);
-				const previousAtQuarantine = readBundlePointer(installRoot, bundlesRoot, "previous", target, false, helper);
-				if (
-					!sameBundlePointerSnapshot(currentPointer, currentAtQuarantine) ||
-					!sameBundlePointerSnapshot(previousPointer, previousAtQuarantine)
-				) {
-					fail("Release bundle pointers changed before quarantine");
-				}
 				const installRootAtQuarantine = directorySnapshot(installRoot, "Pi managed install root changed", helper);
 				const bundlesRootAtQuarantine = directorySnapshot(bundlesRoot, "Pi managed bundles root changed", helper);
 				const executingAtQuarantine = validateInstalledBundle(executableDirectory, executableVersion, target, {
@@ -706,50 +704,6 @@ function validateActivationDestination(
 	return { bundle: snapshot };
 }
 
-function readBundlePointer(
-	installRoot: string,
-	bundlesRoot: string,
-	name: "current" | "previous",
-	target: string,
-	required = name === "current",
-	helper?: WindowsFilesystemSnapshotHelper,
-): BundlePointerSnapshot | undefined {
-	const path = join(installRoot, name);
-	if (!existsSync(path)) {
-		if (!required) return undefined;
-		return fail(`Invalid ${name} bundle pointer`);
-	}
-	try {
-		const pointer = regularFileSnapshot(
-			path,
-			BUNDLE_POINTER_MAX_BYTES,
-			true,
-			`Invalid ${name} bundle pointer`,
-			helper,
-		);
-		if (!pointer.contents) return fail(`Invalid ${name} bundle pointer`);
-		const version = pointer.contents.toString("utf8").trim();
-		parseDistributionVersion(version);
-		const targetSnapshot = validateInstalledBundle(join(bundlesRoot, version), version, target, { helper });
-		return { version, contents: pointer.contents, fileIdentity: pointer.identity, target: targetSnapshot };
-	} catch {
-		return fail(`Invalid ${name} bundle pointer`);
-	}
-}
-
-function sameBundlePointerSnapshot(
-	left: BundlePointerSnapshot | undefined,
-	right: BundlePointerSnapshot | undefined,
-): boolean {
-	if (!left || !right) return left === right;
-	return (
-		left.version === right.version &&
-		left.contents.equals(right.contents) &&
-		left.fileIdentity === right.fileIdentity &&
-		sameInstalledBundleSnapshot(left.target, right.target)
-	);
-}
-
 function isCompleteInstalledBundle(
 	bundleDirectory: string,
 	version: string,
@@ -1214,8 +1168,6 @@ export async function runXzSelfUpdate(
 	const destination = join(bundlesRoot, release.version);
 	const wrapperName = BUNDLE_WRAPPER_NAME;
 	const executableName = BUNDLE_EXECUTABLE_NAME;
-	const currentPath = join(installRoot, "current");
-	const previousPath = join(installRoot, "previous");
 	const helper =
 		process.platform === "win32"
 			? loadWindowsFilesystemSnapshotHelper({
@@ -1313,12 +1265,6 @@ export async function runXzSelfUpdate(
 			if (!sameInstalledBundleSnapshot(executingSnapshot, executingAtActivation)) {
 				fail("Pi executing bundle changed before activation");
 			}
-			const activePointer = readBundlePointer(installRoot, bundlesRoot, "current", target, managedExecution, helper);
-			const rollbackPointer = readBundlePointer(installRoot, bundlesRoot, "previous", target, false, helper);
-			if (!activePointer && rollbackPointer) fail("Invalid previous bundle pointer");
-			const activeVersion = activePointer?.version;
-			const rollbackVersion = rollbackPointer?.version;
-
 			const stagingAtInstall = validateInstalledBundle(staging, release.version, target, {
 				helper,
 				requireFilesystemHelperFile: process.platform === "win32",
@@ -1326,11 +1272,7 @@ export async function runXzSelfUpdate(
 			if (!sameInstalledBundleSnapshot(stagingSnapshot, stagingAtInstall)) {
 				fail("Release bundle changed before installation");
 			}
-			const protectedVersions = new Set([
-				activeVersion,
-				rollbackVersion,
-				managedExecution ? basename(executableDirectory) : undefined,
-			]);
+			const protectedVersions = new Set([managedExecution ? basename(executableDirectory) : undefined]);
 			let existingDestination: ActivationDestinationSnapshot | undefined;
 			if (existsSync(destination)) {
 				if (protectedVersions.has(release.version)) {
@@ -1376,126 +1318,64 @@ export async function runXzSelfUpdate(
 			if (!sameInstalledBundleSnapshot(executingSnapshot, executingBeforeWrapper)) {
 				fail("Pi executing bundle changed before wrapper activation");
 			}
-			if (process.platform !== "win32") {
+			// The root launcher is version-embedded: each update ships its own
+			// launcher and the root copy is replaced only when its bytes differ.
+			// No current/previous pointer files exist; the launcher itself is the
+			// activation record.
+			const rootWrapperPath = join(installRoot, wrapperName);
+			const nextWrapperSource = join(destination, wrapperName);
+			chmodSync(join(destination, executableName), 0o755);
+			chmodSync(nextWrapperSource, 0o755);
+			const rootWrapperExists = existsSync(rootWrapperPath);
+			const wrappersIdentical =
+				rootWrapperExists && readFileSync(rootWrapperPath).equals(readFileSync(nextWrapperSource));
+			if (wrappersIdentical) {
+				// Launcher already references this exact build; nothing to copy.
+			} else if (process.platform !== "win32") {
 				const nextWrapper = join(installRoot, `.${wrapperName}.next-${process.pid}`);
-				copyFileSync(join(destination, wrapperName), nextWrapper);
+				copyFileSync(nextWrapperSource, nextWrapper);
 				chmodSync(nextWrapper, 0o755);
-				chmodSync(join(destination, executableName), 0o755);
-				renameSync(nextWrapper, join(installRoot, wrapperName));
-			}
-
-			const pointerTransaction = mkdtempSync(join(installRoot, ".update-pointers-"));
-			let retainPointerTransaction = false;
-			try {
-				const nextCurrent = join(pointerTransaction, "current.next");
-				writeFileSync(nextCurrent, `${release.version}\n`, { flag: "wx" });
-				const publishPrevious = activeVersion !== undefined && activeVersion !== release.version;
-				const nextPrevious = join(pointerTransaction, "previous.next");
-				const originalPrevious = join(pointerTransaction, "previous.original");
-				const failedPrevious = join(pointerTransaction, "previous.failed");
-				let originalPreviousMoved = false;
-				let nextPreviousPublished = false;
-				const restorePrevious = (activationError: unknown): never => {
+				renameSync(nextWrapper, rootWrapperPath);
+			} else {
+				// Windows cannot overwrite a running executable, but renaming it is
+				// allowed. Move the old root launcher back into its version bundle
+				// directory (dropping any stale copy there first) so the old version
+				// stays runnable for manual rollback, then rename the new launcher
+				// in. If the old launcher is locked and cannot be moved, keep it: the
+				// previous version remains complete and usable.
+				if (rootWrapperExists) {
+					const executingBundleWrapper = join(executableDirectory, wrapperName);
+					if (existsSync(executingBundleWrapper)) {
+						try {
+							rmSync(executingBundleWrapper, { force: true });
+						} catch {
+							// Stale copy locked; the root rename below will surface the
+							// conflict as a kept old launcher instead.
+						}
+					}
+					let oldWrapperMoved = false;
 					try {
-						if (nextPreviousPublished) {
-							rmSync(previousPath, { force: true });
-							nextPreviousPublished = false;
-						}
-						if (originalPreviousMoved) {
-							renameSync(originalPrevious, previousPath);
-							originalPreviousMoved = false;
-						}
-					} catch (restoreError: unknown) {
-						retainPointerTransaction = true;
-						throw new AggregateError(
-							[activationError, restoreError],
-							`Failed to restore Pi activation pointers; recovery data retained at ${pointerTransaction}`,
+						renameSync(rootWrapperPath, executingBundleWrapper);
+						oldWrapperMoved = true;
+					} catch {
+						// Locked (still running). Leave the old launcher in place; the
+						// freshly installed bundle is complete and activates on a later
+						// update or manual launcher copy.
+						options.writeProgress?.(
+							`Kept the old launcher (${executingVersion}); it is still in use. Run pi update again after closing other pi sessions.`,
 						);
 					}
-					throw activationError;
-				};
-
-				if (publishPrevious) {
-					writeFileSync(nextPrevious, `${activeVersion}\n`, { flag: "wx" });
-					writeFileSync(failedPrevious, `${activeVersion}\n`, { flag: "wx" });
-				}
-				if (managedExecution || process.platform === "win32") {
-					const executingAtPublication = validateInstalledBundle(executableDirectory, executingVersion, target, {
-						detached: !managedExecution,
-						helper,
-						requireFilesystemHelper: process.platform === "win32",
-					});
-					if (!sameInstalledBundleSnapshot(executingSnapshot, executingAtPublication)) {
-						fail("Pi executing bundle changed before pointer publication");
+					if (oldWrapperMoved) {
+						const nextWrapper = join(installRoot, `.${wrapperName}.next-${process.pid}`);
+						copyFileSync(nextWrapperSource, nextWrapper);
+						try {
+							renameSync(nextWrapper, rootWrapperPath);
+						} catch (error: unknown) {
+							// Restore the old launcher so the installation stays bootable.
+							renameSync(executingBundleWrapper, rootWrapperPath);
+							throw error;
+						}
 					}
-				}
-				const currentAtPublication = readBundlePointer(
-					installRoot,
-					bundlesRoot,
-					"current",
-					target,
-					managedExecution,
-					helper,
-				);
-				const previousAtPublication = readBundlePointer(
-					installRoot,
-					bundlesRoot,
-					"previous",
-					target,
-					false,
-					helper,
-				);
-				if (
-					!sameBundlePointerSnapshot(activePointer, currentAtPublication) ||
-					!sameBundlePointerSnapshot(rollbackPointer, previousAtPublication)
-				) {
-					fail("Pi activation pointers changed before publication");
-				}
-				const installRootAtPublication = directorySnapshot(
-					installRoot,
-					"Pi self-update install root changed before pointer publication",
-					helper,
-				);
-				const bundlesRootAtPublication = directorySnapshot(
-					bundlesRoot,
-					"Pi self-update bundles root changed before pointer publication",
-					helper,
-				);
-				if (
-					!samePathSnapshot(installRootSnapshot, installRootAtPublication) ||
-					!samePathSnapshot(bundlesRootSnapshot, bundlesRootAtPublication)
-				) {
-					fail("Pi self-update install layout changed before pointer publication");
-				}
-				const destinationAtPublication = validateInstalledBundle(destination, release.version, target, {
-					helper,
-					requireFilesystemHelperFile: process.platform === "win32",
-				});
-				if (!sameInstalledBundleSnapshot(installedDestination.bundle, destinationAtPublication)) {
-					fail("Release bundle changed before activation pointer publication");
-				}
-				if (publishPrevious) {
-					if (rollbackVersion !== undefined) {
-						renameSync(previousPath, originalPrevious);
-						originalPreviousMoved = true;
-					}
-					try {
-						renameSync(nextPrevious, previousPath);
-						nextPreviousPublished = true;
-					} catch (error: unknown) {
-						restorePrevious(error);
-					}
-				}
-				try {
-					renameSync(nextCurrent, currentPath);
-				} catch (error: unknown) {
-					restorePrevious(error);
-				}
-			} finally {
-				if (!retainPointerTransaction) {
-					try {
-						rmSync(pointerTransaction, { recursive: true, force: true });
-					} catch {}
 				}
 			}
 		});
