@@ -40,7 +40,6 @@ jobs:
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
             +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
-            +refs/heads/patch/tui-synchronized-cursor-fleet:refs/remotes/origin/patch/tui-synchronized-cursor-fleet \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
             +refs/heads/tmp/patch/esc-manual-retry-compat:refs/remotes/origin/tmp/patch/esc-manual-retry-compat \
@@ -63,7 +62,6 @@ jobs:
             origin/patch/startup-benchmark-exit \
             origin/patch/native-wrapper-release \
             origin/patch/update-clean \
-            origin/patch/tui-synchronized-cursor-fleet \
             origin/patch/esc-abort \
             origin/patch/manual-retry \
             origin/tmp/patch/esc-manual-retry-compat \
@@ -162,9 +160,6 @@ jobs:
             exit 1
           fi
           git commit -m "merge patch/update-clean branch"
-
-          git merge --squash origin/patch/tui-synchronized-cursor-fleet
-          git commit -m "merge patch/tui-synchronized-cursor-fleet branch"
 
           git merge --squash origin/patch/esc-abort
           git commit -m "merge patch/esc-abort branch"
