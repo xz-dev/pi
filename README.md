@@ -43,14 +43,12 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
   - Use case: Recover control when Esc is pressed during a hook, provider setup, stream, or listener that does not settle.
   - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
-- Keep content and hardware-cursor state in one synchronized terminal release so tmux cannot redraw centered overlays from an intermediate cursor position.
-  - Use case: Prevent tmux from redrawing overlays from an intermediate cursor position.
-  - Patch branch: [`patch/tui-synchronized-cursor-fleet`](https://github.com/xz-dev/pi/tree/patch/tui-synchronized-cursor-fleet)
 
 The integrated Esc and manual-retry patches both extend the Agent failure lifecycle. Their independent branches remain directly reviewable; [`tmp/patch/esc-manual-retry-compat`](https://github.com/xz-dev/pi/tree/tmp/patch/esc-manual-retry-compat) supplies only the downstream combined `handleRunFailure()` resolution and is merged immediately after them.
 
 ### Temporarily disabled
 
+- `patch/tui-synchronized-cursor-fleet` is temporarily retired from generated `main`. Its synchronized-output implementation can emit excessive terminal data and now conflicts with upstream's bounded main-screen writer. The source branch remains retained for a corrected design and independent validation; do not mask the product conflict with a CI resolver.
 - Provider-transparent Responses remote compaction and its dependent pre-provider compaction patch are temporarily retired from generated `main`. Classic compaction remains the default path; both source branches remain retained for re-evaluation. A third-party extension such as [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions) can provide Codex-native remote compaction without adding provider-specific behavior to core.
 
 ### Maintenance

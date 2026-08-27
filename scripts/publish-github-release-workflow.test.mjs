@@ -34,12 +34,11 @@ test("upstream sync fetches and merges the persistent native wrapper patch", () 
 	assert.match(syncWorkflowText, /git commit -m "merge patch\/native-wrapper-release branch"/);
 });
 
-test("upstream sync fetches every merged patch explicitly", () => {
-  assert.match(
-    syncWorkflowText,
-    /\+refs\/heads\/patch\/tui-synchronized-cursor-fleet:refs\/remotes\/origin\/patch\/tui-synchronized-cursor-fleet/,
-  );
-  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/tui-synchronized-cursor-fleet/);
+test("upstream sync keeps the unsafe synchronized-cursor patch retired", () => {
+  assert.doesNotMatch(syncWorkflowText, /patch\/tui-synchronized-cursor-fleet/);
+  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`patch\/tui-synchronized-cursor-fleet` is temporarily retired/);
+  assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /can emit excessive terminal data/);
+  assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /do not fetch, merge, or add a CI conflict resolver/);
 });
 
 test("upstream sync rejects patch branches that touch upstream changelogs", () => {
