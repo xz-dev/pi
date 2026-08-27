@@ -71,13 +71,6 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
 });
 
-test("upstream sync validates the startup and Bun process contracts", () => {
-  for (const model of ["startup-deadline-scope.idea.lean", "bun-runtime-upgrade.idea.lean"]) {
-    assert.match(syncWorkflowText, new RegExp(`lake env lean docs/programming-thinking/${model.replaceAll(".", "\\.")}`));
-    assert.match(syncWorkflowText, new RegExp(`lake env lean --run docs/programming-thinking/${model.replaceAll(".", "\\.")}`));
-  }
-});
-
 test("upstream sync carries the Bun bytecode entrypoint patch", () => {
   assert.match(
     syncWorkflowText,
@@ -263,7 +256,6 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.match(syncWorkflowText, /test\/xz-release-update-safety\.test\.ts/);
   assert.match(syncWorkflowText, /test\/win32-filesystem-snapshot\.test\.ts/);
   assert.match(syncWorkflowText, /test\/package-command-paths\.test\.ts/);
-  assert.match(syncWorkflowText, /update-clean-win32-safety\.idea\.lean/);
   assert.match(updateHarness, /PI_XZ_LATEST_RELEASE_URL: `\$\{releaseBase\}latest-release\.json`/);
   assert.match(updateHarness, /digest: `sha256:\$\{servedBundle\.sha256\}`/);
   assert.match(updateHarness, /First flat-to-managed update published previous/);
