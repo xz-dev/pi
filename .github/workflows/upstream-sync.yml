@@ -115,7 +115,13 @@ jobs:
           git merge --squash origin/patch/model-refresh-session-rebind
           git commit -m "merge patch/model-refresh-session-rebind branch"
 
-          git merge --squash origin/patch/model-catalog-extension-refresh
+          if ! git merge --squash origin/patch/model-catalog-extension-refresh; then
+            python3 scripts/resolve-model-catalog-squash-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying model-catalog extension refresh'
+            exit 1
+          fi
           git commit -m "merge patch/model-catalog-extension-refresh branch"
 
           git merge --squash origin/patch/bun-bytecode-entrypoint
