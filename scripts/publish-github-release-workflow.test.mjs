@@ -59,6 +59,13 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
     /\+refs\/heads\/patch\/model-catalog-extension-refresh:refs\/remotes\/origin\/patch\/model-catalog-extension-refresh/,
   );
   assert.match(syncWorkflowText, /git merge --squash origin\/patch\/model-catalog-extension-refresh/);
+  assert.match(syncWorkflowText, /python3 scripts\/resolve-model-catalog-squash-conflicts\.py/);
+  assert.match(syncWorkflowText, /Unresolved conflicts remain after applying model-catalog extension refresh/);
+  const resolver = readFileSync(join(ROOT, "scripts", "resolve-model-catalog-squash-conflicts.py"), "utf8");
+  assert.match(resolver, /packages\/coding-agent\/README\.md/);
+  assert.match(resolver, /unexpected model-catalog README conflict shape/);
+  assert.match(resolver, /Press Ctrl\+S in the model picker to save the highlighted model as the startup default/);
+  assert.match(resolver, /pi --list-models --refresh/);
   assert.match(syncWorkflowText, /test\/list-models-refresh\.test\.ts/);
   assert.match(syncWorkflowText, /test\/args\.test\.ts/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi --list-models`/);
