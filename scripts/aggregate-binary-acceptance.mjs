@@ -46,6 +46,27 @@ for (const id of BUN_TARGET_IDS) {
 	if (JSON.stringify(record.limits) !== JSON.stringify(SMOKE_LIMITS)) throw new Error(`${id} self-reported limits do not equal authoritative limits`);
 	const expectedTui = descriptor.os === "windows" ? { harness: "Bun.Terminal ConPTY", input: "startup-benchmark", exitSent: false, benchmarkCompleted: true } : { harness: "Bun.Terminal PTY", input: "ctrl-c,ctrl-d", exitSent: true, benchmarkCompleted: null };
 	if (!Number.isSafeInteger(record.tui?.outputBytes) || record.tui.outputBytes <= 0 || record.tui.harness !== expectedTui.harness || record.tui.input !== expectedTui.input || record.tui.childExitCode !== 0 || !record.tui.terminalClosed || !Number.isSafeInteger(record.tui.terminalExitCode) || !record.tui.observedOutput || record.tui.benchmarkCompleted !== expectedTui.benchmarkCompleted || record.tui.exitSent !== expectedTui.exitSent || !record.tui.cleanExit || !record.clipboard?.loadedAndCalled) throw new Error(`${id} missing bounded TUI or clipboard acceptance`);
+	if (descriptor.os === "windows") {
+		if (
+			record.filesystemSnapshot?.apiVersion !== 1 ||
+			record.filesystemSnapshot?.arch !== descriptor.arch ||
+			record.filesystemSnapshot?.reparseRejected !== true ||
+			record.filesystemSnapshot?.ancestorReparseCanonicalized !== true ||
+			record.filesystemSnapshot?.extendedPathValidated !== true ||
+			record.filesystemSnapshot?.longPathValidated !== true ||
+			record.filesystemSnapshot?.uncValidated !== true ||
+			record.filesystemSnapshot?.concurrentSnapshotsCoherent !== true ||
+			record.filesystemSnapshot?.loader?.missingRejected !== true ||
+			record.filesystemSnapshot?.loader?.corruptRejectedWithoutFallback !== true ||
+			record.filesystemSnapshot?.loader?.oppositeArchitectureRejected !== true ||
+			record.filesystemSnapshot?.loader?.apiMismatchRejected !== true ||
+			record.filesystemSnapshot?.loader?.malformedNativeResultsRejected !== true ||
+			record.filesystemSnapshot?.loader?.malformedExportsRejected !== true ||
+			record.filesystemSnapshot?.loader?.malformedResultsRejected !== true
+		) throw new Error(`${id} missing Win32 filesystem snapshot acceptance`);
+	} else if (record.filesystemSnapshot !== null) {
+		throw new Error(`${id} reported unexpected Win32 filesystem snapshot evidence`);
+	}
 	if (record.thirdPartyNotices?.file !== "THIRD_PARTY_NOTICES.md" || !/^[0-9a-f]{64}$/.test(record.thirdPartyNotices?.sha256 ?? "") || !Number.isSafeInteger(record.thirdPartyNotices?.bytes) || record.thirdPartyNotices.bytes <= 0) throw new Error(`${id} missing third-party license closure evidence`);
 	const notice = archiveNotice(join(resolve(manifestPath, ".."), bundle.file));
 	if (notice.sha256 !== record.thirdPartyNotices.sha256 || notice.bytes !== record.thirdPartyNotices.bytes) throw new Error(`${id} archived third-party notices do not match acceptance evidence`);

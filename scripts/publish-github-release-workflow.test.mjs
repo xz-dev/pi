@@ -254,8 +254,28 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.doesNotMatch(workflowText, /AppActivate|SendKeys|Docker allocated TTY|fabricated/);
   assert.match(workflowText, /e2e-binary-self-update\.mjs/);
   assert.match(syncWorkflowText, /test\/xz-release-update\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/xz-release-update-safety\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/win32-filesystem-snapshot\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/package-command-paths\.test\.ts/);
+  assert.match(syncWorkflowText, /update-clean-win32-safety\.idea\.lean/);
   assert.match(updateHarness, /PI_XZ_LATEST_RELEASE_URL: `\$\{releaseBase\}latest-release\.json`/);
-  assert.match(updateHarness, /digest: `sha256:\$\{bundle\.sha256\}`/);
+  assert.match(updateHarness, /digest: `sha256:\$\{servedBundle\.sha256\}`/);
+  assert.match(updateHarness, /First flat-to-managed update published previous/);
+  assert.match(updateHarness, /Managed update did not publish its validated previous bundle/);
+  for (const failure of [
+    "missing-helper",
+    "corrupt-helper",
+    "opposite-architecture-helper",
+    "malformed-result-helper",
+    "api-mismatch-helper",
+  ]) assert.match(updateHarness, new RegExp(`"${failure}",`));
+  assert.match(workflowText, /PI_WIN32_SNAPSHOT_UNC_ROOT/);
+  assert.match(workflowText, /PI_WIN32_SNAPSHOT_OPPOSITE_HELPER/);
+  assert.match(workflowText, /PI_WIN32_SNAPSHOT_API_MISMATCH_HELPER/);
+  assert.match(workflowText, /PI_WIN32_SNAPSHOT_MALFORMED_RESULT_HELPER/);
+  assert.match(workflowText, /malformed-result\.node" 1 1/);
+  assert.match(updateHarness, /escaped the isolated helper probe into a destination bundle/);
+  assert.match(updateHarness, /update retry retained no quarantined rejected bundle/);
   assert.match(updateHarness, /assets: \[/);
   assert.match(updateHarness, /rmSync\(work, \{ recursive: true, force: true, maxRetries: 10, retryDelay: 100 \}\)/);
   assert.deepEqual(workflow.jobs["publish-release"].needs, "update-release-candidate");
@@ -331,6 +351,19 @@ test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.4.
   assert.match(builder, /trap cleanup EXIT/);
   assert.match(builder, /tar -xzf \/inputs\/musl-dev\.apk/);
   const packager = readFileSync(join(ROOT, "scripts", "build-binaries.sh"), "utf8");
+  assert.match(packager, /build-win32-filesystem-snapshot\.sh/);
+  assert.match(packager, /filesystemHelperDir/);
+  assert.match(packager, /filesystemHelperFile/);
+  const sourceArchive = readFileSync(join(ROOT, "scripts", "create-source-archive.sh"), "utf8");
+  for (const required of [
+    "scripts/build-win32-filesystem-snapshot.sh",
+    "scripts/test-win32-filesystem-snapshot.mjs",
+    "scripts/test-win32-filesystem-snapshot-loader.mjs",
+    "native/pi-filesystem-snapshot.c",
+  ]) assert.ok(sourceArchive.includes(`\"${required}\"`), `source archive missing ${required}`);
+  const releaseContract = readFileSync(join(ROOT, "scripts", "lib", "github-release.mjs"), "utf8");
+  assert.match(releaseContract, /info\.filesystemHelperDir/);
+  assert.match(releaseContract, /info\.filesystemHelperFile/);
   assert.match(packager, /--hydrate-target-deps/);
   assert.match(packager, /bun-targets\.mjs --build-flags/);
   assert.match(packager, /command -v cygpath/);
