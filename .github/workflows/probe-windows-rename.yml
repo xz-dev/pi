@@ -1,0 +1,59 @@
+name: "Probe Windows launcher rename semantics"
+
+# Verifies the Windows-specific assumptions behind the version-embedded
+# launcher activation and cleanup on a real Windows runner:
+#   1. A running exe can be renamed (moved into its version bundle directory).
+#   2. Deleting a running exe fails, so cleanup of locked files must be skipped.
+#   3. A new exe can be renamed into the vacated launcher path while the old
+#      process is still running.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-windows-rename:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Probe rename, delete, and replace-while-running
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = Join-Path $env:RUNNER_TEMP ("pi-rename-probe-" + [guid]::NewGuid().ToString("N"))
+          $bundles = Join-Path $root "bundles\v1"
+          New-Item -ItemType Directory -Path $bundles -Force | Out-Null
+          $launcher = Join-Path $root "pi.exe"
+          Copy-Item (Join-Path $env:SystemRoot "System32\cmd.exe") $launcher
+
+          # Start the launcher copy; it runs (waits) while we mutate it.
+          $proc = Start-Process -FilePath $launcher -ArgumentList "/c","pause" -PassThru -WindowStyle Hidden
+          try {
+            if ($proc.HasExited) { throw "probe process exited immediately" }
+
+            # 1. Renaming a running exe must succeed.
+            $moved = Join-Path $bundles "pi.exe"
+            Move-Item -LiteralPath $launcher -Destination $moved
+            if (Test-Path -LiteralPath $launcher) { throw "rename: old launcher still present" }
+            if (-not (Test-Path -LiteralPath $moved)) { throw "rename: moved launcher missing" }
+
+            # 2. Deleting the running (renamed) exe must fail -> cleanup skips it.
+            $deleteSucceeded = $true
+            try { Remove-Item -LiteralPath $moved -Force -ErrorAction Stop } catch { $deleteSucceeded = $false }
+            if ($deleteSucceeded) { throw "delete: running exe was deleted; skip-on-locked assumption invalid" }
+
+            # 3. A new launcher can take the vacated path while the old runs.
+            $next = Join-Path $root "pi-next.exe"
+            Copy-Item (Join-Path $env:SystemRoot "System32\where.exe") $next
+            Move-Item -LiteralPath $next -Destination $launcher
+            if (-not (Test-Path -LiteralPath $launcher)) { throw "replace: new launcher missing" }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Milliseconds 500
+            # After exit, the old launcher inside the bundle must be deletable.
+            try { Remove-Item -LiteralPath $moved -Force -ErrorAction Stop } catch { throw "post-exit delete failed" }
+          }
+          Write-Output "probe: all Windows rename semantics confirmed"

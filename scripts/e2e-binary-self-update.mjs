@@ -48,9 +48,7 @@ function run(command, args, env = process.env) {
 			} else {
 				child.kill("SIGKILL");
 			}
-			const currentPath = join(install, "current");
-			const current = existsSync(currentPath) ? readFileSync(currentPath, "utf8").trim() : "missing";
-			reject(new Error(`${command} ${args.join(" ")} timed out (current=${current}): ${stdout}${stderr}`));
+			reject(new Error(`${command} ${args.join(" ")} timed out: ${stdout}${stderr}`));
 		}, 120_000);
 		child.stdout.on("data", (chunk) => { stdout += chunk; });
 		child.stderr.on("data", (chunk) => { stderr += chunk; });
@@ -254,8 +252,8 @@ try {
 				(error) => error,
 			);
 			if (!(error instanceof Error)) throw new Error(`${label} unexpectedly activated`);
-			if (existsSync(join(install, "current")) || existsSync(join(install, "previous"))) {
-				throw new Error(`${label} published an activation pointer`);
+			if (existsSync(join(install, target.wrapper))) {
+				throw new Error(`${label} published a root launcher`);
 			}
 			const rejectedDestination = join(install, "bundles", expectedVersion);
 			if (existsSync(rejectedDestination)) {
@@ -281,10 +279,9 @@ try {
 		PI_XZ_RELEASE_BASE_URL: releaseBase,
 	});
 
-	const current = readFileSync(join(install, "current"), "utf8").trim();
-	if (current !== expectedVersion) throw new Error(`current points to ${current}, expected ${expectedVersion}`);
-	if (existsSync(join(install, "previous"))) throw new Error("First flat-to-managed update published previous");
-	if (existsSync(join(install, "bundles", oldVersion))) throw new Error("First update created an unvalidated legacy bundle");
+	// The launcher is version-embedded; the activated layout is bundles/<version>.
+	// No current/previous pointers exist, and the flat layout is not migrated
+	// into a legacy bundle.
 	const activatedBundle = join(install, "bundles", expectedVersion);
 	if (!existsSync(join(activatedBundle, target.wrapper)) || !existsSync(join(activatedBundle, target.executable))) {
 		throw new Error("Activated bundle is missing wrapper or pi-native");
@@ -316,9 +313,8 @@ try {
 	const managedPreviousPackage = JSON.parse(readFileSync(managedPreviousPackagePath, "utf8"));
 	managedPreviousPackage.version = managedPreviousVersion;
 	writeFileSync(managedPreviousPackagePath, `${JSON.stringify(managedPreviousPackage, null, 2)}\n`);
-	writeFileSync(join(install, "current"), `${managedPreviousVersion}\n`);
-	if ((await run(wrapper, ["--version"], offlineEnv)).trim() !== managedPreviousVersion) {
-		throw new Error("Managed previous bundle did not start through the wrapper");
+	if ((await run(join(managedPreviousBundle, target.wrapper), ["--version"], offlineEnv)).trim() !== managedPreviousVersion) {
+		throw new Error("Managed previous bundle did not start through its own launcher");
 	}
 
 	console.log(`Updating managed bundle: ${targetId} ${managedPreviousVersion} -> ${expectedVersion}`);
@@ -328,11 +324,8 @@ try {
 		PI_XZ_LATEST_RELEASE_URL: `${releaseBase}latest-release.json`,
 		PI_XZ_RELEASE_BASE_URL: releaseBase,
 	});
-	if (readFileSync(join(install, "current"), "utf8").trim() !== expectedVersion) {
-		throw new Error("Managed update did not publish current");
-	}
-	if (readFileSync(join(install, "previous"), "utf8").trim() !== managedPreviousVersion) {
-		throw new Error("Managed update did not publish its validated previous bundle");
+	if (readFileSync(join(install, target.wrapper), "utf8").length === 0) {
+		throw new Error("Managed update did not install a root launcher");
 	}
 	if (target.os === "windows") {
 		rmSync(join(managedPreviousBundle, target.filesystemHelperDir, target.filesystemHelperFile));
@@ -355,12 +348,6 @@ try {
 	if (existsSync(staleBundle)) throw new Error("Stale bundle survived update --clean");
 	if (!existsSync(activatedBundle) || !existsSync(managedPreviousBundle)) {
 		throw new Error("Cleanup removed a protected bundle");
-	}
-	if (readFileSync(join(install, "current"), "utf8").trim() !== expectedVersion) {
-		throw new Error("Cleanup changed the current pointer");
-	}
-	if (readFileSync(join(install, "previous"), "utf8").trim() !== managedPreviousVersion) {
-		throw new Error("Cleanup changed the previous pointer");
 	}
 	console.log(`Reapplying from managed bundle: ${targetId} ${expectedVersion}`);
 	await run(wrapper, ["update", "--self", "--force"], {
