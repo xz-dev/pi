@@ -3262,6 +3262,11 @@ export class InteractiveMode {
 				}
 				break;
 
+			case "session_entry_spliced":
+				this.rebuildChatFromMessages();
+				this.ui.requestRender();
+				break;
+
 			case "session_info_changed":
 				this.updateTerminalTitle();
 				this.footer.invalidate();
