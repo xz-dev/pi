@@ -132,6 +132,12 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		mkdir -p "$target_dir/$native_dir"
 		cp "../tui/$native_dir/$native_file" "$target_dir/$native_dir/"
 	fi
+	if [[ "$target" == windows-* ]]; then
+		filesystem_helper_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" filesystemHelperDir)
+		filesystem_helper_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" filesystemHelperFile)
+		mkdir -p "$target_dir/$filesystem_helper_dir"
+		(cd ../.. && scripts/build-win32-filesystem-snapshot.sh "$target" "$target_dir/$filesystem_helper_dir/$filesystem_helper_file")
+	fi
 	node ../../scripts/generate-third-party-notices.mjs "$target_dir" "$target_dir/THIRD_PARTY_NOTICES.md"
 
 	[[ "$archive" == zip ]]
