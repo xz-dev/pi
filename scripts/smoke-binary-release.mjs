@@ -1,0 +1,147 @@
+#!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpus, platform, release, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { bunTarget, SMOKE_LIMITS } from "./lib/bun-targets.mjs";
+import { cpuFeatures } from "./lib/cpu-features.mjs";
+import { operatingSystemArchitecture } from "./lib/runtime-architecture.mjs";
+
+const [archiveArg, targetId, expectedVersion, recordArg] = process.argv.slice(2);
+if (!archiveArg || !targetId || !expectedVersion || !recordArg) throw new Error("Usage: smoke-binary-release.mjs <archive> <target> <version> <record.json>");
+const target = bunTarget(targetId);
+const archive = resolve(archiveArg);
+const recordPath = resolve(recordArg);
+const work = mkdtempSync(join(tmpdir(), "pi-binary-smoke-"));
+const commands = [];
+const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+function run(name, command, args, options = {}) {
+	const started = performance.now();
+	const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? options.maxMs ?? 10_000, env: options.env });
+	const elapsedMs = Math.round(performance.now() - started);
+	commands.push({ name, command: [command, ...args].join(" "), status: result.status, elapsedMs });
+	if (result.status !== 0) throw new Error(`${name} failed (${result.status ?? result.signal ?? result.error?.message ?? "unknown"}): ${result.stdout ?? ""}${result.stderr ?? ""}`);
+	if (options.maxMs && elapsedMs > options.maxMs) throw new Error(`${name} ${elapsedMs}ms exceeds ${options.maxMs}ms`);
+	return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", elapsedMs };
+}
+function directoryBytes(root) {
+	const script = "const fs=require('node:fs'),p=require('node:path');let n=0;for(const d of fs.readdirSync(process.argv[1],{recursive:true,withFileTypes:true})){if(d.isFile())n+=fs.statSync(p.join(d.parentPath??d.path,d.name)).size}console.log(n)";
+	return Number(run("measure-extracted-size", process.execPath, ["-e", script, root]).stdout.trim());
+}
+try {
+	const archiveBytes = statSync(archive).size;
+	if (archiveBytes > SMOKE_LIMITS.archiveBytes) throw new Error(`archive size ${archiveBytes} exceeds ${SMOKE_LIMITS.archiveBytes}`);
+	if (target.os === "windows") run("extract", "powershell", ["-NoProfile", "-Command", "Expand-Archive -LiteralPath $env:PI_XZ_ARCHIVE -DestinationPath $env:PI_XZ_EXTRACT_DIR -Force"], { env: { ...process.env, PI_XZ_ARCHIVE: archive, PI_XZ_EXTRACT_DIR: work }, timeout: 60_000 });
+	else run("extract", "unzip", ["-q", archive, "-d", work]);
+	const root = work;
+	const extractedBytes = directoryBytes(root);
+	if (extractedBytes > SMOKE_LIMITS.extractedBytes) throw new Error(`extracted size ${extractedBytes} exceeds ${SMOKE_LIMITS.extractedBytes}`);
+	const executable = join(root, target.wrapper);
+	const nativeExecutable = join(root, target.executable);
+	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color" };
+	const tuiEnv = target.os === "windows" ? { ...env, PI_STARTUP_BENCHMARK: "1" } : env;
+	const coldVersion = run("cold-version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.coldVersionMs });
+	if (coldVersion.stdout.trim() !== expectedVersion) throw new Error(`cold version mismatch: ${coldVersion.stdout.trim()}`);
+	const bytecode = run("bytecode", nativeExecutable, ["--version"], { env: { ...env, BUN_JSC_verboseDiskCache: "1" }, maxMs: SMOKE_LIMITS.versionMs });
+	if (bytecode.stdout.trim() !== expectedVersion) throw new Error(`bytecode version mismatch: ${bytecode.stdout.trim()}`);
+	if (!bytecode.stderr.includes("[Disk Cache] Cache hit for sourceCode")) throw new Error("native executable did not load its entrypoint from embedded bytecode");
+	const version = run("version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.versionMs });
+	if (version.stdout.trim() !== expectedVersion) throw new Error(`version mismatch: ${version.stdout.trim()}`);
+	const help = run("help", executable, ["--help"], { env, maxMs: SMOKE_LIMITS.helpMs });
+	if (!help.stdout.includes("Usage") && !help.stdout.includes("pi")) throw new Error("help output was not recognized");
+	const listModels = run("list-models", executable, ["--list-models"], { env, maxMs: SMOKE_LIMITS.listModelsMs });
+	if (!listModels.stdout.trim()) throw new Error("list-models produced no output");
+	const noticesPath = join(root, "THIRD_PARTY_NOTICES.md");
+	const notices = readFileSync(noticesPath, "utf8");
+	if (!notices.startsWith("# Third-Party Notices") || !notices.includes("License SHA-256:")) throw new Error("third-party notices are missing or invalid");
+	const addon = join(root, "node_modules", "@mariozechner", "clipboard", target.clipboardNativeFile);
+	const clipboard = run("clipboard", "bun", ["-e", "const c=require(process.argv[1]);if(typeof c.hasImage!=='function')process.exit(2);c.hasImage()", addon], { env });
+	let filesystemSnapshot;
+	if (target.os === "windows") {
+		const filesystemHelper = join(root, target.filesystemHelperDir, target.filesystemHelperFile);
+		const hiddenFilesystemHelper = `${filesystemHelper}.lazy-smoke`;
+		renameSync(filesystemHelper, hiddenFilesystemHelper);
+		try {
+			const lazyMissing = run("win32-filesystem-snapshot-lazy-missing", executable, ["--version"], { env });
+			if (lazyMissing.stdout.trim() !== expectedVersion) throw new Error("ordinary startup failed without Win32 helper");
+			writeFileSync(filesystemHelper, "corrupt helper\n");
+			const lazyCorrupt = run("win32-filesystem-snapshot-lazy-corrupt", executable, ["--version"], { env });
+			if (lazyCorrupt.stdout.trim() !== expectedVersion) throw new Error("ordinary startup failed with corrupt Win32 helper");
+		} finally {
+			rmSync(filesystemHelper, { force: true });
+			renameSync(hiddenFilesystemHelper, filesystemHelper);
+		}
+		const oppositeHelper = process.env.PI_WIN32_SNAPSHOT_OPPOSITE_HELPER;
+		const apiMismatchHelper = process.env.PI_WIN32_SNAPSHOT_API_MISMATCH_HELPER;
+		const malformedResultHelper = process.env.PI_WIN32_SNAPSHOT_MALFORMED_RESULT_HELPER;
+		if (!oppositeHelper || !apiMismatchHelper || !malformedResultHelper) {
+			throw new Error(
+				"Windows acceptance requires opposite-architecture, API-mismatch, and malformed-result helpers",
+			);
+		}
+		const snapshot = run(
+			"win32-filesystem-snapshot",
+			process.execPath,
+			[join(process.cwd(), "scripts", "test-win32-filesystem-snapshot.mjs"), filesystemHelper],
+			{ env: { ...env, PI_REQUIRE_WIN32_SNAPSHOT_UNC: "1" }, timeout: 60_000 },
+		);
+		const loader = run(
+			"win32-filesystem-snapshot-loader",
+			process.execPath,
+			[
+				join(process.cwd(), "scripts", "test-win32-filesystem-snapshot-loader.mjs"),
+				filesystemHelper,
+				oppositeHelper,
+				apiMismatchHelper,
+				malformedResultHelper,
+			],
+			{ env, timeout: 30_000 },
+		);
+		filesystemSnapshot = {
+			...JSON.parse(snapshot.stdout.trim().split(/\r?\n/).at(-1)),
+			loader: JSON.parse(loader.stdout.trim().split(/\r?\n/).at(-1)),
+		};
+		if (
+			filesystemSnapshot.apiVersion !== 1 ||
+			filesystemSnapshot.arch !== target.arch ||
+			filesystemSnapshot.reparseRejected !== true ||
+			filesystemSnapshot.ancestorReparseCanonicalized !== true ||
+			filesystemSnapshot.extendedPathValidated !== true ||
+			filesystemSnapshot.longPathValidated !== true ||
+			filesystemSnapshot.uncValidated !== true ||
+			filesystemSnapshot.concurrentSnapshotsCoherent !== true ||
+			filesystemSnapshot.loader?.oppositeArchitectureRejected !== true ||
+			filesystemSnapshot.loader?.apiMismatchRejected !== true ||
+			filesystemSnapshot.loader?.malformedNativeResultsRejected !== true ||
+			filesystemSnapshot.loader?.corruptRejectedWithoutFallback !== true
+		) {
+			throw new Error("Win32 filesystem snapshot helper smoke returned invalid evidence");
+		}
+	}
+	if (target.libc === "musl") run("musl-provenance", "bun", [join(process.cwd(), "scripts", "verify-musl-provenance.mjs"), join(root, "clipboard-native-provenance.json"), addon, targetId], { env });
+	let tui;
+	if (process.env.PI_XZ_TUI_EVIDENCE) {
+		tui = JSON.parse(readFileSync(process.env.PI_XZ_TUI_EVIDENCE, "utf8"));
+		if (tui.harness !== "Bun.Terminal PTY" || !Number.isSafeInteger(tui.elapsedMs) || tui.elapsedMs < 0 || tui.elapsedMs > SMOKE_LIMITS.interactiveMs || !Number.isSafeInteger(tui.outputBytes) || tui.outputBytes <= 0 || tui.input !== "ctrl-c,ctrl-d" || tui.childExitCode !== 0 || !tui.terminalClosed || !Number.isSafeInteger(tui.terminalExitCode) || !tui.observedOutput || tui.benchmarkCompleted !== null || !tui.exitSent || !tui.cleanExit) throw new Error("invalid external TUI evidence");
+		commands.push({ name: "tui-pseudoterminal", command: `external:${process.env.PI_XZ_TUI_EVIDENCE}`, status: tui.childExitCode, elapsedMs: tui.elapsedMs });
+	} else {
+		const result = run(platform() === "win32" ? "tui-pseudoconsole" : "tui-pseudoterminal", "bun", [join(process.cwd(), "scripts", "smoke-bun-tui.mjs"), executable], { env: tuiEnv, timeout: SMOKE_LIMITS.interactiveMs + 3000 });
+		tui = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
+	}
+	const osArchitecture = operatingSystemArchitecture();
+	const record = {
+		schemaVersion: 1, target: targetId, version: expectedVersion,
+		archive: { file: archive.split(/[\\/]/).at(-1), sha256: sha256(archive), bytes: archiveBytes, extractedBytes },
+		runner: { name: process.env.RUNNER_NAME ?? "local", os: process.env.RUNNER_OS ?? platform(), arch: process.env.RUNNER_ARCH ?? osArchitecture, osArchitecture, imageOs: process.env.ImageOS ?? null, imageVersion: process.env.ImageVersion ?? null, cpuModel: cpus()[0]?.model ?? "unknown", cpuFeatures: cpuFeatures(), libc: target.libc ?? null },
+		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, emulated: false },
+		commands, tui, clipboard: { addon: target.clipboardNativeFile, loadedAndCalled: true, elapsedMs: clipboard.elapsedMs },
+		filesystemSnapshot: filesystemSnapshot ?? null,
+		thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: sha256(noticesPath), bytes: statSync(noticesPath).size },
+		timingsMs: { coldVersion: coldVersion.elapsedMs, version: version.elapsedMs, help: help.elapsedMs, listModels: listModels.elapsedMs, interactive: commands.filter(({ name }) => name.startsWith("tui-")).reduce((sum, entry) => sum + entry.elapsedMs, 0) },
+		limits: SMOKE_LIMITS,
+	};
+	if (osArchitecture !== target.arch) throw new Error(`operating-system architecture ${osArchitecture} does not match ${target.arch}`);
+	writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
+	console.log(JSON.stringify(record));
+} finally { rmSync(work, { recursive: true, force: true }); }
