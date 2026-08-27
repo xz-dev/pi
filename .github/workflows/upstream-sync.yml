@@ -365,6 +365,9 @@ jobs:
               test/tools-manager.test.ts \
               test/tools-manager-timeout.test.ts \
               test/xz-release-update.test.ts \
+              test/xz-release-update-safety.test.ts \
+              test/win32-filesystem-snapshot.test.ts \
+              test/package-command-paths.test.ts \
               test/interactive-mode-queue-tui.test.ts \
               test/suite/agent-session-compaction.test.ts \
               test/suite/manual-retry.test.ts \
@@ -398,6 +401,8 @@ jobs:
           lake env lean --run docs/programming-thinking/startup-deadline-scope.idea.lean
           lake env lean docs/programming-thinking/bun-runtime-upgrade.idea.lean
           lake env lean --run docs/programming-thinking/bun-runtime-upgrade.idea.lean
+          lake env lean docs/programming-thinking/update-clean-win32-safety.idea.lean
+          lake env lean --run docs/programming-thinking/update-clean-win32-safety.idea.lean
 
       - name: Smoke test packed npm release
         run: |

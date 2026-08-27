@@ -78,6 +78,10 @@ export function binaryRequiredPaths(platform) {
 		paths.push(info.nativeHelperDir);
 		paths.push(`${info.nativeHelperDir}/${info.nativeHelperFile}`);
 	}
+	if (info.filesystemHelperDir) {
+		if (info.filesystemHelperDir !== info.nativeHelperDir) paths.push(info.filesystemHelperDir);
+		paths.push(`${info.filesystemHelperDir}/${info.filesystemHelperFile}`);
+	}
 	return paths;
 }
 

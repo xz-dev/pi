@@ -57,7 +57,7 @@ const MUSL_IMAGES = Object.freeze({
 	arm64: "docker.io/oven/bun@sha256:b707d91190be7e8d5dee8dd7dbe9e7dfecfd26a632266b69335d7a9082814f8b",
 });
 
-function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runner, clipboardNativePackage, clipboardNativeFile, nativeHelperDir, nativeHelperFile }) {
+function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runner, clipboardNativePackage, clipboardNativeFile, nativeHelperDir, nativeHelperFile, filesystemHelperDir, filesystemHelperFile }) {
 	if (!GITHUB_HOSTED_RUNNERS.includes(runner)) throw new Error(`Unsupported GitHub-hosted runner label: ${runner}`);
 	if (!GITHUB_HOSTED_RUNNERS.includes(buildRunner)) throw new Error(`Unsupported GitHub-hosted build runner label: ${buildRunner}`);
 	const buildPlatform = GITHUB_RUNNER_PLATFORMS[buildRunner];
@@ -79,18 +79,43 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 		executor,
 		...(executor === "pinned-musl-container" ? { containerImage: MUSL_IMAGES[arch] } : {}),
 		requiredCpuFeatures: arch === "x64" ? ["sse4_2"] : [],
-		requiredCommands: ["extract", "measure-extracted-size", "cold-version", "bytecode", "version", "help", "list-models", "clipboard", ...(libc === "musl" ? ["musl-provenance"] : []), os === "windows" ? "tui-pseudoconsole" : "tui-pseudoterminal"],
+		requiredCommands: [
+			"extract",
+			"measure-extracted-size",
+			"cold-version",
+			"bytecode",
+			"version",
+			"help",
+			"list-models",
+			"clipboard",
+			...(libc === "musl" ? ["musl-provenance"] : []),
+			...(os === "windows"
+				? [
+						"win32-filesystem-snapshot-lazy-missing",
+						"win32-filesystem-snapshot-lazy-corrupt",
+						"win32-filesystem-snapshot",
+						"win32-filesystem-snapshot-loader",
+					]
+				: []),
+			os === "windows" ? "tui-pseudoconsole" : "tui-pseudoterminal",
+		],
 		executable: os === "windows" ? "pi-native.exe" : "pi-native",
 		wrapper: os === "windows" ? "pi.exe" : "pi",
 		archive: "zip",
 		clipboardNativePackage,
 		clipboardNativeFile,
 		...(nativeHelperDir ? { nativeHelperDir, nativeHelperFile } : {}),
+		...(filesystemHelperDir ? { filesystemHelperDir, filesystemHelperFile } : {}),
 	});
 }
 
 const darwinHelper = (arch) => ({ nativeHelperDir: `native/darwin/prebuilds/darwin-${arch}`, nativeHelperFile: "darwin-modifiers.node" });
-const windowsHelper = (arch) => ({ nativeHelperDir: `native/win32/prebuilds/win32-${arch}`, nativeHelperFile: "win32-console-mode.node" });
+const windowsHelper = (arch) => ({
+	nativeHelperDir: `native/win32/prebuilds/win32-${arch}`,
+	nativeHelperFile: "win32-console-mode.node",
+	filesystemHelperDir: `native/win32/prebuilds/win32-${arch}`,
+	filesystemHelperFile: "pi-filesystem-snapshot.node",
+});
 export const BUN_TARGETS = Object.freeze([
 	target({ id: "darwin-x64-baseline", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "baseline", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-x64-modern", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "modern", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
