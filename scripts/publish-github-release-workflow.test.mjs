@@ -258,8 +258,9 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.match(syncWorkflowText, /test\/package-command-paths\.test\.ts/);
   assert.match(updateHarness, /PI_XZ_LATEST_RELEASE_URL: `\$\{releaseBase\}latest-release\.json`/);
   assert.match(updateHarness, /digest: `sha256:\$\{servedBundle\.sha256\}`/);
-  assert.match(updateHarness, /First flat-to-managed update published previous/);
-  assert.match(updateHarness, /Managed update did not publish its validated previous bundle/);
+  assert.match(updateHarness, /const activatedBundle = join\(install, "bundles", expectedVersion\)/);
+  assert.match(updateHarness, /Managed previous bundle did not start through its own launcher/);
+  assert.doesNotMatch(updateHarness, /join\(install, "(?:current|previous)"\)/);
   for (const failure of [
     "missing-helper",
     "corrupt-helper",
