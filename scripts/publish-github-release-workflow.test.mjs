@@ -259,7 +259,11 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.match(updateHarness, /PI_XZ_LATEST_RELEASE_URL: `\$\{releaseBase\}latest-release\.json`/);
   assert.match(updateHarness, /digest: `sha256:\$\{servedBundle\.sha256\}`/);
   assert.match(updateHarness, /const activatedBundle = join\(install, "bundles", expectedVersion\)/);
+  assert.match(updateHarness, /createHash\("sha256"\)\.update\(readFileSync\(wrapper\)\)\.digest\("hex"\) !== wrapperSha256/);
+  assert.match(updateHarness, /Identical POSIX root wrapper was replaced/);
+  assert.match(updateHarness, /await run\(join\(managedPreviousBundle, target\.wrapper\), \["update", "--self", "--force"\]/);
   assert.match(updateHarness, /Managed previous bundle did not start through its own launcher/);
+  assert.doesNotMatch(updateHarness, /published a root launcher|POSIX root wrapper was not atomically replaced/);
   assert.doesNotMatch(updateHarness, /join\(install, "(?:current|previous)"\)/);
   for (const failure of [
     "missing-helper",
