@@ -252,8 +252,8 @@ try {
 				(error) => error,
 			);
 			if (!(error instanceof Error)) throw new Error(`${label} unexpectedly activated`);
-			if (existsSync(join(install, target.wrapper))) {
-				throw new Error(`${label} published a root launcher`);
+			if (createHash("sha256").update(readFileSync(wrapper)).digest("hex") !== wrapperSha256) {
+				throw new Error(`${label} replaced the root launcher`);
 			}
 			const rejectedDestination = join(install, "bundles", expectedVersion);
 			if (existsSync(rejectedDestination)) {
@@ -297,8 +297,8 @@ try {
 		const helper = join(activatedBundle, target.filesystemHelperDir, target.filesystemHelperFile);
 		if (!existsSync(helper)) throw new Error("Activated Windows bundle is missing filesystem snapshot helper");
 	}
-	if (target.os !== "windows" && statSync(wrapper).ino === wrapperInode) {
-		throw new Error("POSIX root wrapper was not atomically replaced");
+	if (target.os !== "windows" && statSync(wrapper).ino !== wrapperInode) {
+		throw new Error("Identical POSIX root wrapper was replaced");
 	}
 	rmSync(join(install, target.executable), { force: true });
 	console.log(`Starting activated bundle: ${targetId} ${expectedVersion}`);
@@ -318,7 +318,7 @@ try {
 	}
 
 	console.log(`Updating managed bundle: ${targetId} ${managedPreviousVersion} -> ${expectedVersion}`);
-	await run(wrapper, ["update", "--self", "--force"], {
+	await run(join(managedPreviousBundle, target.wrapper), ["update", "--self", "--force"], {
 		...process.env,
 		PI_CODING_AGENT_DIR: join(work, "agent"),
 		PI_XZ_LATEST_RELEASE_URL: `${releaseBase}latest-release.json`,
