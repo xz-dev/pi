@@ -181,6 +181,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
 | `httpIdleTimeoutMs` | number | `300000` | HTTP header/body idle timeout in milliseconds, also used by providers with explicit stream idle timeouts. Set to `0` to disable. |
 | `websocketConnectTimeoutMs` | number | `15000` | WebSocket connect/open handshake timeout in milliseconds for providers that support WebSocket transports. Set to `0` to disable. |
+| `slowHookThresholdMs` | number | `100` | In interactive TUI, show a transient reminder for each registered extension hook taking longer than this many milliseconds. Timing diagnostics are not persisted. |
 
 ### Terminal & Images
 
