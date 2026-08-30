@@ -441,6 +441,78 @@ describe("agentLoop with AgentMessage", () => {
 		expect(messages[messages.length - 1].role).toBe("assistant");
 	});
 
+	// Regression: #8935
+	it.each([
+		{ name: "aborted", abort: true, expected: "Operation aborted" },
+		{ name: "non-abort", abort: false, expected: "preflight rejected" },
+	] as const)("should report a $name beforeToolCall failure with canonical text", async ({ abort, expected }) => {
+		const controller = new AbortController();
+		let executions = 0;
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "unexpected" }], details: {} };
+			},
+		};
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => {
+				if (abort) controller.abort();
+				throw new Error("preflight rejected");
+			},
+		};
+
+		let streamCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("run echo")],
+			context,
+			config,
+			controller.signal,
+			() => {
+				const call = streamCalls++;
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message =
+						call === 0
+							? createAssistantMessage(
+									[{ type: "toolCall", id: "tool-1", name: "echo", arguments: {} }],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]);
+					mockStream.push({ type: "done", reason: call === 0 ? "toolUse" : "stop", message });
+				});
+				return mockStream;
+			},
+		);
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end",
+		);
+		expect(executions).toBe(0);
+		expect(streamCalls).toBe(abort ? 1 : 2);
+		expect(toolEnd).toMatchObject({
+			isError: true,
+			result: { content: [{ type: "text", text: expected }] },
+		});
+	});
+
 	it("should execute mutated beforeToolCall args without revalidation", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: Array<string | number> = [];
