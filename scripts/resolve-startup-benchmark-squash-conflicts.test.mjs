@@ -97,6 +97,10 @@ function createConflictFixture() {
 	return repo;
 }
 
+function removeFixture(repo) {
+	rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
 function mutationSnapshot(repo) {
 	return {
 		index: git(repo, ["ls-files", "--stage"]).stdout,
@@ -125,7 +129,7 @@ test("preserves managed-tool status and adds benchmark stages with isolated time
 		assert.equal(readFileSync(join(repo, TOOL_TEST), "utf8"), "managed status test\n");
 		assert.equal(readFileSync(join(repo, TIMEOUT_TEST), "utf8"), "bounded probe test\n");
 	} finally {
-		rmSync(repo, { recursive: true, force: true });
+		removeFixture(repo);
 	}
 });
 
@@ -143,7 +147,7 @@ for (const [name, conflicts] of [
 			assert.notEqual(result.status, 0, `${name} input must fail`);
 			assert.deepEqual(mutationSnapshot(repo), before);
 		} finally {
-			rmSync(repo, { recursive: true, force: true });
+			removeFixture(repo);
 		}
 	});
 }
