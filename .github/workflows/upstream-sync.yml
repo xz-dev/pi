@@ -26,8 +26,10 @@ jobs:
 
       - name: Rebuild main from upstream and squash branches
         run: |
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          echo "EXPECTED_MAIN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git remote add upstream https://github.com/earendil-works/pi.git
           git fetch upstream main
           git fetch origin \
@@ -40,38 +42,41 @@ jobs:
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
             +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
+            +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
-            +refs/heads/tmp/patch/esc-manual-retry-compat:refs/remotes/origin/tmp/patch/esc-manual-retry-compat \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice
 
+          patch_refs=(
+            origin/patch/contributor-approval
+            origin/patch/model-startup-refresh-barrier
+            origin/patch/model-refresh-session-rebind
+            origin/patch/model-catalog-extension-refresh
+            origin/patch/bun-bytecode-entrypoint
+            origin/patch/startup-benchmark-exit
+            origin/patch/native-wrapper-release
+            origin/patch/update-clean
+            origin/patch/agent-run-failure-seam
+            origin/patch/esc-abort
+            origin/patch/manual-retry
+            origin/patch/changelog-prerelease
+            origin/patch/skill-overrides
+            origin/patch/retry-non-retryable-patterns
+            origin/patch/slow-hook-tui-only
+            origin/patch/session-tree-splice
+          )
+
           # Upstream-maintained changelogs move every release cycle, so patch
           # branches must never carry packages/*/CHANGELOG.md hunks; downstream
           # notes live in README/MAINTAIN on ci. Fail before merging anything.
           changelog_offenders=()
-          for ref in \
-            origin/patch/contributor-approval \
-            origin/patch/model-startup-refresh-barrier \
-            origin/patch/model-refresh-session-rebind \
-            origin/patch/model-catalog-extension-refresh \
-            origin/patch/bun-bytecode-entrypoint \
-            origin/patch/startup-benchmark-exit \
-            origin/patch/native-wrapper-release \
-            origin/patch/update-clean \
-            origin/patch/esc-abort \
-            origin/patch/manual-retry \
-            origin/tmp/patch/esc-manual-retry-compat \
-            origin/patch/changelog-prerelease \
-            origin/patch/skill-overrides \
-            origin/patch/retry-non-retryable-patterns \
-            origin/patch/slow-hook-tui-only \
-            origin/patch/session-tree-splice; do
+          for ref in "${patch_refs[@]}"; do
             base=$(git merge-base upstream/main "$ref")
-            if git diff --name-only "$base..$ref" | grep -q '^packages/.*/CHANGELOG.md$'; then
+            if [[ -n "$(git diff --name-only "$base..$ref" -- 'packages/*/CHANGELOG.md')" ]]; then
               changelog_offenders+=("$ref")
             fi
           done
@@ -80,11 +85,19 @@ jobs:
             exit 1
           fi
 
-          # Skip the full rebuild when main already integrates every
-          # upstream/main commit. Checked-out main HEAD is the rebuild result,
-          # so merge-base equality with upstream/main head means nothing new.
-          if [[ "$(git merge-base HEAD upstream/main)" == "$(git rev-parse upstream/main)" ]]; then
-            echo 'No new upstream commits since last rebuild; skipping sync'
+          # Rebuild whenever upstream, ci, or any enabled overlay tip changes.
+          # The final empty commit records the exact input vector without changing
+          # the generated source tree.
+          sync_input_refs=(upstream/main origin/ci "${patch_refs[@]}")
+          {
+            echo 'record upstream sync inputs'
+            echo
+            for ref in "${sync_input_refs[@]}"; do
+              printf '%s %s\n' "$ref" "$(git rev-parse "$ref")"
+            done
+          } > /tmp/upstream-sync-inputs-message
+          if [[ "$(git show -s --format=%B HEAD)" == "$(cat /tmp/upstream-sync-inputs-message)" ]]; then
+            echo 'Upstream and all enabled overlay tips already match main; skipping rebuild'
             exit 0
           fi
 
@@ -169,49 +182,68 @@ jobs:
           fi
           git commit -m "merge patch/update-clean branch"
 
-          git merge --squash origin/patch/esc-abort
-          git commit -m "merge patch/esc-abort branch"
-
-          if ! git merge --squash origin/patch/manual-retry; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/agent/src/agent.ts ]]; then
-              printf '::error::Unexpected manual-retry squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            git checkout --ours packages/agent/src/agent.ts
-            git add packages/agent/src/agent.ts
-          fi
-          git commit -m "merge patch/manual-retry branch"
-
-          git merge --squash origin/tmp/patch/esc-manual-retry-compat
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying compatibility patch'
+          git merge --squash origin/patch/agent-run-failure-seam
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/agent-run-failure-seam'
             exit 1
           fi
-          mapfile -t compatibility_paths < <(git diff --cached --name-only | sort)
-          expected_compatibility_paths=(
-            packages/agent/src/agent.ts
-            packages/agent/test/agent.test.ts
+          git diff --cached --check
+          git commit -m "merge patch/agent-run-failure-seam branch"
+
+          terminal_seam=origin/patch/agent-run-failure-seam
+          for child in origin/patch/esc-abort origin/patch/manual-retry; do
+            if ! git merge-base --is-ancestor "$terminal_seam" "$child"; then
+              echo "::error::$child must descend from patch/agent-run-failure-seam"
+              exit 1
+            fi
+            if [[ -n "$(git rev-list --min-parents=2 "$terminal_seam..$child")" ]]; then
+              echo "::error::$child descendant range must be linear"
+              exit 1
+            fi
+          done
+          if ! git diff --quiet "$terminal_seam..origin/patch/esc-abort" -- packages/agent/src/types.ts; then
+            echo '::error::patch/esc-abort must not redefine the shared run_failure event type'
+            exit 1
+          fi
+          if ! git diff --quiet "$terminal_seam..origin/patch/manual-retry" -- packages/agent; then
+            echo '::error::patch/manual-retry must not modify packages/agent after the shared seam'
+            exit 1
+          fi
+          mapfile -t terminal_child_overlap < <(
+            comm -12 \
+              <(git diff --name-only "$terminal_seam..origin/patch/esc-abort" | sort) \
+              <(git diff --name-only "$terminal_seam..origin/patch/manual-retry" | sort)
           )
-          if (( ${#compatibility_paths[@]} != ${#expected_compatibility_paths[@]} )) ||
-            [[ ${compatibility_paths[*]} != "${expected_compatibility_paths[*]}" ]]; then
-            printf '::error::Unexpected compatibility squash paths:'
-            printf ' %q' "${compatibility_paths[@]}"
+          expected_terminal_child_overlap=(packages/coding-agent/src/core/agent-session.ts)
+          if (( ${#terminal_child_overlap[@]} != ${#expected_terminal_child_overlap[@]} )) ||
+            [[ ${terminal_child_overlap[*]} != "${expected_terminal_child_overlap[*]}" ]]; then
+            printf '::error::Unexpected Esc/manual-retry child overlap:'
+            printf ' %q' "${terminal_child_overlap[@]}"
             printf '\n'
             exit 1
           fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty compatibility patch integration'
+
+          if ! git cherry-pick --no-commit "$terminal_seam..origin/patch/esc-abort"; then
+            echo '::error::Failed to apply patch/esc-abort descendant range'
             exit 1
           fi
-          grep -Fq 'Agent is already processing. Wait for completion before resetting.' packages/agent/src/agent.ts
-          test "$(grep -Fc '| { type: "run_failure"; message: AgentMessage }' packages/agent/src/types.ts)" -eq 1
-          grep -Fq 'lastRunMessage?.role === "toolResult"' packages/agent/src/agent.ts
-          grep -Fq 'synthesizes an aborted assistant after the last aborted tool result' packages/agent/test/agent.test.ts
+          if git diff --cached --quiet; then
+            echo '::error::patch/esc-abort descendant range is empty'
+            exit 1
+          fi
           git diff --cached --check
-          git commit -m "merge tmp/patch/esc-manual-retry-compat branch"
+          git commit -m "merge patch/esc-abort branch"
+
+          if ! git cherry-pick --no-commit "$terminal_seam..origin/patch/manual-retry"; then
+            echo '::error::Failed to apply patch/manual-retry descendant range'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::patch/manual-retry descendant range is empty'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/manual-retry branch"
 
           if ! git merge --squash origin/patch/changelog-prerelease; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
@@ -309,6 +341,8 @@ jobs:
           grep -Fq 'persist?: boolean;' packages/coding-agent/test/suite/harness.ts
           git diff --cached --check
           git commit -m "merge patch/session-tree-splice branch"
+
+          git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 
 
       - name: Install dependencies for pre-push gates
@@ -488,4 +522,4 @@ jobs:
           PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
         run: |
           git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push --force-with-lease origin HEAD:main
+          git push --force-with-lease="refs/heads/main:${EXPECTED_MAIN_SHA}" origin HEAD:main
