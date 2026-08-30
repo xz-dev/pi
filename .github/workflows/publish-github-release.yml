@@ -58,6 +58,7 @@ jobs:
             printf '::error::Source validation mutated the checkout\n%s\n' "$status"
             git diff --stat
             git diff --name-status
+            git diff -- packages/coding-agent/test/manual-retry-planner.test.ts
             exit 1
           fi
 
