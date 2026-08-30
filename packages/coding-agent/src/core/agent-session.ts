@@ -140,6 +140,44 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 	};
 }
 
+function abortError(signal?: AbortSignal): Error {
+	return new Error(
+		signal?.reason instanceof Error ? signal.reason.message : String(signal?.reason ?? "Agent run aborted"),
+	);
+}
+
+async function abortable<T>(promise: Promise<T> | T, signal?: AbortSignal): Promise<T> {
+	if (!signal) return await promise;
+	if (signal.aborted) throw abortError(signal);
+
+	return await new Promise<T>((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const onAbort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(abortError(signal));
+		};
+
+		signal.addEventListener("abort", onAbort, { once: true });
+		Promise.resolve(promise).then(
+			(value) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve(value);
+			},
+			(error) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(error);
+			},
+		);
+	});
+}
+
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "agent_end" }>
@@ -666,8 +704,27 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		// Emit to extensions first. If the active run has already been aborted,
+		// do not let an extension lifecycle hook keep the agent in Working...
+		// forever; still continue with session/UI bookkeeping below.
+		const signal = this.agent.signal;
+		if (event.type === "message_end") {
+			try {
+				if (!signal?.aborted) {
+					await abortable(this._emitExtensionEvent(event, signal), signal);
+				}
+			} catch (error) {
+				if (!signal?.aborted) throw error;
+			} finally {
+				this._emitUninterruptibleMessageEnd(event);
+			}
+		} else if (!signal?.aborted) {
+			try {
+				await abortable(this._emitExtensionEvent(event), signal);
+			} catch (error) {
+				if (!signal?.aborted) throw error;
+			}
+		}
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
@@ -752,6 +809,29 @@ export class AgentSession {
 		return undefined;
 	}
 
+	private _emitUninterruptibleMessageEnd(event: Extract<AgentEvent, { type: "message_end" }>): void {
+		const extensionEvent: MessageEndEvent = {
+			type: "message_end",
+			message: event.message,
+		};
+		const replacement = this._extensionRunner.emitUninterruptibleMessageEnd(extensionEvent);
+		if (replacement) this._applyMessageEndReplacement(event.message, replacement);
+	}
+
+	private _applyMessageEndReplacement(target: AgentMessage, replacement: AgentMessage): void {
+		// Untyped extension handlers can return messages with null/missing content;
+		// normalize so it never enters agent state or session history.
+		const normalized =
+			(replacement.role === "user" ||
+				replacement.role === "assistant" ||
+				replacement.role === "toolResult" ||
+				replacement.role === "custom") &&
+			replacement.content == null
+				? ({ ...replacement, content: [] } as AgentMessage)
+				: replacement;
+		this._replaceMessageInPlace(target, normalized);
+	}
+
 	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
 		// Agent-core stores the finalized message object in its state before emitting message_end.
 		// SessionManager persistence happens later in _handleAgentEvent() with event.message.
@@ -769,7 +849,7 @@ export class AgentSession {
 	}
 
 	/** Emit extension events based on agent events */
-	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
+	private async _emitExtensionEvent(event: AgentEvent, signal?: AbortSignal): Promise<void> {
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
@@ -807,21 +887,14 @@ export class AgentSession {
 		} else if (event.type === "message_end") {
 			const extensionEvent: MessageEndEvent = {
 				type: "message_end",
-				message: event.message,
+				message: structuredClone(event.message),
 			};
 			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
-			if (replacement) {
-				// Untyped extension handlers can return messages with null/missing content;
-				// normalize so it never enters agent state or session history.
-				const normalized =
-					(replacement.role === "user" ||
-						replacement.role === "assistant" ||
-						replacement.role === "toolResult" ||
-						replacement.role === "custom") &&
-					replacement.content == null
-						? ({ ...replacement, content: [] } as AgentMessage)
-						: replacement;
-				this._replaceMessageInPlace(event.message, normalized);
+			// abortable() cannot cancel the underlying handler promise. Once terminal
+			// cleanup starts, ignore a late ordinary replacement so it cannot overwrite
+			// the authoritative redaction in agent state.
+			if (replacement && !signal?.aborted) {
+				this._applyMessageEndReplacement(event.message, replacement);
 			}
 		} else if (event.type === "tool_execution_start") {
 			const extensionEvent: ToolExecutionStartEvent = {
