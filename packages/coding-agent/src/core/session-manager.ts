@@ -6,15 +6,19 @@ import {
 	closeSync,
 	createReadStream,
 	existsSync,
+	fsyncSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
+	renameSync,
+	rmSync,
 	statSync,
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
-import { join, resolve } from "path";
+import { dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -170,6 +174,41 @@ export interface SessionContext {
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
 }
+
+export interface ContinuationCommit {
+	expectedSessionId: string;
+	expectedLeafId: string | null;
+	expectedGeneration: number;
+	branchFromId: string | null;
+	messages: Message[];
+}
+
+export type ContinuationFileWriter = (temporaryFile: string, destinationFile: string, contents: Buffer) => void;
+
+const writeContinuationFile: ContinuationFileWriter = (temporaryFile, destinationFile, contents) => {
+	const mode = existsSync(destinationFile) ? statSync(destinationFile).mode & 0o777 : 0o600;
+	const fileDescriptor = openSync(temporaryFile, "wx", mode);
+	try {
+		writeFileSync(fileDescriptor, contents);
+		fsyncSync(fileDescriptor);
+	} finally {
+		closeSync(fileDescriptor);
+	}
+	// Atomic replacement requires source and destination to share a directory.
+	renameSync(temporaryFile, destinationFile);
+	if (process.platform !== "win32") {
+		let directoryDescriptor: number | undefined;
+		try {
+			directoryDescriptor = openSync(dirname(destinationFile), "r");
+			fsyncSync(directoryDescriptor);
+		} catch {
+			// Some filesystems do not support directory fsync. The atomic rename
+			// has already succeeded, so this durability reinforcement is best-effort.
+		} finally {
+			if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
+		}
+	}
+};
 
 export interface SessionInfo {
 	path: string;
@@ -865,6 +904,9 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private generation = 0;
+	/** @internal Fault-injection seam for continuation publication tests. */
+	continuationFileWriter: ContinuationFileWriter = writeContinuationFile;
 
 	private constructor(
 		cwd: string,
@@ -920,6 +962,7 @@ export class SessionManager {
 			}
 
 			this._buildIndex();
+			this.generation++;
 			this.flushed = true;
 		} else {
 			const explicitPath = this.sessionFile;
@@ -948,6 +991,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this.generation++;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1009,6 +1053,10 @@ export class SessionManager {
 		return this.sessionId;
 	}
 
+	getGeneration(): number {
+		return this.generation;
+	}
+
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
 	}
@@ -1046,7 +1094,70 @@ export class SessionManager {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
+		this.generation++;
 		this._persist(entry);
+	}
+
+	/**
+	 * Atomically publish recovery messages and the first continued assistant as a
+	 * new append-only branch. Validation and persistence happen before in-memory
+	 * state changes, so a failed commit leaves the active branch unchanged.
+	 */
+	commitContinuation(commit: ContinuationCommit): string {
+		if (this.sessionId !== commit.expectedSessionId) {
+			throw new Error("Session changed before retry continuation could be committed");
+		}
+		if (this.leafId !== commit.expectedLeafId) {
+			throw new Error("Session branch changed before retry continuation could be committed");
+		}
+		if (this.generation !== commit.expectedGeneration) {
+			throw new Error("Session changed before retry continuation could be committed");
+		}
+		if (commit.branchFromId !== null && !this.byId.has(commit.branchFromId)) {
+			throw new Error(`Entry ${commit.branchFromId} not found`);
+		}
+		if (commit.messages.length === 0) {
+			throw new Error("Retry continuation commit requires at least one message");
+		}
+
+		const entries: SessionMessageEntry[] = [];
+		let parentId = commit.branchFromId;
+		const reservedIds = new Map(this.byId);
+		for (const message of commit.messages) {
+			const entry: SessionMessageEntry = {
+				type: "message",
+				id: generateId(reservedIds),
+				parentId,
+				timestamp: new Date().toISOString(),
+				message,
+			};
+			entries.push(entry);
+			reservedIds.set(entry.id, entry);
+			parentId = entry.id;
+		}
+
+		if (this.persist && this.sessionFile) {
+			const original = this.flushed && existsSync(this.sessionFile) ? readFileSync(this.sessionFile) : undefined;
+			const completeFile = original
+				? Buffer.concat([original, Buffer.from(entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""))])
+				: Buffer.from([...this.fileEntries, ...entries].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+			const temporaryFile = `${this.sessionFile}.continuation-${process.pid}-${randomUUID()}.tmp`;
+			try {
+				this.continuationFileWriter(temporaryFile, this.sessionFile, completeFile);
+			} catch (error) {
+				rmSync(temporaryFile, { force: true });
+				throw error;
+			}
+		}
+
+		for (const entry of entries) {
+			this.fileEntries.push(entry);
+			this.byId.set(entry.id, entry);
+		}
+		this.leafId = entries.at(-1)!.id;
+		this.generation++;
+		this.flushed = this.persist ? true : this.flushed;
+		return this.leafId;
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1363,6 +1474,7 @@ export class SessionManager {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		this.leafId = branchFromId;
+		this.generation++;
 	}
 
 	/**
@@ -1372,6 +1484,7 @@ export class SessionManager {
 	 */
 	resetLeaf(): void {
 		this.leafId = null;
+		this.generation++;
 	}
 
 	/**
@@ -1391,6 +1504,7 @@ export class SessionManager {
 		}
 		const fromId = this.leafId ?? "root";
 		this.leafId = branchFromId;
+		this.generation++;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
@@ -1475,6 +1589,7 @@ export class SessionManager {
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
+			this.generation++;
 
 			// Only write the file now if it contains an assistant message.
 			// Otherwise defer to _persist(), which creates the file on the
@@ -1510,6 +1625,7 @@ export class SessionManager {
 		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 		this.sessionId = newSessionId;
 		this._buildIndex();
+		this.generation++;
 		return undefined;
 	}
 
