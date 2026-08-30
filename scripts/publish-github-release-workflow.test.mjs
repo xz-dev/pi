@@ -43,7 +43,8 @@ test("upstream sync keeps the unsafe synchronized-cursor patch retired", () => {
 
 test("upstream sync rejects patch branches that touch upstream changelogs", () => {
   assert.match(syncWorkflowText, /changelog_offenders=\(\)/);
-  assert.match(syncWorkflowText, /git diff --name-only "\$base\.\./);  assert.match(syncWorkflowText, /\^packages\/\.\*\/CHANGELOG\.md\$/);
+  assert.match(syncWorkflowText, /git diff --name-only "\$base\.\./);
+  assert.match(syncWorkflowText, /'packages\/\*\/CHANGELOG\.md'/);
   assert.match(syncWorkflowText, /modifies an upstream-maintained packages\/\*\/CHANGELOG\.md/);
   assert.ok(
     syncWorkflowText.indexOf("changelog_offenders") < syncWorkflowText.indexOf('git merge --squash origin/ci'),
