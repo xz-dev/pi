@@ -158,10 +158,11 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 		helper,
 		requireFilesystemHelper: process.platform === "win32",
 	});
-	// The root launcher is version-embedded. Identify which bundle the user
-	// actually launches by byte-comparing the root launcher with each bundle's
-	// bundled launcher, and protect that version from cleanup.
-	let launcherVersion = executableVersion;
+	// The root launcher is version-embedded. Identify every bundle whose
+	// bundled launcher byte-matches it, and protect those versions from cleanup.
+	// Multiple matches are possible when identical archives were installed more
+	// than once; filesystem iteration order must not decide which one survives.
+	const launcherVersions = new Set([executableVersion]);
 	const rootWrapperPath = join(installRoot, BUNDLE_WRAPPER_NAME);
 	if (existsSync(rootWrapperPath)) {
 		const rootWrapper = readFileSync(rootWrapperPath);
@@ -169,8 +170,7 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 			if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
 			const wrapperPath = join(bundlesRoot, entry.name, BUNDLE_WRAPPER_NAME);
 			if (existsSync(wrapperPath) && rootWrapper.equals(readFileSync(wrapperPath))) {
-				launcherVersion = entry.name;
-				break;
+				launcherVersions.add(entry.name);
 			}
 		}
 	}
@@ -199,8 +199,7 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 			) {
 				fail("Pi managed installation changed before cleanup");
 			}
-			const protectedVersions = new Set([executableVersion, launcherVersion]);
-			if (protectedVersions.has(candidate)) return undefined;
+			if (launcherVersions.has(candidate)) return undefined;
 			const bundleDirectory = join(bundlesRoot, candidate);
 			let before: InstalledBundleSnapshot;
 			try {

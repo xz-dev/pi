@@ -301,6 +301,27 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		}
 	});
 
+	it("preserves every bundle whose launcher matches the root launcher", () => {
+		const root = join(tmpdir(), `pi-xz-clean-duplicate-launcher-${process.pid}-${Date.now()}`);
+		const executingBundle = writeInstalledBundle(root, CURRENT_VERSION);
+		const launcherBundle = writeInstalledBundle(root, NEXT_VERSION);
+		const duplicateVersion = "0.84.1-xz.70.1.g33333333";
+		const duplicateBundle = writeInstalledBundle(root, duplicateVersion, {
+			wrapper: readFileSync(join(launcherBundle, WRAPPER_NAME), "utf8"),
+		});
+		const staleBundle = writeInstalledBundle(root, STALE_VERSION);
+		writeFileSync(join(root, WRAPPER_NAME), readFileSync(join(launcherBundle, WRAPPER_NAME)));
+		try {
+			expect(cleanXzBundles(join(executingBundle, EXECUTABLE_NAME))).toBe(1);
+			expect(existsSync(executingBundle)).toBe(true);
+			expect(existsSync(launcherBundle)).toBe(true);
+			expect(existsSync(duplicateBundle)).toBe(true);
+			expect(existsSync(staleBundle)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("restores a quarantined bundle when post-rename revalidation fails", () => {
 		const { root, currentBundle, staleBundle } = createCleanupFixture("pi-xz-clean-restore");
 		const validationError = new Error("detached validation failed");
