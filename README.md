@@ -13,6 +13,9 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ### Features
 
+- Detach eligible long-running AI tool calls into session-owned managed executions, with `tool_task` controls for status, bounded waits, and cancellation requests while preserving exactly one result for each original tool call.
+  - Use case: Let Pi continue reasoning while opted-in shell or extension work runs, without turning untrusted tool output into a steering message or losing cancellation/lifecycle ownership.
+  - Patch branch: [`patch/managed-tool-executions`](https://github.com/xz-dev/pi/tree/patch/managed-tool-executions)
 - Continue from the nearest protocol-safe conversation boundary with `/retry` or RPC `retry`, preserving superseded history as an append-only sibling branch, retaining completed tool results, and synthesizing explicit unknown-outcome errors only for missing results without replaying old tool calls.
   - Use case: Resume after Pi or its provider was interrupted, without replaying completed tool calls.
   - Patch branch: [`patch/manual-retry`](https://github.com/xz-dev/pi/tree/patch/manual-retry)

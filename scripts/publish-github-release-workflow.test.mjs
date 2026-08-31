@@ -43,14 +43,34 @@ test("upstream sync keeps the unsafe synchronized-cursor patch retired", () => {
 
 test("upstream sync rejects patch branches that touch upstream changelogs", () => {
   assert.match(syncWorkflowText, /changelog_offenders=\(\)/);
-  assert.match(syncWorkflowText, /git diff --name-only "\$base\.\./);
-  assert.match(syncWorkflowText, /'packages\/\*\/CHANGELOG\.md'/);
+  assert.match(syncWorkflowText, /git diff --name-only "\$base\.\.\$ref" -- 'packages\/\*\/CHANGELOG\.md'/);
   assert.match(syncWorkflowText, /modifies an upstream-maintained packages\/\*\/CHANGELOG\.md/);
   assert.ok(
-    syncWorkflowText.indexOf("changelog_offenders") < syncWorkflowText.indexOf('git merge --squash origin/ci'),
+    syncWorkflowText.indexOf("changelog_offenders") < syncWorkflowText.indexOf("git merge --squash origin/ci"),
     "changelog guard must run before any squash merge",
   );
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /never carry `packages\/\*\/CHANGELOG\.md` hunks/);
+});
+
+test("upstream sync integrates and tests managed tool execution compatibility", () => {
+  const resolver = readFileSync(join(ROOT, "scripts", "resolve-managed-tool-esc-conflicts.py"), "utf8");
+  assert.match(
+    syncWorkflowText,
+    /\+refs\/heads\/patch\/managed-tool-executions:refs\/remotes\/origin\/patch\/managed-tool-executions/,
+  );
+  const seamIndex = syncWorkflowText.indexOf('git commit -m "merge patch/agent-run-failure-seam branch"');
+  const managedIndex = syncWorkflowText.indexOf('git commit -m "merge patch/managed-tool-executions branch"');
+  const escIndex = syncWorkflowText.indexOf('git commit -m "merge patch/esc-abort branch"');
+  assert.ok(seamIndex >= 0 && seamIndex < managedIndex && managedIndex < escIndex);
+  assert.match(syncWorkflowText, /python3 scripts\/resolve-managed-tool-esc-conflicts\.py/);
+  assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/suite\/managed-tool-executions\.test\.ts/);
+  assert.match(resolver, /const toolController = new AbortController\(\);/);
+  assert.match(resolver, /const interruptController = new AbortController\(\);/);
+  assert.match(resolver, /controller: toolController,/);
+  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /patch\/managed-tool-executions/);
+  assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /tool cancellation signal from the current-run interrupt signal/);
 });
 
 test("upstream sync carries and tests the model catalog list refresh patch", () => {
