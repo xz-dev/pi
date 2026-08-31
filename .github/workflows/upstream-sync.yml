@@ -43,6 +43,7 @@ jobs:
             +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
             +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
+            +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
@@ -61,6 +62,7 @@ jobs:
             origin/patch/native-wrapper-release
             origin/patch/update-clean
             origin/patch/agent-run-failure-seam
+            origin/patch/managed-tool-executions
             origin/patch/esc-abort
             origin/patch/manual-retry
             origin/patch/changelog-prerelease
@@ -190,6 +192,14 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/agent-run-failure-seam branch"
 
+          git merge --squash origin/patch/managed-tool-executions
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/managed-tool-executions'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/managed-tool-executions branch"
+
           terminal_seam=origin/patch/agent-run-failure-seam
           for child in origin/patch/esc-abort origin/patch/manual-retry; do
             if ! git merge-base --is-ancestor "$terminal_seam" "$child"; then
@@ -224,13 +234,27 @@ jobs:
           fi
 
           if ! git cherry-pick --no-commit "$terminal_seam..origin/patch/esc-abort"; then
-            echo '::error::Failed to apply patch/esc-abort descendant range'
+            python3 scripts/resolve-managed-tool-esc-conflicts.py
+            git cherry-pick --quit
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying patch/esc-abort'
             exit 1
           fi
           if git diff --cached --quiet; then
             echo '::error::patch/esc-abort descendant range is empty'
             exit 1
           fi
+          agent_loop=packages/agent/src/agent-loop.ts
+          grep -Fq 'const toolController = new AbortController();' "$agent_loop"
+          grep -Fq 'const interruptController = new AbortController();' "$agent_loop"
+          grep -Fq 'controller: toolController,' "$agent_loop"
+          grep -Fq 'await awaitPreparedToolExecution(preparation, execution, config);' "$agent_loop"
+          grep -Fq 'await emitToolExecutionEnd(finalized, emit, signal);' "$agent_loop"
+          grep -Fq 'prepared.args as never, toolSignal,' "$agent_loop"
+          grep -Fq 'const replayError = getManagedExecutionReplayError(result);' "$agent_loop"
+          test "$(grep -Fc 'const execution = createPreparedToolExecution(' "$agent_loop")" -eq 2
+          test "$(grep -Fc 'const executed = await executePreparedToolCall(preparation, signal, emit);' "$agent_loop")" -eq 0
           git diff --cached --check
           git commit -m "merge patch/esc-abort branch"
 
@@ -375,12 +399,16 @@ jobs:
             cd packages/agent
             node ../../node_modules/vitest/dist/cli.js --run \
               test/agent-loop.test.ts \
-              test/agent.test.ts
+              test/agent.test.ts \
+              test/managed-tool-executions.test.ts \
+              test/managed-tool-executions-esc-abort.test.ts
           )
           (
             cd packages/coding-agent
             node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
               test/settings-manager.test.ts \
+              test/settings-diagnostics.test.ts \
+              test/default-tools-setting.test.ts \
               test/model-runtime-cloudflare-compat.test.ts \
               test/extensions-runner.test.ts \
               test/lifecycle-diagnostics.test.ts \
@@ -413,7 +441,10 @@ jobs:
               test/package-command-paths.test.ts \
               test/interactive-mode-queue-tui.test.ts \
               test/suite/agent-session-compaction.test.ts \
+              test/suite/managed-tool-executions.test.ts \
               test/suite/manual-retry.test.ts \
+              test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts \
+              test/suite/regressions/5109-exclude-tools.test.ts \
               test/suite/regressions/7253-manual-compact-during-response.test.ts \
               test/suite/session-tree-splice.test.ts \
               test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts \
