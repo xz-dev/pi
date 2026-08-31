@@ -27,7 +27,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, type Message } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -98,7 +98,8 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { planContinuation } from "./manual-retry.ts";
+import type { BashExecutionMessage, CustomMessage, ManualRetryRecoveryMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -361,6 +362,21 @@ export class AgentSession {
 	private _isAgentRunActive = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
+	private _manualRetryActive = false;
+	private _manualRetryCommit:
+		| {
+				expectedSessionId: string;
+				expectedLeafId: string | null;
+				expectedGeneration: number;
+				branchFromId: string | null;
+				recoveryMessages: Message[];
+				committed: boolean;
+				runFailedBeforeCommit: boolean;
+				runFailureMessage: string | undefined;
+		  }
+		| undefined;
+	private _continuationAnchorId: string | undefined;
+	private _continuationBranchLeafId: string | undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -716,6 +732,11 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "run_failure" && this._manualRetryCommit && !this._manualRetryCommit.committed) {
+			this._manualRetryCommit.runFailedBeforeCommit = true;
+			this._manualRetryCommit.runFailureMessage = event.message.errorMessage;
+		}
+
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -765,6 +786,30 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			let committedFirstRetryAssistant = false;
+			if (
+				event.message.role === "assistant" &&
+				this._manualRetryCommit &&
+				!this._manualRetryCommit.committed &&
+				!this._manualRetryCommit.runFailedBeforeCommit
+			) {
+				try {
+					this.sessionManager.commitContinuation({
+						expectedSessionId: this._manualRetryCommit.expectedSessionId,
+						expectedLeafId: this._manualRetryCommit.expectedLeafId,
+						expectedGeneration: this._manualRetryCommit.expectedGeneration,
+						branchFromId: this._manualRetryCommit.branchFromId,
+						messages: [...this._manualRetryCommit.recoveryMessages, event.message],
+					});
+				} catch (error) {
+					this._manualRetryCommit.runFailedBeforeCommit = true;
+					this._manualRetryCommit.runFailureMessage = error instanceof Error ? error.message : String(error);
+					throw error;
+				}
+				this._manualRetryCommit.committed = true;
+				committedFirstRetryAssistant = true;
+			}
+
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
@@ -775,9 +820,13 @@ export class AgentSession {
 					event.message.details,
 				);
 			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
+				!committedFirstRetryAssistant &&
+				!(
+					event.message.role === "assistant" &&
+					this._manualRetryCommit?.runFailedBeforeCommit &&
+					!this._manualRetryCommit.committed
+				) &&
+				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
@@ -1215,6 +1264,8 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		this._continuationAnchorId = undefined;
+		this._continuationBranchLeafId = undefined;
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
@@ -1225,6 +1276,103 @@ export class AgentSession {
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
+			await this._emitAgentSettled();
+		}
+	}
+
+	/** Recover the latest interrupted response or continue from an explicit safe protocol boundary. */
+	async retry(): Promise<void> {
+		const continuationAnchorId = this._continuationAnchorId;
+		if (this._manualRetryActive || this._isAgentRunActive) {
+			throw new Error("Agent is already processing a retry.");
+		}
+		if (
+			this.isCompacting ||
+			this.isBashRunning ||
+			this._retryAbortController !== undefined ||
+			this._autoCompactionAbortController !== undefined
+		) {
+			throw new Error("Cannot retry while another session operation is in progress.");
+		}
+		if (this.pendingMessageCount > 0 || this.agent.hasQueuedMessages() || this._pendingNextTurnMessages.length > 0) {
+			throw new Error("Cannot retry while queued messages are pending.");
+		}
+		if (!this.model) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
+		const hasConfiguredAuth =
+			this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
+			(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+		if (!hasConfiguredAuth) {
+			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+		}
+
+		const expectedSessionId = this.sessionManager.getSessionId();
+		const expectedLeafId = this.sessionManager.getLeafId();
+		const expectedGeneration = this.sessionManager.getGeneration();
+		const branchEntries = continuationAnchorId
+			? this.sessionManager.getBranch(this._continuationBranchLeafId ?? continuationAnchorId)
+			: this.sessionManager.getBranch();
+		const plan = planContinuation({
+			branchEntries,
+			selectedEntryId: continuationAnchorId,
+			recoveryTimestamp: Date.now(),
+		});
+		const recoveryCue: ManualRetryRecoveryMessage | undefined =
+			plan.kind === "interrupted_assistant"
+				? {
+						role: "manualRetryRecovery",
+						partialAssistantText: plan.partialAssistantText,
+						timestamp: Date.now(),
+					}
+				: undefined;
+		const previousMessages = this.agent.state.messages;
+		this._manualRetryActive = true;
+		this._isAgentRunActive = true;
+		this._lastAssistantMessage = undefined;
+		this._manualRetryCommit = {
+			expectedSessionId,
+			expectedLeafId,
+			expectedGeneration,
+			branchFromId: plan.anchorEntryId,
+			recoveryMessages: plan.recoveryMessages,
+			committed: false,
+			runFailedBeforeCommit: false,
+			runFailureMessage: undefined,
+		};
+		this.agent.state.messages = [
+			...plan.contextMessages,
+			...(plan.providerRecoveryMessages ?? []),
+			...plan.recoveryMessages,
+			...(recoveryCue ? [recoveryCue] : []),
+		];
+		try {
+			await this.agent.continue();
+			if (this._manualRetryCommit.runFailureMessage) {
+				throw new Error(this._manualRetryCommit.runFailureMessage);
+			}
+			while (await this._handlePostAgentRun()) {
+				await this.agent.continue();
+				if (this._manualRetryCommit.runFailureMessage) {
+					throw new Error(this._manualRetryCommit.runFailureMessage);
+				}
+			}
+			if (this._manualRetryCommit.runFailureMessage) {
+				throw new Error(this._manualRetryCommit.runFailureMessage);
+			}
+			if (!this._manualRetryCommit.committed) {
+				throw new Error("Retry continuation ended without an assistant response");
+			}
+			this._continuationAnchorId = undefined;
+			this._continuationBranchLeafId = undefined;
+			this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		} finally {
+			if (!this._manualRetryCommit?.committed) {
+				this.agent.state.messages = previousMessages;
+			}
+			this._manualRetryCommit = undefined;
+			this._manualRetryActive = false;
+			this._systemPromptOverride = undefined;
 			await this._emitAgentSettled();
 		}
 	}
@@ -3224,6 +3372,9 @@ export class AgentSession {
 		}
 
 		const oldLeafId = this.sessionManager.getLeafId();
+		const oldBranchContainsTarget = this.sessionManager.getBranch().some((entry) => entry.id === targetId);
+		this._continuationAnchorId = undefined;
+		this._continuationBranchLeafId = undefined;
 
 		// No-op if already at target
 		if (targetId === oldLeafId) {
@@ -3343,9 +3494,11 @@ export class AgentSession {
 			let editorText: string | undefined;
 
 			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				// User message: leaf = parent (null if root), text goes to editor
+				// User message: leaf = parent for editing, while retry retains the exact selected entry.
 				newLeafId = targetEntry.parentId;
 				editorText = contentText(targetEntry.message.content, "");
+				this._continuationAnchorId = targetId;
+				this._continuationBranchLeafId = oldBranchContainsTarget ? (oldLeafId ?? undefined) : targetId;
 			} else if (targetEntry.type === "custom_message") {
 				// Custom message: leaf = parent (null if root), text goes to editor
 				newLeafId = targetEntry.parentId;
@@ -3353,6 +3506,10 @@ export class AgentSession {
 			} else {
 				// Non-user message: leaf = selected node
 				newLeafId = targetId;
+				if (targetEntry.type === "message") {
+					this._continuationAnchorId = targetId;
+					this._continuationBranchLeafId = oldBranchContainsTarget ? (oldLeafId ?? undefined) : targetId;
+				}
 			}
 
 			// Switch leaf (with or without summary)
