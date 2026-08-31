@@ -22,6 +22,8 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	BackgroundToolCalls,
+	ManagedExecutionNotification,
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
@@ -109,7 +111,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
+import { createAllToolDefinitions, createToolTaskTool } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
@@ -403,6 +405,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._syncManagedToolExecutions();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -484,6 +487,37 @@ export class AgentSession {
 	 * registered tool execution to the extension context. Tool call and tool result interception now
 	 * happens here instead of in wrappers.
 	 */
+	private _syncManagedToolExecutions(): void {
+		const configured = this.settingsManager.getBackgroundToolCalls();
+		const backgroundToolCalls: BackgroundToolCalls = { ...configured };
+		for (const toolName of ["bash", "powershell"] as const) {
+			if (configured[toolName]) continue;
+			backgroundToolCalls[toolName] = {
+				detachAfterSeconds: 600,
+				shouldDetach: (argumentsValue) => {
+					const timeout = (argumentsValue as { timeout?: unknown } | undefined)?.timeout;
+					return timeout === undefined || (typeof timeout === "number" && timeout > 1200);
+				},
+			};
+		}
+		delete backgroundToolCalls.tool_task;
+		this.agent.backgroundToolCalls = backgroundToolCalls;
+		this.agent.managedExecutions.setCompletionHandler((notification) => this._notifyManagedExecution(notification));
+	}
+
+	private async _notifyManagedExecution(notification: ManagedExecutionNotification): Promise<void> {
+		const text = `Managed tool execution ${notification.id} (${notification.toolName}) ${notification.status}. Use tool_task wait with this task ID to retrieve its result.`;
+		await this.sendCustomMessage(
+			{
+				customType: "managed-tool-execution-completed",
+				content: [{ type: "text", text }],
+				display: false,
+				details: notification,
+			},
+			{ triggerTurn: true, deliverAs: this.isStreaming ? "steer" : undefined },
+		);
+	}
+
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
 			const runner = this._extensionRunner;
@@ -886,6 +920,7 @@ export class AgentSession {
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			this.agent.managedExecutions.dispose();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -2732,6 +2767,9 @@ export class AgentSession {
 		const nextActiveToolNames = (
 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
 		).filter((name) => isAllowedTool(name));
+		if (this._toolRegistry.has("tool_task") && isAllowedTool("tool_task")) {
+			nextActiveToolNames.push("tool_task");
+		}
 
 		if (allowedToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {
@@ -2764,15 +2802,18 @@ export class AgentSession {
 		const shellPath = this.settingsManager.getShellPath();
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
-					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
-						name,
-						createToolDefinitionFromAgentTool(tool),
-					]),
+					[
+						...Object.entries(this._baseToolsOverride),
+						["tool_task", createToolTaskTool(this.agent.managedExecutions)] as const,
+					].map(([name, tool]) => [name, createToolDefinitionFromAgentTool(tool)]),
 				)
-			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
-				});
+			: {
+					...createAllToolDefinitions(this._cwd, {
+						read: { autoResizeImages },
+						bash: { commandPrefix: shellCommandPrefix, shellPath },
+					}),
+					tool_task: createToolDefinitionFromAgentTool(createToolTaskTool(this.agent.managedExecutions)),
+				};
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
@@ -2799,8 +2840,8 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 
 		const defaultActiveToolNames = this._baseToolsOverride
-			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			? [...Object.keys(this._baseToolsOverride), "tool_task"]
+			: ["read", "bash", "edit", "write", "tool_task"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -2814,6 +2855,7 @@ export class AgentSession {
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
 		oldRunner.invalidate();
 		await this.settingsManager.reload();
+		this._syncManagedToolExecutions();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
 		await this._resourceLoader.reload();
