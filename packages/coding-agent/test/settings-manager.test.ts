@@ -259,6 +259,46 @@ describe("SettingsManager", () => {
 			expect(manager.getTheme()).toBe("project");
 		});
 
+		it("updates background tool policy when project trust changes", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ backgroundToolCalls: { global_tool: { detachAfterSeconds: 11 } } }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ backgroundToolCalls: { project_tool: { detachAfterSeconds: 22 } } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+
+			expect(manager.getBackgroundToolCalls()).toEqual({ global_tool: { detachAfterSeconds: 11 } });
+
+			manager.setProjectTrusted(true);
+			expect(manager.getBackgroundToolCalls()).toEqual({
+				global_tool: { detachAfterSeconds: 11 },
+				project_tool: { detachAfterSeconds: 22 },
+			});
+
+			manager.setProjectTrusted(false);
+			expect(manager.getBackgroundToolCalls()).toEqual({ global_tool: { detachAfterSeconds: 11 } });
+		});
+
+		it("keeps valid global background tool policy when project rules are invalid", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ backgroundToolCalls: { global_tool: { detachAfterSeconds: 11 } } }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ backgroundToolCalls: { project_tool: { detachAfterSeconds: 0 } } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getBackgroundToolCalls()).toEqual({ global_tool: { detachAfterSeconds: 11 } });
+			expect(manager.drainErrors()).toMatchObject([
+				{ scope: "project", error: { message: expect.stringContaining("backgroundToolCalls.project_tool") } },
+			]);
+		});
+
 		it("should fail project settings writes when project is not trusted", async () => {
 			const projectSettingsPath = join(projectDir, ".pi", "settings.json");
 			writeFileSync(projectSettingsPath, JSON.stringify({ packages: ["npm:existing"] }));
@@ -567,6 +607,35 @@ describe("SettingsManager", () => {
 		it("preserves an empty tool list", () => {
 			expect(SettingsManager.inMemory({ defaultTools: [] }).getDefaultTools()).toEqual([]);
 			expect(SettingsManager.inMemory().getDefaultTools()).toBeUndefined();
+		});
+	});
+
+	describe("backgroundToolCalls overrides", () => {
+		it("applies valid SDK overrides to effective policy", () => {
+			const manager = SettingsManager.inMemory({
+				backgroundToolCalls: { existing: { detachAfterSeconds: 7 } },
+			});
+
+			manager.applyOverrides({ backgroundToolCalls: { added: {} } });
+
+			expect(manager.getBackgroundToolCalls()).toEqual({
+				existing: { detachAfterSeconds: 7 },
+				added: {},
+			});
+		});
+
+		it("diagnoses invalid SDK overrides and keeps the last valid effective policy", () => {
+			const manager = SettingsManager.inMemory({
+				backgroundToolCalls: { existing: { detachAfterSeconds: 7 } },
+			});
+
+			expect(() =>
+				manager.applyOverrides({ backgroundToolCalls: { added: { detachAfterSeconds: 0 } } }),
+			).not.toThrow();
+			expect(manager.getBackgroundToolCalls()).toEqual({ existing: { detachAfterSeconds: 7 } });
+			expect(manager.drainErrors()).toMatchObject([
+				{ scope: "global", error: { message: expect.stringContaining("backgroundToolCalls.added") } },
+			]);
 		});
 	});
 
