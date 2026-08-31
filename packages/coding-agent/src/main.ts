@@ -81,6 +81,7 @@ import {
 	markStartupBenchmarkStage,
 } from "./utils/startup-benchmark.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
+import { runWindowsFilesystemSnapshotProbe } from "./utils/xz-release-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;
 
@@ -572,6 +573,7 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	if (runWindowsFilesystemSnapshotProbe()) return;
 	resetTimings();
 	markStartupBenchmarkStage("main-entered");
 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
