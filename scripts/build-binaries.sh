@@ -1,287 +1,153 @@
 #!/usr/bin/env bash
-#
-# Build pi binaries for all platforms locally.
-# Mirrors .github/workflows/build-binaries.yml
-#
-# Usage:
-#   ./scripts/build-binaries.sh [--skip-install] [--skip-deps] [--skip-build] [--offline-model-data] [--platform <platform>] [--out <dir>]
-#
-# Options:
-#   --skip-install       Skip npm ci
-#   --skip-deps          Skip installing cross-platform dependencies
-#   --skip-build         Skip the package build
-#   --offline-model-data Build with bundled model data instead of refreshing it
-#   --platform <name>    Build only for specified platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64)
-#   --out <dir>          Output directory (default: packages/coding-agent/binaries)
-#
-# Output:
-#   packages/coding-agent/binaries/
-#     pi-darwin-arm64.tar.gz
-#     pi-darwin-x64.tar.gz
-#     pi-linux-x64.tar.gz
-#     pi-linux-arm64.tar.gz
-#     pi-windows-x64.zip
-#     pi-windows-arm64.zip
-
+# Build one or more canonical Bun Release targets. The authoritative matrix is
+# scripts/lib/bun-targets.mjs; GitHub Actions invokes one target per matrix job.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-
 SKIP_INSTALL=false
 SKIP_DEPS=false
 SKIP_BUILD=false
+HYDRATE_TARGET_DEPS=false
 OFFLINE_MODEL_DATA=false
-PLATFORM=""
+PLATFORMS_REQUESTED=()
 OUTPUT_DIR=""
+DISTRIBUTION_VERSION=""
+CLIPBOARD_MUSL_DIR=""
 
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --skip-install)
-            SKIP_INSTALL=true
-            shift
-            ;;
-        --skip-deps)
-            SKIP_DEPS=true
-            shift
-            ;;
-        --skip-build)
-            SKIP_BUILD=true
-            shift
-            ;;
-        --offline-model-data)
-            OFFLINE_MODEL_DATA=true
-            shift
-            ;;
-        --platform)
-            PLATFORM="$2"
-            shift 2
-            ;;
-        --out)
-            OUTPUT_DIR="$2"
-            shift 2
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
-    esac
+	case $1 in
+		--skip-install) SKIP_INSTALL=true; shift ;;
+		--skip-deps) SKIP_DEPS=true; shift ;;
+		--skip-build) SKIP_BUILD=true; shift ;;
+		--hydrate-target-deps) HYDRATE_TARGET_DEPS=true; shift ;;
+		--offline-model-data) OFFLINE_MODEL_DATA=true; shift ;;
+		--platform) PLATFORMS_REQUESTED+=("$2"); shift 2 ;;
+		--out) OUTPUT_DIR="$2"; shift 2 ;;
+		--distribution-version) DISTRIBUTION_VERSION="$2"; shift 2 ;;
+		--clipboard-musl-dir) CLIPBOARD_MUSL_DIR="$2"; shift 2 ;;
+		*) echo "Unknown option: $1" >&2; exit 1 ;;
+	esac
 done
 
-# Validate platform if specified
-if [[ -n "$PLATFORM" ]]; then
-    case "$PLATFORM" in
-        darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64|windows-arm64)
-            ;;
-        *)
-            echo "Invalid platform: $PLATFORM"
-            echo "Valid platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64"
-            exit 1
-            ;;
-    esac
+ALL_TARGETS=()
+while IFS= read -r target; do
+	[[ -n "$target" ]] && ALL_TARGETS+=("$target")
+done < <(node scripts/lib/bun-targets.mjs --ids)
+if [[ ${#PLATFORMS_REQUESTED[@]} -eq 0 ]]; then PLATFORMS_REQUESTED=("${ALL_TARGETS[@]}"); fi
+for target in "${PLATFORMS_REQUESTED[@]}"; do
+	node scripts/lib/bun-targets.mjs --get "$target" bunTarget >/dev/null || { echo "Invalid target: $target" >&2; exit 1; }
+done
+
+OUTPUT_DIR=${OUTPUT_DIR:-packages/coding-agent/binaries}
+if command -v cygpath >/dev/null 2>&1 && [[ "$OUTPUT_DIR" =~ ^[A-Za-z]:[\\/] ]]; then
+	OUTPUT_DIR=$(cygpath -u "$OUTPUT_DIR")
+fi
+[[ "$OUTPUT_DIR" = /* ]] || OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
+
+if [[ "$SKIP_INSTALL" == false ]]; then npm ci --ignore-scripts; fi
+if [[ "$SKIP_DEPS" == false ]]; then
+	clipboard_version=$(node -p "require('./packages/coding-agent/package.json').optionalDependencies['@mariozechner/clipboard']")
+	npm install --include=optional --no-save --package-lock=false --force --ignore-scripts \
+		"@mariozechner/clipboard@$clipboard_version" \
+		"@mariozechner/clipboard-darwin-arm64@$clipboard_version" \
+		"@mariozechner/clipboard-darwin-x64@$clipboard_version" \
+		"@mariozechner/clipboard-linux-x64-gnu@$clipboard_version" \
+		"@mariozechner/clipboard-linux-arm64-gnu@$clipboard_version" \
+		"@mariozechner/clipboard-linux-x64-musl@$clipboard_version" \
+		"@mariozechner/clipboard-linux-arm64-musl@$clipboard_version" \
+		"@mariozechner/clipboard-win32-x64-msvc@$clipboard_version" \
+		"@mariozechner/clipboard-win32-arm64-msvc@$clipboard_version"
+fi
+if [[ "$SKIP_BUILD" == false ]]; then
+	if [[ "$OFFLINE_MODEL_DATA" == true ]]; then npm run build:offline; else npm run build; fi
+fi
+if [[ "$HYDRATE_TARGET_DEPS" == true ]]; then
+	test "${#PLATFORMS_REQUESTED[@]}" -eq 1 || { echo "--hydrate-target-deps requires exactly one target" >&2; exit 1; }
+	clipboard_package=$(node scripts/lib/bun-targets.mjs --get "${PLATFORMS_REQUESTED[0]}" clipboardNativePackage)
+	lock_entry="node_modules/@mariozechner/$clipboard_package"
+	resolved=$(node -p "require('./package-lock.json').packages['$lock_entry'].resolved")
+	integrity=$(node -p "require('./package-lock.json').packages['$lock_entry'].integrity")
+	mkdir -p node_modules/@mariozechner
+	tarball="$(pwd)/$(npm pack --ignore-scripts --silent "$resolved")"
+	node -e "const fs=require('node:fs');const crypto=require('node:crypto');const [file,expected]=process.argv.slice(1);const [algorithm,digest]=expected.split('-',2);const actual=crypto.createHash(algorithm).update(fs.readFileSync(file)).digest('base64');if(actual!==digest)throw new Error('clipboard tarball integrity mismatch')" "$tarball" "$integrity"
+	tmp_deps=$(mktemp -d)
+	trap 'rm -rf "$tmp_deps" "$tarball"' EXIT
+	tar -xzf "$tarball" -C "$tmp_deps"
+	rm -rf "node_modules/@mariozechner/$clipboard_package"
+	mv "$tmp_deps/package" "node_modules/@mariozechner/$clipboard_package"
+fi
+export NODE_ENV=production
+if [[ -z "$CLIPBOARD_MUSL_DIR" ]] && printf '%s\n' "${PLATFORMS_REQUESTED[@]}" | grep -q -- '-musl'; then
+	echo "musl targets require an architecture-matched --clipboard-musl-dir" >&2
+	exit 1
 fi
 
-if [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR="packages/coding-agent/binaries"
-fi
-if [[ "$OUTPUT_DIR" != /* ]]; then
-    OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
-fi
-
-if [[ "$SKIP_INSTALL" == "false" ]]; then
-    echo "==> Installing dependencies..."
-    npm ci --ignore-scripts
-else
-    echo "==> Skipping npm ci (--skip-install)"
-fi
-
-if [[ "$SKIP_DEPS" == "false" ]]; then
-    echo "==> Installing cross-platform native bindings..."
-    CLIPBOARD_VERSION=$(node -p "require('./packages/coding-agent/package.json').optionalDependencies['@mariozechner/clipboard']")
-    # npm ci only installs optional deps for the current platform. Install the
-    # cross-platform packages in isolation so npm does not re-resolve and mutate
-    # the workspace dependency graph, which can trigger npm/arborist failures.
-    NATIVE_DEPS_DIR=$(mktemp -d)
-    cleanup_native_deps() {
-        rm -rf "$NATIVE_DEPS_DIR"
-    }
-    trap cleanup_native_deps EXIT
-    printf '%s\n' '{"private":true}' > "$NATIVE_DEPS_DIR/package.json"
-    # Use --force to bypass platform checks (os/cpu restrictions in package.json).
-    npm install --prefix "$NATIVE_DEPS_DIR" --include=optional --no-save --package-lock=false --force --ignore-scripts \
-        @mariozechner/clipboard@"$CLIPBOARD_VERSION" \
-        @mariozechner/clipboard-darwin-arm64@"$CLIPBOARD_VERSION" \
-        @mariozechner/clipboard-darwin-x64@"$CLIPBOARD_VERSION" \
-        @mariozechner/clipboard-linux-x64-gnu@"$CLIPBOARD_VERSION" \
-        @mariozechner/clipboard-linux-arm64-gnu@"$CLIPBOARD_VERSION" \
-        @mariozechner/clipboard-win32-x64-msvc@"$CLIPBOARD_VERSION" \
-        @mariozechner/clipboard-win32-arm64-msvc@"$CLIPBOARD_VERSION"
-    mkdir -p node_modules/@mariozechner
-    for package in \
-        clipboard \
-        clipboard-darwin-arm64 \
-        clipboard-darwin-x64 \
-        clipboard-linux-x64-gnu \
-        clipboard-linux-arm64-gnu \
-        clipboard-win32-x64-msvc \
-        clipboard-win32-arm64-msvc; do
-        rm -rf "node_modules/@mariozechner/$package"
-        cp -R "$NATIVE_DEPS_DIR/node_modules/@mariozechner/$package" node_modules/@mariozechner/
-    done
-    cleanup_native_deps
-    trap - EXIT
-else
-    echo "==> Skipping cross-platform native bindings (--skip-deps)"
-fi
-
-if [[ "$SKIP_BUILD" == "false" ]]; then
-    if [[ "$OFFLINE_MODEL_DATA" == "true" ]]; then
-        echo "==> Building all packages with bundled model data..."
-        npm run build:offline
-    else
-        echo "==> Building all packages..."
-        npm run build
-    fi
-else
-    echo "==> Skipping package build (--skip-build)"
-fi
-
-echo "==> Building binaries..."
+mkdir -p "$OUTPUT_DIR"
 cd packages/coding-agent
+for target in "${PLATFORMS_REQUESTED[@]}"; do
+	bun_target=$(node ../../scripts/lib/bun-targets.mjs --get "$target" bunTarget)
+	executable=$(node ../../scripts/lib/bun-targets.mjs --get "$target" executable)
+	wrapper=$(node ../../scripts/lib/bun-targets.mjs --get "$target" wrapper)
+	archive=$(node ../../scripts/lib/bun-targets.mjs --get "$target" archive)
+	clipboard_package=$(node ../../scripts/lib/bun-targets.mjs --get "$target" clipboardNativePackage)
+	clipboard_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" clipboardNativeFile)
+	target_dir="$OUTPUT_DIR/$target"
+	rm -rf "$target_dir"
+	mkdir -p "$target_dir"
 
-# Clean previous builds
-rm -rf "$OUTPUT_DIR"
-mkdir -p "$OUTPUT_DIR"/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64,windows-arm64}
+	# Keep the executable flags in the authoritative target descriptor so local,
+	# CI, and release builds cannot silently diverge. macOS runners ship bash 3.2,
+	# so read the flags with a portable while loop instead of mapfile.
+	bun_build_flags=()
+	while IFS= read -r flag; do bun_build_flags+=("$flag"); done < <(node ../../scripts/lib/bun-targets.mjs --build-flags "$target")
+	bun build --compile "${bun_build_flags[@]}" --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$target_dir/$executable"
+	(cd ../.. && scripts/build-pi-wrapper.sh "$target" "$target_dir/$wrapper" "$DISTRIBUTION_VERSION")
+	cp package.json README.md CHANGELOG.md "$target_dir/"
+	if [[ -n "$DISTRIBUTION_VERSION" ]]; then
+		node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const base=p.version;p.version=process.argv[2];p.piConfig={...(p.piConfig??{}),distribution:'xz-dev',releaseTarget:process.argv[3],changelogVersion:p.piConfig?.changelogVersion??base};fs.writeFileSync(process.argv[1],JSON.stringify(p,null,2)+'\n')" "$target_dir/package.json" "$DISTRIBUTION_VERSION" "$target"
+	fi
+	cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm "$target_dir/"
+	mkdir -p "$target_dir/theme" "$target_dir/assets"
+	cp dist/modes/interactive/theme/*.json "$target_dir/theme/"
+	cp dist/modes/interactive/assets/* "$target_dir/assets/"
+	cp -r dist/core/export-html docs examples "$target_dir/"
+	mkdir -p "$target_dir/node_modules/@mariozechner"
+	cp -r ../../node_modules/@mariozechner/clipboard "$target_dir/node_modules/@mariozechner/"
+	if [[ "$target" == *-musl* ]]; then
+		test -n "$CLIPBOARD_MUSL_DIR"
+		cp -r "$CLIPBOARD_MUSL_DIR/$clipboard_package" "$target_dir/node_modules/@mariozechner/"
+		cp "$CLIPBOARD_MUSL_DIR/$clipboard_package/$clipboard_file" "$target_dir/node_modules/@mariozechner/clipboard/"
+		cp "$CLIPBOARD_MUSL_DIR/provenance.json" "$target_dir/clipboard-native-provenance.json"
+		cp "$CLIPBOARD_MUSL_DIR/$clipboard_package/LICENSE" "$target_dir/node_modules/@mariozechner/$clipboard_package/LICENSE"
+	else
+		native_package="../../node_modules/@mariozechner/$clipboard_package"
+		test -f "$native_package/$clipboard_file" || { echo "npm ci did not install host native package @mariozechner/$clipboard_package for $target" >&2; exit 1; }
+		cp -r "$native_package" "$target_dir/node_modules/@mariozechner/"
+		cp "$native_package/$clipboard_file" "$target_dir/node_modules/@mariozechner/clipboard/"
+	fi
 
-# Determine which platforms to build
-if [[ -n "$PLATFORM" ]]; then
-    PLATFORMS=("$PLATFORM")
-else
-    PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 windows-arm64)
-fi
+	native_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperDir 2>/dev/null || true)
+	if [[ -n "$native_dir" ]]; then
+		native_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperFile)
+		mkdir -p "$target_dir/$native_dir"
+		cp "../tui/$native_dir/$native_file" "$target_dir/$native_dir/"
+	fi
+	if [[ "$target" == windows-* ]]; then
+		filesystem_helper_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" filesystemHelperDir)
+		filesystem_helper_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" filesystemHelperFile)
+		mkdir -p "$target_dir/$filesystem_helper_dir"
+		(cd ../.. && scripts/build-win32-filesystem-snapshot.sh "$target" "$target_dir/$filesystem_helper_dir/$filesystem_helper_file")
+	fi
+	node ../../scripts/generate-third-party-notices.mjs "$target_dir" "$target_dir/THIRD_PARTY_NOTICES.md"
 
-set_clipboard_target() {
-    case "$1" in
-        darwin-arm64)
-            clipboard_native_package="clipboard-darwin-arm64"
-            clipboard_native_file="clipboard.darwin-arm64.node"
-            ;;
-        darwin-x64)
-            clipboard_native_package="clipboard-darwin-x64"
-            clipboard_native_file="clipboard.darwin-x64.node"
-            ;;
-        linux-x64)
-            clipboard_native_package="clipboard-linux-x64-gnu"
-            clipboard_native_file="clipboard.linux-x64-gnu.node"
-            ;;
-        linux-arm64)
-            clipboard_native_package="clipboard-linux-arm64-gnu"
-            clipboard_native_file="clipboard.linux-arm64-gnu.node"
-            ;;
-        windows-x64)
-            clipboard_native_package="clipboard-win32-x64-msvc"
-            clipboard_native_file="clipboard.win32-x64-msvc.node"
-            ;;
-        windows-arm64)
-            clipboard_native_package="clipboard-win32-arm64-msvc"
-            clipboard_native_file="clipboard.win32-arm64-msvc.node"
-            ;;
-    esac
-}
-
-for platform in "${PLATFORMS[@]}"; do
-    echo "Building for $platform..."
-    bun_target="bun-$platform"
-    if [[ "$platform" == *-x64 ]]; then
-        bun_target="${bun_target}-baseline"
-    fi
-
-    # Bun compiled executables only embed worker scripts when they are passed as
-    # explicit build entrypoints. The runtime can still use new URL(...), but the
-    # worker must be present in the compiled executable.
-    #
-    # Disable cwd bunfig.toml autoload so project preload scripts cannot crash the
-    # standalone binary before pi starts (see #7684).
-    if [[ "$platform" == windows-* ]]; then
-        bun build --compile --no-compile-autoload-bunfig --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$OUTPUT_DIR/$platform/pi.exe"
-    else
-        bun build --compile --no-compile-autoload-bunfig --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$OUTPUT_DIR/$platform/pi"
-    fi
-done
-
-echo "==> Creating release archives..."
-
-# Copy shared files to each platform directory
-for platform in "${PLATFORMS[@]}"; do
-    cp package.json "$OUTPUT_DIR/$platform/"
-    cp README.md "$OUTPUT_DIR/$platform/"
-    cp CHANGELOG.md "$OUTPUT_DIR/$platform/"
-    cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm "$OUTPUT_DIR/$platform/"
-    mkdir -p "$OUTPUT_DIR/$platform/theme"
-    cp dist/modes/interactive/theme/*.json "$OUTPUT_DIR/$platform/theme/"
-    mkdir -p "$OUTPUT_DIR/$platform/assets"
-    cp dist/modes/interactive/assets/* "$OUTPUT_DIR/$platform/assets/"
-    cp -r dist/core/export-html "$OUTPUT_DIR/$platform/"
-    cp -r docs "$OUTPUT_DIR/$platform/"
-    cp -r examples "$OUTPUT_DIR/$platform/"
-
-    set_clipboard_target "$platform"
-    mkdir -p "$OUTPUT_DIR/$platform/node_modules/@mariozechner"
-    cp -r ../../node_modules/@mariozechner/clipboard "$OUTPUT_DIR/$platform/node_modules/@mariozechner/"
-    cp "../../node_modules/@mariozechner/$clipboard_native_package/$clipboard_native_file" \
-        "$OUTPUT_DIR/$platform/node_modules/@mariozechner/clipboard/"
-
-    # Copy terminal input native helpers next to compiled binaries.
-    if [[ "$platform" == darwin-* ]]; then
-        mkdir -p "$OUTPUT_DIR/$platform/native/darwin/prebuilds/$platform"
-        cp ../tui/native/darwin/prebuilds/$platform/darwin-modifiers.node "$OUTPUT_DIR/$platform/native/darwin/prebuilds/$platform/"
-    fi
-    if [[ "$platform" == windows-* ]]; then
-        if [[ "$platform" == "windows-arm64" ]]; then
-            win32_arch_dir="win32-arm64"
-        else
-            win32_arch_dir="win32-x64"
-        fi
-        mkdir -p "$OUTPUT_DIR/$platform/native/win32/prebuilds/$win32_arch_dir"
-        cp ../tui/native/win32/prebuilds/$win32_arch_dir/win32-console-mode.node "$OUTPUT_DIR/$platform/native/win32/prebuilds/$win32_arch_dir/"
-    fi
-done
-
-# Create archives
-cd "$OUTPUT_DIR"
-
-for platform in "${PLATFORMS[@]}"; do
-    if [[ "$platform" == windows-* ]]; then
-        # Windows (zip)
-        echo "Creating pi-$platform.zip..."
-        (cd "$platform" && zip -r ../pi-$platform.zip .)
-    else
-        # Unix platforms (tar.gz) - use wrapper directory for mise compatibility
-        echo "Creating pi-$platform.tar.gz..."
-        mv "$platform" pi && tar -czf pi-$platform.tar.gz pi && mv pi "$platform"
-    fi
-done
-
-# Extract archives for easy local testing
-echo "==> Extracting archives for testing..."
-for platform in "${PLATFORMS[@]}"; do
-    rm -rf "$platform"
-    if [[ "$platform" == windows-* ]]; then
-        mkdir -p "$platform" && (cd "$platform" && unzip -q ../pi-$platform.zip)
-    else
-        tar -xzf pi-$platform.tar.gz && mv pi "$platform"
-    fi
-done
-
-echo ""
-echo "==> Build complete!"
-echo "Archives available in $OUTPUT_DIR/"
-ls -lh *.tar.gz *.zip 2>/dev/null || true
-echo ""
-echo "Extracted directories for testing:"
-for platform in "${PLATFORMS[@]}"; do
-    if [[ "$platform" == windows-* ]]; then
-        echo "  $OUTPUT_DIR/$platform/pi.exe"
-    else
-        echo "  $OUTPUT_DIR/$platform/pi"
-    fi
+	[[ "$archive" == zip ]]
+	archive_path="$OUTPUT_DIR/pi-$target.zip"
+	rm -f "$archive_path"
+	if command -v cygpath >/dev/null 2>&1; then
+		archive_path=$(cygpath -w "$archive_path")
+		(cd "$target_dir" && 7z a -bd -tzip -mm=Deflate "$archive_path" .)
+		node ../../scripts/normalize-windows-zip.mjs "$archive_path"
+	else
+		(cd "$target_dir" && zip -qr "$archive_path" .)
+	fi
 done
