@@ -19,7 +19,10 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 type ShutdownThis = {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
-	runtimeHost: { dispose: () => Promise<void> };
+	runtimeHost: {
+		dispose: () => Promise<void>;
+		session: { extensionRunner: { setShutdownProgressListener: (listener?: unknown) => void } };
+	};
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	themeController: { disableAutoSync: () => void };
 	stop: () => void;
@@ -79,6 +82,9 @@ function restoreStdoutIsTTY(): void {
 }
 
 function createContext(order: string[], sessionManager = createSessionManager()): ShutdownThis {
+	const setShutdownProgressListener = vi.fn((listener?: unknown) => {
+		order.push(listener ? "enableProgress" : "disableProgress");
+	});
 	return {
 		isShuttingDown: false,
 		unregisterSignalHandlers: vi.fn(),
@@ -86,6 +92,7 @@ function createContext(order: string[], sessionManager = createSessionManager())
 			dispose: vi.fn(async () => {
 				order.push("dispose");
 			}),
+			session: { extensionRunner: { setShutdownProgressListener } },
 		},
 		ui: {
 			terminal: {
@@ -144,8 +151,11 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context, { fromSignal: true });
 
-		expect(order).toEqual(["dispose", "drainInput", "stop"]);
+		expect(order).toEqual(["enableProgress", "dispose", "drainInput", "stop"]);
 		expect(context.isShuttingDown).toBe(true);
+		expect(context.runtimeHost.session.extensionRunner.setShutdownProgressListener).toHaveBeenCalledWith(
+			expect.any(Function),
+		);
 	});
 
 	test("interactive quit stops the TUI before emitting session_shutdown", async () => {
@@ -157,7 +167,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context);
 
-		expect(order).toEqual(["drainInput", "stop", "dispose"]);
+		expect(order).toEqual(["drainInput", "stop", "enableProgress", "dispose", "disableProgress"]);
 	});
 
 	test("interactive quit prints a resume hint for persisted sessions", async () => {
@@ -173,7 +183,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context);
 
-		expect(order).toEqual(["drainInput", "stop", "dispose"]);
+		expect(order).toEqual(["drainInput", "stop", "enableProgress", "dispose", "disableProgress"]);
 		expect(stdoutWrite).toHaveBeenCalledWith(
 			`${chalk.dim("To resume this session:")} ${APP_NAME} --session test-session\n`,
 		);

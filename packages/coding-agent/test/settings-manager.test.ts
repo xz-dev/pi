@@ -417,6 +417,17 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("slowHookThresholdMs", () => {
+		it("defaults to 100 ms and accepts a non-negative override", () => {
+			expect(SettingsManager.inMemory().getSlowHookThresholdMs()).toBe(100);
+			expect(SettingsManager.inMemory({ slowHookThresholdMs: 250 }).getSlowHookThresholdMs()).toBe(250);
+		});
+
+		it("falls back to 100 ms for invalid thresholds", () => {
+			expect(SettingsManager.inMemory({ slowHookThresholdMs: -1 }).getSlowHookThresholdMs()).toBe(100);
+		});
+	});
+
 	describe("externalEditor", () => {
 		const originalVisual = process.env.VISUAL;
 		const originalEditor = process.env.EDITOR;
