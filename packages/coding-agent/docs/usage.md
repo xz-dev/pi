@@ -214,7 +214,23 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools: `read`, `bash`, `powershell` (Windows), `edit`, `write`, `grep`, `find`, `ls`.
+Built-in tools: `read`, `bash`, `powershell` (Windows), `edit`, `write`, `grep`, `find`, `ls`, `tool_task`.
+
+### Managed Tool Executions
+
+Long AI tool calls can detach from their original tool call according to `backgroundToolCalls` rules in [Settings](settings.md#tools). Detach returns one background-task result; underlying work continues under its original timeout.
+
+The default `tool_task` tool provides:
+
+- `list` and `info` to inspect managed executions
+- `wait` to retrieve final output; `timeoutSeconds` is required and must be greater than 0 and no greater than 1800. Repeated waits return the cached outcome without re-executing the original tool
+- `cancel` to request cancellation through the tool call's abort signal; this does not prove that an abort-ignoring operation stopped
+
+Escape or another abort of the current agent run does not cancel an execution after it detaches; use `tool_task cancel` to request cancellation. `tool_task` itself is never auto-backgrounded, and a `backgroundToolCalls.tool_task` rule is ignored.
+
+Completion notifications contain trusted task metadata only. Raw tool output is returned only by `tool_task wait`. Managed executions survive `/reload`; `/new`, `/resume`, `/fork`, session teardown, and process shutdown cancel and clear executions owned by the replaced session.
+
+`tool_task` remains enabled when `defaultTools` omits normal built-ins. `--tools` is a strict allowlist, so include `tool_task` to retain management controls; `--no-tools` or `--exclude-tools tool_task` disables it. User-entered `!` and `!!` commands are separate from AI-called shell tools and never become managed executions.
 
 ### Resource Options
 
@@ -306,6 +322,6 @@ pi --exclude-tools ask_question
 
 Pi keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
 
-It intentionally does not include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
+It intentionally does not include built-in MCP, sub-agents, permission popups, plan mode, or to-dos. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
 
 For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).

@@ -10,6 +10,11 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import {
+	createManagedExecutionOutcome,
+	getManagedExecutionReplayError,
+	type ManagedExecutionOutcome,
+} from "./managed-executions.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
@@ -456,15 +461,15 @@ async function executeToolCallsSequential(
 				isError: preparation.isError,
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
-			finalized = await finalizeExecutedToolCall(
+			const execution = createPreparedToolExecution(
 				currentContext,
 				assistantMessage,
 				preparation,
-				executed,
 				config,
 				signal,
+				emit,
 			);
+			finalized = await awaitPreparedToolExecution(preparation, execution, config);
 		}
 
 		await emitToolExecutionEnd(finalized, emit);
@@ -517,16 +522,16 @@ async function executeToolCallsParallel(
 			continue;
 		}
 
+		const execution = createPreparedToolExecution(
+			currentContext,
+			assistantMessage,
+			preparation,
+			config,
+			signal,
+			emit,
+		);
 		finalizedCalls.push(async () => {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
-			const finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				executed,
-				config,
-				signal,
-			);
+			const finalized = await awaitPreparedToolExecution(preparation, execution, config);
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
 		});
@@ -569,6 +574,14 @@ type ExecutedToolCallOutcome = {
 	isError: boolean;
 };
 
+type PreparedToolExecution = {
+	completion: Promise<FinalizedToolCallOutcome>;
+	detachAfterMs?: number;
+	controller: AbortController;
+	startedAt: number;
+	detach: () => void;
+};
+
 type FinalizedToolCallOutcome = {
 	toolCall: AgentToolCall;
 	result: AgentToolResult<any>;
@@ -576,6 +589,102 @@ type FinalizedToolCallOutcome = {
 };
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
+
+function createSyntheticBackgroundOutcome(prepared: PreparedToolCall, taskId: string): FinalizedToolCallOutcome {
+	return {
+		toolCall: prepared.toolCall,
+		result: {
+			content: [
+				{
+					type: "text",
+					text: `Tool execution continues in background as task ${taskId}. Use tool_task to inspect or wait for it.`,
+				},
+			],
+			details: { taskId },
+		},
+		isError: false,
+	};
+}
+
+function getDetachAfterMs(prepared: PreparedToolCall, config: AgentLoopConfig): number | undefined {
+	if (prepared.toolCall.name === "tool_task") return undefined;
+	const rule = config.backgroundToolCalls?.[prepared.toolCall.name];
+	if (!rule || (rule.shouldDetach && !rule.shouldDetach(prepared.args))) return undefined;
+	const detachAfterSeconds = rule.detachAfterSeconds ?? 600;
+	return Number.isFinite(detachAfterSeconds) && detachAfterSeconds > 0 ? detachAfterSeconds * 1000 : undefined;
+}
+
+function createPreparedToolExecution(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	prepared: PreparedToolCall,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): PreparedToolExecution {
+	const controller = new AbortController();
+	const forwardAbort = () => controller.abort();
+	if (signal) {
+		if (signal.aborted) controller.abort();
+		else signal.addEventListener("abort", forwardAbort, { once: true });
+	}
+	let detached = false;
+	const startedAt = Date.now();
+	const completion = executePreparedToolCall(prepared, controller.signal, (event) => {
+		if (detached) return;
+		return emit(event);
+	})
+		.then((executed) =>
+			finalizeExecutedToolCall(currentContext, assistantMessage, prepared, executed, config, controller.signal),
+		)
+		.finally(() => {
+			if (!detached && signal) signal.removeEventListener("abort", forwardAbort);
+		});
+	return {
+		completion,
+		detachAfterMs: getDetachAfterMs(prepared, config),
+		controller,
+		startedAt,
+		detach: () => {
+			detached = true;
+			if (signal) signal.removeEventListener("abort", forwardAbort);
+		},
+	};
+}
+
+async function awaitPreparedToolExecution(
+	prepared: PreparedToolCall,
+	execution: PreparedToolExecution,
+	config: AgentLoopConfig,
+): Promise<FinalizedToolCallOutcome> {
+	if (execution.detachAfterMs === undefined || !config.managedExecutions) {
+		return execution.completion;
+	}
+
+	let detachTimer: ReturnType<typeof setTimeout> | undefined;
+	const detach = new Promise<"detach">((resolve) => {
+		detachTimer = setTimeout(() => resolve("detach"), execution.detachAfterMs);
+	});
+	const winner = await Promise.race([execution.completion, detach]);
+	if (winner !== "detach") {
+		if (detachTimer) clearTimeout(detachTimer);
+		return winner;
+	}
+
+	execution.detach();
+	const completion = execution.completion.then(
+		(finalized): ManagedExecutionOutcome => createManagedExecutionOutcome(finalized.result, finalized.isError),
+	);
+	const taskId = config.managedExecutions.register({
+		toolCallId: prepared.toolCall.id,
+		toolName: prepared.toolCall.name,
+		arguments: prepared.args,
+		startedAt: execution.startedAt,
+		controller: execution.controller,
+		completion,
+	});
+	return createSyntheticBackgroundOutcome(prepared, taskId);
+}
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
@@ -717,9 +826,10 @@ async function finalizeExecutedToolCall(
 	signal: AbortSignal | undefined,
 ): Promise<FinalizedToolCallOutcome> {
 	let result = executed.result;
-	let isError = executed.isError;
+	const replayError = getManagedExecutionReplayError(result);
+	let isError = replayError ?? executed.isError;
 
-	if (config.afterToolCall) {
+	if (config.afterToolCall && replayError === undefined) {
 		try {
 			const afterResult = await config.afterToolCall(
 				{

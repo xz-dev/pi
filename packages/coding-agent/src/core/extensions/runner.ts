@@ -275,6 +275,7 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+	private activeToolChangeListeners = new Set<(toolNames: string[]) => void>();
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -332,7 +333,11 @@ export class ExtensionRunner {
 		this.runtime.setLabel = actions.setLabel;
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
-		this.runtime.setActiveTools = actions.setActiveTools;
+		this.runtime.setActiveTools = (toolNames) => {
+			actions.setActiveTools(toolNames);
+			const activeToolNames = actions.getActiveTools();
+			for (const listener of this.activeToolChangeListeners) listener(activeToolNames);
+		};
 		this.runtime.refreshTools = actions.refreshTools;
 		this.runtime.getCommands = actions.getCommands;
 		this.runtime.setModel = actions.setModel;
@@ -714,6 +719,18 @@ export class ExtensionRunner {
 	getActiveTools(): string[] {
 		this.assertActive();
 		return this.runtime.getActiveTools();
+	}
+
+	captureActiveToolChanges(): { getLatest: () => string[] | undefined; stop: () => void } {
+		let latest: string[] | undefined;
+		const listener = (toolNames: string[]) => {
+			latest = [...toolNames];
+		};
+		this.activeToolChangeListeners.add(listener);
+		return {
+			getLatest: () => latest,
+			stop: () => this.activeToolChangeListeners.delete(listener),
+		};
 	}
 
 	/**
