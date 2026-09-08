@@ -52,7 +52,10 @@ The integrated Esc and manual-retry patches both extend the Agent failure lifecy
 ### Temporarily disabled
 
 - `patch/tui-synchronized-cursor-fleet` is temporarily retired from generated `main`. Its synchronized-output implementation can emit excessive terminal data and now conflicts with upstream's bounded main-screen writer. The source branch remains retained for a corrected design and independent validation; do not mask the product conflict with a CI resolver.
-- Provider-transparent Responses remote compaction and its dependent pre-provider compaction patch are temporarily retired from generated `main`. Classic compaction remains the default path; both source branches remain retained for re-evaluation. A third-party extension such as [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions) can provide Codex-native remote compaction without adding provider-specific behavior to core.
+
+### Removed patches
+
+- Provider-transparent Responses remote compaction and its dependent pre-provider compaction patch have been removed, and both source branches have been permanently deleted. Classic compaction remains the default path. A third-party extension such as [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions) can provide Codex-native remote compaction without adding provider-specific behavior to core.
 
 ### Maintenance
 
