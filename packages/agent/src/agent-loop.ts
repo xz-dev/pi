@@ -522,15 +522,25 @@ async function executeToolCallsParallel(
 			continue;
 		}
 
-		const execution = createPreparedToolExecution(
-			currentContext,
-			assistantMessage,
-			preparation,
-			config,
-			signal,
-			emit,
-		);
 		finalizedCalls.push(async () => {
+			// A later preflight can abort the whole batch before execution (#8935).
+			if (signal?.aborted) {
+				const finalized = {
+					toolCall,
+					result: createErrorToolResult("Operation aborted"),
+					isError: true,
+				} satisfies FinalizedToolCallOutcome;
+				await emitToolExecutionEnd(finalized, emit);
+				return finalized;
+			}
+			const execution = createPreparedToolExecution(
+				currentContext,
+				assistantMessage,
+				preparation,
+				config,
+				signal,
+				emit,
+			);
 			const finalized = await awaitPreparedToolExecution(preparation, execution, config);
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
