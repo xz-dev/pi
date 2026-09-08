@@ -166,24 +166,25 @@ describe("GitHub Release binary packaging helpers", () => {
 			expect(inventory).toContain("export-html");
 			expect(inventory).toContain("docs");
 			expect(inventory).toContain("examples");
-			expect(inventory).toContain("node_modules/@mariozechner/clipboard");
-			expect(inventory).toContain(`node_modules/@mariozechner/${info.clipboardNativePackage}`);
-			expect(inventory).toContain(`node_modules/@mariozechner/clipboard/${info.clipboardNativeFile}`);
-			if (info.nativeHelperDir) {
-				expect(inventory).toContain(info.nativeHelperDir);
-				expect(inventory).toContain(`${info.nativeHelperDir}/${info.nativeHelperFile}`);
+			expect(inventory).toContain("native/LICENSE");
+			expect(inventory).toContain(info.nativeHelperDir);
+			expect(inventory).toContain(`${info.nativeHelperDir}/${info.nativeHelperFile}`);
+			expect(inventory.some((path: string) => path.includes("node_modules/@mariozechner/clipboard"))).toBe(false);
+			if (platform.includes("-musl")) {
+				expect(inventory).toContain("clipboard-native-provenance.json");
 			}
 			expect(inventory).toEqual(expect.arrayContaining([...inventory]));
 		}
 	});
 
-	test("darwin targets carry the native modifier helper; windows carries console-mode", async () => {
+	test("all platforms carry the upstream native platform helper", async () => {
 		const lib = await loadLib();
-		expect(lib.platformNativeInfo("darwin-arm64").nativeHelperFile).toBe("darwin-modifiers.node");
+		expect(lib.platformNativeInfo("darwin-arm64").nativeHelperFile).toBe("darwin-platform.node");
 		expect(lib.platformNativeInfo("darwin-x64-modern").nativeHelperDir).toBe("native/darwin/prebuilds/darwin-x64");
 		expect(lib.platformNativeInfo("windows-x64-modern").nativeHelperDir).toBe("native/win32/prebuilds/win32-x64");
-		expect(lib.platformNativeInfo("windows-arm64").nativeHelperFile).toBe("win32-console-mode.node");
-		expect(lib.platformNativeInfo("linux-x64-gnu-modern").nativeHelperDir).toBeUndefined();
+		expect(lib.platformNativeInfo("windows-arm64").nativeHelperFile).toBe("win32-platform.node");
+		expect(lib.platformNativeInfo("linux-x64-gnu-modern").nativeHelperDir).toBe("native/linux/prebuilds/linux-x64");
+		expect(lib.platformNativeInfo("linux-arm64-musl").nativeHelperFile).toBe("linux-platform-x11.node");
 	});
 });
 
