@@ -109,10 +109,11 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 	});
 }
 
-const darwinHelper = (arch) => ({ nativeHelperDir: `native/darwin/prebuilds/darwin-${arch}`, nativeHelperFile: "darwin-modifiers.node" });
+const darwinHelper = (arch) => ({ nativeHelperDir: `native/darwin/prebuilds/darwin-${arch}`, nativeHelperFile: "darwin-platform.node" });
+const linuxHelper = (arch) => ({ nativeHelperDir: `native/linux/prebuilds/linux-${arch}`, nativeHelperFile: "linux-platform-x11.node" });
 const windowsHelper = (arch) => ({
 	nativeHelperDir: `native/win32/prebuilds/win32-${arch}`,
-	nativeHelperFile: "win32-console-mode.node",
+	nativeHelperFile: "win32-platform.node",
 	filesystemHelperDir: `native/win32/prebuilds/win32-${arch}`,
 	filesystemHelperFile: "pi-filesystem-snapshot.node",
 });
@@ -120,9 +121,9 @@ export const BUN_TARGETS = Object.freeze([
 	target({ id: "darwin-x64-baseline", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "baseline", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-x64-modern", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "modern", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-arm64", bunTarget: "bun-darwin-arm64", os: "darwin", arch: "arm64", cpu: "arm64", runner: "macos-15", clipboardNativePackage: "clipboard-darwin-arm64", clipboardNativeFile: "clipboard.darwin-arm64.node", ...darwinHelper("arm64") }),
-	target({ id: "linux-x64-gnu-baseline", bunTarget: "bun-linux-x64", os: "linux", arch: "x64", libc: "gnu", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-gnu", clipboardNativeFile: "clipboard.linux-x64-gnu.node" }),
-	target({ id: "linux-x64-gnu-modern", bunTarget: "bun-linux-x64", os: "linux", arch: "x64", libc: "gnu", cpu: "modern", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-gnu", clipboardNativeFile: "clipboard.linux-x64-gnu.node" }),
-	target({ id: "linux-arm64-gnu", bunTarget: "bun-linux-arm64", os: "linux", arch: "arm64", libc: "gnu", cpu: "arm64", runner: "ubuntu-24.04-arm", clipboardNativePackage: "clipboard-linux-arm64-gnu", clipboardNativeFile: "clipboard.linux-arm64-gnu.node" }),
+	target({ id: "linux-x64-gnu-baseline", bunTarget: "bun-linux-x64", os: "linux", arch: "x64", libc: "gnu", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-gnu", clipboardNativeFile: "clipboard.linux-x64-gnu.node", ...linuxHelper("x64") }),
+	target({ id: "linux-x64-gnu-modern", bunTarget: "bun-linux-x64", os: "linux", arch: "x64", libc: "gnu", cpu: "modern", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-gnu", clipboardNativeFile: "clipboard.linux-x64-gnu.node", ...linuxHelper("x64") }),
+	target({ id: "linux-arm64-gnu", bunTarget: "bun-linux-arm64", os: "linux", arch: "arm64", libc: "gnu", cpu: "arm64", runner: "ubuntu-24.04-arm", clipboardNativePackage: "clipboard-linux-arm64-gnu", clipboardNativeFile: "clipboard.linux-arm64-gnu.node", ...linuxHelper("arm64") }),
 	target({ id: "linux-x64-musl-baseline", bunTarget: "bun-linux-x64-musl", os: "linux", arch: "x64", libc: "musl", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-musl", clipboardNativeFile: "clipboard.linux-x64-musl.node" }),
 	target({ id: "linux-x64-musl-modern", bunTarget: "bun-linux-x64-musl", os: "linux", arch: "x64", libc: "musl", cpu: "modern", runner: "ubuntu-24.04", clipboardNativePackage: "clipboard-linux-x64-musl", clipboardNativeFile: "clipboard.linux-x64-musl.node" }),
 	target({ id: "linux-arm64-musl", bunTarget: "bun-linux-arm64-musl", os: "linux", arch: "arm64", libc: "musl", cpu: "arm64", runner: "ubuntu-24.04-arm", clipboardNativePackage: "clipboard-linux-arm64-musl", clipboardNativeFile: "clipboard.linux-arm64-musl.node" }),

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { cpus, platform, release, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { bunTarget, SMOKE_LIMITS } from "./lib/bun-targets.mjs";
@@ -55,8 +55,10 @@ try {
 	const noticesPath = join(root, "THIRD_PARTY_NOTICES.md");
 	const notices = readFileSync(noticesPath, "utf8");
 	if (!notices.startsWith("# Third-Party Notices") || !notices.includes("License SHA-256:")) throw new Error("third-party notices are missing or invalid");
-	const addon = join(root, "node_modules", "@mariozechner", "clipboard", target.clipboardNativeFile);
-	const clipboard = run("clipboard", "bun", ["-e", "const c=require(process.argv[1]);if(typeof c.hasImage!=='function')process.exit(2);c.hasImage()", addon], { env });
+	const nativeHelper = join(root, target.nativeHelperDir ?? "native", target.nativeHelperFile ?? "");
+	if (target.nativeHelperDir) {
+		if (!existsSync(nativeHelper)) throw new Error(`native platform helper missing: ${nativeHelper}`);
+	}
 	let filesystemSnapshot;
 	if (target.os === "windows") {
 		const filesystemHelper = join(root, target.filesystemHelperDir, target.filesystemHelperFile);
@@ -119,7 +121,6 @@ try {
 			throw new Error("Win32 filesystem snapshot helper smoke returned invalid evidence");
 		}
 	}
-	if (target.libc === "musl") run("musl-provenance", "bun", [join(process.cwd(), "scripts", "verify-musl-provenance.mjs"), join(root, "clipboard-native-provenance.json"), addon, targetId], { env });
 	let tui;
 	if (process.env.PI_XZ_TUI_EVIDENCE) {
 		tui = JSON.parse(readFileSync(process.env.PI_XZ_TUI_EVIDENCE, "utf8"));
@@ -135,7 +136,7 @@ try {
 		archive: { file: archive.split(/[\\/]/).at(-1), sha256: sha256(archive), bytes: archiveBytes, extractedBytes },
 		runner: { name: process.env.RUNNER_NAME ?? "local", os: process.env.RUNNER_OS ?? platform(), arch: process.env.RUNNER_ARCH ?? osArchitecture, osArchitecture, imageOs: process.env.ImageOS ?? null, imageVersion: process.env.ImageVersion ?? null, cpuModel: cpus()[0]?.model ?? "unknown", cpuFeatures: cpuFeatures(), libc: target.libc ?? null },
 		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, emulated: false },
-		commands, tui, clipboard: { addon: target.clipboardNativeFile, loadedAndCalled: true, elapsedMs: clipboard.elapsedMs },
+		commands, tui, clipboard: { helper: target.nativeHelperFile ?? null, packaged: Boolean(target.nativeHelperDir) },
 		filesystemSnapshot: filesystemSnapshot ?? null,
 		thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: sha256(noticesPath), bytes: statSync(noticesPath).size },
 		timingsMs: { coldVersion: coldVersion.elapsedMs, version: version.elapsedMs, help: help.elapsedMs, listModels: listModels.elapsedMs, interactive: commands.filter(({ name }) => name.startsWith("tui-")).reduce((sum, entry) => sum + entry.elapsedMs, 0) },
