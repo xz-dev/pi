@@ -89,7 +89,7 @@ test("TUI benchmark timeout reports only a bounded escaped output tail", { skip:
 	try {
 		const executable = join(root, "pi");
 		writeFileSync(executable, "#!/bin/sh\nprintf 'discard-me\\n'; i=0; while [ $i -lt 3000 ]; do printf '\\033'; i=$((i + 1)); done; printf '\\ntail-line\\n'; while :; do :; done\n"); chmodSync(executable, 0o755);
-		const result = spawnSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8", env: { ...process.env, PI_STARTUP_BENCHMARK: "1" }, timeout: 9_000 });
+		const result = spawnSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8", env: { ...process.env, PI_STARTUP_BENCHMARK: "1", GITHUB_ACTIONS: "true" }, timeout: 9_000 });
 		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
 		assert.notEqual(result.status, 0);
 		assert.match(output, /lastStage=null tail="(?:\\u001b){100,}\\r\\ntail-line\\r\\n"/);

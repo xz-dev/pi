@@ -11,7 +11,7 @@ const startupBenchmarkCompleteMarker = "__PI_STARTUP_BENCHMARK_COMPLETE__";
 const startupBenchmarkStagePattern = /__PI_STARTUP_BENCHMARK_STAGE__:(main-entered|session-manager-ready|runtime-ready|input-ready|interactive-created|init-entered|tools-ready|tui-started|theme-applied|session-rebound|providers-counted)/g;
 const markerTailLength = Math.max(startupBenchmarkCompleteMarker.length, "__PI_STARTUP_BENCHMARK_STAGE__:session-manager-ready".length) - 1;
 // JSON.stringify can expand one UTF-16 code unit to six ASCII characters (for example, ESC -> "\\u001b").
-// Keep the serialized tail below 3.1 KB so the complete Bun error remains below 5 KB.
+// Keep the serialized tail below 3.1 KB so the complete diagnostic remains below 5 KB.
 const diagnosticTailLength = 512;
 const decoder = new TextDecoder();
 let outputBytes = 0;
@@ -87,6 +87,10 @@ try {
 		exitSent,
 		cleanExit: true,
 	}));
+} catch (error) {
+	// Bun's GitHub annotations duplicate uncaught errors; print the bounded diagnostic once.
+	console.error(error instanceof Error ? error.message : String(error));
+	process.exitCode = 1;
 } finally {
 	clearTimeout(interruptTimer);
 	clearTimeout(exitTimer);
