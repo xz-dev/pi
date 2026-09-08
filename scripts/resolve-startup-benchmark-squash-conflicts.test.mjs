@@ -72,6 +72,8 @@ function interactiveText({ managed, benchmark }) {
 function createConflictFixture() {
 	const repo = mkdtempSync(join(tmpdir(), "pi-startup-benchmark-conflicts-"));
 	git(repo, ["init", "-q", "-b", "base"]);
+	// Detached maintenance can recreate .git entries while the fixture is being removed.
+	git(repo, ["config", "maintenance.auto", "false"]);
 	git(repo, ["config", "user.name", "test"]);
 	git(repo, ["config", "user.email", "test@example.invalid"]);
 	write(repo, INTERACTIVE_MODE, interactiveText({ managed: false, benchmark: false }));
