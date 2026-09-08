@@ -259,6 +259,46 @@ describe("SettingsManager", () => {
 			expect(manager.getTheme()).toBe("project");
 		});
 
+		it("updates background tool policy when project trust changes", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ backgroundToolCalls: { global_tool: { detachAfterSeconds: 11 } } }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ backgroundToolCalls: { project_tool: { detachAfterSeconds: 22 } } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+
+			expect(manager.getBackgroundToolCalls()).toEqual({ global_tool: { detachAfterSeconds: 11 } });
+
+			manager.setProjectTrusted(true);
+			expect(manager.getBackgroundToolCalls()).toEqual({
+				global_tool: { detachAfterSeconds: 11 },
+				project_tool: { detachAfterSeconds: 22 },
+			});
+
+			manager.setProjectTrusted(false);
+			expect(manager.getBackgroundToolCalls()).toEqual({ global_tool: { detachAfterSeconds: 11 } });
+		});
+
+		it("keeps valid global background tool policy when project rules are invalid", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ backgroundToolCalls: { global_tool: { detachAfterSeconds: 11 } } }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ backgroundToolCalls: { project_tool: { detachAfterSeconds: 0 } } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getBackgroundToolCalls()).toEqual({ global_tool: { detachAfterSeconds: 11 } });
+			expect(manager.drainErrors()).toMatchObject([
+				{ scope: "project", error: { message: expect.stringContaining("backgroundToolCalls.project_tool") } },
+			]);
+		});
+
 		it("should fail project settings writes when project is not trusted", async () => {
 			const projectSettingsPath = join(projectDir, ".pi", "settings.json");
 			writeFileSync(projectSettingsPath, JSON.stringify({ packages: ["npm:existing"] }));
@@ -374,6 +414,17 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(() => manager.getHttpIdleTimeoutMs()).toThrow("Invalid httpIdleTimeoutMs setting");
+		});
+	});
+
+	describe("slowHookThresholdMs", () => {
+		it("defaults to 100 ms and accepts a non-negative override", () => {
+			expect(SettingsManager.inMemory().getSlowHookThresholdMs()).toBe(100);
+			expect(SettingsManager.inMemory({ slowHookThresholdMs: 250 }).getSlowHookThresholdMs()).toBe(250);
+		});
+
+		it("falls back to 100 ms for invalid thresholds", () => {
+			expect(SettingsManager.inMemory({ slowHookThresholdMs: -1 }).getSlowHookThresholdMs()).toBe(100);
 		});
 	});
 
@@ -570,6 +621,35 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("backgroundToolCalls overrides", () => {
+		it("applies valid SDK overrides to effective policy", () => {
+			const manager = SettingsManager.inMemory({
+				backgroundToolCalls: { existing: { detachAfterSeconds: 7 } },
+			});
+
+			manager.applyOverrides({ backgroundToolCalls: { added: {} } });
+
+			expect(manager.getBackgroundToolCalls()).toEqual({
+				existing: { detachAfterSeconds: 7 },
+				added: {},
+			});
+		});
+
+		it("diagnoses invalid SDK overrides and keeps the last valid effective policy", () => {
+			const manager = SettingsManager.inMemory({
+				backgroundToolCalls: { existing: { detachAfterSeconds: 7 } },
+			});
+
+			expect(() =>
+				manager.applyOverrides({ backgroundToolCalls: { added: { detachAfterSeconds: 0 } } }),
+			).not.toThrow();
+			expect(manager.getBackgroundToolCalls()).toEqual({ existing: { detachAfterSeconds: 7 } });
+			expect(manager.drainErrors()).toMatchObject([
+				{ scope: "global", error: { message: expect.stringContaining("backgroundToolCalls.added") } },
+			]);
+		});
+	});
+
 	describe("getSessionDir", () => {
 		it("should return undefined when not set", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
@@ -623,6 +703,44 @@ describe("SettingsManager", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ shellPath: "~" }));
 			const manager = SettingsManager.create(projectDir, agentDir);
 			expect(manager.getShellPath()).toBe(homedir());
+		});
+	});
+
+	describe("getRetrySettings", () => {
+		it("omits empty or invalid nonRetryableErrorPatterns", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					retry: {
+						nonRetryableErrorPatterns: ["  ", "", 1, null],
+					},
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getRetrySettings()).toEqual({
+				enabled: true,
+				maxRetries: 3,
+				baseDelayMs: 2000,
+			});
+		});
+
+		it("returns trimmed nonRetryableErrorPatterns", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					retry: {
+						maxRetries: 10,
+						nonRetryableErrorPatterns: [" quota threshold ", "", "reset after"],
+					},
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getRetrySettings()).toEqual({
+				enabled: true,
+				maxRetries: 10,
+				baseDelayMs: 2000,
+				nonRetryableErrorPatterns: ["quota threshold", "reset after"],
+			});
 		});
 	});
 });

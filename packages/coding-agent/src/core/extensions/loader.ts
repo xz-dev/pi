@@ -144,7 +144,7 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+type HandlerFn = (...args: unknown[]) => unknown;
 
 let extensionCacheCwd: string | undefined;
 let extensionCacheGeneration = 0;
@@ -190,6 +190,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
 		appendEntry: notInitialized,
+		spliceEntry: notInitialized,
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
 		setLabel: notInitialized,
@@ -277,10 +278,16 @@ function createExtensionAPI(
 
 	const api = {
 		// Registration methods - write to extension
-		on(event: string, handler: HandlerFn): void {
+		on(event: string, handler: HandlerFn, options?: { uninterruptible?: boolean }): void {
 			assertActive();
 			const list = extension.handlers.get(event) ?? [];
-			list.push(handler);
+			if (event === "message_end" && options?.uninterruptible === true) {
+				const terminalHandler: HandlerFn = (...args) => handler(...args);
+				list.push(terminalHandler);
+				extension.uninterruptibleHandlers?.add(terminalHandler);
+			} else {
+				list.push(handler);
+			}
 			extension.handlers.set(event, list);
 		},
 
@@ -370,6 +377,11 @@ function createExtensionAPI(
 		appendEntry(customType: string, data?: unknown): void {
 			assertActive();
 			runtime.appendEntry(customType, data);
+		},
+
+		spliceEntry(entryId: string): void {
+			runtime.assertActive();
+			runtime.spliceEntry(entryId);
 		},
 
 		setSessionName(name: string): void {
@@ -531,6 +543,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		resolvedPath,
 		sourceInfo: createSyntheticSourceInfo(extensionPath, { source, baseDir }),
 		handlers: new Map(),
+		uninterruptibleHandlers: new WeakSet(),
 		tools: new Map(),
 		messageRenderers: new Map(),
 		entryRenderers: new Map(),

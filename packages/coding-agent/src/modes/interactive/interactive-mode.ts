@@ -47,6 +47,7 @@ import { spawn } from "child_process";
 import {
 	APP_NAME,
 	APP_TITLE,
+	CHANGELOG_VERSION,
 	CONFIG_DIR_NAME,
 	getAgentDir,
 	getAuthPath,
@@ -76,8 +77,10 @@ import type {
 	ExtensionWidgetOptions,
 	MarkdownTransformer,
 	ProjectTrustContext,
+	SlowExtensionHookEntry,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { formatSlowExtensionHook } from "../../core/extensions/runner.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -107,6 +110,7 @@ import { parseGitUrl } from "../../utils/git.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { markStartupBenchmarkStage } from "../../utils/startup-benchmark.ts";
 import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
@@ -157,6 +161,7 @@ import { editInExternalEditor } from "./external-editor.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
 import { shareSession } from "./session-share.ts";
+import { createInteractiveShutdownProgressWriter, formatShutdownProgressLine } from "./shutdown-progress.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -468,6 +473,8 @@ export class InteractiveMode {
 
 	// Shutdown state
 	private shutdownRequested = false;
+	// Transient TUI-only: survive exactly one chat reconstruction after reload/replacement.
+	private pendingRetainedShutdownSlowLines: string[] = [];
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -850,6 +857,7 @@ export class InteractiveMode {
 
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
+		markStartupBenchmarkStage("init-entered");
 
 		this.registerSignalHandlers();
 
@@ -905,8 +913,10 @@ export class InteractiveMode {
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
 		this.isInitialized = true;
+		markStartupBenchmarkStage("tui-started");
 
 		await this.themeController.applyFromSettings();
+		markStartupBenchmarkStage("theme-applied");
 
 		// Add header with keybindings from config (unless silenced)
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
@@ -978,6 +988,7 @@ export class InteractiveMode {
 			ensureTool("rg", (status) => this.showManagedToolStatus(status)),
 		]);
 		this.fdPath = fdPath;
+		markStartupBenchmarkStage("tools-ready");
 
 		// Enable the remaining input handlers only after managed-tool setup completes.
 		this.setupKeyHandlers();
@@ -986,6 +997,7 @@ export class InteractiveMode {
 
 		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
+		markStartupBenchmarkStage("session-rebound");
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
@@ -1004,6 +1016,7 @@ export class InteractiveMode {
 
 		// Initialize available provider count for footer display
 		await this.updateAvailableProviderCount();
+		markStartupBenchmarkStage("providers-counted");
 
 		// Flush the completed startup state before loading the remaining syntax grammars.
 		this.ui.renderNow();
@@ -1220,15 +1233,15 @@ export class InteractiveMode {
 		const entries = parseChangelog(changelogPath);
 
 		if (!lastVersion) {
-			// Fresh install - record the version, send telemetry, don't show changelog
-			this.settingsManager.setLastChangelogVersion(VERSION);
+			// Fresh install - record the changelog baseline version, send telemetry, don't show changelog
+			this.settingsManager.setLastChangelogVersion(CHANGELOG_VERSION);
 			this.reportInstallTelemetry(VERSION);
 			return undefined;
 		}
 
 		const newEntries = getNewEntries(entries, lastVersion);
 		if (newEntries.length > 0) {
-			this.settingsManager.setLastChangelogVersion(VERSION);
+			this.settingsManager.setLastChangelogVersion(CHANGELOG_VERSION);
 			this.reportInstallTelemetry(VERSION);
 			return newEntries.map((e) => normalizeChangelogLinks(e.content, e)).join("\n\n");
 		}
@@ -1860,6 +1873,8 @@ export class InteractiveMode {
 		await this.session.bindExtensions({
 			uiContext,
 			mode: "tui",
+			onSlowHook: (entry) => this.showSlowExtensionHook(entry),
+			onShutdownProgress: (entry) => this.showShutdownProgress(entry),
 			abortHandler: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
@@ -2008,6 +2023,7 @@ export class InteractiveMode {
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
 		this.renderInitialMessages();
+		this.flushRetainedShutdownSlowLines();
 	}
 
 	/**
@@ -2417,6 +2433,7 @@ export class InteractiveMode {
 				input: ui.input,
 				notify: ui.notify,
 			},
+			onSlowHook: (entry) => this.showSlowExtensionHook(entry),
 		};
 	}
 
@@ -2739,6 +2756,39 @@ export class InteractiveMode {
 		} else {
 			this.showStatus(message);
 		}
+	}
+
+	private showShutdownProgress(entry: Parameters<typeof formatShutdownProgressLine>[0]): void {
+		this.statusContainer.clear();
+		if (entry.status === "start") {
+			this.statusContainer.addChild(new Text(theme.fg("muted", formatShutdownProgressLine(entry)), 1, 0));
+		} else if (entry.slow) {
+			this.pendingRetainedShutdownSlowLines.push(formatShutdownProgressLine(entry));
+			this.lastStatusSpacer = undefined;
+			this.lastStatusText = undefined;
+		}
+		this.ui.requestRender();
+	}
+
+	private flushRetainedShutdownSlowLines(): void {
+		const lines = this.pendingRetainedShutdownSlowLines;
+		if (lines.length === 0) {
+			return;
+		}
+		this.pendingRetainedShutdownSlowLines = [];
+		for (const line of lines) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("warning", line), 1, 0));
+		}
+	}
+
+	private showSlowExtensionHook(entry: SlowExtensionHookEntry): void {
+		const color = entry.executionKind === "sync" ? "warning" : "muted";
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg(color, formatSlowExtensionHook(entry)), 1, 0));
+		this.lastStatusSpacer = undefined;
+		this.lastStatusText = undefined;
+		this.ui.requestRender();
 	}
 
 	/** Show a custom component with keyboard focus. Overlay mode renders on top of existing content. */
@@ -3065,6 +3115,11 @@ export class InteractiveMode {
 				await this.handleClearCommand();
 				return;
 			}
+			if (text === "/retry") {
+				this.editor.setText("");
+				await this.handleRetryCommand();
+				return;
+			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
 				this.editor.setText("");
@@ -3204,6 +3259,11 @@ export class InteractiveMode {
 					this.addCustomEntryToChat(event.entry);
 					this.ui.requestRender();
 				}
+				break;
+
+			case "session_entry_spliced":
+				this.rebuildChatFromMessages();
+				this.ui.requestRender();
 				break;
 
 			case "session_info_changed":
@@ -3677,6 +3737,10 @@ export class InteractiveMode {
 				// Tool results are rendered inline with tool calls, handled separately
 				break;
 			}
+			case "manualRetryRecovery": {
+				// Provider-only recovery cue is never rendered or persisted.
+				break;
+			}
 			default: {
 				const _exhaustive: never = message;
 			}
@@ -3922,6 +3986,7 @@ export class InteractiveMode {
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
 		this.renderSessionEntries(this.sessionManager.buildContextEntries());
+		this.flushRetainedShutdownSlowLines();
 	}
 
 	// =========================================================================
@@ -3958,8 +4023,11 @@ export class InteractiveMode {
 		// dispatch and re-sends the signal if only its own listeners remain.
 
 		if (options?.fromSignal) {
-			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
-			// (session_shutdown) BEFORE touching the terminal. Extension teardown
+			// Signal-triggered shutdown (SIGTERM/SIGHUP) cannot safely render progress:
+			// suppress the already-bound TUI listener and generic slow-hook fallback.
+			// Emit extension cleanup (session_shutdown) BEFORE touching the terminal.
+			this.runtimeHost.session.extensionRunner.setShutdownProgressListener(() => {});
+			// Extension teardown
 			// such as removing sockets does not write to the tty, so it must not be
 			// skipped if a later terminal-restore write fails on a dead or stalled
 			// terminal. If the terminal is gone, the restore writes below emit EIO,
@@ -3981,7 +4049,19 @@ export class InteractiveMode {
 		await this.ui.terminal.drainInput(1000);
 
 		this.stop();
-		await this.runtimeHost.dispose();
+		const runner = this.runtimeHost.session.extensionRunner;
+		const writer = createInteractiveShutdownProgressWriter(
+			(chunk) => {
+				process.stdout.write(chunk);
+			},
+			() => process.stdout.columns ?? 80,
+		);
+		runner.setShutdownProgressListener((entry) => writer.write(entry));
+		try {
+			await this.runtimeHost.dispose();
+		} finally {
+			runner.setShutdownProgressListener(undefined);
+		}
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
@@ -3994,6 +4074,9 @@ export class InteractiveMode {
 	private emergencyTerminalExit(): never {
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
+		try {
+			this.agent.managedExecutions.dispose();
+		} catch {}
 		killTrackedDetachedChildren();
 		// The terminal is gone. Do not run normal shutdown because TUI and
 		// extension cleanup can write restore sequences and re-trigger EIO.
@@ -4013,11 +4096,17 @@ export class InteractiveMode {
 	 */
 	private uncaughtCrash(error: Error): never {
 		if (this.isShuttingDown) {
+			try {
+				this.agent.managedExecutions.dispose();
+			} catch {}
 			process.exit(1);
 		}
 		this.isShuttingDown = true;
 		try {
 			this.unregisterSignalHandlers();
+		} catch {}
+		try {
+			this.agent.managedExecutions.dispose();
 		} catch {}
 		try {
 			killTrackedDetachedChildren();
@@ -6588,6 +6677,15 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private async handleRetryCommand(): Promise<void> {
+		this.clearStatusIndicator();
+		try {
+			await this.session.retry();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
 	private async handleCompactCommand(customInstructions?: string): Promise<void> {
 		this.clearStatusIndicator();
 
@@ -6599,6 +6697,7 @@ export class InteractiveMode {
 	}
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
+		this.pendingRetainedShutdownSlowLines = [];
 		this.disposeActiveSelector();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);

@@ -338,7 +338,9 @@ export function getSelfUpdateUnavailableInstruction(
 	const method = detectInstallMethod();
 	const target = normalizeSelfUpdatePackageTarget(updatePackageTarget);
 	if (method === "bun-binary") {
-		return `Download from: https://github.com/earendil-works/pi/releases/latest`;
+		return DISTRIBUTION === "xz-dev"
+			? `Download from: https://github.com/xz-dev/pi/releases/latest`
+			: `Download from: https://github.com/earendil-works/pi/releases/latest`;
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, target, npmCommand);
 	if (command) {
@@ -357,6 +359,18 @@ export function getUpdateInstruction(packageName: string): string {
 		return `Run: ${command.display}`;
 	}
 	return getSelfUpdateUnavailableInstruction(packageName);
+}
+
+export function getXzDevSourceUpdateGuidance(): string {
+	return [
+		"This xz-dev installation is a source checkout and is user-managed.",
+		"Run the following to update it (Pi does not run these for you):",
+		"",
+		"git -C <xz-dev-pi-checkout> pull --ff-only",
+		"cd <xz-dev-pi-checkout>",
+		"npm ci --ignore-scripts",
+		"npm run build",
+	].join("\n");
 }
 
 // =============================================================================
@@ -487,6 +501,8 @@ interface PackageJson {
 		name?: string;
 		configDir?: string;
 		distribution?: string;
+		changelogVersion?: string;
+		releaseTarget?: string;
 	};
 }
 
@@ -504,7 +520,9 @@ export const APP_NAME: string = piConfigName || "pi";
 export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
 export const DISTRIBUTION: string | undefined = pkg.piConfig?.distribution;
+export const RELEASE_TARGET: string | undefined = pkg.piConfig?.releaseTarget;
 export const VERSION: string = pkg.version || "0.0.0";
+export const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;
 
 // e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
 export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;

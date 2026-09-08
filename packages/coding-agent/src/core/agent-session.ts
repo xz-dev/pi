@@ -22,10 +22,12 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	BackgroundToolCalls,
+	ManagedExecutionNotification,
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, type Message } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -85,6 +87,7 @@ import {
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
+	type SlowExtensionHookEntry,
 	type ToolDefinition,
 	type ToolExecutionEndEvent,
 	type ToolExecutionStartEvent,
@@ -95,8 +98,9 @@ import {
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
-import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { type ExtensionShutdownProgressListener, emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { planContinuation } from "./manual-retry.ts";
+import type { BashExecutionMessage, CustomMessage, ManualRetryRecoveryMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -109,7 +113,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
+import { createAllToolDefinitions, createToolTaskTool } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
@@ -140,6 +144,44 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 	};
 }
 
+function abortError(signal?: AbortSignal): Error {
+	return new Error(
+		signal?.reason instanceof Error ? signal.reason.message : String(signal?.reason ?? "Agent run aborted"),
+	);
+}
+
+async function abortable<T>(promise: Promise<T> | T, signal?: AbortSignal): Promise<T> {
+	if (!signal) return await promise;
+	if (signal.aborted) throw abortError(signal);
+
+	return await new Promise<T>((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const onAbort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(abortError(signal));
+		};
+
+		signal.addEventListener("abort", onAbort, { once: true });
+		Promise.resolve(promise).then(
+			(value) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve(value);
+			},
+			(error) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(error);
+			},
+		);
+	});
+}
+
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "agent_end" }>
@@ -156,6 +198,7 @@ export type AgentSessionEvent =
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
+	| { type: "session_entry_spliced"; entryId: string; parentId: string; newLeafId: string | null }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
@@ -236,6 +279,8 @@ export interface ExtensionBindings {
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
+	onSlowHook?: (entry: SlowExtensionHookEntry) => void;
+	onShutdownProgress?: ExtensionShutdownProgressListener;
 }
 
 /** Options for AgentSession.prompt() */
@@ -320,6 +365,21 @@ export class AgentSession {
 	private _isAgentRunActive = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
+	private _manualRetryActive = false;
+	private _manualRetryCommit:
+		| {
+				expectedSessionId: string;
+				expectedLeafId: string | null;
+				expectedGeneration: number;
+				branchFromId: string | null;
+				recoveryMessages: Message[];
+				committed: boolean;
+				runFailedBeforeCommit: boolean;
+				runFailureMessage: string | undefined;
+		  }
+		| undefined;
+	private _continuationAnchorId: string | undefined;
+	private _continuationBranchLeafId: string | undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -367,8 +427,11 @@ export class AgentSession {
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
+	private _extensionSlowHookSink?: (entry: SlowExtensionHookEntry) => void;
+	private _extensionShutdownProgressListener?: ExtensionShutdownProgressListener;
 
 	private _modelRuntime: ModelRuntime;
+	private _unsubscribeModelsChanged: () => void;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -390,6 +453,7 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRuntime = config.modelRuntime;
+		this._unsubscribeModelsChanged = this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime());
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -402,6 +466,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._syncManagedToolExecutions();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -483,6 +548,37 @@ export class AgentSession {
 	 * registered tool execution to the extension context. Tool call and tool result interception now
 	 * happens here instead of in wrappers.
 	 */
+	private _syncManagedToolExecutions(): void {
+		const configured = this.settingsManager.getBackgroundToolCalls();
+		const backgroundToolCalls: BackgroundToolCalls = { ...configured };
+		for (const toolName of ["bash", "powershell"] as const) {
+			if (configured[toolName]) continue;
+			backgroundToolCalls[toolName] = {
+				detachAfterSeconds: 600,
+				shouldDetach: (argumentsValue) => {
+					const timeout = (argumentsValue as { timeout?: unknown } | undefined)?.timeout;
+					return timeout === undefined || (typeof timeout === "number" && timeout > 1200);
+				},
+			};
+		}
+		delete backgroundToolCalls.tool_task;
+		this.agent.backgroundToolCalls = backgroundToolCalls;
+		this.agent.managedExecutions.setCompletionHandler((notification) => this._notifyManagedExecution(notification));
+	}
+
+	private async _notifyManagedExecution(notification: ManagedExecutionNotification): Promise<void> {
+		const text = `Managed tool execution ${notification.id} (${notification.toolName}) ${notification.status}. Use tool_task wait with this task ID to retrieve its result.`;
+		await this.sendCustomMessage(
+			{
+				customType: "managed-tool-execution-completed",
+				content: [{ type: "text", text }],
+				display: false,
+				details: notification,
+			},
+			{ triggerTurn: true, deliverAs: this.isStreaming ? "steer" : undefined },
+		);
+	}
+
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
 			const runner = this._extensionRunner;
@@ -641,6 +737,11 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "run_failure" && this._manualRetryCommit && !this._manualRetryCommit.committed) {
+			this._manualRetryCommit.runFailedBeforeCommit = true;
+			this._manualRetryCommit.runFailureMessage = event.message.errorMessage;
+		}
+
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -663,14 +764,57 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		// Emit to extensions first. If the active run has already been aborted,
+		// do not let an extension lifecycle hook keep the agent in Working...
+		// forever; still continue with session/UI bookkeeping below.
+		const signal = this.agent.signal;
+		if (event.type === "message_end") {
+			try {
+				if (!signal?.aborted) {
+					await abortable(this._emitExtensionEvent(event, signal), signal);
+				}
+			} catch (error) {
+				if (!signal?.aborted) throw error;
+			} finally {
+				this._emitUninterruptibleMessageEnd(event);
+			}
+		} else if (!signal?.aborted) {
+			try {
+				await abortable(this._emitExtensionEvent(event), signal);
+			} catch (error) {
+				if (!signal?.aborted) throw error;
+			}
+		}
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			let committedFirstRetryAssistant = false;
+			if (
+				event.message.role === "assistant" &&
+				this._manualRetryCommit &&
+				!this._manualRetryCommit.committed &&
+				!this._manualRetryCommit.runFailedBeforeCommit
+			) {
+				try {
+					this.sessionManager.commitContinuation({
+						expectedSessionId: this._manualRetryCommit.expectedSessionId,
+						expectedLeafId: this._manualRetryCommit.expectedLeafId,
+						expectedGeneration: this._manualRetryCommit.expectedGeneration,
+						branchFromId: this._manualRetryCommit.branchFromId,
+						messages: [...this._manualRetryCommit.recoveryMessages, event.message],
+					});
+				} catch (error) {
+					this._manualRetryCommit.runFailedBeforeCommit = true;
+					this._manualRetryCommit.runFailureMessage = error instanceof Error ? error.message : String(error);
+					throw error;
+				}
+				this._manualRetryCommit.committed = true;
+				committedFirstRetryAssistant = true;
+			}
+
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
@@ -681,9 +825,13 @@ export class AgentSession {
 					event.message.details,
 				);
 			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
+				!committedFirstRetryAssistant &&
+				!(
+					event.message.role === "assistant" &&
+					this._manualRetryCommit?.runFailedBeforeCommit &&
+					!this._manualRetryCommit.committed
+				) &&
+				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
@@ -749,6 +897,29 @@ export class AgentSession {
 		return undefined;
 	}
 
+	private _emitUninterruptibleMessageEnd(event: Extract<AgentEvent, { type: "message_end" }>): void {
+		const extensionEvent: MessageEndEvent = {
+			type: "message_end",
+			message: event.message,
+		};
+		const replacement = this._extensionRunner.emitUninterruptibleMessageEnd(extensionEvent);
+		if (replacement) this._applyMessageEndReplacement(event.message, replacement);
+	}
+
+	private _applyMessageEndReplacement(target: AgentMessage, replacement: AgentMessage): void {
+		// Untyped extension handlers can return messages with null/missing content;
+		// normalize so it never enters agent state or session history.
+		const normalized =
+			(replacement.role === "user" ||
+				replacement.role === "assistant" ||
+				replacement.role === "toolResult" ||
+				replacement.role === "custom") &&
+			replacement.content == null
+				? ({ ...replacement, content: [] } as AgentMessage)
+				: replacement;
+		this._replaceMessageInPlace(target, normalized);
+	}
+
 	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
 		// Agent-core stores the finalized message object in its state before emitting message_end.
 		// SessionManager persistence happens later in _handleAgentEvent() with event.message.
@@ -766,7 +937,7 @@ export class AgentSession {
 	}
 
 	/** Emit extension events based on agent events */
-	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
+	private async _emitExtensionEvent(event: AgentEvent, signal?: AbortSignal): Promise<void> {
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
@@ -804,21 +975,14 @@ export class AgentSession {
 		} else if (event.type === "message_end") {
 			const extensionEvent: MessageEndEvent = {
 				type: "message_end",
-				message: event.message,
+				message: structuredClone(event.message),
 			};
 			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
-			if (replacement) {
-				// Untyped extension handlers can return messages with null/missing content;
-				// normalize so it never enters agent state or session history.
-				const normalized =
-					(replacement.role === "user" ||
-						replacement.role === "assistant" ||
-						replacement.role === "toolResult" ||
-						replacement.role === "custom") &&
-					replacement.content == null
-						? ({ ...replacement, content: [] } as AgentMessage)
-						: replacement;
-				this._replaceMessageInPlace(event.message, normalized);
+			// abortable() cannot cancel the underlying handler promise. Once terminal
+			// cleanup starts, ignore a late ordinary replacement so it cannot overwrite
+			// the authoritative redaction in agent state.
+			if (replacement && !signal?.aborted) {
+				this._applyMessageEndReplacement(event.message, replacement);
 			}
 		} else if (event.type === "tool_execution_start") {
 			const extensionEvent: ToolExecutionStartEvent = {
@@ -885,6 +1049,7 @@ export class AgentSession {
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			this.agent.managedExecutions.dispose();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -893,6 +1058,7 @@ export class AgentSession {
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
 		this._disconnectFromAgent();
+		this._unsubscribeModelsChanged();
 		this._eventListeners = [];
 		cleanupSessionResources(this.sessionId);
 	}
@@ -1103,6 +1269,8 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		this._continuationAnchorId = undefined;
+		this._continuationBranchLeafId = undefined;
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
@@ -1113,6 +1281,103 @@ export class AgentSession {
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
+			await this._emitAgentSettled();
+		}
+	}
+
+	/** Recover the latest interrupted response or continue from an explicit safe protocol boundary. */
+	async retry(): Promise<void> {
+		const continuationAnchorId = this._continuationAnchorId;
+		if (this._manualRetryActive || this._isAgentRunActive) {
+			throw new Error("Agent is already processing a retry.");
+		}
+		if (
+			this.isCompacting ||
+			this.isBashRunning ||
+			this._retryAbortController !== undefined ||
+			this._autoCompactionAbortController !== undefined
+		) {
+			throw new Error("Cannot retry while another session operation is in progress.");
+		}
+		if (this.pendingMessageCount > 0 || this.agent.hasQueuedMessages() || this._pendingNextTurnMessages.length > 0) {
+			throw new Error("Cannot retry while queued messages are pending.");
+		}
+		if (!this.model) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
+		const hasConfiguredAuth =
+			this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
+			(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+		if (!hasConfiguredAuth) {
+			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+		}
+
+		const expectedSessionId = this.sessionManager.getSessionId();
+		const expectedLeafId = this.sessionManager.getLeafId();
+		const expectedGeneration = this.sessionManager.getGeneration();
+		const branchEntries = continuationAnchorId
+			? this.sessionManager.getBranch(this._continuationBranchLeafId ?? continuationAnchorId)
+			: this.sessionManager.getBranch();
+		const plan = planContinuation({
+			branchEntries,
+			selectedEntryId: continuationAnchorId,
+			recoveryTimestamp: Date.now(),
+		});
+		const recoveryCue: ManualRetryRecoveryMessage | undefined =
+			plan.kind === "interrupted_assistant"
+				? {
+						role: "manualRetryRecovery",
+						partialAssistantText: plan.partialAssistantText,
+						timestamp: Date.now(),
+					}
+				: undefined;
+		const previousMessages = this.agent.state.messages;
+		this._manualRetryActive = true;
+		this._isAgentRunActive = true;
+		this._lastAssistantMessage = undefined;
+		this._manualRetryCommit = {
+			expectedSessionId,
+			expectedLeafId,
+			expectedGeneration,
+			branchFromId: plan.anchorEntryId,
+			recoveryMessages: plan.recoveryMessages,
+			committed: false,
+			runFailedBeforeCommit: false,
+			runFailureMessage: undefined,
+		};
+		this.agent.state.messages = [
+			...plan.contextMessages,
+			...(plan.providerRecoveryMessages ?? []),
+			...plan.recoveryMessages,
+			...(recoveryCue ? [recoveryCue] : []),
+		];
+		try {
+			await this.agent.continue();
+			if (this._manualRetryCommit.runFailureMessage) {
+				throw new Error(this._manualRetryCommit.runFailureMessage);
+			}
+			while (await this._handlePostAgentRun()) {
+				await this.agent.continue();
+				if (this._manualRetryCommit.runFailureMessage) {
+					throw new Error(this._manualRetryCommit.runFailureMessage);
+				}
+			}
+			if (this._manualRetryCommit.runFailureMessage) {
+				throw new Error(this._manualRetryCommit.runFailureMessage);
+			}
+			if (!this._manualRetryCommit.committed) {
+				throw new Error("Retry continuation ended without an assistant response");
+			}
+			this._continuationAnchorId = undefined;
+			this._continuationBranchLeafId = undefined;
+			this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		} finally {
+			if (!this._manualRetryCommit?.committed) {
+				this.agent.state.messages = previousMessages;
+			}
+			this._manualRetryCommit = undefined;
+			this._manualRetryActive = false;
+			this._systemPromptOverride = undefined;
 			await this._emitAgentSettled();
 		}
 	}
@@ -2461,6 +2726,12 @@ export class AgentSession {
 		if (bindings.onError !== undefined) {
 			this._extensionErrorListener = bindings.onError;
 		}
+		if (bindings.onSlowHook !== undefined) {
+			this._extensionSlowHookSink = bindings.onSlowHook;
+		}
+		if (bindings.onShutdownProgress !== undefined) {
+			this._extensionShutdownProgressListener = bindings.onShutdownProgress;
+		}
 
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
@@ -2522,6 +2793,8 @@ export class AgentSession {
 
 	private _applyExtensionBindings(runner: ExtensionRunner): void {
 		runner.setUIContext(this._extensionUIContext, this._extensionMode);
+		runner.setSlowHookSink(this._extensionSlowHookSink);
+		runner.setShutdownProgressListener(this._extensionShutdownProgressListener);
 		runner.bindCommandContext(this._extensionCommandContextActions);
 
 		this._extensionErrorUnsubscriber?.();
@@ -2530,18 +2803,15 @@ export class AgentSession {
 			: undefined;
 	}
 
-	private _refreshCurrentModelFromRegistry(): void {
+	private _refreshModelsFromRuntime(): void {
 		const currentModel = this.model;
-		if (!currentModel) {
-			return;
+		if (currentModel) {
+			this.agent.state.model = this._modelRuntime.getModel(currentModel.provider, currentModel.id) ?? currentModel;
 		}
-
-		const refreshedModel = this._modelRuntime.getModel(currentModel.provider, currentModel.id);
-		if (!refreshedModel || refreshedModel === currentModel) {
-			return;
-		}
-
-		this.agent.state.model = refreshedModel;
+		this._scopedModels = this._scopedModels.map((scoped) => ({
+			...scoped,
+			model: this._modelRuntime.getModel(scoped.model.provider, scoped.model.id) ?? scoped.model,
+		}));
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -2596,6 +2866,9 @@ export class AgentSession {
 					if (entry) {
 						this._emit({ type: "entry_appended", entry });
 					}
+				},
+				spliceEntry: (entryId) => {
+					this.spliceEntry(entryId);
 				},
 				setSessionName: (name) => {
 					this.setSessionName(name);
@@ -2654,15 +2927,12 @@ export class AgentSession {
 			{
 				registerProvider: (name, config) => {
 					this._modelRuntime.registerProvider(name, config);
-					this._refreshCurrentModelFromRegistry();
 				},
 				registerNativeProvider: (provider) => {
 					this._modelRuntime.registerNativeProvider(provider);
-					this._refreshCurrentModelFromRegistry();
 				},
 				unregisterProvider: (name) => {
 					this._modelRuntime.unregisterProvider(name);
-					this._refreshCurrentModelFromRegistry();
 				},
 			},
 		);
@@ -2739,6 +3009,9 @@ export class AgentSession {
 		const nextActiveToolNames = (
 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
 		).filter((name) => isAllowedTool(name));
+		if (this._toolRegistry.has("tool_task") && isAllowedTool("tool_task")) {
+			nextActiveToolNames.push("tool_task");
+		}
 
 		if (allowedToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {
@@ -2771,15 +3044,18 @@ export class AgentSession {
 		const shellPath = this.settingsManager.getShellPath();
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
-					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
-						name,
-						createToolDefinitionFromAgentTool(tool),
-					]),
+					[
+						...Object.entries(this._baseToolsOverride),
+						["tool_task", createToolTaskTool(this.agent.managedExecutions)] as const,
+					].map(([name, tool]) => [name, createToolDefinitionFromAgentTool(tool)]),
 				)
-			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
-				});
+			: {
+					...createAllToolDefinitions(this._cwd, {
+						read: { autoResizeImages },
+						bash: { commandPrefix: shellCommandPrefix, shellPath },
+					}),
+					tool_task: createToolDefinitionFromAgentTool(createToolTaskTool(this.agent.managedExecutions)),
+				};
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
@@ -2798,6 +3074,7 @@ export class AgentSession {
 			this._cwd,
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
+			() => this.settingsManager.getSlowHookThresholdMs(),
 		);
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
@@ -2806,8 +3083,8 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 
 		const defaultActiveToolNames = this._baseToolsOverride
-			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			? [...Object.keys(this._baseToolsOverride), "tool_task"]
+			: ["read", "bash", "edit", "write", "tool_task"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -2821,6 +3098,7 @@ export class AgentSession {
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
 		oldRunner.invalidate();
 		await this.settingsManager.reload();
+		this._syncManagedToolExecutions();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
 		await this._resourceLoader.reload();
@@ -2834,7 +3112,9 @@ export class AgentSession {
 			this._extensionUIContext ||
 			this._extensionCommandContextActions ||
 			this._extensionShutdownHandler ||
-			this._extensionErrorListener;
+			this._extensionErrorListener ||
+			this._extensionSlowHookSink ||
+			this._extensionShutdownProgressListener;
 		if (hasBindings) {
 			await options?.beforeSessionStart?.();
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
@@ -2853,7 +3133,8 @@ export class AgentSession {
 	private _isRetryableError(message: AssistantMessage): boolean {
 		// Context overflow is handled by compaction, not retry.
 		if (isContextOverflow(message, this.model?.contextWindow ?? 0)) return false;
-		return isRetryableAssistantError(message);
+		const { nonRetryableErrorPatterns } = this.settingsManager.getRetrySettings();
+		return isRetryableAssistantError(message, { nonRetryableErrorPatterns });
 	}
 
 	/**
@@ -3095,6 +3376,33 @@ export class AgentSession {
 		void this._extensionRunner.emit(event);
 	}
 
+	/**
+	 * Delete one existing non-root session entry and reparent its children to its parent.
+	 * Safe only while idle: no agent run, compaction, or branch summarization.
+	 */
+	spliceEntry(entryId: string): void {
+		if (!this.isIdle || this.isCompacting) {
+			throw new Error("Wait for the current response to finish before splicing a session entry.");
+		}
+		const entry = this.sessionManager.getEntry(entryId);
+		if (!entry) {
+			throw new Error(`Entry ${entryId} not found`);
+		}
+		if (entry.parentId === null) {
+			throw new Error(`Cannot splice root entry ${entryId}`);
+		}
+		const parentId = entry.parentId;
+		this.sessionManager.spliceEntry(entryId);
+		const sessionContext = this.sessionManager.buildSessionContext();
+		this.agent.state.messages = sessionContext.messages;
+		this._emit({
+			type: "session_entry_spliced",
+			entryId,
+			parentId,
+			newLeafId: this.sessionManager.getLeafId(),
+		});
+	}
+
 	// =========================================================================
 	// Tree Navigation
 	// =========================================================================
@@ -3124,6 +3432,9 @@ export class AgentSession {
 		}
 
 		const oldLeafId = this.sessionManager.getLeafId();
+		const oldBranchContainsTarget = this.sessionManager.getBranch().some((entry) => entry.id === targetId);
+		this._continuationAnchorId = undefined;
+		this._continuationBranchLeafId = undefined;
 
 		// No-op if already at target
 		if (targetId === oldLeafId) {
@@ -3243,9 +3554,11 @@ export class AgentSession {
 			let editorText: string | undefined;
 
 			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				// User message: leaf = parent (null if root), text goes to editor
+				// User message: leaf = parent for editing, while retry retains the exact selected entry.
 				newLeafId = targetEntry.parentId;
 				editorText = contentText(targetEntry.message.content, "");
+				this._continuationAnchorId = targetId;
+				this._continuationBranchLeafId = oldBranchContainsTarget ? (oldLeafId ?? undefined) : targetId;
 			} else if (targetEntry.type === "custom_message") {
 				// Custom message: leaf = parent (null if root), text goes to editor
 				newLeafId = targetEntry.parentId;
@@ -3253,6 +3566,10 @@ export class AgentSession {
 			} else {
 				// Non-user message: leaf = selected node
 				newLeafId = targetId;
+				if (targetEntry.type === "message") {
+					this._continuationAnchorId = targetId;
+					this._continuationBranchLeafId = oldBranchContainsTarget ? (oldLeafId ?? undefined) : targetId;
+				}
 			}
 
 			// Switch leaf (with or without summary)

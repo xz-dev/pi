@@ -31,6 +31,8 @@ export interface RetrySettings {
 	enabled?: boolean; // default: true
 	maxRetries?: number; // default: 3
 	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
+	/** Additional case-insensitive errorMessage substrings that skip auto-retry. */
+	nonRetryableErrorPatterns?: string[];
 	provider?: ProviderRetrySettings;
 }
 
@@ -74,6 +76,12 @@ export type DefaultProjectTrust = "ask" | "always" | "never";
 
 export type TransportSetting = Transport;
 
+export interface SkillOverride {
+	disableModelInvocation?: boolean;
+}
+
+export type SkillOverrides = Record<string, SkillOverride>;
+
 /**
  * Package source for npm/git packages.
  * - String form: load all resources from the package
@@ -87,9 +95,16 @@ export type PackageSource =
 			autoload?: boolean;
 			extensions?: string[];
 			skills?: string[];
+			skillOverrides?: SkillOverrides;
 			prompts?: string[];
 			themes?: string[];
 	  };
+
+export interface BackgroundToolCallSetting {
+	detachAfterSeconds?: number;
+}
+
+export type BackgroundToolCallsSettings = Record<string, BackgroundToolCallSetting>;
 
 export interface Settings {
 	lastChangelogVersion?: string;
@@ -126,6 +141,7 @@ export interface Settings {
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	defaultTools?: string[]; // Initial built-in tool selection
+	backgroundToolCalls?: BackgroundToolCallsSettings; // Per-tool managed background execution rules
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
@@ -139,6 +155,7 @@ export interface Settings {
 	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+	slowHookThresholdMs?: number; // Extension hook duration warning threshold in milliseconds; default: 100
 	tuiMode?: TuiMode; // default: "regular"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular TUI mode
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
@@ -182,6 +199,15 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
 	}
 	return undefined;
+}
+
+function normalizeNonRetryableErrorPatterns(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const patterns = value
+		.filter((entry): entry is string => typeof entry === "string")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0);
+	return patterns.length > 0 ? patterns : undefined;
 }
 
 export type SettingsScope = "global" | "project";
@@ -311,6 +337,9 @@ export class SettingsManager {
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 	private settingsPaths: SettingsPaths;
+	private lastValidBackgroundToolCalls: BackgroundToolCallsSettings = {};
+	private lastValidGlobalBackgroundToolCalls: BackgroundToolCallsSettings = {};
+	private lastValidProjectBackgroundToolCalls: BackgroundToolCallsSettings = {};
 
 	private constructor(
 		storage: SettingsStorage,
@@ -330,7 +359,8 @@ export class SettingsManager {
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
 		this.settingsPaths = settingsPaths;
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = {};
+		this.recomputeEffectiveSettings();
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -482,6 +512,72 @@ export class SettingsManager {
 		return settings as Settings;
 	}
 
+	private validateBackgroundToolCalls(value: unknown): BackgroundToolCallsSettings {
+		if (value === undefined) return {};
+		if (!isMergeableObject(value)) {
+			throw new Error("Invalid backgroundToolCalls setting: expected an object");
+		}
+		const validated: BackgroundToolCallsSettings = {};
+		for (const [toolName, rule] of Object.entries(value)) {
+			if (!isMergeableObject(rule)) {
+				throw new Error(`Invalid backgroundToolCalls.${toolName} setting: expected an object`);
+			}
+			const detachAfterSeconds = rule.detachAfterSeconds;
+			if (
+				detachAfterSeconds !== undefined &&
+				(typeof detachAfterSeconds !== "number" || !Number.isFinite(detachAfterSeconds) || detachAfterSeconds <= 0)
+			) {
+				throw new Error(
+					`Invalid backgroundToolCalls.${toolName}.detachAfterSeconds setting: expected a positive finite number`,
+				);
+			}
+			validated[toolName] = detachAfterSeconds === undefined ? {} : { detachAfterSeconds };
+		}
+		return validated;
+	}
+
+	private acceptBackgroundToolCalls(
+		value: unknown,
+		scope: SettingsScope,
+		previous: BackgroundToolCallsSettings,
+	): BackgroundToolCallsSettings {
+		try {
+			return this.validateBackgroundToolCalls(value);
+		} catch (error) {
+			this.recordError(scope, error);
+			return previous;
+		}
+	}
+
+	private recomputeEffectiveSettings(scope: SettingsScope = "global", overrides?: Partial<Settings>): void {
+		if (overrides) {
+			const nextSettings = deepMergeSettings(this.settings, overrides);
+			try {
+				this.lastValidBackgroundToolCalls = this.validateBackgroundToolCalls(nextSettings.backgroundToolCalls);
+				this.settings = nextSettings;
+			} catch (error) {
+				this.recordError(scope, error);
+			}
+			return;
+		}
+
+		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.lastValidGlobalBackgroundToolCalls = this.acceptBackgroundToolCalls(
+			this.globalSettings.backgroundToolCalls,
+			"global",
+			this.lastValidGlobalBackgroundToolCalls,
+		);
+		this.lastValidProjectBackgroundToolCalls = this.acceptBackgroundToolCalls(
+			this.projectSettings.backgroundToolCalls,
+			"project",
+			this.lastValidProjectBackgroundToolCalls,
+		);
+		this.lastValidBackgroundToolCalls = {
+			...this.lastValidGlobalBackgroundToolCalls,
+			...this.lastValidProjectBackgroundToolCalls,
+		};
+	}
+
 	getGlobalSettings(): Settings {
 		return structuredClone(this.globalSettings);
 	}
@@ -506,7 +602,7 @@ export class SettingsManager {
 		if (!trusted) {
 			this.projectSettings = {};
 			this.projectSettingsLoadError = null;
-			this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+			this.recomputeEffectiveSettings();
 			return;
 		}
 
@@ -516,7 +612,7 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeEffectiveSettings("project");
 	}
 
 	async reload(): Promise<void> {
@@ -544,12 +640,12 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeEffectiveSettings();
 	}
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.recomputeEffectiveSettings("global", overrides);
 	}
 
 	/** Mark a global field as modified during this session */
@@ -879,11 +975,20 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
+	getRetrySettings(): {
+		enabled: boolean;
+		maxRetries: number;
+		baseDelayMs: number;
+		nonRetryableErrorPatterns?: string[];
+	} {
+		const nonRetryableErrorPatterns = normalizeNonRetryableErrorPatterns(
+			this.settings.retry?.nonRetryableErrorPatterns,
+		);
 		return {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
+			...(nonRetryableErrorPatterns ? { nonRetryableErrorPatterns } : {}),
 		};
 	}
 
@@ -910,6 +1015,14 @@ export class SettingsManager {
 
 	getWebSocketConnectTimeoutMs(): number | undefined {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
+	}
+
+	getSlowHookThresholdMs(): number {
+		try {
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? 100;
+		} catch {
+			return 100;
+		}
 	}
 
 	getHideThinkingBlock(): boolean {
@@ -1268,6 +1381,10 @@ export class SettingsManager {
 
 	getEnabledModels(): string[] | undefined {
 		return this.settings.enabledModels;
+	}
+
+	getBackgroundToolCalls(): BackgroundToolCallsSettings {
+		return structuredClone(this.lastValidBackgroundToolCalls);
 	}
 
 	getDefaultTools(): string[] | undefined {

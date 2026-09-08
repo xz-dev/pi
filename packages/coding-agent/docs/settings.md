@@ -143,6 +143,7 @@ Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--off
 | `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
 | `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
+| `retry.nonRetryableErrorPatterns` | string[] | - | Extra case-insensitive `errorMessage` substrings that skip auto-retry (in addition to built-in quota/billing patterns) |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
 | `retry.provider.maxRetries` | number | `0` | Provider/SDK retry attempts |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
@@ -151,12 +152,17 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 
 Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed. Setting it above `0` can make SDK/provider retries handle out-of-usage-limit errors before Pi sees them, which may block the agent until the provider quota resets in some circumstances.
 
+`retry.nonRetryableErrorPatterns` is useful when a gateway returns a terminal quota/limit error that still looks retryable (for example a plain HTTP 429 whose body is not covered by the built-in patterns).
+
 ```json
 {
   "retry": {
     "enabled": true,
     "maxRetries": 3,
     "baseDelayMs": 2000,
+    "nonRetryableErrorPatterns": [
+      "quota threshold"
+    ],
     "provider": {
       "timeoutMs": 3600000,
       "maxRetries": 0,
@@ -175,6 +181,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
 | `httpIdleTimeoutMs` | number | `300000` | HTTP header/body idle timeout in milliseconds, also used by providers with explicit stream idle timeouts. Set to `0` to disable. |
 | `websocketConnectTimeoutMs` | number | `15000` | WebSocket connect/open handshake timeout in milliseconds for providers that support WebSocket transports. Set to `0` to disable. |
+| `slowHookThresholdMs` | number | `100` | In interactive TUI, show a transient reminder for each registered extension hook taking longer than this many milliseconds. Timing diagnostics are not persisted. |
 
 ### Terminal & Images
 
@@ -226,6 +233,7 @@ With `npmCommand` unset or `[]`, only xz-dev Bun-compiled standalone Pi defaults
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `defaultTools` | string[] | - | Built-in tools enabled initially. When omitted, Pi uses its standard defaults |
+| `backgroundToolCalls` | object | `{}` | Per-tool managed background rules. An empty rule uses a 600-second detach threshold |
 
 `defaultTools` selects the built-in tools enabled at startup. Extension and SDK custom tools remain enabled. Available built-ins are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`:
 
@@ -243,7 +251,20 @@ On Windows, select `powershell` instead of `bash`, or include both:
 }
 ```
 
-An empty array starts with no built-in tools while preserving extension and SDK custom tools. `--tools` replaces this behavior with a strict allowlist for all tools, `--no-tools` disables all tools, and `--no-builtin-tools` disables the built-in defaults. `--exclude-tools` filters the resulting list. A project `defaultTools` array replaces the global array.
+An empty array starts with no built-in tools while preserving extension and SDK custom tools. The `tool_task` management tool remains enabled with `defaultTools`, including an empty array. `--tools` replaces this behavior with a strict allowlist for all tools, so include `tool_task` when managed execution controls are needed. `--no-tools` disables all tools, and `--no-builtin-tools` disables the built-in defaults while retaining `tool_task` and extension/custom tools. `--exclude-tools` filters the resulting list. A project `defaultTools` array replaces the global array.
+
+`backgroundToolCalls` opts named extension, SDK, or other third-party tools into managed execution. `{}` uses the default 600-second detach threshold; `detachAfterSeconds` must be a positive finite number:
+
+```json
+{
+  "backgroundToolCalls": {
+    "ctx_execute": {},
+    "long_report": { "detachAfterSeconds": 900 }
+  }
+}
+```
+
+Invalid rule shapes or non-positive thresholds are diagnosed and not applied; reload keeps the last valid managed policy. Project rules merge with global rules by tool name. Unlisted third-party tools remain foreground-only. When no explicit `bash` or `powershell` rule exists, AI-called shell tools use the built-in 600-second detach policy when their `timeout` is omitted or strictly greater than 1200 seconds; `timeout: 1200` does not qualify. Their original timeout continues after detach. User-entered `!` and `!!` shell commands are not managed. `tool_task` is never auto-backgrounded, and any `backgroundToolCalls.tool_task` rule is ignored. See [Managed tool executions](usage.md#managed-tool-executions) for `tool_task` operations and lifecycle semantics.
 
 ### Sessions
 

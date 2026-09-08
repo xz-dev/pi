@@ -14,6 +14,7 @@ import type {
 	Usage,
 } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
+import type { BackgroundToolCalls, ManagedExecutionRegistry } from "./managed-executions.ts";
 
 /**
  * Stream function used by the agent loop. `Models.streamSimple` satisfies
@@ -267,6 +268,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Default: "parallel"
 	 */
 	toolExecution?: ToolExecutionMode;
+	/** Per-tool rules for detaching long-running executions from the active agent loop. */
+	backgroundToolCalls?: BackgroundToolCalls;
+	/** Registry owned by the current Agent instance. */
+	managedExecutions?: ManagedExecutionRegistry;
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.
@@ -440,6 +445,8 @@ export type AgentEvent =
 	// Only emitted for assistant messages during streaming
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
+	// Emitted once when a run throws, before Agent emits recovery lifecycle events for that failure.
+	| { type: "run_failure"; message: AssistantMessage }
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }

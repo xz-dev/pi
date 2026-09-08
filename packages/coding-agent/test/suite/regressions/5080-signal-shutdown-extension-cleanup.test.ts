@@ -19,15 +19,30 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 type ShutdownThis = {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
-	runtimeHost: { dispose: () => Promise<void> };
+	runtimeHost: {
+		dispose: () => Promise<void>;
+		session: { extensionRunner: { setShutdownProgressListener: (listener?: unknown) => void } };
+	};
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	themeController: { disableAutoSync: () => void };
 	stop: () => void;
 	sessionManager: SessionManager;
 };
 
+type EmergencyExitThis = {
+	isShuttingDown: boolean;
+	unregisterSignalHandlers: () => void;
+	agent: { managedExecutions: { dispose: () => void } };
+};
+
+type UncaughtCrashThis = EmergencyExitThis & {
+	ui: { stop: () => void };
+};
+
 type InteractiveModePrototypeWithShutdown = {
 	shutdown(this: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void>;
+	emergencyTerminalExit(this: EmergencyExitThis): never;
+	uncaughtCrash(this: UncaughtCrashThis, error: Error): never;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown;
@@ -67,6 +82,9 @@ function restoreStdoutIsTTY(): void {
 }
 
 function createContext(order: string[], sessionManager = createSessionManager()): ShutdownThis {
+	const setShutdownProgressListener = vi.fn((listener?: unknown) => {
+		order.push(listener ? "enableProgress" : "disableProgress");
+	});
 	return {
 		isShuttingDown: false,
 		unregisterSignalHandlers: vi.fn(),
@@ -74,6 +92,7 @@ function createContext(order: string[], sessionManager = createSessionManager())
 			dispose: vi.fn(async () => {
 				order.push("dispose");
 			}),
+			session: { extensionRunner: { setShutdownProgressListener } },
 		},
 		ui: {
 			terminal: {
@@ -98,6 +117,22 @@ async function callShutdown(context: ShutdownThis, options?: { fromSignal?: bool
 	}
 }
 
+function callEmergencyTerminalExit(context: EmergencyExitThis): void {
+	try {
+		(interactiveModePrototype as InteractiveModePrototypeWithShutdown).emergencyTerminalExit.call(context);
+	} catch (error) {
+		if (!(error instanceof ProcessExitError)) throw error;
+	}
+}
+
+function callUncaughtCrash(context: UncaughtCrashThis, error: Error): void {
+	try {
+		(interactiveModePrototype as InteractiveModePrototypeWithShutdown).uncaughtCrash.call(context, error);
+	} catch (caught) {
+		if (!(caught instanceof ProcessExitError)) throw caught;
+	}
+}
+
 describe("InteractiveMode.shutdown ordering (#5080)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -116,8 +151,11 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context, { fromSignal: true });
 
-		expect(order).toEqual(["dispose", "drainInput", "stop"]);
+		expect(order).toEqual(["enableProgress", "dispose", "drainInput", "stop"]);
 		expect(context.isShuttingDown).toBe(true);
+		expect(context.runtimeHost.session.extensionRunner.setShutdownProgressListener).toHaveBeenCalledWith(
+			expect.any(Function),
+		);
 	});
 
 	test("interactive quit stops the TUI before emitting session_shutdown", async () => {
@@ -129,7 +167,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context);
 
-		expect(order).toEqual(["drainInput", "stop", "dispose"]);
+		expect(order).toEqual(["drainInput", "stop", "enableProgress", "dispose", "disableProgress"]);
 	});
 
 	test("interactive quit prints a resume hint for persisted sessions", async () => {
@@ -145,7 +183,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context);
 
-		expect(order).toEqual(["drainInput", "stop", "dispose"]);
+		expect(order).toEqual(["drainInput", "stop", "enableProgress", "dispose", "disableProgress"]);
 		expect(stdoutWrite).toHaveBeenCalledWith(
 			`${chalk.dim("To resume this session:")} ${APP_NAME} --session test-session\n`,
 		);
@@ -181,5 +219,58 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		expect(order).toEqual([]);
 		expect(context.runtimeHost.dispose).not.toHaveBeenCalled();
+	});
+
+	test("emergency terminal exit cancels managed executions before exiting", () => {
+		vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new ProcessExitError();
+		}) as typeof process.exit);
+		const dispose = vi.fn();
+		const context: EmergencyExitThis = {
+			isShuttingDown: false,
+			unregisterSignalHandlers: vi.fn(),
+			agent: { managedExecutions: { dispose } },
+		};
+
+		callEmergencyTerminalExit(context);
+
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(context.isShuttingDown).toBe(true);
+	});
+
+	test("uncaught crash cancels managed executions before exiting", () => {
+		vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new ProcessExitError();
+		}) as typeof process.exit);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const dispose = vi.fn();
+		const context: UncaughtCrashThis = {
+			isShuttingDown: false,
+			unregisterSignalHandlers: vi.fn(),
+			agent: { managedExecutions: { dispose } },
+			ui: { stop: vi.fn() },
+		};
+
+		callUncaughtCrash(context, new Error("boom"));
+
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(context.isShuttingDown).toBe(true);
+	});
+
+	test("re-entrant uncaught crash still cancels managed executions", () => {
+		vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new ProcessExitError();
+		}) as typeof process.exit);
+		const dispose = vi.fn();
+		const context: UncaughtCrashThis = {
+			isShuttingDown: true,
+			unregisterSignalHandlers: vi.fn(),
+			agent: { managedExecutions: { dispose } },
+			ui: { stop: vi.fn() },
+		};
+
+		callUncaughtCrash(context, new Error("boom"));
+
+		expect(dispose).toHaveBeenCalledOnce();
 	});
 });

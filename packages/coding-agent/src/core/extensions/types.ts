@@ -535,6 +535,8 @@ export interface ProjectTrustContext {
 	mode: ExtensionMode;
 	hasUI: boolean;
 	ui: Pick<ExtensionUIContext, "select" | "confirm" | "input" | "notify">;
+	/** Transient TUI-only slow-hook sink. Absent outside a real interactive TUI. */
+	onSlowHook?: (entry: SlowExtensionHookEntry) => void;
 }
 
 export type ProjectTrustHandler = (
@@ -1246,6 +1248,11 @@ export interface ResolvedCommand extends RegisteredCommand {
 // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
+export interface UninterruptibleMessageEndHandlerOptions {
+	/** Run terminal cleanup even when the active agent signal has been aborted. */
+	uninterruptible: true;
+}
+
 /**
  * ExtensionAPI passed to extension factory functions.
  */
@@ -1289,6 +1296,11 @@ export interface ExtensionAPI {
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): void;
+	on(
+		event: "message_end",
+		handler: (event: MessageEndEvent, ctx: ExtensionContext) => MessageEndEventResult | undefined,
+		options: UninterruptibleMessageEndHandlerOptions,
+	): void;
 	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent, MessageEndEventResult>): void;
 	on(event: "tool_execution_start", handler: ExtensionHandler<ToolExecutionStartEvent>): void;
 	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): void;
@@ -1379,6 +1391,12 @@ export interface ExtensionAPI {
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
+
+	/**
+	 * Delete exactly one existing non-root session entry and reparent its children to its parent.
+	 * Call only while the agent is idle. Root, missing, and unsafe metadata references are rejected.
+	 */
+	spliceEntry(entryId: string): void;
 
 	// =========================================================================
 	// Session Metadata
@@ -1621,7 +1639,7 @@ export interface ExtensionShortcut {
 	extensionPath: string;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+type HandlerFn = (...args: unknown[]) => unknown;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
@@ -1634,6 +1652,8 @@ export type SendUserMessageHandler = (
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
+
+export type SpliceEntryHandler = (entryId: string) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
 
@@ -1697,6 +1717,7 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
+	spliceEntry: SpliceEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;
 	setLabel: SetLabelHandler;
@@ -1768,6 +1789,7 @@ export interface Extension {
 	hidden?: boolean;
 	sourceInfo: SourceInfo;
 	handlers: Map<string, HandlerFn[]>;
+	uninterruptibleHandlers?: WeakSet<HandlerFn>;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
@@ -1778,6 +1800,14 @@ export interface Extension {
 }
 
 /** Result of loading extensions. */
+export interface SlowExtensionHookEntry {
+	event: string;
+	extensionPath: string;
+	handlerIndex: number;
+	elapsedMs: number;
+	executionKind: "sync" | "async";
+}
+
 export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;

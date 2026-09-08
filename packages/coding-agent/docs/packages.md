@@ -32,7 +32,7 @@ pi list                     # show installed packages from settings
 pi update                   # update pi only
 pi update --all             # update pi, update packages, and reconcile pinned git refs
 pi update --extensions      # update packages and reconcile pinned git refs only
-pi update --models          # refresh model catalogs only
+pi update --models          # refresh Pi-managed catalogs without loading extensions
 pi update --self            # update pi only
 pi update --self --force    # reinstall pi even if current
 pi update npm:@foo/bar      # update one package
@@ -235,6 +235,8 @@ Filter what a package loads using the object form in settings:
 - `+path` force-includes an exact path.
 - `-path` force-excludes an exact path.
 - Filters layer on top of the manifest. They narrow down what is already allowed.
+
+A package may also set `skillOverrides` keyed by each skill's resolved `name`. Setting `disableModelInvocation` to `true` hides that skill from the model prompt while keeping `/skill:name` available; `false` overrides the skill's frontmatter. Unknown skill names are ignored, and overrides apply only to skills from that package. For an `autoload: false` project delta, same-name overrides replace global entries while unspecified skill overrides are inherited.
 
 ## Enable and Disable Resources
 

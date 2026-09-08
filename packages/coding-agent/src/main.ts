@@ -33,7 +33,15 @@ import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
-import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
+import {
+	APP_NAME,
+	ENV_SESSION_DIR,
+	expandTildePath,
+	getAgentDir,
+	getPackageDir,
+	isBunBinary,
+	VERSION,
+} from "./config.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
@@ -68,7 +76,13 @@ import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/inte
 import { validateThemeJson } from "./modes/interactive/theme/theme-json.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
+import {
+	completeStartupBenchmark,
+	isStartupBenchmarkEnabled,
+	markStartupBenchmarkStage,
+} from "./utils/startup-benchmark.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
+import { runWindowsFilesystemSnapshotProbe } from "./utils/xz-release-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;
 
@@ -560,7 +574,9 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	if (runWindowsFilesystemSnapshotProbe()) return;
 	resetTimings();
+	markStartupBenchmarkStage("main-entered");
 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
@@ -585,7 +601,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (await handlePackageCommand(args, { extensionFactories })) {
 		const exitCode = process.exitCode ?? 0;
-		if (process.platform === "win32" && exitCode === 0 && args[0] === "update") {
+		if (process.platform === "win32" && !isBunBinary && exitCode === 0 && args[0] === "update") {
 			// We normally prefer process.exit(0) for package commands so bad extensions cannot keep
 			// one-shot commands alive. On Windows, Node can assert after fetch() if process.exit(0)
 			// runs during teardown; let successful `pi update` drain naturally instead.
@@ -609,6 +625,10 @@ export async function main(args: string[], options?: MainOptions) {
 		if (parsed.diagnostics.some((d) => d.type === "error")) {
 			process.exit(1);
 		}
+	}
+	if (parsed.refreshModels && offlineMode) {
+		console.error(chalk.red("Error: --refresh cannot be used with --offline or PI_OFFLINE."));
+		process.exit(1);
 	}
 	time("parseArgs");
 
@@ -696,6 +716,7 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager.appendSessionInfo(name);
 	}
 	time("createSessionManager");
+	markStartupBenchmarkStage("session-manager-ready");
 
 	const trustStore = new ProjectTrustStore(agentDir);
 	const sessionCwd = sessionManager.getCwd();
@@ -733,7 +754,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
-			modelRuntimeSignal: AbortSignal.timeout(15_000),
+			modelRuntimeTimeoutMs: 15_000,
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
 				? {
@@ -753,6 +774,7 @@ export async function main(args: string[], options?: MainOptions) {
 										hasUI: isInitialRuntime && trustPromptMode === "interactive",
 									}),
 								onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
+								slowHookThresholdMs: runtimeSettingsManager.getSlowHookThresholdMs(),
 							});
 							projectTrustByCwd.set(cwd, trusted);
 							return trusted;
@@ -844,6 +866,7 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager,
 	});
 	time("createAgentSessionRuntime");
+	markStartupBenchmarkStage("runtime-ready");
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRuntime, resourceLoader } = services;
 	setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides());
@@ -861,9 +884,38 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (parsed.listModels !== undefined) {
 		reportDiagnostics(startupSettingsDiagnostics);
+		let refreshFailed = false;
+		if (parsed.refreshModels) {
+			reportDiagnostics(runtime.diagnostics);
+			if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+				if (runtime.diagnostics.some((diagnostic) => diagnostic.message.includes("Failed to load extension"))) {
+					console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
+				}
+				refreshFailed = true;
+			}
+			try {
+				const result = await modelRuntime.refresh({
+					allowNetwork: true,
+					force: true,
+					signal: AbortSignal.timeout(15_000),
+				});
+				if (result.aborted) {
+					console.error(chalk.red("Error: Model catalog refresh timed out; showing cached models."));
+					refreshFailed = true;
+				}
+				for (const [provider, error] of result.errors) {
+					console.error(chalk.red(`Error: ${provider}: ${error.message}; showing cached models.`));
+					refreshFailed = true;
+				}
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : "Unknown model catalog refresh error";
+				console.error(chalk.red(`Error: ${message}; showing cached models.`));
+				refreshFailed = true;
+			}
+		}
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRuntime, searchPattern, AbortSignal.timeout(15_000));
-		process.exit(0);
+		process.exit(refreshFailed ? 1 : 0);
 	}
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
@@ -875,6 +927,7 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("readPipedStdin");
+	markStartupBenchmarkStage("input-ready");
 
 	const { initialMessage, initialImages } = await prepareInitialMessage(
 		parsed,
@@ -911,7 +964,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
+	const startupBenchmark = isStartupBenchmarkEnabled();
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
@@ -943,6 +996,7 @@ export async function main(args: string[], options?: MainOptions) {
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
 		});
+		markStartupBenchmarkStage("interactive-created");
 		if (startupBenchmark) {
 			await interactiveMode.init();
 			time("interactiveMode.init");
@@ -952,13 +1006,7 @@ export async function main(args: string[], options?: MainOptions) {
 			interactiveMode.stop();
 			stopThemeWatcher();
 			printTimings();
-			if (process.stdout.writableLength > 0) {
-				await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
-			}
-			if (process.stderr.writableLength > 0) {
-				await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
-			}
-			return;
+			completeStartupBenchmark();
 		}
 
 		printTimings();

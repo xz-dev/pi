@@ -12,6 +12,7 @@ import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } fro
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
+	ExtensionAPI,
 	ExtensionContextActions,
 	ExtensionUIContext,
 	ProviderConfig,
@@ -20,16 +21,20 @@ import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import type { ScopedModel } from "../src/core/model-resolver.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { createTestExtensionsResult } from "./utilities.ts";
 
 describe("ExtensionRunner", () => {
 	let tempDir: string;
 	let extensionsDir: string;
 	let sessionManager: SessionManager;
 	let modelRegistry: ModelRegistry;
+	let previousAgentDir: string | undefined;
 	const defaultKeybindings = new KeybindingsManager().getEffectiveConfig();
 
 	beforeEach(async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-runner-test-"));
+		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = tempDir;
 		extensionsDir = path.join(tempDir, "extensions");
 		fs.mkdirSync(extensionsDir);
 		sessionManager = SessionManager.inMemory();
@@ -38,6 +43,11 @@ describe("ExtensionRunner", () => {
 
 	afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
+		if (previousAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		}
 	});
 
 	const providerModelConfig: ProviderConfig = {
@@ -75,6 +85,7 @@ describe("ExtensionRunner", () => {
 		sendMessage: () => {},
 		sendUserMessage: () => {},
 		appendEntry: () => {},
+		spliceEntry: () => {},
 		setSessionName: () => {},
 		getSessionName: () => undefined,
 		setLabel: () => {},
@@ -118,6 +129,95 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("uninterruptible message_end handlers", () => {
+		it("requires synchronous handlers at the public type boundary", () => {
+			const register = (pi: ExtensionAPI): void => {
+				// @ts-expect-error Abort-safe terminal cleanup must not return a promise.
+				pi.on("message_end", async () => undefined, { uninterruptible: true });
+			};
+			expect(register).toBeTypeOf("function");
+		});
+
+		it("classifies duplicate callback registrations independently", async () => {
+			const calls: string[] = [];
+			const sharedHandler = () => {
+				calls.push("shared");
+				return undefined;
+			};
+			const extensionsResult = await createTestExtensionsResult([
+				(pi) => {
+					pi.on("message_end", sharedHandler);
+					pi.on("message_end", sharedHandler, { uninterruptible: true });
+				},
+			]);
+			const runner = new ExtensionRunner(
+				extensionsResult.extensions,
+				extensionsResult.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			const message = {
+				role: "custom" as const,
+				customType: "private",
+				content: "private",
+				display: false,
+				timestamp: Date.now(),
+			};
+
+			await runner.emitMessageEnd({ type: "message_end", message });
+			expect(calls).toEqual(["shared"]);
+			runner.emitUninterruptibleMessageEnd({ type: "message_end", message });
+			expect(calls).toEqual(["shared", "shared"]);
+		});
+
+		it("separates ordinary handlers from abort-safe terminal cleanup", async () => {
+			const calls: string[] = [];
+			const extensionsResult = await createTestExtensionsResult([
+				(pi) => {
+					pi.on("message_end", () => {
+						calls.push("ordinary");
+					});
+					pi.on(
+						"message_end",
+						(event) => {
+							calls.push("cleanup");
+							return { message: { ...event.message, content: [] } };
+						},
+						{ uninterruptible: true },
+					);
+				},
+			]);
+			const runner = new ExtensionRunner(
+				extensionsResult.extensions,
+				extensionsResult.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			const message = {
+				role: "custom" as const,
+				customType: "private",
+				content: "private",
+				display: false,
+				timestamp: Date.now(),
+			};
+
+			expect(await runner.emitMessageEnd({ type: "message_end", message })).toBeUndefined();
+			expect(calls).toEqual(["ordinary"]);
+
+			const replacement = runner.emitUninterruptibleMessageEnd({ type: "message_end", message });
+			expect(replacement?.role === "custom" ? replacement.content : undefined).toEqual([]);
+			expect(calls).toEqual(["ordinary", "cleanup"]);
+
+			calls.length = 0;
+			const current = (await runner.emitMessageEnd({ type: "message_end", message })) ?? message;
+			const finalized = runner.emitUninterruptibleMessageEnd({ type: "message_end", message: current });
+			expect(finalized?.role === "custom" ? finalized.content : undefined).toEqual([]);
+			expect(calls).toEqual(["ordinary", "cleanup"]);
+		});
+	});
+
 	describe("project_trust", () => {
 		it("continues past undecided handlers and returns the first yes/no decision", async () => {
 			const undecidedPath = path.join(extensionsDir, "undecided.ts");
@@ -154,6 +254,84 @@ describe("ExtensionRunner", () => {
 
 			expect(result.result).toEqual({ trusted: "no", remember: true });
 			expect(result.errors).toEqual([]);
+		});
+
+		it("emits no project_trust timing diagnostics without an interactive UI", async () => {
+			const extensionPath = path.join(extensionsDir, "slow-project-trust.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`export default function(pi) {
+	pi.on("project_trust", () => Promise.resolve({ trusted: "undecided" }));
+	pi.on("project_trust", () => { throw new Error("private trust detail"); });
+}`,
+			);
+			const extensionsResult = await loadExtensions([extensionPath], tempDir);
+			const notices: Array<{ event: string; executionKind: string }> = [];
+			const result = await emitProjectTrustEvent(
+				extensionsResult,
+				{ type: "project_trust", cwd: tempDir },
+				{
+					cwd: tempDir,
+					mode: "tui",
+					hasUI: false,
+					ui: {
+						select: async () => undefined,
+						confirm: async () => false,
+						input: async () => undefined,
+						notify: () => {},
+					},
+					onSlowHook: (entry) => notices.push({ event: entry.event, executionKind: entry.executionKind }),
+				},
+				-1,
+			);
+
+			expect(result.errors).toHaveLength(1);
+			expect(notices).toEqual([]);
+			expect(fs.existsSync(path.join(tempDir, "logs", "extension-lifecycle.jsonl"))).toBe(false);
+		});
+
+		it("notifies slow project_trust handlers only when a real TUI context exists", async () => {
+			const extensionPath = path.join(extensionsDir, "slow-project-trust-tui.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`export default function(pi) {
+	pi.on("project_trust", () => Promise.resolve({ trusted: "undecided" }));
+	pi.on("project_trust", () => ({ trusted: "yes" }));
+}`,
+			);
+			const extensionsResult = await loadExtensions([extensionPath], tempDir);
+			const notices: Array<{ event: string; handlerIndex: number; executionKind: string }> = [];
+			const result = await emitProjectTrustEvent(
+				extensionsResult,
+				{ type: "project_trust", cwd: tempDir },
+				{
+					cwd: tempDir,
+					mode: "tui",
+					hasUI: true,
+					ui: {
+						select: async () => undefined,
+						confirm: async () => false,
+						input: async () => undefined,
+						notify: () => {
+							throw new Error("notify must not be used for hook timing");
+						},
+					},
+					onSlowHook: (entry) =>
+						notices.push({
+							event: entry.event,
+							handlerIndex: entry.handlerIndex,
+							executionKind: entry.executionKind,
+						}),
+				},
+				-1,
+			);
+
+			expect(result.result).toEqual({ trusted: "yes" });
+			expect(notices).toEqual([
+				{ event: "project_trust", handlerIndex: 0, executionKind: "async" },
+				{ event: "project_trust", handlerIndex: 1, executionKind: "sync" },
+			]);
+			expect(fs.existsSync(path.join(tempDir, "logs", "extension-lifecycle.jsonl"))).toBe(false);
 		});
 	});
 

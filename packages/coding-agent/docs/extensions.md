@@ -348,6 +348,8 @@ exit (Ctrl+C, Ctrl+D, SIGHUP, SIGTERM)
   └─► session_shutdown
 ```
 
+In interactive TUI, Pi shows slow extension handlers as transient notices. Timing diagnostics are not saved to the session, model context, RPC/print events, or disk. During shutdown, the current handler is shown while Pi waits; fast handlers are cleared and only slow handlers remain on the terminal. Outside interactive TUI, these diagnostics are dropped.
+
 ### Startup Events
 
 #### project_trust
@@ -619,6 +621,7 @@ Fired for message lifecycle updates.
 - `message_start` and `message_end` fire for user, assistant, and toolResult messages.
 - `message_update` fires for assistant streaming updates.
 - `message_end` handlers can return `{ message }` to replace the finalized message. The replacement must keep the same `role`.
+- Pass `{ uninterruptible: true }` only for bounded synchronous terminal cleanup that must still run after abort, such as redacting private finalized content. These handlers run separately from ordinary `message_end` handlers; TypeScript rejects async handlers for this registration.
 
 ```typescript
 pi.on("message_start", async (event, ctx) => {
@@ -646,6 +649,11 @@ pi.on("message_end", async (event, ctx) => {
     },
   };
 });
+
+pi.on("message_end", (event) => {
+  if (event.message.role !== "assistant" || !isPrivateRun(event.message)) return;
+  return { message: { ...event.message, content: [] } };
+}, { uninterruptible: true });
 ```
 
 #### tool_execution_start / tool_execution_update / tool_execution_end
@@ -1490,6 +1498,16 @@ pi.on("session_start", async (_event, ctx) => {
     }
   }
 });
+```
+
+### pi.spliceEntry(entryId)
+
+Delete exactly one existing non-root session entry and reparent its direct children to that entry's parent. Descendants stay. If the deleted entry is the current leaf, the parent becomes the leaf. Persisted JSONL is rewritten so a later reload keeps the same topology, and the live agent context is rebuilt.
+
+Call this only while the agent is idle. It is a later best-effort rewrite, not a replacement for other session cleanup. Root, missing, and unsafe metadata references (label targets, compaction `firstKeptEntryId`, branch-summary `fromId`, missing parent) throw.
+
+```typescript
+pi.spliceEntry(entryId);
 ```
 
 ### pi.setSessionName(name)

@@ -88,7 +88,7 @@ pi
 /login  # Then select provider
 ```
 
-Then just talk to pi. By default, pi gives the model four tools: `read`, `write`, `edit`, and `bash`. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
+Then just talk to pi. By default, pi gives the model four coding tools: `read`, `write`, `edit`, and `bash`, plus `tool_task` for managed long-running tool calls. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -96,7 +96,7 @@ Then just talk to pi. By default, pi gives the model four tools: `read`, `write`
 
 ## Providers & Models
 
-For each built-in provider, pi maintains a list of tool-capable models. Configured provider catalogs refresh automatically; run `pi update --models` to force an immediate refresh. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L). Press Ctrl+S in the model picker to save the highlighted model as the startup default.
+For each built-in provider, pi maintains a list of tool-capable models. Configured provider catalogs refresh automatically; run `pi update --models` to force an immediate refresh. To load extension providers, refresh every loaded provider, and print the resulting list, run `pi --list-models --refresh`. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L). Press Ctrl+S in the model picker to save the highlighted model as the startup default.
 
 **Subscriptions:**
 - Anthropic Claude Pro/Max
@@ -428,7 +428,7 @@ pi list
 pi update                               # update pi only
 pi update --all                         # update pi and packages
 pi update --extensions                  # update packages only
-pi update --models                      # refresh model catalogs only
+pi update --models                      # refresh Pi-managed catalogs without loading extensions
 pi update --self                        # update pi only
 pi update --self --force                # reinstall pi even if current
 pi update npm:@foo/pi-tools             # update one package
@@ -506,7 +506,7 @@ Pi is aggressively extensible so it doesn't have to dictate your workflow. Featu
 
 **No built-in to-dos.** They confuse models. Use a TODO.md file, or build your own with [extensions](#extensions).
 
-**No background bash.** Use tmux. Full observability, direct interaction.
+**Managed long-running tools.** Eligible AI tool calls can detach without duplicating their original result. Configure rules and use `tool_task` as described in [Managed tool executions](docs/usage.md#managed-tool-executions). User `!`/`!!` commands remain foreground shell commands; use tmux when direct interaction and full terminal observability are needed.
 
 Read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/) for the full rationale.
 
@@ -527,7 +527,7 @@ pi uninstall <source> [-l]   # Alias for remove
 pi update [source|self|pi]   # Update pi only, or one package source
 pi update --all              # Update pi and packages
 pi update --extensions       # Update packages only
-pi update --models           # Refresh model catalogs only
+pi update --models           # Refresh Pi-managed catalogs without loading extensions
 pi update --self             # Update pi only
 pi update --self --force     # Reinstall pi even if current
 pi update --extension <src>  # Update one package
@@ -562,7 +562,7 @@ cat README.md | pi -p "Summarize this text"
 | `--api-key <key>` | API key (overrides env vars) |
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
-| `--list-models [search]` | List available models |
+| `--list-models [search]` | List available cached models; add `--refresh` to refresh loaded providers first |
 
 ### Session Options
 

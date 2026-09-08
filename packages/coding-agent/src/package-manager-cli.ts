@@ -17,11 +17,13 @@ import { createProjectTrustContext } from "./cli/project-trust.ts";
 import {
 	APP_NAME,
 	CONFIG_DIR_NAME,
+	DISTRIBUTION,
 	detectInstallMethod,
 	getAgentDir,
 	getPackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
+	getXzDevSourceUpdateGuidance,
 	PACKAGE_NAME,
 	type SelfUpdateCommand,
 	type SelfUpdatePackageTarget,
@@ -42,6 +44,7 @@ import {
 	cleanupWindowsSelfUpdateQuarantine,
 	quarantineWindowsNativeDependencies,
 } from "./utils/windows-self-update.ts";
+import { cleanXzBundles, getLatestXzRelease, runXzSelfUpdate } from "./utils/xz-release-update.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -244,6 +247,7 @@ interface PackageCommandOptions {
 	showExtensionsSkippedNote: boolean;
 	local: boolean;
 	force: boolean;
+	clean: boolean;
 	projectTrustOverride?: boolean;
 	help: boolean;
 	invalidOption?: string;
@@ -269,7 +273,7 @@ function getPackageCommandUsage(command: PackageCommand): string {
 		case "remove":
 			return `${APP_NAME} remove <source> [-l] [--approve|--no-approve]`;
 		case "update":
-			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force]`;
+			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force|--clean]`;
 		case "list":
 			return `${APP_NAME} list [--approve|--no-approve]`;
 	}
@@ -342,17 +346,18 @@ Update pi, installed packages, or model catalogs.
 Options:
   --self                  Update pi only (default when no target is given)
   --extensions            Update installed packages only
-  --models                Refresh model catalogs only
+  --models                Refresh Pi-managed catalogs without loading extensions
   --all                   Update pi and installed packages
   --extension <source>    Update one package only
   -a, --approve           Trust project-local files for this command
   -na, --no-approve       Ignore project-local files for this command
   --force                 Reinstall pi even if the current version is latest
+  --clean                 Detach stale complete bundles for removal; preserve running, current, and previous versions
 
 Short forms:
   ${APP_NAME} update                Update pi only
   ${APP_NAME} update --all          Update pi and all extensions
-  ${APP_NAME} update --models       Refresh model catalogs only
+  ${APP_NAME} update --models       Refresh Pi-managed catalogs without loading extensions
   ${APP_NAME} update <source>       Update one package
   ${APP_NAME} update pi             Update pi only (self works as alias to pi)
 `);
@@ -386,6 +391,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 
 	let local = false;
 	let force = false;
+	let clean = false;
 	let projectTrustOverride: boolean | undefined;
 	let help = false;
 	let invalidOption: string | undefined;
@@ -470,6 +476,15 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			continue;
 		}
 
+		if (arg === "--clean") {
+			if (command === "update") {
+				clean = true;
+			} else {
+				invalidOption = invalidOption ?? arg;
+			}
+			continue;
+		}
+
 		if (arg === "--extension") {
 			if (command !== "update") {
 				invalidOption = invalidOption ?? arg;
@@ -504,6 +519,9 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let updateTarget: UpdateTarget | undefined;
 	let showExtensionsSkippedNote = false;
 	if (command === "update") {
+		if (clean && (source || selfFlag || extensionsFlag || modelsFlag || allFlag || extensionFlagSource || force)) {
+			conflictingOptions = conflictingOptions ?? "--clean cannot be combined with another update target or --force";
+		}
 		if (allFlag && (selfFlag || extensionsFlag || modelsFlag || extensionFlagSource)) {
 			conflictingOptions =
 				conflictingOptions ?? "--all cannot be combined with --self, --extensions, --models, or --extension";
@@ -563,6 +581,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		showExtensionsSkippedNote,
 		local,
 		force,
+		clean,
 		projectTrustOverride,
 		help,
 		invalidOption,
@@ -783,6 +802,7 @@ async function createCommandSettingsManager(options: {
 			hasUI: appMode === "interactive",
 		}),
 		onExtensionError: (message) => projectTrustWarnings.push(message),
+		slowHookThresholdMs: settingsManager.getSlowHookThresholdMs(),
 	});
 	settingsManager.setProjectTrusted(projectTrusted);
 	return { settingsManager, projectTrustWarnings };
@@ -911,6 +931,18 @@ export async function handlePackageCommand(
 		return true;
 	}
 
+	if (options.command === "update" && options.clean) {
+		try {
+			const removed = cleanXzBundles();
+			console.log(chalk.green(`Removed ${removed} old ${removed === 1 ? "bundle" : "bundles"}`));
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : "Unknown bundle cleanup error";
+			console.error(chalk.red(`Error: ${message}`));
+			process.exitCode = 1;
+		}
+		return true;
+	}
+
 	if (options.command === "update" && options.updateTarget?.type === "models") {
 		try {
 			await refreshModelCatalogs(getAgentDir());
@@ -1028,6 +1060,24 @@ export async function handlePackageCommand(
 							),
 						);
 						process.exitCode = 1;
+						return true;
+					}
+					if (DISTRIBUTION === "xz-dev" && PACKAGE_NAME === "@earendil-works/pi-coding-agent") {
+						if (detectInstallMethod() === "bun-binary") {
+							const latestRelease = await getLatestXzRelease(VERSION, { retry: true });
+							if (!latestRelease) {
+								throw new Error(`Could not determine latest ${APP_NAME} version.`);
+							}
+							if (!options.force && !isNewerPackageVersion(latestRelease.version, VERSION)) {
+								console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
+								return true;
+							}
+							console.log(chalk.dim(`Updating ${APP_NAME} from the xz-dev Release...`));
+							await runXzSelfUpdate(latestRelease, VERSION, options.force);
+							console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${latestRelease.version}`));
+							return true;
+						}
+						console.log(chalk.dim(getXzDevSourceUpdateGuidance()));
 						return true;
 					}
 					const selfUpdatePlan = await getSelfUpdatePlan(options.force);

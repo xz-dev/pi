@@ -19,6 +19,7 @@ import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-sessi
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
+import type { ModelRegistry } from "../../src/core/model-registry.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
@@ -72,6 +73,8 @@ export interface HarnessOptions {
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
+	sessionManagerFactory?: (tempDir: string) => SessionManager;
+	persist?: boolean;
 }
 
 export interface Harness {
@@ -81,6 +84,7 @@ export interface Harness {
 	authStorage: AuthStorage;
 	faux: FauxProviderRegistration;
 	models: [Model<string>, ...Model<string>[]];
+	modelRegistry: ModelRegistry;
 	getModel(): Model<string>;
 	getModel(modelId: string): Model<string> | undefined;
 	setResponses: (responses: FauxResponseStep[]) => void;
@@ -109,7 +113,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager =
+		options.sessionManagerFactory?.(tempDir) ??
+		(options.persist ? SessionManager.create(tempDir, join(tempDir, "sessions")) : SessionManager.inMemory());
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
@@ -205,6 +211,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		authStorage,
 		faux: fauxProvider,
 		models: fauxProvider.models,
+		modelRegistry,
 		getModel: fauxProvider.getModel,
 		setResponses: fauxProvider.setResponses,
 		appendResponses: fauxProvider.appendResponses,
