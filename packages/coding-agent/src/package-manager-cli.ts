@@ -1051,7 +1051,7 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
-				const managedInstallRoot = getActiveManagedInstallRoot();
+					const managedInstallRoot = getActiveManagedInstallRoot();
 					if (managedInstallRoot && options.force) {
 						console.error(
 							chalk.red(
