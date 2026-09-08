@@ -52,13 +52,6 @@ const packages = [...closure].filter((path) => path.startsWith("node_modules/"))
 	return { path, name: packageName(path), version: metadata.version, license: metadata.license, sourceDirectory: join(repoRoot, path) };
 }).sort((a, b) => `${a.path}@${a.version}`.localeCompare(`${b.path}@${b.version}`));
 if (packages.length === 0) throw new Error("No locked runtime dependencies found");
-const nativeRoot = join(root, "node_modules", "@mariozechner");
-const nativePackages = ["@mariozechner/clipboard", ...(existsSync(nativeRoot) ? readdirSync(nativeRoot).filter((name) => name.startsWith("clipboard-") && existsSync(join(nativeRoot, name, "package.json"))).map((name) => `@mariozechner/${name}`) : [])].sort();
-for (const name of nativePackages) if (!packages.some((entry) => entry.name === name)) {
-	const metadata = JSON.parse(readFileSync(join(root, "node_modules", name, "package.json"), "utf8"));
-	if (!metadata.version || !metadata.license) throw new Error(`Incomplete packaged native metadata: ${name}`);
-	packages.push({ path: `node_modules/${name}`, name, version: metadata.version, license: metadata.license, packagedNative: true, sourceDirectory: join(root, "node_modules", name) });
-}
 packages.sort((a, b) => `${a.path}@${a.version}`.localeCompare(`${b.path}@${b.version}`));
 const legalFilePattern = /^(?:licen[cs]e|copying|notice)(?:$|[-_.].*)/iu;
 function legalFiles(entry) {

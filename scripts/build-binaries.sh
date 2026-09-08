@@ -45,36 +45,8 @@ fi
 [[ "$OUTPUT_DIR" = /* ]] || OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
 
 if [[ "$SKIP_INSTALL" == false ]]; then npm ci --ignore-scripts; fi
-if [[ "$SKIP_DEPS" == false ]]; then
-	clipboard_version=$(node -p "require('./packages/coding-agent/package.json').optionalDependencies['@mariozechner/clipboard']")
-	npm install --include=optional --no-save --package-lock=false --force --ignore-scripts \
-		"@mariozechner/clipboard@$clipboard_version" \
-		"@mariozechner/clipboard-darwin-arm64@$clipboard_version" \
-		"@mariozechner/clipboard-darwin-x64@$clipboard_version" \
-		"@mariozechner/clipboard-linux-x64-gnu@$clipboard_version" \
-		"@mariozechner/clipboard-linux-arm64-gnu@$clipboard_version" \
-		"@mariozechner/clipboard-linux-x64-musl@$clipboard_version" \
-		"@mariozechner/clipboard-linux-arm64-musl@$clipboard_version" \
-		"@mariozechner/clipboard-win32-x64-msvc@$clipboard_version" \
-		"@mariozechner/clipboard-win32-arm64-msvc@$clipboard_version"
-fi
 if [[ "$SKIP_BUILD" == false ]]; then
 	if [[ "$OFFLINE_MODEL_DATA" == true ]]; then npm run build:offline; else npm run build; fi
-fi
-if [[ "$HYDRATE_TARGET_DEPS" == true ]]; then
-	test "${#PLATFORMS_REQUESTED[@]}" -eq 1 || { echo "--hydrate-target-deps requires exactly one target" >&2; exit 1; }
-	clipboard_package=$(node scripts/lib/bun-targets.mjs --get "${PLATFORMS_REQUESTED[0]}" clipboardNativePackage)
-	lock_entry="node_modules/@mariozechner/$clipboard_package"
-	resolved=$(node -p "require('./package-lock.json').packages['$lock_entry'].resolved")
-	integrity=$(node -p "require('./package-lock.json').packages['$lock_entry'].integrity")
-	mkdir -p node_modules/@mariozechner
-	tarball="$(pwd)/$(npm pack --ignore-scripts --silent "$resolved")"
-	node -e "const fs=require('node:fs');const crypto=require('node:crypto');const [file,expected]=process.argv.slice(1);const [algorithm,digest]=expected.split('-',2);const actual=crypto.createHash(algorithm).update(fs.readFileSync(file)).digest('base64');if(actual!==digest)throw new Error('clipboard tarball integrity mismatch')" "$tarball" "$integrity"
-	tmp_deps=$(mktemp -d)
-	trap 'rm -rf "$tmp_deps" "$tarball"' EXIT
-	tar -xzf "$tarball" -C "$tmp_deps"
-	rm -rf "node_modules/@mariozechner/$clipboard_package"
-	mv "$tmp_deps/package" "node_modules/@mariozechner/$clipboard_package"
 fi
 export NODE_ENV=production
 if [[ -z "$CLIPBOARD_MUSL_DIR" ]] && printf '%s\n' "${PLATFORMS_REQUESTED[@]}" | grep -q -- '-musl'; then
@@ -89,8 +61,6 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	executable=$(node ../../scripts/lib/bun-targets.mjs --get "$target" executable)
 	wrapper=$(node ../../scripts/lib/bun-targets.mjs --get "$target" wrapper)
 	archive=$(node ../../scripts/lib/bun-targets.mjs --get "$target" archive)
-	clipboard_package=$(node ../../scripts/lib/bun-targets.mjs --get "$target" clipboardNativePackage)
-	clipboard_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" clipboardNativeFile)
 	target_dir="$OUTPUT_DIR/$target"
 	rm -rf "$target_dir"
 	mkdir -p "$target_dir"
@@ -111,21 +81,6 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	cp dist/modes/interactive/theme/*.json "$target_dir/theme/"
 	cp dist/modes/interactive/assets/* "$target_dir/assets/"
 	cp -r dist/core/export-html docs examples "$target_dir/"
-	mkdir -p "$target_dir/node_modules/@mariozechner"
-	cp -r ../../node_modules/@mariozechner/clipboard "$target_dir/node_modules/@mariozechner/"
-	if [[ "$target" == *-musl* ]]; then
-		test -n "$CLIPBOARD_MUSL_DIR"
-		cp -r "$CLIPBOARD_MUSL_DIR/$clipboard_package" "$target_dir/node_modules/@mariozechner/"
-		cp "$CLIPBOARD_MUSL_DIR/$clipboard_package/$clipboard_file" "$target_dir/node_modules/@mariozechner/clipboard/"
-		cp "$CLIPBOARD_MUSL_DIR/provenance.json" "$target_dir/clipboard-native-provenance.json"
-		cp "$CLIPBOARD_MUSL_DIR/$clipboard_package/LICENSE" "$target_dir/node_modules/@mariozechner/$clipboard_package/LICENSE"
-	else
-		native_package="../../node_modules/@mariozechner/$clipboard_package"
-		test -f "$native_package/$clipboard_file" || { echo "npm ci did not install host native package @mariozechner/$clipboard_package for $target" >&2; exit 1; }
-		cp -r "$native_package" "$target_dir/node_modules/@mariozechner/"
-		cp "$native_package/$clipboard_file" "$target_dir/node_modules/@mariozechner/clipboard/"
-	fi
-
 	native_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperDir 2>/dev/null || true)
 	if [[ -n "$native_dir" ]]; then
 		native_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperFile)

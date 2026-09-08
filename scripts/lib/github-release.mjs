@@ -49,7 +49,6 @@ export function platformNativeInfo(targetId) {
  */
 export function binaryRequiredPaths(platform) {
 	const info = platformNativeInfo(platform);
-	const clipboardParent = "node_modules/@mariozechner/clipboard";
 	const paths = [
 		info.wrapper,
 		info.executable,
@@ -66,14 +65,7 @@ export function binaryRequiredPaths(platform) {
 		"export-html",
 		"docs",
 		"examples",
-		clipboardParent,
-		`node_modules/@mariozechner/${info.clipboardNativePackage}`,
-		`${clipboardParent}/${info.clipboardNativeFile}`,
 	];
-	if (info.libc === "musl") {
-		paths.push("clipboard-native-provenance.json");
-		paths.push(`node_modules/@mariozechner/${info.clipboardNativePackage}/LICENSE`);
-	}
 	if (info.nativeHelperDir) {
 		paths.push(info.nativeHelperDir);
 		paths.push(`${info.nativeHelperDir}/${info.nativeHelperFile}`);
