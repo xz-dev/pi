@@ -356,6 +356,33 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("model catalog flags", () => {
+		test("parses --list-models with an optional search pattern", () => {
+			const result = parseArgs(["--list-models", "claude"]);
+			expect(result.listModels).toBe("claude");
+		});
+
+		test("parses --refresh as a list-models modifier", () => {
+			const result = parseArgs(["--list-models", "--refresh"]);
+			expect(result.listModels).toBe(true);
+			expect(result.refreshModels).toBe(true);
+			expect(result.unknownFlags.size).toBe(0);
+		});
+
+		test("keeps standalone --refresh available to extensions", () => {
+			const result = parseArgs(["--refresh"]);
+			expect(result.refreshModels).toBeUndefined();
+			expect(result.unknownFlags.get("refresh")).toBe(true);
+		});
+
+		test("does not treat --list-models after -- as an option", () => {
+			const result = parseArgs(["--refresh", "--", "--list-models"]);
+			expect(result.refreshModels).toBeUndefined();
+			expect(result.unknownFlags.get("refresh")).toBe(true);
+			expect(result.messages).toEqual(["--list-models"]);
+		});
+	});
+
 	describe("--offline flag", () => {
 		test("parses --offline flag", () => {
 			const result = parseArgs(["--offline"]);
