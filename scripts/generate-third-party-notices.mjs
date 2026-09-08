@@ -80,4 +80,4 @@ const inventory = packages.map((entry) => {
 	return [`## ${entry.path}@${entry.version}`, `License: ${entry.license}${entry.packagedNative ? " (packaged native)" : ""}`, "", ...sections].join("\n");
 }).join("\n\n");
 writeFileSync(output, `# Third-Party Notices\n\nGenerated deterministically from package-lock.json's complete production dependency closure rooted at @earendil-works/pi-coding-agent, plus packaged native modules.\n\n## Dependency inventory and included license texts\n\n${inventory}\n`);
-console.log(`${packages.length} dependency notices (${nativePackages.length} packaged natives): ${sha256(readFileSync(output))}`);
+console.log(`${packages.length} dependency notices: ${sha256(readFileSync(output))}`);
