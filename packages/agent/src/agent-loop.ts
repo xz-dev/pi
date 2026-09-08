@@ -737,11 +737,7 @@ async function prepareToolCall(
 			args: validatedArgs,
 		};
 	} catch (error) {
-		const message = signal?.aborted
-			? "Operation aborted"
-			: error instanceof Error
-				? error.message
-				: String(error);
+		const message = signal?.aborted ? "Operation aborted" : error instanceof Error ? error.message : String(error);
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(message),

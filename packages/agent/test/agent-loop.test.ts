@@ -474,27 +474,18 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		let streamCalls = 0;
-		const stream = agentLoop(
-			[createUserMessage("run echo")],
-			context,
-			config,
-			controller.signal,
-			() => {
-				const call = streamCalls++;
-				const mockStream = new MockAssistantStream();
-				queueMicrotask(() => {
-					const message =
-						call === 0
-							? createAssistantMessage(
-									[{ type: "toolCall", id: "tool-1", name: "echo", arguments: {} }],
-									"toolUse",
-								)
-							: createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: call === 0 ? "toolUse" : "stop", message });
-				});
-				return mockStream;
-			},
-		);
+		const stream = agentLoop([createUserMessage("run echo")], context, config, controller.signal, () => {
+			const call = streamCalls++;
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message =
+					call === 0
+						? createAssistantMessage([{ type: "toolCall", id: "tool-1", name: "echo", arguments: {} }], "toolUse")
+						: createAssistantMessage([{ type: "text", text: "done" }]);
+				mockStream.push({ type: "done", reason: call === 0 ? "toolUse" : "stop", message });
+			});
+			return mockStream;
+		});
 
 		const events: AgentEvent[] = [];
 		for await (const event of stream) {
@@ -502,8 +493,7 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		const toolEnd = events.find(
-			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
-				event.type === "tool_execution_end",
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
 		);
 		expect(executions).toBe(0);
 		expect(streamCalls).toBe(abort ? 1 : 2);
