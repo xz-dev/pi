@@ -68,25 +68,7 @@ text = resolve_conflict(
 managed_parallel = '''\t\t\tconst finalized = await awaitPreparedToolExecution(preparation, execution, config);
 \t\t\tawait emitToolExecutionEnd(finalized, emit);
 '''
-esc_parallel = '''\t\t\tif (signal?.aborted) {
-\t\t\t\tconst finalized = {
-\t\t\t\t\ttoolCall,
-\t\t\t\t\tresult: createErrorToolResult("Operation aborted"),
-\t\t\t\t\tisError: true,
-\t\t\t\t} satisfies FinalizedToolCallOutcome;
-\t\t\t\tawait emitToolExecutionEnd(finalized, emit, signal);
-\t\t\t\treturn finalized;
-\t\t\t}
-\t\t\tconst executed = await executePreparedToolCall(preparation, signal, emit);
-\t\t\tconst finalized = await finalizeExecutedToolCall(
-\t\t\t\tcurrentContext,
-\t\t\t\tassistantMessage,
-\t\t\t\tpreparation,
-\t\t\t\texecuted,
-\t\t\t\tconfig,
-\t\t\t\tsignal,
-\t\t\t);
-\t\t\tawait emitToolExecutionEnd(finalized, emit, signal);
+esc_parallel = '''\t\t\tawait emitToolExecutionEnd(finalized, emit, signal);
 '''
 combined_parallel = '''\t\t\tconst finalized = await awaitPreparedToolExecution(preparation, execution, config);
 \t\t\tawait emitToolExecutionEnd(finalized, emit, signal);
