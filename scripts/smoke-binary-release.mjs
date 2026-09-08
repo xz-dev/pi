@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { bunTarget, SMOKE_LIMITS } from "./lib/bun-targets.mjs";
 import { cpuFeatures } from "./lib/cpu-features.mjs";
 import { operatingSystemArchitecture } from "./lib/runtime-architecture.mjs";
+import { verifyMuslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 
 const [archiveArg, targetId, expectedVersion, recordArg] = process.argv.slice(2);
 if (!archiveArg || !targetId || !expectedVersion || !recordArg) throw new Error("Usage: smoke-binary-release.mjs <archive> <target> <version> <record.json>");
@@ -55,9 +56,15 @@ try {
 	const noticesPath = join(root, "THIRD_PARTY_NOTICES.md");
 	const notices = readFileSync(noticesPath, "utf8");
 	if (!notices.startsWith("# Third-Party Notices") || !notices.includes("License SHA-256:")) throw new Error("third-party notices are missing or invalid");
-	const nativeHelper = join(root, target.nativeHelperDir ?? "native", target.nativeHelperFile ?? "");
-	if (target.nativeHelperDir) {
-		if (!existsSync(nativeHelper)) throw new Error(`native platform helper missing: ${nativeHelper}`);
+	const nativeHelper = join(root, target.nativeHelperDir, target.nativeHelperFile);
+	if (!existsSync(nativeHelper)) throw new Error(`native platform helper missing: ${nativeHelper}`);
+	const muslLibraries = target.libc === "musl" ? verifyMuslSmokeLibraries(process.env.PI_XZ_MUSL_LIBRARIES, target.arch) : null;
+	const nativeClipboard = run("clipboard", "bun", [join(process.cwd(), "scripts", "test-native-clipboard.mjs"), nativeHelper], { env });
+	const clipboardReads = JSON.parse(nativeClipboard.stdout.trim());
+	if (clipboardReads.textRead !== true || clipboardReads.imageRead !== true) throw new Error("native clipboard smoke returned invalid evidence");
+	const clipboard = { helper: `${target.nativeHelperDir}/${target.nativeHelperFile}`, sha256: sha256(nativeHelper), loadedAndCalled: true, ...clipboardReads, elapsedMs: nativeClipboard.elapsedMs };
+	if (target.libc === "musl") {
+		run("musl-provenance", process.execPath, [join(process.cwd(), "scripts", "verify-musl-provenance.mjs"), join(root, "clipboard-native-provenance.json"), nativeHelper, targetId], { env });
 	}
 	let filesystemSnapshot;
 	if (target.os === "windows") {
@@ -135,8 +142,8 @@ try {
 		schemaVersion: 1, target: targetId, version: expectedVersion,
 		archive: { file: archive.split(/[\\/]/).at(-1), sha256: sha256(archive), bytes: archiveBytes, extractedBytes },
 		runner: { name: process.env.RUNNER_NAME ?? "local", os: process.env.RUNNER_OS ?? platform(), arch: process.env.RUNNER_ARCH ?? osArchitecture, osArchitecture, imageOs: process.env.ImageOS ?? null, imageVersion: process.env.ImageVersion ?? null, cpuModel: cpus()[0]?.model ?? "unknown", cpuFeatures: cpuFeatures(), libc: target.libc ?? null },
-		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, emulated: false },
-		commands, tui, clipboard: { helper: target.nativeHelperFile ?? null, packaged: Boolean(target.nativeHelperDir) },
+		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, libraries: muslLibraries, emulated: false },
+		commands, tui, clipboard,
 		filesystemSnapshot: filesystemSnapshot ?? null,
 		thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: sha256(noticesPath), bytes: statSync(noticesPath).size },
 		timingsMs: { coldVersion: coldVersion.elapsedMs, version: version.elapsedMs, help: help.elapsedMs, listModels: listModels.elapsedMs, interactive: commands.filter(({ name }) => name.startsWith("tui-")).reduce((sum, entry) => sum + entry.elapsedMs, 0) },

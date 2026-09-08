@@ -52,6 +52,21 @@ const packages = [...closure].filter((path) => path.startsWith("node_modules/"))
 	return { path, name: packageName(path), version: metadata.version, license: metadata.license, sourceDirectory: join(repoRoot, path) };
 }).sort((a, b) => `${a.path}@${a.version}`.localeCompare(`${b.path}@${b.version}`));
 if (packages.length === 0) throw new Error("No locked runtime dependencies found");
+const nativeRoot = join(root, "native");
+if (existsSync(nativeRoot)) {
+	const helpers = readdirSync(nativeRoot, { recursive: true, withFileTypes: true })
+		.filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
+		.map((entry) => join(entry.parentPath ?? entry.path, entry.name))
+		.sort();
+	if (helpers.length > 0) {
+		if (!existsSync(join(nativeRoot, "LICENSE"))) throw new Error("Packaged native helpers are missing native/LICENSE");
+		packages.push({
+			path: "native", name: "@earendil-works/pi-tui", version: lock.packages["packages/tui"]?.version ?? lock.version, license: "MIT",
+			sourceDirectory: nativeRoot, packagedNative: true,
+			helpers: helpers.map((file) => `${file.slice(root.length + 1).replaceAll("\\", "/")}: ${sha256(readFileSync(file))}`),
+		});
+	}
+}
 packages.sort((a, b) => `${a.path}@${a.version}`.localeCompare(`${b.path}@${b.version}`));
 const legalFilePattern = /^(?:licen[cs]e|copying|notice)(?:$|[-_.].*)/iu;
 function legalFiles(entry) {
@@ -77,7 +92,7 @@ const inventory = packages.map((entry) => {
 		bytes.toString("utf8").trimEnd(),
 		"```",
 	].join("\n"));
-	return [`## ${entry.path}@${entry.version}`, `License: ${entry.license}${entry.packagedNative ? " (packaged native)" : ""}`, "", ...sections].join("\n");
+	return [`## ${entry.path}@${entry.version}`, `License: ${entry.license}${entry.packagedNative ? " (packaged native)" : ""}`, ...(entry.packagedNative ? [`Component: ${entry.name}`, ...entry.helpers.map((helper) => `Helper SHA-256: ${helper}`)] : []), "", ...sections].join("\n");
 }).join("\n\n");
 writeFileSync(output, `# Third-Party Notices\n\nGenerated deterministically from package-lock.json's complete production dependency closure rooted at @earendil-works/pi-coding-agent, plus packaged native modules.\n\n## Dependency inventory and included license texts\n\n${inventory}\n`);
 console.log(`${packages.length} dependency notices: ${sha256(readFileSync(output))}`);

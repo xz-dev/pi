@@ -327,7 +327,21 @@ test("Linux archive smoke provisions a headless display without bypassing clipbo
   assert.match(muslSmoke?.run ?? "", /Xvfb :99[^\n]*-nolisten tcp -ac/);
   assert.match(muslSmoke?.run ?? "", /-e DISPLAY=:99/);
   assert.match(muslSmoke?.run ?? "", /-v \/tmp\/\.X11-unix:\/tmp\/\.X11-unix:ro/);
-  assert.match(smoke, /typeof c\.hasImage!==['"]function['"]/);
+  assert.match(smoke, /run\("clipboard", "bun"/);
+  assert.match(smoke, /test-native-clipboard\.mjs/);
+  const clipboardProbe = readFileSync(join(ROOT, "scripts", "test-native-clipboard.mjs"), "utf8");
+  assert.match(clipboardProbe, /await helper\.getText\(\)/);
+  assert.match(clipboardProbe, /await helper\.getImage\(\)/);
+  const prepare = acceptSteps.find((step) => step.name === "Prepare hash-pinned musl XCB test libraries");
+  assert.equal(prepare?.if, "matrix.executor == 'pinned-musl-container'");
+  assert.match(prepare?.run ?? "", /prepare-musl-smoke\.mjs/);
+  assert.match(muslSmoke?.run ?? "", /-e LD_LIBRARY_PATH=\/musl-libraries\/usr\/lib/);
+  assert.match(muslSmoke?.run ?? "", /musl-libraries:\/musl-libraries:ro/);
+  assert.match(muslSmoke?.run ?? "", /-e GITHUB_SHA/);
+  const tuiCommand = muslSmoke.run.split("\n").find((line) => line.includes("bun scripts/smoke-bun-tui.mjs"));
+  assert.doesNotMatch(tuiCommand, /LD_LIBRARY_PATH|musl-libraries/);
+  assert.match(tuiCommand, /--network none/);
+  assert.equal(syncSteps.find((step) => step.name === "Test release packaging scripts")?.run, "npm run test:scripts");
   assert.doesNotMatch(`${syncWorkflowText}\n${workflowText}\n${smoke}`, /skip[-_]clipboard|PI_XZ_SKIP_CLIPBOARD/i);
 });
 
@@ -361,19 +375,20 @@ test("Windows ConPTY uses Bun 1.4.0's native Terminal implementation", () => {
   assert.match(harness, /if \(!startupBenchmark\)/);
 });
 
-test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.4.0", () => {
+test("stages upstream musl helpers with provenance and uses optimized Bun 1.4.0", () => {
   assert.match(workflowText, /build-musl-clipboard\.sh/);
   assert.match(workflowText, /--clipboard-musl-dir/);
   assert.match(workflowText, /bun-version: ["']?1\.4\.0/);
   assert.match(workflowText, /NODE_ENV: production/);
   const builder = readFileSync(join(ROOT, "scripts", "build-musl-clipboard.sh"), "utf8");
   assert.doesNotMatch(builder, /curl|apk add --no-cache|apk update/);
-  assert.match(builder, /--network none/);
-  assert.match(builder, /host_uid=\$\(id -u\)/);
-  assert.match(builder, /host_gid=\$\(id -g\)/);
-  assert.match(builder, /chown -R "\$HOST_UID:\$HOST_GID" \/work/);
-  assert.match(builder, /trap cleanup EXIT/);
-  assert.match(builder, /tar -xzf \/inputs\/musl-dev\.apk/);
+  assert.match(builder, /node "\$ROOT\/scripts\/lib\/musl-provenance\.mjs"/);
+  const provenance = readFileSync(join(ROOT, "scripts", "lib", "musl-provenance.mjs"), "utf8");
+  assert.match(provenance, /method: "upstream-prebuilt"/);
+  assert.match(provenance, /copyFileSync\(join\(repoRoot, provenance\.source\.path\), helper\)/);
+  const libraries = readFileSync(join(ROOT, "scripts", "prepare-musl-smoke.mjs"), "utf8");
+  assert.match(libraries, /APK digest mismatch/);
+  assert.match(libraries, /musl library digest mismatch/);
   const packager = readFileSync(join(ROOT, "scripts", "build-binaries.sh"), "utf8");
   assert.match(packager, /build-win32-filesystem-snapshot\.sh/);
   assert.match(packager, /filesystemHelperDir/);
@@ -397,9 +412,9 @@ test("builds pinned downstream musl clipboard addons and uses optimized Bun 1.4.
   assert.match(packager, /rm -f "\$archive_path"/);
   // macOS runners ship bash 3.2 without mapfile; keep flag reading portable.
   assert.doesNotMatch(packager, /^\s*mapfile\s/m);
-  assert.match(packager, /require\('\.\/package-lock\.json'\)\.packages/);
-  assert.match(packager, /clipboard tarball integrity mismatch/);
-  assert.match(packager, /tarball="\$\(pwd\)\/\$\(npm pack/);
+  assert.match(packager, /verify-musl-provenance\.mjs/);
+  assert.match(packager, /cp "\$CLIPBOARD_MUSL_DIR\/provenance\.json" "\$target_dir\/clipboard-native-provenance\.json"/);
+  assert.match(packager, /cp \.\.\/\.\.\/LICENSE "\$target_dir\/native\/LICENSE"/);
 });
 
 test("publication attests final subjects before draft publication and keeps audit list separate", () => {

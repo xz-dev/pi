@@ -5,6 +5,8 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { BUN_TARGET_IDS, SMOKE_LIMITS, bunTarget } from "./lib/bun-targets.mjs";
+import { readZipFileBuffer } from "./lib/github-release.mjs";
+import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 const [recordsArg, manifestArg, outputArg] = process.argv.slice(2);
 if (!recordsArg || !manifestArg || !outputArg) throw new Error("Usage: aggregate-binary-acceptance.mjs <records-dir> <manifest> <output>");
 const recordsDir = resolve(recordsArg); const manifestPath = resolve(manifestArg); const output = resolve(outputArg);
@@ -31,6 +33,7 @@ for (const id of BUN_TARGET_IDS) {
 	if (record.runner?.os !== descriptor.runnerOs || normalizeRunnerArch(record.runner?.arch) !== descriptor.arch || record.runner?.osArchitecture !== descriptor.arch) throw new Error(`${id} runner OS/architecture does not match authoritative descriptor`);
 	if (record.executor?.kind !== descriptor.executor || record.executor?.emulated !== false) throw new Error(`${id} executor does not match authoritative descriptor`);
 	if ((record.executor.containerDigest ?? null) !== (descriptor.containerImage ?? null)) throw new Error(`${id} container digest does not match authoritative descriptor`);
+	if (descriptor.libc === "musl" && JSON.stringify(record.executor.libraries) !== JSON.stringify(muslSmokeLibraries(descriptor.arch))) throw new Error(`${id} musl library evidence does not match fixed inputs`);
 	const features = String(record.runner.cpuFeatures ?? "").toLowerCase().replaceAll(".", "_");
 	for (const feature of descriptor.requiredCpuFeatures) if (!features.includes(feature)) throw new Error(`${id} CPU lacks required ${feature}`);
 	const commands = record.commands ?? [];
@@ -46,6 +49,11 @@ for (const id of BUN_TARGET_IDS) {
 	if (JSON.stringify(record.limits) !== JSON.stringify(SMOKE_LIMITS)) throw new Error(`${id} self-reported limits do not equal authoritative limits`);
 	const expectedTui = descriptor.os === "windows" ? { harness: "Bun.Terminal ConPTY", input: "startup-benchmark", exitSent: false, benchmarkCompleted: true } : { harness: "Bun.Terminal PTY", input: "ctrl-c,ctrl-d", exitSent: true, benchmarkCompleted: null };
 	if (!Number.isSafeInteger(record.tui?.outputBytes) || record.tui.outputBytes <= 0 || record.tui.harness !== expectedTui.harness || record.tui.input !== expectedTui.input || record.tui.childExitCode !== 0 || !record.tui.terminalClosed || !Number.isSafeInteger(record.tui.terminalExitCode) || !record.tui.observedOutput || record.tui.benchmarkCompleted !== expectedTui.benchmarkCompleted || record.tui.exitSent !== expectedTui.exitSent || !record.tui.cleanExit || !record.clipboard?.loadedAndCalled) throw new Error(`${id} missing bounded TUI or clipboard acceptance`);
+	const helperFile = `${descriptor.nativeHelperDir}/${descriptor.nativeHelperFile}`;
+	if (record.clipboard?.loadedAndCalled !== true || record.clipboard.textRead !== true || record.clipboard.imageRead !== true || record.clipboard.helper !== helperFile) throw new Error(`${id} missing native clipboard read evidence`);
+	assertLimit(id, "clipboardMs", record.clipboard.elapsedMs, 10_000);
+	const helperHash = createHash("sha256").update(readZipFileBuffer(join(resolve(manifestPath, ".."), bundle.file), helperFile)).digest("hex");
+	if (record.clipboard.sha256 !== helperHash) throw new Error(`${id} archived native helper does not match acceptance evidence`);
 	if (descriptor.os === "windows") {
 		if (
 			record.filesystemSnapshot?.apiVersion !== 1 ||

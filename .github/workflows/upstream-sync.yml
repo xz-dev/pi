@@ -482,10 +482,13 @@ jobs:
         with:
           bun-version: 1.4.0
 
+      - name: Test release packaging scripts
+        run: npm run test:scripts
+
       - name: Install Linux smoke display
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb libxcb1
 
       - name: Smoke test host binary packaging path
         run: |

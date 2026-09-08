@@ -7,11 +7,11 @@ import test from "node:test";
 
 function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "pi-notices-")); const bundle = join(root, "bundle");
-	mkdirSync(join(bundle, "node_modules", "@mariozechner", "clipboard-native"), { recursive: true });
-	writeFileSync(join(bundle, "node_modules", "@mariozechner", "clipboard-native", "package.json"), JSON.stringify({ name: "@mariozechner/clipboard-native", version: "1.0.0", license: "MIT" }));
-	writeFileSync(join(bundle, "node_modules", "@mariozechner", "clipboard-native", "LICENSE.txt"), "fixture license\n");
-	writeFileSync(join(bundle, "node_modules", "@mariozechner", "clipboard-native", "NOTICE.md"), "fixture notice\n");
-	const lock = { lockfileVersion: 3, packages: { "packages/coding-agent": { name: "@earendil-works/pi-coding-agent", dependencies: { alpha: "1.0.0", "proper-lockfile": "4.1.2", "p-retry": "4.6.2" }, optionalDependencies: { "@mariozechner/clipboard": "1.0.0" } }, "node_modules/alpha": { version: "1.0.0", license: "ISC", dependencies: { beta: "2.0.0" } }, "node_modules/beta": { version: "2.0.0", license: "MIT" }, "node_modules/@mariozechner/clipboard": { version: "1.0.0", license: "MIT" }, "node_modules/proper-lockfile": { version: "4.1.2", license: "MIT", dependencies: { retry: "0.12.0" } }, "node_modules/proper-lockfile/node_modules/retry": { version: "0.12.0", license: "MIT" }, "node_modules/p-retry": { version: "4.6.2", license: "MIT", dependencies: { retry: "0.13.1", "@types/retry": "0.12.0" } }, "node_modules/p-retry/node_modules/@types/retry": { version: "0.12.0", license: "MIT" }, "node_modules/retry": { version: "0.13.1", license: "MIT" }, "node_modules/@types/retry": { version: "0.12.5", license: "MIT" } } };
+	mkdirSync(join(bundle, "native", "linux", "prebuilds", "linux-x64"), { recursive: true });
+	writeFileSync(join(bundle, "native", "linux", "prebuilds", "linux-x64", "linux-platform-x11.node"), "fixture native helper");
+	writeFileSync(join(bundle, "native", "LICENSE"), "fixture license\n");
+	writeFileSync(join(bundle, "native", "NOTICE.md"), "fixture notice\n");
+	const lock = { version: "1.0.0", lockfileVersion: 3, packages: { "packages/coding-agent": { name: "@earendil-works/pi-coding-agent", dependencies: { alpha: "1.0.0", "proper-lockfile": "4.1.2", "p-retry": "4.6.2" }, optionalDependencies: { "@mariozechner/clipboard": "1.0.0" } }, "node_modules/alpha": { version: "1.0.0", license: "ISC", dependencies: { beta: "2.0.0" } }, "node_modules/beta": { version: "2.0.0", license: "MIT" }, "node_modules/@mariozechner/clipboard": { version: "1.0.0", license: "MIT" }, "node_modules/proper-lockfile": { version: "4.1.2", license: "MIT", dependencies: { retry: "0.12.0" } }, "node_modules/proper-lockfile/node_modules/retry": { version: "0.12.0", license: "MIT" }, "node_modules/p-retry": { version: "4.6.2", license: "MIT", dependencies: { retry: "0.13.1", "@types/retry": "0.12.0" } }, "node_modules/p-retry/node_modules/@types/retry": { version: "0.12.0", license: "MIT" }, "node_modules/retry": { version: "0.13.1", license: "MIT" }, "node_modules/@types/retry": { version: "0.12.5", license: "MIT" } } };
 	const lockPath = join(root, "package-lock.json"); writeFileSync(lockPath, JSON.stringify(lock)); return { root, bundle, lockPath, output: join(root, "notices.md") };
 }
 
@@ -20,10 +20,11 @@ test("notices deterministically cover exact runtime closure and packaged natives
 		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.bundle, value.output, value.lockPath]); const first = readFileSync(value.output);
 		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.bundle, value.output, value.lockPath]); const second = readFileSync(value.output);
 		assert.deepEqual(second, first); const text = first.toString();
-		for (const expected of ["## node_modules/alpha@1.0.0\nLicense: ISC", "## node_modules/beta@2.0.0\nLicense: MIT", "## node_modules/@mariozechner/clipboard@1.0.0\nLicense: MIT", "## node_modules/@mariozechner/clipboard-native@1.0.0\nLicense: MIT (packaged native)"]) assert.ok(text.includes(expected));
-		assert.match(text, /### LICENSE\.txt\nLicense SHA-256: [0-9a-f]{64}\n\n```text\nfixture license\n```/);
+		for (const expected of ["## node_modules/alpha@1.0.0\nLicense: ISC", "## node_modules/beta@2.0.0\nLicense: MIT", "## node_modules/@mariozechner/clipboard@1.0.0\nLicense: MIT", "## native@1.0.0\nLicense: MIT (packaged native)"]) assert.ok(text.includes(expected));
+		assert.match(text, /Helper SHA-256: native\/linux\/prebuilds\/linux-x64\/linux-platform-x11\.node: [0-9a-f]{64}/);
+		assert.match(text, /### LICENSE\nLicense SHA-256: [0-9a-f]{64}\n\n```text\nfixture license\n```/);
 		assert.match(text, /### NOTICE\.md\nLicense SHA-256: [0-9a-f]{64}\n\n```text\nfixture notice\n```/);
-		assert.ok(text.indexOf("### LICENSE.txt") < text.indexOf("### NOTICE.md"));
+		assert.ok(text.indexOf("### LICENSE") < text.indexOf("### NOTICE.md"));
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 

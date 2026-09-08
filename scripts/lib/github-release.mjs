@@ -66,7 +66,9 @@ export function binaryRequiredPaths(platform) {
 		"docs",
 		"examples",
 	];
+	if (info.libc === "musl") paths.push("clipboard-native-provenance.json");
 	if (info.nativeHelperDir) {
+		paths.push("native/LICENSE");
 		paths.push(info.nativeHelperDir);
 		paths.push(`${info.nativeHelperDir}/${info.nativeHelperFile}`);
 	}
