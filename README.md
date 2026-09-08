@@ -67,6 +67,8 @@ The integrated Esc and manual-retry patches both extend the Agent failure lifecy
 
 xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 12 ZIP bundles: Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64. Choose `modern` on an AVX2-capable x64 CPU and `baseline` otherwise; on Linux, choose `gnu` for glibc systems and `musl` for musl systems. Each ZIP contains `pi` plus `pi-native` (`.exe` on Windows) and all version-matched runtime assets. No Node.js, Bun, npm, package manager, or generated installer script is required.
 
+Keep the extracted ZIP contents together; the launcher alone is not a single-file distribution. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
+
 ### Linux and macOS
 
 ```bash

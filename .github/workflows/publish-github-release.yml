@@ -84,7 +84,7 @@ jobs:
           test "$RUNNER_ARCH" = '${{ matrix.runnerArch }}'
       - run: npm ci --ignore-scripts
       - run: npm run hydrate:model-data && npm run build
-      - name: Build architecture-matched downstream musl clipboard addon
+      - name: Stage upstream musl clipboard helper and provenance
         if: contains(matrix.id, '-musl')
         shell: bash
         run: scripts/build-musl-clipboard.sh "$RUNNER_TEMP/clipboard-musl" '${{ matrix.arch }}'
@@ -139,7 +139,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb libxcb1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: "github-release-candidate-${{ github.sha }}-${{ github.run_attempt }}", path: "${{ runner.temp }}/pi-github-release" }
       - name: Execute final native archive
@@ -189,6 +189,10 @@ jobs:
             export PI_WIN32_SNAPSHOT_MALFORMED_RESULT_HELPER="$native_dir/malformed-result.node"
           fi
           mkdir -p "$RUNNER_TEMP/smoke-record"; node scripts/smoke-binary-release.mjs "$candidate/$archive" '${{ matrix.target }}' "$version" "$RUNNER_TEMP/smoke-record/${{ matrix.target }}.json"
+      - name: Prepare hash-pinned musl XCB test libraries
+        if: matrix.executor == 'pinned-musl-container'
+        shell: bash
+        run: node scripts/prepare-musl-smoke.mjs "$(node scripts/lib/bun-targets.mjs --get '${{ matrix.target }}' arch)" "$RUNNER_TEMP/musl-libraries"
       - name: Execute final archive in immutable native musl userspace
         if: matrix.executor == 'pinned-musl-container'
         shell: bash
@@ -213,8 +217,9 @@ jobs:
             sleep 0.1
           done
           test -S /tmp/.X11-unix/X99
+          # Keep the basic TUI probe free of XCB libraries: clipboard is optional at startup.
           timeout --foreground --signal=TERM --kill-after=10s 20s docker run --name "$container" --rm --network none -e TERM=xterm-256color -e NODE_ENV=production -e PI_OFFLINE=1 -e PI_CODING_AGENT_DIR=/tmp/isolated-agent -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/musl-extracted:/extracted:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-bun-tui.mjs /extracted/pi > "$RUNNER_TEMP/musl-tui/tui.json"
-          docker run --rm --network none -e DISPLAY=:99 -e PI_XZ_EXECUTOR=pinned-musl-container -e PI_XZ_CONTAINER_DIGEST='${{ matrix.containerImage }}' -e PI_XZ_TUI_EVIDENCE=/evidence/tui.json -e RUNNER_NAME -e RUNNER_OS -e RUNNER_ARCH -e ImageOS -e ImageVersion -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/repo:ro" -v "$candidate:/release:ro" -v "$RUNNER_TEMP/smoke-record:/record" -v "$RUNNER_TEMP/musl-tui:/evidence:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-binary-release.mjs "/release/$archive" '${{ matrix.target }}' "$version" "/record/${{ matrix.target }}.json"
+          docker run --rm --network none -e DISPLAY=:99 -e LD_LIBRARY_PATH=/musl-libraries/usr/lib -e PI_XZ_MUSL_LIBRARIES=/musl-libraries -e GITHUB_SHA -v "$RUNNER_TEMP/musl-libraries:/musl-libraries:ro" -e PI_XZ_EXECUTOR=pinned-musl-container -e PI_XZ_CONTAINER_DIGEST='${{ matrix.containerImage }}' -e PI_XZ_TUI_EVIDENCE=/evidence/tui.json -e RUNNER_NAME -e RUNNER_OS -e RUNNER_ARCH -e ImageOS -e ImageVersion -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/repo:ro" -v "$candidate:/release:ro" -v "$RUNNER_TEMP/smoke-record:/record" -v "$RUNNER_TEMP/musl-tui:/evidence:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-binary-release.mjs "/release/$archive" '${{ matrix.target }}' "$version" "/record/${{ matrix.target }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-smoke-${{ github.sha }}-${{ github.run_attempt }}-${{ matrix.target }}", path: "${{ runner.temp }}/smoke-record/${{ matrix.target }}.json", if-no-files-found: error, retention-days: 14 }
 

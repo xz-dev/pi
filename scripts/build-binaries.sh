@@ -85,7 +85,14 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	if [[ -n "$native_dir" ]]; then
 		native_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperFile)
 		mkdir -p "$target_dir/$native_dir"
-		cp "../tui/$native_dir/$native_file" "$target_dir/$native_dir/"
+		native_source="../tui/$native_dir/$native_file"
+		if [[ "$target" == *-musl* ]]; then
+			native_source="$CLIPBOARD_MUSL_DIR/$native_dir/$native_file"
+			node ../../scripts/verify-musl-provenance.mjs "$CLIPBOARD_MUSL_DIR/provenance.json" "$native_source" "$target"
+			cp "$CLIPBOARD_MUSL_DIR/provenance.json" "$target_dir/clipboard-native-provenance.json"
+		fi
+		cp "$native_source" "$target_dir/$native_dir/"
+		cp ../../LICENSE "$target_dir/native/LICENSE"
 	fi
 	if [[ "$target" == windows-* ]]; then
 		filesystem_helper_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" filesystemHelperDir)

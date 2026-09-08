@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BUN_TARGETS, SMOKE_LIMITS, binaryArchiveName } from "./lib/bun-targets.mjs";
+import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
+
+const nativeBytes = Buffer.from("native helper fixture");
+const nativeDigest = createHash("sha256").update(nativeBytes).digest("hex");
 
 const digest = "a".repeat(64);
 const notice = `# Third-Party Notices\n\nLicense SHA-256: ${digest}\n`;
@@ -51,6 +55,7 @@ function record(target, archive = { sha256: digest, bytes: 1 }) {
 		executor: {
 			kind: target.executor,
 			containerDigest: target.containerImage ?? null,
+			libraries: target.libc === "musl" ? muslSmokeLibraries(target.arch) : null,
 			emulated: false,
 		},
 		commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })),
@@ -67,7 +72,7 @@ function record(target, archive = { sha256: digest, bytes: 1 }) {
 			exitSent: target.os !== "windows",
 			cleanExit: true,
 		},
-		clipboard: { loadedAndCalled: true },
+		clipboard: { helper: `${target.nativeHelperDir}/${target.nativeHelperFile}`, sha256: nativeDigest, loadedAndCalled: true, textRead: true, imageRead: true, elapsedMs: 1 },
 		filesystemSnapshot: target.os === "windows" ? windowsFilesystemSnapshotEvidence(target) : null,
 		thirdPartyNotices: {
 			file: "THIRD_PARTY_NOTICES.md",
@@ -87,9 +92,11 @@ function fixture() {
 	for (const target of BUN_TARGETS) {
 		const stage = join(root, `stage-${target.id}`);
 		mkdirSync(stage, { recursive: true });
+		mkdirSync(join(stage, target.nativeHelperDir), { recursive: true });
+		writeFileSync(join(stage, target.nativeHelperDir, target.nativeHelperFile), nativeBytes);
 		writeFileSync(join(stage, "THIRD_PARTY_NOTICES.md"), notice);
 		const archivePath = join(root, binaryArchiveName(target.id));
-		execFileSync("zip", ["-q", archivePath, "THIRD_PARTY_NOTICES.md"], { cwd: stage });
+		execFileSync("zip", ["-qr", archivePath, "."], { cwd: stage });
 		const identity = {
 			sha256: createHash("sha256").update(readFileSync(archivePath)).digest("hex"),
 			bytes: statSync(archivePath).size,
@@ -211,6 +218,24 @@ test("aggregator rejects missing or malformed Windows filesystem snapshot eviden
 			rmSync(value.root, { recursive: true, force: true });
 		}
 	}
+});
+
+for (const [label, mutate] of [
+	["presence-only clipboard", (record) => { record.clipboard = { packaged: true }; }],
+	["missing image call", (record) => { delete record.clipboard.imageRead; }],
+	["different helper bytes", (record) => { record.clipboard.sha256 = "0".repeat(64); }],
+	["unverified musl libraries", (record) => { delete record.executor.libraries; }],
+]) test(`aggregator rejects ${label}`, () => {
+	const value = fixture();
+	try {
+		const target = BUN_TARGETS.find(({ libc }) => libc === "musl");
+		const path = join(value.records, `${target.id}.json`);
+		const changed = JSON.parse(readFileSync(path, "utf8"));
+		mutate(changed); writeFileSync(path, JSON.stringify(changed));
+		const result = runAggregator(value);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /clipboard|native helper|musl library/);
+	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 
 test("aggregator rejects notice evidence that does not match archive bytes", () => {
