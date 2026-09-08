@@ -195,7 +195,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 |---------|------|---------|-------------|
 | `shellPath` | string | - | Custom shell path (e.g., for Cygwin on Windows); supports a leading `~` for the home directory |
 | `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
-| `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
+| `npmCommand` | string[] | Distribution default | Explicit command argv for extension package-manager operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`); takes precedence over embedded Bun |
 
 Windows paths in JSON must use forward slashes or escaped backslashes:
 
@@ -218,6 +218,8 @@ Windows paths in JSON must use forward slashes or escaped backslashes:
 ```
 
 `npmCommand` is used for all npm package-manager operations, including installs, uninstalls, and dependency installs inside git packages. User-scoped npm packages install under `~/.pi/agent/npm/`; project-scoped npm packages install under `.pi/npm/`. Use argv-style entries exactly as the process should be launched. When `npmCommand` is configured, git package dependency installs use plain `install` to avoid npm-specific flags in wrappers or alternate package managers.
+
+With `npmCommand` unset or `[]`, only xz-dev Bun-compiled standalone Pi defaults to embedded Bun via public `pi` on `PATH`, even if npm is available. `BUN_BE_BUN=1` is added only to those package-manager children, never to explicit overrides. Other installations default to npm. Set `"npmCommand": ["npm"]` to use external npm; `[""]` is invalid. This does not change Pi self-update. See [package-manager selection](packages.md#package-manager-selection) for PATH requirements and Bun's registry, lockfile, script, and native-dependency compatibility limits.
 
 ### Tools
 
