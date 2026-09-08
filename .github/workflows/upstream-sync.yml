@@ -233,10 +233,13 @@ jobs:
             exit 1
           fi
 
-          if ! git cherry-pick --no-commit "$terminal_seam..origin/patch/esc-abort"; then
-            python3 scripts/resolve-managed-tool-esc-conflicts.py
-            git cherry-pick --quit
-          fi
+          # Apply each commit separately so resolving a conflict cannot discard later commits.
+          while IFS= read -r esc_commit; do
+            if ! git cherry-pick --no-commit "$esc_commit"; then
+              python3 scripts/resolve-managed-tool-esc-conflicts.py
+              git cherry-pick --quit
+            fi
+          done < <(git rev-list --reverse "$terminal_seam..origin/patch/esc-abort")
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying patch/esc-abort'
             exit 1
