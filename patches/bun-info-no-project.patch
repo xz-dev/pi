@@ -1,0 +1,109 @@
+diff --git a/src/install/PackageManager/CommandLineArguments.rs b/src/install/PackageManager/CommandLineArguments.rs
+index cbac3099..5f0c2d14 100644
+--- a/src/install/PackageManager/CommandLineArguments.rs
++++ b/src/install/PackageManager/CommandLineArguments.rs
+@@ -1290,5 +1290,6 @@ Full documentation is available at <magenta>https://bun.com/docs/pm/cli/prune<r>
+         let mut cli = CommandLineArguments::default();
+         cli.positionals = args.positionals();
++        cli.no_project_ok = subcommand == Subcommand::Info;
+         cli.yarn = args.flag(b"--yarn");
+         cli.production = args.flag(b"--production") || args.flag(b"--prod");
+         cli.frozen_lockfile = args.flag(b"--frozen-lockfile")
+@@ -1786,7 +1787,10 @@ Full documentation is available at <magenta>https://bun.com/docs/pm/cli/prune<r>
+             cli.diff_name_only = args.flag(b"--name-only");
+             cli.diff_raw = args.flag(b"--raw") || args.flag(b"--unformatted");
+             cli.no_project_ok = cli.positionals.first().is_some_and(|p| *p == b"pm")
+-                && cli.positionals.get(1).is_some_and(|p| *p == b"diff");
++                && cli
++                    .positionals
++                    .get(1)
++                    .is_some_and(|p| matches!(*p, b"diff" | b"view"));
+             cli.diff_unminify = args.flag(b"--unminify");
+             cli.diff_minify = args.flag(b"--minify");
+             cli.diff_ignore_space = args.flag(b"--ignore-space");
+diff --git a/test/cli/install/bun-info-no-project.test.ts b/test/cli/install/bun-info-no-project.test.ts
+new file mode 100644
+index 00000000..8c2d0742
+--- /dev/null
++++ b/test/cli/install/bun-info-no-project.test.ts
+@@ -0,0 +1,80 @@
++import { spawn } from "bun";
++import { expect, test } from "bun:test";
++import { bunEnv, bunExe, tempDirWithFiles } from "harness";
++import { existsSync, readdirSync } from "node:fs";
++import { join } from "node:path";
++
++// Regression: xz-dev/pi#5. Registry metadata must not require or create a project.
++for (const command of [["info"], ["pm", "view"]]) {
++  for (const config of ["npmrc", "bunfig"]) {
++    test(`${command.join(" ")} without package.json preserves ${config} registry and auth`, async () => {
++      const requests: Array<{ pathname: string; auth: string | null }> = [];
++      await using server = Bun.serve({
++        hostname: "127.0.0.1",
++        port: 0,
++        fetch(request) {
++          requests.push({ pathname: new URL(request.url).pathname, auth: request.headers.get("authorization") });
++          return Response.json({
++            name: "@fixture/pkg",
++            "dist-tags": { latest: "2.0.0", next: "1.1.0" },
++            versions: Object.fromEntries(
++              ["1.0.0", "1.1.0", "2.0.0"].map(version => [
++                version,
++                {
++                  name: "@fixture/pkg",
++                  version,
++                  dist: { tarball: "http://127.0.0.1/unused.tgz", shasum: "0".repeat(40) },
++                },
++              ]),
++            ),
++          });
++        },
++      });
++      const registry = server.url.href;
++      const token = "test-local-token";
++      const dir = tempDirWithFiles("info-no-project", {
++        ...(config === "npmrc"
++          ? { ".npmrc": `@fixture:registry=${registry}\n//127.0.0.1:${server.port}/:_authToken=${token}\n` }
++          : { "bunfig.toml": Bun.TOML.stringify({ install: { scopes: { fixture: { url: registry, token } } } }) }),
++        "home/.npmrc": "registry=http://127.0.0.1:1/\n",
++      });
++      const before = readdirSync(dir).sort();
++      for (const [selector, version] of [
++        ["", "2.0.0"],
++        ["@1.0.0", "1.0.0"],
++        ["@^1.0.0", "1.1.0"],
++        ["@next", "1.1.0"],
++      ]) {
++        await using proc = spawn({
++          cmd: [bunExe(), ...command, `@fixture/pkg${selector}`, "version", "--json"],
++          cwd: String(dir),
++          env: {
++            ...bunEnv,
++            HOME: join(String(dir), "home"),
++            XDG_CONFIG_HOME: join(String(dir), "home"),
++            http_proxy: "",
++            https_proxy: "",
++            HTTP_PROXY: "",
++            HTTPS_PROXY: "",
++          },
++          stdin: "ignore",
++          stdout: "pipe",
++          stderr: "pipe",
++        });
++        const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++        expect({ exitCode, stderr, stdout: stdout.trim() }).toEqual({
++          exitCode: 0,
++          stderr: "",
++          stdout: JSON.stringify(version),
++        });
++      }
++      expect(requests).toHaveLength(4);
++      for (const request of requests) {
++        expect(decodeURIComponent(request.pathname)).toBe("/@fixture/pkg");
++        expect(request.auth).toBe(`Bearer ${token}`);
++      }
++      expect(existsSync(join(String(dir), "package.json"))).toBe(false);
++      expect(readdirSync(dir).sort()).toEqual(before);
++    });
++  }
++}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "bunVersion": "1.4.2",
+  "sourceCommit": "744846f844374847c902b5e7fd59b4342a51ef99",
+  "patch": "bun-info-no-project.patch",
+  "patchSha256": "b2529f8baa07b641c2fa5dea83a119c1f5e9080818bf8cc0f76fc86f3da9b7e4",
+  "runtimes": {
+    "linux-x64-gnu-modern": {
+      "platform": "linux",
+      "arch": "x64",
+      "sha256": "a1d52d8aca1afae522e6ec72f67791032b1d8a49849e6dd340427558ca2740e8",
+      "revision": "1.4.2-canary.1+744846f84"
+    }
+  }
+}
