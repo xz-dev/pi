@@ -33,7 +33,9 @@ test("real ignore dependency preserves LICENSE-MIT attribution instead of unrela
 	try {
 		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), join(import.meta.dirname, "..", "packages", "coding-agent"), output]);
 		const text = readFileSync(output, "utf8");
-		const section = text.slice(text.indexOf("## node_modules/ignore@7.0.5"), text.indexOf("\n## ", text.indexOf("## node_modules/ignore@7.0.5") + 1));
+		const ignoreHeading = text.match(/^## node_modules\/ignore@[^\n]+$/m);
+		assert.ok(ignoreHeading, "ignore dependency section is present");
+		const section = text.slice(ignoreHeading.index, text.indexOf("\n## ", ignoreHeading.index + 1));
 		assert.match(section, /### LICENSE-MIT\nLicense SHA-256: 9c94db23dc4b1e9aaee5d195668b916afc71efed54af226b66cf0ccc4389c1c0/);
 		assert.match(section, /Copyright \(c\) 2013 Kael Zhang/);
 		assert.doesNotMatch(section, /Copyright 2023 Anthropic/);
