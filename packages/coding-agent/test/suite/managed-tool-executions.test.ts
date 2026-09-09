@@ -214,6 +214,58 @@ describe("coding-agent managed tool executions", () => {
 		}
 	});
 
+	it("accepts empty tool_task arguments instead of failing validation, then succeeds with corrected arguments", async () => {
+		vi.useFakeTimers();
+		const hang = hangTool("hang");
+		const harness = await createHarness({
+			tools: [hang.tool],
+			settings: { backgroundToolCalls: { hang: { detachAfterSeconds: 1 } } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("hang", {}, { id: "call-hang" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("detached"),
+		]);
+		const firstPrompt = harness.session.prompt("run hang");
+		await hang.started.promise;
+		await vi.advanceTimersByTimeAsync(1000);
+		await expectSettled(firstPrompt, "session prompt released after detach");
+		const taskId = managedFromSession(harness.session).list()[0]!.id;
+
+		// Regression: models behind OpenAI-compatible gateways previously saw a root
+		// anyOf schema and emitted {} repeatedly; validation then failed forever.
+		harness.appendResponses([
+			fauxAssistantMessage(fauxToolCall("tool_task", {}, { id: "empty-args" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("tool_task", { action: "list" }, { id: "retry-list" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage(fauxToolCall("tool_task", { action: "info", id: taskId }, { id: "retry-info" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage(fauxToolCall("tool_task", { action: "cancel", id: taskId }, { id: "retry-cancel" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("done"),
+		]);
+		const retryPrompt = harness.session.prompt("manage task");
+		await vi.advanceTimersByTimeAsync(0);
+		hang.finish.resolve({ text: "secret-output" });
+		await retryPrompt;
+
+		const empty = toolResults(harness.session).find((message) => message.toolCallId === "empty-args");
+		expect(empty?.isError).toBe(true);
+		expect(textOf(empty)).toContain("action");
+		expect(textOf(empty)).not.toContain("anyOf");
+		const list = toolResults(harness.session).find((message) => message.toolCallId === "retry-list");
+		expect(list?.isError).toBeFalsy();
+		expect(textOf(list)).toContain(taskId);
+		const info = toolResults(harness.session).find((message) => message.toolCallId === "retry-info");
+		expect(info?.isError).toBeFalsy();
+		const cancel = toolResults(harness.session).find((message) => message.toolCallId === "retry-cancel");
+		expect(cancel?.isError).toBeFalsy();
+		expect(textOf(cancel)).toContain("Cancellation requested");
+	});
+
 	it("rejects invalid wait arguments through tool_task and returns cached error via wait's own result", async () => {
 		vi.useFakeTimers();
 		const hang = hangTool("hang");

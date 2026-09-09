@@ -2,21 +2,27 @@
 
 Official Bun 1.4.2 fixes the npm-lock migration bug that could silently omit Git dependencies. It still rejects `info` and `pm view` outside a project. `bun-info-no-project.patch` enables Bun's existing projectless initialization for those commands without changing cwd or creating a manifest. The patch includes four local-registry regressions covering npmrc/bunfig configuration, scoped authentication, selectors, and unchanged directory contents.
 
-## Review status: not release-ready
+## Scope: separate metadata compatibility experiment
+
+These files preserve an earlier metadata-query experiment. The core fix for unavailable external npm is validated separately with official Bun 1.4.2: public package installation, dependency repair, installed extension actions, native child completion/exit, and removal. Exact source commits and CI evidence belong in the PR description and validation artifacts. That core result does not claim projectless metadata queries pass.
+
+This PR does not provision a custom Bun runtime or enable a build-binding gate. Existing release workflows are unchanged. `bun-runtime.json` records the historical runtime below, not the runtime used by current core validation.
+
+## Experimental runtime: not release-ready
 
 The frozen runtime passed functional acceptance only on the local Linux host. Its ELF requires `GLIBC_2.43`, while official Bun 1.4.2 requires at most `GLIBC_2.17`. It cannot run directly on the existing Ubuntu 24.04 runner. This is a build-environment compatibility regression, not a requirement of the metadata-query patch. The current runtime hash records that local experiment; it does not attest a portable GNU/Linux release.
 
-Restoring the official glibc baseline, rerunning acceptance for the new runtime, and provisioning it in release CI remain review blockers. No binary from this experiment has been published.
+Restoring the official glibc baseline, rerunning acceptance for the new runtime, and provisioning it in release CI remain blockers for shipping this experimental patched runtime. They are separate from the core external-npm availability fix. No binary from this experiment has been published.
 
-## Build binding
+## Historical build-binding proposal
 
-`bun-runtime.json` records the source patch and locally verified runtime by SHA-256. The proposed binary build entrypoint requires `BUN_COMPILE_EXECUTABLE_PATH`, verifies the patch, host, target, and runtime hashes before installing/building anything, and uses that same executable as both compiler and embedded runtime, without a stock Bun fallback.
+`bun-runtime.json` records the source patch and locally verified runtime by SHA-256. The earlier local companion proposed requiring `BUN_COMPILE_EXECUTABLE_PATH`, verifying patch/host/target/runtime hashes before build side effects, and using the same executable as compiler and embedded runtime without stock fallback.
 
-Those build-entrypoint and workflow changes remain only on the local `ci` branch. They are not included in PR #5 or pushed to a review or publishing branch. This follow-up adds the Bun behavior patch, its regression tests, and local-runtime metadata; CI integration is deferred.
+That companion was not submitted and is not the current non-publishing validation workflow. PR #5 contains no active custom-runtime preflight. The recorded hash must not be treated as proof of portable release acceptance.
 
-The already accepted runtime is frozen in `.artifacts/pr5/frozen/accepted-runtime.zip`. Extract its `bun` executable and point `BUN_COMPILE_EXECUTABLE_PATH` at it to reuse the validated bytes without rebuilding Bun.
+The local experiment stored `.artifacts/pr5/frozen/accepted-runtime.zip`, `acceptance-receipts.zip`, and `SHA256SUMS.json`; those archives are not checked in or available from this PR. If recovered, unchanged bytes can reuse their historical local evidence, not the newer official-Bun core result.
 
-Only `linux-x64-gnu-modern` currently has a locally verified runtime binding. Other targets deliberately fail preflight. The proposed build entrypoint checks hashes and host OS/architecture, not glibc compatibility. Release workflows have **not** been provisioned with a compatible patched runtime; official Bun version pins alone do not satisfy the binding. Do not integrate the CI companion into active publishing until those blockers are resolved.
+Only `linux-x64-gnu-modern` had a local runtime binding. Release workflows have **not** been provisioned with a compatible patched runtime. Do not activate the historical custom-runtime proposal for publishing until its compatibility and acceptance blockers are resolved.
 
 ## Reproduce the local experiment
 

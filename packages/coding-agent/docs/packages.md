@@ -68,7 +68,7 @@ Explicit `npmCommand` commands receive no injected embedded-Bun flag. Wrappers r
 
 User, trusted-project, and temporary package locations are unchanged. Git remains separately required for Git sources. Bun compatibility is not npm equivalence: registry/`.npmrc` handling, lockfiles, lifecycle scripts, and native dependencies can differ. Pi does not add blanket script trust or install missing native build tools. Use an explicit compatible `npmCommand` when needed; switching managers does not undo lockfile or dependency changes.
 
-The tested Windows Bun 1.4 bundle rejects metadata queries from a working directory without `package.json`. Pi preserves its existing lookup-error policy: availability checks omit failed lookups, while an explicit package update still attempts installation with the same selected manager. Pi does not create a project manifest to work around this. Use an explicit npm command if you need metadata queries from such directories.
+Official Bun 1.4.0 and 1.4.2 reject metadata queries from a working directory without `package.json`; this is not Windows-specific. Pi preserves its lookup-error policy: availability checks omit failed lookups, while an explicit package update still attempts installation with the same selected manager. Pi does not create a project manifest or change the working directory to work around this. Use an explicit npm command if you need metadata queries from such directories.
 
 ## Package Sources
 
