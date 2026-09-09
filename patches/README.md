@@ -10,9 +10,9 @@ Restoring the official glibc baseline, rerunning acceptance for the new runtime,
 
 ## Build binding
 
-`bun-runtime.json` binds the source patch and each accepted runtime by SHA-256. The binary build entrypoint requires `BUN_COMPILE_EXECUTABLE_PATH`, verifies the patch, host, target, and runtime hashes before installing/building anything, and uses that same executable as both compiler and embedded runtime. There is no stock Bun fallback.
+`bun-runtime.json` records the source patch and locally verified runtime by SHA-256. The proposed binary build entrypoint requires `BUN_COMPILE_EXECUTABLE_PATH`, verifies the patch, host, target, and runtime hashes before installing/building anything, and uses that same executable as both compiler and embedded runtime, without a stock Bun fallback.
 
-The build-entrypoint changes are maintained separately on `ci` and submitted for review at `JohnsonRan/pi:review/pr5-runtime-binding`, without updating the active `xz-dev/pi:ci` branch. The Bun behavior patch and binding belong to `patch/use-embedded-bun-package-manager` (PR #5). Use their combined tree.
+Those build-entrypoint and workflow changes remain only on the local `ci` branch. They are not included in PR #5 or pushed to a review or publishing branch. This follow-up adds the Bun behavior patch, its regression tests, and local-runtime metadata; CI integration is deferred.
 
 The already accepted runtime is frozen in `.artifacts/pr5/frozen/accepted-runtime.zip`. Extract its `bun` executable and point `BUN_COMPILE_EXECUTABLE_PATH` at it to reuse the validated bytes without rebuilding Bun.
 
@@ -39,6 +39,7 @@ build/release/bun test test/cli/install/bun-info-no-project.test.ts test/cli/ins
 
 cd "$PI_SOURCE"
 export BUN_COMPILE_EXECUTABLE_PATH="$BUN_SOURCE/build/release/bun"
+# Requires the unpublished local CI companion; PR #5 alone lacks this build binding.
 # With the workspace already built and Zig 0.15.2 available:
 bash scripts/build-binaries.sh --skip-install --skip-build \
   --platform linux-x64-gnu-modern --distribution-version 0.85.1-xz.pr5.1.g627c958 \
@@ -57,6 +58,6 @@ Version: `0.85.1-xz.pr5.1.g627c958`, based on Pi commit `627c95875c774dd3e0c2a1a
 | `pi-native` | `032afe1c4ca572a10afd38915445999523d8226e9c501ed801225043f6005e59` |
 | `pi-linux-x64-gnu-modern.zip` | `753ca78475a6833506f4a937da5fee9f9fa15c52cfa3948bba6ab6e438fd980f` |
 
-Frozen local artifacts: `.artifacts/pr5/frozen/`, including `acceptance-receipts.zip` and `SHA256SUMS.json`.
+Frozen local artifacts (not checked in): `.artifacts/pr5/frozen/`, including `acceptance-receipts.zip` and `SHA256SUMS.json`.
 
 Verified with the exact candidate: Bun queries 23/23; public installation and RPC loading of pinned pi-notify/pi-subagents; a real notification action; a native child reading a random fixture, normal completion delivery, and observed exit; the existing 18-mode matrix; isolated/coexisting plugins; update/reload/removal; and bulk/explicit updates retaining installed 2.0.0 when the registry target is 1.0.0. Original plugin manifests and npm locks remained unchanged. Runtime sandboxes had no executable external Node/npm/Bun, no network, and no host credentials or paid provider calls. Installation and update commands had network access.
