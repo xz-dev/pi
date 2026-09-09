@@ -50,7 +50,8 @@ jobs:
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
-            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice
+            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
+            +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta
 
           patch_refs=(
             origin/patch/contributor-approval
@@ -70,6 +71,7 @@ jobs:
             origin/patch/retry-non-retryable-patterns
             origin/patch/slow-hook-tui-only
             origin/patch/session-tree-splice
+            origin/patch/ws-cached-empty-delta
           )
 
           # Upstream-maintained changelogs move every release cycle, so patch
@@ -368,6 +370,14 @@ jobs:
           grep -Fq 'persist?: boolean;' packages/coding-agent/test/suite/harness.ts
           git diff --cached --check
           git commit -m "merge patch/session-tree-splice branch"
+
+          git merge --squash origin/patch/ws-cached-empty-delta
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/ws-cached-empty-delta'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/ws-cached-empty-delta branch"
 
           git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 
