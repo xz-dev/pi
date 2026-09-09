@@ -224,6 +224,7 @@ Windows paths in JSON must use forward slashes or escaped backslashes:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `defaultTools` | string[] | - | Built-in tools enabled initially. When omitted, Pi uses its standard defaults |
+| `backgroundToolCalls` | object | `{}` | Per-tool managed background rules. An empty rule uses a 600-second detach threshold |
 
 `defaultTools` selects the built-in tools enabled at startup. Extension and SDK custom tools remain enabled. Available built-ins are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`:
 
@@ -241,7 +242,20 @@ On Windows, select `powershell` instead of `bash`, or include both:
 }
 ```
 
-An empty array starts with no built-in tools while preserving extension and SDK custom tools. `--tools` replaces this behavior with a strict allowlist for all tools, `--no-tools` disables all tools, and `--no-builtin-tools` disables the built-in defaults. `--exclude-tools` filters the resulting list. A project `defaultTools` array replaces the global array.
+An empty array starts with no built-in tools while preserving extension and SDK custom tools. The `tool_task` management tool remains enabled with `defaultTools`, including an empty array. `--tools` replaces this behavior with a strict allowlist for all tools, so include `tool_task` when managed execution controls are needed. `--no-tools` disables all tools, and `--no-builtin-tools` disables the built-in defaults while retaining `tool_task` and extension/custom tools. `--exclude-tools` filters the resulting list. A project `defaultTools` array replaces the global array.
+
+`backgroundToolCalls` opts named extension, SDK, or other third-party tools into managed execution. `{}` uses the default 600-second detach threshold; `detachAfterSeconds` must be a positive finite number:
+
+```json
+{
+  "backgroundToolCalls": {
+    "ctx_execute": {},
+    "long_report": { "detachAfterSeconds": 900 }
+  }
+}
+```
+
+Invalid rule shapes or non-positive thresholds are diagnosed and not applied; reload keeps the last valid managed policy. Project rules merge with global rules by tool name. Unlisted third-party tools remain foreground-only. When no explicit `bash` or `powershell` rule exists, AI-called shell tools use the built-in 600-second detach policy when their `timeout` is omitted or strictly greater than 1200 seconds; `timeout: 1200` does not qualify. Their original timeout continues after detach. User-entered `!` and `!!` shell commands are not managed. `tool_task` is never auto-backgrounded, and any `backgroundToolCalls.tool_task` rule is ignored. See [Managed tool executions](usage.md#managed-tool-executions) for `tool_task` operations and lifecycle semantics.
 
 ### Sessions
 
