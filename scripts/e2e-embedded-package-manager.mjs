@@ -70,7 +70,7 @@ async function run(label, args, options = {}) {
 async function verifyNoDowngrade() {
   const name = "pi-acceptance-version-fixture";
   const tarballs = {};
-  for (const version of ["1.0.0", "2.0.0"]) {
+  for (const version of ["1.0.0", "1.1.0", "2.0.0"]) {
     const directory = join(root, "registry", version);
     mkdirSync(join(directory, "package"), { recursive: true });
     writeFileSync(join(directory, "package", "package.json"), JSON.stringify({ name, version, pi: { extensions: ["./index.ts"] } }));
@@ -115,6 +115,14 @@ async function verifyNoDowngrade() {
       assert.equal(existsSync(join(root, "work", "package.json")), false);
     }
     await run("remove-version-fixture", ["remove", `npm:${name}`], { env: registryEnv });
+    writeFileSync(join(root, "work", "package.json"), "{}\n");
+    await run("range-fixture-install", ["install", `npm:${name}@^1.0.0`], { env: { ...registryEnv, BUN_INSTALL_CACHE_DIR: join(root, "range-install-cache") } });
+    assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "1.0.0");
+    latest = "2.0.0";
+    await run("range-fixture-update", ["update", `npm:${name}`], { env: { ...registryEnv, BUN_INSTALL_CACHE_DIR: join(root, "range-update-cache") } });
+    assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "1.1.0");
+    assert.ok(JSON.parse(readFileSync(join(env.PI_CODING_AGENT_DIR, "settings.json"), "utf8")).packages.includes(`npm:${name}@^1.0.0`));
+    await run("remove-range-fixture", ["remove", `npm:${name}@^1.0.0`], { env: registryEnv });
   } finally {
     await new Promise(resolveClose => server.close(resolveClose));
   }
