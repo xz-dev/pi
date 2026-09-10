@@ -58,3 +58,14 @@ export function stripAnsi(value: string): string {
 	// and doing it manually has a performance penalty.
 	return value.replace(regex, "");
 }
+
+// OSC/DCS/SOS/PM/APC: ESC or C1 introducer through BEL, ST, or end of string.
+const STRING_CONTROL = /(?:\x1b[\x50\x58\x5d\x5e\x5f]|\x90|\x98|\x9d|\x9e|\x9f)[\s\S]*?(?:\x07|\x1b\\|\x9c|$)/g;
+
+/** Terminal-safe single line for TUI diagnostics. Drops string-control payloads first. */
+export function sanitizeTerminalSingleLine(value: unknown): string {
+	return stripAnsi(String(value).replace(STRING_CONTROL, ""))
+		.replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
