@@ -75,7 +75,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with: { version: "0.15.2" }
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with: { bun-version: "1.4.0" }
+        with: { bun-version: "1.4.2" }
       - name: Assert native build runner
         shell: bash
         run: |
@@ -133,7 +133,7 @@ jobs:
         if: runner.os == 'Windows'
         with: { version: "0.15.2" }
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with: { bun-version: "1.4.0" }
+        with: { bun-version: "1.4.2" }
       - name: Install Linux smoke display
         if: runner.os == 'Linux'
         shell: bash
@@ -189,6 +189,26 @@ jobs:
             export PI_WIN32_SNAPSHOT_MALFORMED_RESULT_HELPER="$native_dir/malformed-result.node"
           fi
           mkdir -p "$RUNNER_TEMP/smoke-record"; node scripts/smoke-binary-release.mjs "$candidate/$archive" '${{ matrix.target }}' "$version" "$RUNNER_TEMP/smoke-record/${{ matrix.target }}.json"
+      - name: Verify real installed extension packages without external runtimes
+        if: matrix.target == 'linux-x64-gnu-modern'
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/pi-github-release"
+          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
+          extracted="$RUNNER_TEMP/package-manager-final-bundle"
+          mkdir -p "$extracted"
+          unzip -q "$candidate/$archive" -d "$extracted"
+          node scripts/e2e-embedded-package-manager.mjs "$extracted/pi" "$RUNNER_TEMP/package-manager-evidence"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && matrix.target == 'linux-x64-gnu-modern'
+        with:
+          name: "embedded-package-manager-${{ github.sha }}-${{ github.run_attempt }}"
+          path: |
+            ${{ runner.temp }}/package-manager-evidence/receipt.json
+            ${{ runner.temp }}/package-manager-evidence/*.log
+          if-no-files-found: error
+          retention-days: 14
       - name: Prepare hash-pinned musl XCB test libraries
         if: matrix.executor == 'pinned-musl-container'
         shell: bash
