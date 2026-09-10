@@ -42,6 +42,7 @@ import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
+import { withBunGitIntegrityCompatibility } from "./bun-git-integrity.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { type PiManifest, readPiManifest } from "./pi-manifest.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
@@ -1787,11 +1788,19 @@ export class DefaultPackageManager implements PackageManager {
 
 	private async runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void> {
 		const npmCommand = this.getNpmCommand();
-		await this.runCommand(
-			npmCommand.command,
-			[...npmCommand.args, ...args],
-			npmCommand.embeddedBun ? { ...options, env: { BUN_BE_BUN: "1" } } : options,
-		);
+		const run = () =>
+			this.runCommand(
+				npmCommand.command,
+				[...npmCommand.args, ...args],
+				npmCommand.embeddedBun ? { ...options, env: { BUN_BE_BUN: "1" } } : options,
+			);
+		if (npmCommand.embeddedBun && (args[0] === "install" || args[0] === "update")) {
+			const cwdIndex = args.indexOf("--cwd");
+			const cwd = cwdIndex >= 0 ? args[cwdIndex + 1] : options?.cwd;
+			await withBunGitIntegrityCompatibility(cwd ?? process.cwd(), run);
+		} else {
+			await run();
+		}
 	}
 
 	private getGitDependencyInstallArgs(): string[] {
