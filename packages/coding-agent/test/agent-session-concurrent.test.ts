@@ -90,10 +90,29 @@ describe("AgentSession concurrent prompt guard", () => {
 				systemPrompt: "Test",
 				tools: [],
 			},
-			streamFn: (_model, _context, options) => {
+			streamFn: (_model, context, options) => {
 				abortSignal = options?.signal;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
+					const userTexts = context.messages
+						.filter((message) => message.role === "user")
+						.map((message) => {
+							if (typeof message.content === "string") {
+								return message.content;
+							}
+							return message.content
+								.filter((part): part is TextContent | ImageContent => typeof part === "object" && part !== null)
+								.filter((part): part is TextContent => part.type === "text")
+								.map((part) => part.text)
+								.join("\n");
+						});
+
+					if (userTexts.includes("Steering message") || userTexts.includes("Follow-up message")) {
+						stream.push({ type: "start", partial: createAssistantMessage("") });
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Queued") });
+						return;
+					}
+
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
@@ -147,6 +166,282 @@ describe("AgentSession concurrent prompt guard", () => {
 		// Cleanup
 		await session.abort();
 		await firstPrompt.catch(() => {}); // Ignore abort error
+	});
+
+	it("should abort while an extension agent_start handler is stuck", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let providerCalled = false;
+		let extensionStarted = false;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model,
+				systemPrompt: "Test",
+				tools: [],
+			},
+			streamFn: () => {
+				providerCalled = true;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = await createModelRegistry(authStorage, tempDir);
+		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
+		const extensionsResult = await createTestExtensionsResult([
+			(pi) => {
+				pi.on("agent_start", async () => {
+					extensionStarted = true;
+					await new Promise(() => {});
+				});
+			},
+		]);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRuntime: getModelRuntime(modelRegistry),
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+
+		const promptPromise = session.prompt("First message");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(extensionStarted).toBe(true);
+		expect(providerCalled).toBe(false);
+		expect(session.isStreaming).toBe(true);
+
+		await session.abort();
+		await promptPromise;
+
+		expect(session.isStreaming).toBe(false);
+		expect(providerCalled).toBe(false);
+	});
+
+	it("runs abort-safe message_end cleanup after abort interrupts an ordinary handler", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let ordinaryStarted = false;
+		let releaseOrdinary: (() => void) | undefined;
+		const ordinaryRelease = new Promise<void>((resolve) => {
+			releaseOrdinary = resolve;
+		});
+		let ordinaryCompleted = false;
+		let cleanupCalls = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("private") });
+				});
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = await createModelRegistry(authStorage, tempDir);
+		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
+		const extensionsResult = await createTestExtensionsResult([
+			(pi) => {
+				pi.on("message_end", async (event) => {
+					if (event.message.role !== "assistant") return;
+					ordinaryStarted = true;
+					await ordinaryRelease;
+					event.message.content = [{ type: "text", text: "direct late mutation" }];
+					ordinaryCompleted = true;
+					return {
+						message: {
+							...event.message,
+							content: [{ type: "text", text: "late private replacement" }],
+							stopReason: "stop",
+							errorMessage: "late",
+						},
+					};
+				});
+				pi.on(
+					"message_end",
+					(event) => {
+						if (event.message.role !== "assistant") return;
+						cleanupCalls += 1;
+						return {
+							message: {
+								...event.message,
+								content: [],
+								stopReason: "stop",
+								errorMessage: "cleaned",
+							},
+						};
+					},
+					{ uninterruptible: true },
+				);
+			},
+		]);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRuntime: getModelRuntime(modelRegistry),
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+
+		const promptPromise = session.prompt("hello");
+		await expect.poll(() => ordinaryStarted).toBe(true);
+		await session.abort();
+		await promptPromise;
+		await session.agent.waitForIdle();
+		await expect.poll(() => cleanupCalls).toBe(1);
+		releaseOrdinary?.();
+		await expect.poll(() => ordinaryCompleted).toBe(true);
+
+		const persistedAssistant = sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
+		expect(persistedAssistant?.type).toBe("message");
+		if (persistedAssistant?.type === "message" && persistedAssistant.message.role === "assistant") {
+			expect(persistedAssistant.message.content).toEqual([]);
+			expect(persistedAssistant.message.stopReason).toBe("stop");
+			expect(persistedAssistant.message.errorMessage).toBe("cleaned");
+		}
+		expect(session.messages.find((message) => message.role === "assistant")?.content).toEqual([]);
+	});
+
+	for (const stuckEvent of ["message_end", "turn_end", "agent_end"] as const) {
+		it(`should keep single terminal assistant and session persistence when aborting stuck ${stuckEvent}`, async () => {
+			const model = getModel("anthropic", "claude-sonnet-4-5")!;
+			let stuckStarted = false;
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model,
+					systemPrompt: "Test",
+					tools: [],
+				},
+				streamFn: () => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+					});
+					return stream;
+				},
+			});
+			const sessionManager = SessionManager.inMemory();
+			const settingsManager = SettingsManager.create(tempDir, tempDir);
+			const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+			const modelRegistry = await createModelRegistry(authStorage, tempDir);
+			await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
+			const extensionsResult = await createTestExtensionsResult([
+				(pi) => {
+					const hang = async () => {
+						stuckStarted = true;
+						await new Promise(() => {});
+					};
+					if (stuckEvent === "message_end") {
+						pi.on("message_end", async (event) => {
+							if (event.message.role !== "assistant") {
+								return;
+							}
+							await hang();
+						});
+					} else if (stuckEvent === "turn_end") {
+						pi.on("turn_end", hang);
+					} else {
+						pi.on("agent_end", hang);
+					}
+				},
+			]);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settingsManager,
+				cwd: tempDir,
+				modelRuntime: getModelRuntime(modelRegistry),
+				resourceLoader: createTestResourceLoader({ extensionsResult }),
+			});
+
+			const promptPromise = session.prompt("hello");
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			expect(stuckStarted).toBe(true);
+			expect(session.isStreaming).toBe(true);
+
+			await session.abort();
+			await promptPromise;
+			await session.agent.waitForIdle();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+
+			const assistantMessages = session.messages.filter((message) => message.role === "assistant");
+			expect(assistantMessages).toHaveLength(1);
+			expect(session.isStreaming).toBe(false);
+			expect(session.agent.state.streamingMessage).toBeUndefined();
+			expect(session.agent.state.pendingToolCalls.size).toBe(0);
+
+			const persistedRoles = sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "message")
+				.map((entry) => entry.message.role);
+			const stateRoles = session.messages.map((message) => message.role);
+			expect(persistedRoles).toEqual(stateRoles);
+			expect(persistedRoles.filter((role) => role === "assistant")).toHaveLength(1);
+		});
+	}
+
+	it("should persist the terminal event when an earlier direct agent listener is aborted", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let stuckStarted = false;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				stuckStarted = true;
+				return new Promise(() => {});
+			}
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = await createModelRegistry(authStorage, tempDir);
+		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRuntime: getModelRuntime(modelRegistry),
+			resourceLoader: createTestResourceLoader(),
+		});
+
+		const promptPromise = session.prompt("hello");
+		await expect.poll(() => stuckStarted).toBe(true);
+		await session.abort();
+		await promptPromise;
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		const persistedRoles = sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message")
+			.map((entry) => entry.message.role);
+		expect(persistedRoles).toEqual(session.messages.map((message) => message.role));
+		expect(persistedRoles.filter((role) => role === "assistant")).toHaveLength(1);
 	});
 
 	it("should allow steer() while streaming", async () => {
@@ -439,6 +734,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				hasHandlers: (eventType: string) => boolean;
 				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
 				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
+				emitUninterruptibleMessageEnd: () => undefined;
 				emitToolCall: (event: { type: string; toolCallId: string }) => Promise<undefined>;
 				emitInput: (
 					text: string,
@@ -459,6 +755,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			hasHandlers: (eventType) => eventType === "tool_call",
 			emit: async () => {},
 			emitMessageEnd: async () => undefined,
+			emitUninterruptibleMessageEnd: () => undefined,
 			emitToolCall: async () => {
 				snapshots.push(
 					sessionManager
@@ -585,6 +882,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				hasHandlers: (eventType: string) => boolean;
 				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
 				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
+				emitUninterruptibleMessageEnd: () => undefined;
 				emitInput: (
 					text: string,
 					images: unknown,
@@ -609,6 +907,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				}
 				return undefined;
 			},
+			emitUninterruptibleMessageEnd: () => undefined,
 			emitInput: async () => ({ action: "continue" }),
 			emitBeforeAgentStart: async () => undefined,
 			invalidate: () => {},
