@@ -21,8 +21,14 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Exten
 		...tool,
 		execute: async (toolCallId, params, signal, onUpdate) => {
 			const activeBefore = runner.getActiveTools();
-			const result = await execute(toolCallId, params, signal, onUpdate);
-			const activeAfter = runner.getActiveTools();
+			const activeToolChanges = runner.captureActiveToolChanges();
+			let result: Awaited<ReturnType<typeof execute>>;
+			try {
+				result = await execute(toolCallId, params, signal, onUpdate);
+			} finally {
+				activeToolChanges.stop();
+			}
+			const activeAfter = activeToolChanges.getLatest() ?? activeBefore;
 			if (!activeBefore.every((name) => activeAfter.includes(name))) return result;
 
 			const beforeNames = new Set(activeBefore);
