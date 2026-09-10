@@ -64,7 +64,7 @@ To use an installed external manager instead:
 { "npmCommand": ["npm"] }
 ```
 
-Explicit `npmCommand` commands receive no injected embedded-Bun flag. Wrappers remain supported, for example `["mise", "exec", "node@20", "--", "npm"]`. Recognized Bun commands use `info` for version queries instead of npm's `view`.
+Explicit `npmCommand` commands receive no injected embedded-Bun flag. Wrappers remain supported, for example `["mise", "exec", "node@20", "--", "npm"]`. Recognized Bun commands use `info` for version queries instead of npm's `view`. The embedded default uses `bun update` for managed npm updates so compatible newer versions are resolved instead of retaining the installed lockfile version; configured source selectors remain unchanged.
 
 User, trusted-project, and temporary package locations are unchanged. Git remains separately required for Git sources. Bun compatibility is not npm equivalence: registry/`.npmrc` handling, lockfiles, lifecycle scripts, and native dependencies can differ. Pi does not add blanket script trust or install missing native build tools. Use an explicit compatible `npmCommand` when needed; switching managers does not undo lockfile or dependency changes.
 
