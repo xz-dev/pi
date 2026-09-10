@@ -13,11 +13,6 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ### Features
 
-- Install and update compatible extension packages with the Bun embedded in the xz-dev standalone bundle, without separately installing Node.js, npm, or Bun. Explicit `npmCommand` settings take precedence; otherwise package operations use public `pi` on `PATH`.
-  - Use case: Install a Git extension with runtime dependencies on a machine that only has Pi and Git. Managed npm updates retain version selectors and exact pins. If metadata lookup fails, Pi warns about possible downgrade and continues; successful queries still skip equal or older targets.
-  - Limits: Official Bun 1.4.2 requires a project manifest for metadata queries. Registry configuration, lockfiles, dependency scripts, and native modules are not guaranteed to behave like npm; Pi does not broaden script trust or install native build tools automatically.
-  - Details: [Package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection)
-  - Patch branch: [`patch/use-embedded-bun-package-manager`](https://github.com/xz-dev/pi/tree/patch/use-embedded-bun-package-manager)
 - Detach eligible long-running AI tool calls into session-owned managed executions, with `tool_task` controls for status, bounded waits, and cancellation requests while preserving exactly one result for each original tool call.
   - Use case: Let Pi continue reasoning while opted-in shell or extension work runs, without turning untrusted tool output into a steering message or losing cancellation/lifecycle ownership.
   - Patch branch: [`patch/managed-tool-executions`](https://github.com/xz-dev/pi/tree/patch/managed-tool-executions)
@@ -39,6 +34,11 @@ It tracks upstream `main` with a minimal downstream patch stack.
 
 ### Fixes
 
+- Fix standalone extension installation and updates failing when an external package manager is unavailable by using the Bun embedded in the xz-dev bundle. Explicit `npmCommand` settings take precedence; otherwise package operations use public `pi` on `PATH`, without separately installing Node.js, npm, or Bun.
+  - Use case: Install a Git extension with runtime dependencies on a machine that only has Pi and Git. Managed npm updates retain version selectors and exact pins. If metadata lookup fails, Pi warns about possible downgrade and continues; successful queries still skip equal or older targets.
+  - Limits: Official Bun 1.4.2 requires a project manifest for metadata queries. Registry configuration, lockfiles, dependency scripts, and native modules are not guaranteed to behave like npm; Pi does not broaden script trust or install native build tools automatically.
+  - Details: [Package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection)
+  - Patch branch: [`patch/use-embedded-bun-package-manager`](https://github.com/xz-dev/pi/tree/patch/use-embedded-bun-package-manager)
 - Send the full request instead of a cached OpenAI Codex Responses WebSocket continuation when the input delta is empty.
   - Use case: Retry an unchanged request without reusing a stale continuation that contains no new input.
   - Patch branch: [`patch/ws-cached-empty-delta`](https://github.com/xz-dev/pi/tree/patch/ws-cached-empty-delta)
