@@ -68,7 +68,7 @@ test("authoritative Bun target descriptors contain the exact supported matrix", 
 });
 
 test("release compiler settings and smoke descriptors cover every target", () => {
-	assert.equal(BUN_VERSION, "1.4.0");
+	assert.equal(BUN_VERSION, "1.4.2");
 	assert.deepEqual(BUN_BUILD_FLAGS, ["--minify", "--bytecode", "--format=esm"]);
 	assert.equal(RELEASE_BUILD.bytecode, true);
 	assert.match(RELEASE_BUILD.bytecodeReason, /ESM bytecode/);

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Authoritative xz-dev binary Release target and acceptance matrix. */
-export const BUN_VERSION = "1.4.0";
+export const BUN_VERSION = "1.4.2";
 export const BUN_BUILD_FLAGS = Object.freeze(["--minify", "--bytecode", "--format=esm"]);
 export const RELEASE_BUILD = Object.freeze({
 	nodeEnv: "production",

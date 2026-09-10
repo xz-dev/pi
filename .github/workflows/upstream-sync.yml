@@ -42,6 +42,7 @@ jobs:
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
             +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
+            +refs/heads/patch/use-embedded-bun-package-manager:refs/remotes/origin/patch/use-embedded-bun-package-manager \
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
             +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
@@ -62,6 +63,7 @@ jobs:
             origin/patch/startup-benchmark-exit
             origin/patch/native-wrapper-release
             origin/patch/update-clean
+            origin/patch/use-embedded-bun-package-manager
             origin/patch/agent-run-failure-seam
             origin/patch/managed-tool-executions
             origin/patch/esc-abort
@@ -185,6 +187,20 @@ jobs:
             exit 1
           fi
           git commit -m "merge patch/update-clean branch"
+
+          if ! git merge --squash origin/patch/use-embedded-bun-package-manager; then
+            python3 scripts/resolve-embedded-bun-squash-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying embedded Bun'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/use-embedded-bun-package-manager'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/use-embedded-bun-package-manager branch"
 
           git merge --squash origin/patch/agent-run-failure-seam
           if git diff --cached --quiet; then
@@ -453,6 +469,8 @@ jobs:
               test/xz-release-update-safety.test.ts \
               test/win32-filesystem-snapshot.test.ts \
               test/package-command-paths.test.ts \
+              test/package-manager.test.ts \
+              test/package-manager-ssh.test.ts \
               test/interactive-mode-queue-tui.test.ts \
               test/suite/agent-session-compaction.test.ts \
               test/suite/managed-tool-executions.test.ts \
@@ -495,10 +513,14 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
 
       - name: Test release packaging scripts
         run: npm run test:scripts
+
+      - name: Test squash conflict resolvers
+        run: |
+          python3 scripts/resolve-embedded-bun-squash-conflicts.test.py
 
       - name: Install Linux smoke display
         run: |

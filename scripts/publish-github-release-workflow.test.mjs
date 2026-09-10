@@ -352,10 +352,10 @@ test("final native smoke proves every executable contains bytecode", () => {
   assert.match(smoke, /\[Disk Cache\] Cache hit for sourceCode/);
   assert.match(smoke, /did not load its entrypoint from embedded bytecode/);
 });
-test("Windows ConPTY uses Bun 1.4.0's native Terminal implementation", () => {
+test("Windows ConPTY uses Bun 1.4.2's native Terminal implementation", () => {
   const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
   const harness = readFileSync(join(ROOT, "scripts", "smoke-bun-tui.mjs"), "utf8");
-  assert.match(workflowText, /bun-version: ["']?1\.4\.0/);
+  assert.match(workflowText, /bun-version: ["']?1\.4\.2/);
   assert.match(smoke, /platform\(\) === "win32" \? "tui-pseudoconsole" : "tui-pseudoterminal"/);
   assert.match(smoke, /"bun", \[join\(process\.cwd\(\), "scripts", "smoke-bun-tui\.mjs"\), executable\]/);
   assert.doesNotMatch(smoke, /smoke-windows-tui\.ps1/);
@@ -375,10 +375,10 @@ test("Windows ConPTY uses Bun 1.4.0's native Terminal implementation", () => {
   assert.match(harness, /if \(!startupBenchmark\)/);
 });
 
-test("stages upstream musl helpers with provenance and uses optimized Bun 1.4.0", () => {
+test("stages upstream musl helpers with provenance and uses optimized Bun 1.4.2", () => {
   assert.match(workflowText, /build-musl-clipboard\.sh/);
   assert.match(workflowText, /--clipboard-musl-dir/);
-  assert.match(workflowText, /bun-version: ["']?1\.4\.0/);
+  assert.match(workflowText, /bun-version: ["']?1\.4\.2/);
   assert.match(workflowText, /NODE_ENV: production/);
   const builder = readFileSync(join(ROOT, "scripts", "build-musl-clipboard.sh"), "utf8");
   assert.doesNotMatch(builder, /curl|apk add --no-cache|apk update/);

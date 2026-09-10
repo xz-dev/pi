@@ -44,6 +44,13 @@ if command -v cygpath >/dev/null 2>&1 && [[ "$OUTPUT_DIR" =~ ^[A-Za-z]:[\\/] ]];
 fi
 [[ "$OUTPUT_DIR" = /* ]] || OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
 
+expected_bun=$(node --input-type=module -e 'import { BUN_VERSION } from "./scripts/lib/bun-targets.mjs"; console.log(BUN_VERSION)')
+actual_bun=$(bun --version)
+if [[ "$actual_bun" != "$expected_bun" ]]; then
+	echo "Bun compiler version mismatch: expected $expected_bun, got $actual_bun" >&2
+	exit 1
+fi
+
 if [[ "$SKIP_INSTALL" == false ]]; then npm ci --ignore-scripts; fi
 if [[ "$SKIP_BUILD" == false ]]; then
 	if [[ "$OFFLINE_MODEL_DATA" == true ]]; then npm run build:offline; else npm run build; fi
