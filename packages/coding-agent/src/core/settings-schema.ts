@@ -62,6 +62,11 @@ const RetrySettingsSchema = Type.Object({
 		}),
 	),
 	maxAgentDelayMs: Type.Optional(Type.Number({ default: SETTINGS_DEFAULTS.retry.maxAgentDelayMs })),
+	nonRetryableErrorPatterns: Type.Optional(
+		Type.Array(Type.String(), {
+			description: "Additional case-insensitive error message substrings that skip automatic retry.",
+		}),
+	),
 	provider: Type.Optional(ProviderRetrySettingsSchema),
 	maxDelayMs: Type.Optional(
 		Type.Number({
