@@ -20,6 +20,15 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 4. Run all pre-push build, check, focused integration, packed-release, GitHub Release candidate, audit, and signature gates.
 5. Update `main` only with `--force-with-lease`; a lease failure requires investigation and a fresh rebuild.
 
+## README synchronization checklist
+
+Run this checklist whenever a downstream feature, fix, default, command, installation requirement, release target, or patch activation/retirement changes. README updates belong on `ci`, alongside the corresponding integration change.
+
+1. Compare the enabled patch refs in `.github/workflows/upstream-sync.yml` with the root `README.md`. Every user-visible capability must have a current description, a concrete use case, and a link to its persistent patch branch. Internal support patches may be covered by the feature they support; document their dependency/order details here rather than presenting them as separate user features.
+2. Update affected installation, update, compatibility, and disabled/removed-patch sections as well as the feature list. A change to defaults or failure handling must state the current behavior and limits, with links to detailed package docs. Updating package docs or this guide alone does not complete the root README update.
+3. Verify branch links and technical claims against current source and workflows: target/CPU requirements, package-manager prerequisites, sync order, and blocking versus advisory checks. Remove obsolete compatibility-branch descriptions when integration changes.
+4. Before reporting delivery complete, inspect the README at the rebuilt remote `main` SHA and confirm it contains the intended `ci` documentation. Distinguish unpublished documentation changes from descriptions verified in a released artifact. If synchronization or publication has not run, report it as pending.
+
 ## GitHub Release distribution rules
 
 - Only an `xz-dev/pi` `refs/heads/main` push or explicit dispatch from `main` may publish. An explicit workflow dispatch from any non-`main` repository branch is a non-publishing release probe that must complete source validation, all 12 native builds, archive acceptance, and self-update E2E while `publish-release` remains skipped. In every context the checked-out clean `HEAD` and `GITHUB_SHA` must be identical.
