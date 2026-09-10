@@ -1430,7 +1430,11 @@ function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body:
 	}
 
 	const delta = getCachedWebSocketInputDelta(body, continuation);
-	if (!delta || !continuation.lastResponseId) {
+	// An empty delta means the caller resubmitted the exact same context (for
+	// example /tree rollback followed by /retry). Continuing the previous
+	// response would resume the abandoned node instead of answering the
+	// rolled-back context, so fall back to the full request body.
+	if (!delta || delta.length === 0 || !continuation.lastResponseId) {
 		entry.continuation = undefined;
 		return body;
 	}
