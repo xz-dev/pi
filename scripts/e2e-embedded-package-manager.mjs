@@ -103,14 +103,16 @@ async function verifyNoDowngrade() {
     await run("version-fixture-install", ["install", `npm:${name}`], { env: { ...registryEnv, BUN_INSTALL_CACHE_DIR: join(root, "version-install-cache") } });
     const manifest = join(env.PI_CODING_AGENT_DIR, "npm", "node_modules", name, "package.json");
     assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "2.0.0");
-    const before = hash(manifest);
     const settingsBefore = hash(join(env.PI_CODING_AGENT_DIR, "settings.json"));
     latest = "1.0.0";
     for (const mode of ["bulk", "explicit"]) {
       const args = mode === "bulk" ? ["update", "--extensions"] : ["update", `npm:${name}`];
-      await run(`no-downgrade-${mode}`, args, { code: 1, env: { ...registryEnv, BUN_INSTALL_CACHE_DIR: join(root, `empty-${mode}-cache`) } });
-      assert.match(readFileSync(join(root, `no-downgrade-${mode}.stderr.log`), "utf8"), /Cannot verify update/);
-      assert.equal(hash(manifest), before);
+      await run(`unknown-version-${mode}`, args, { env: { ...registryEnv, BUN_INSTALL_CACHE_DIR: join(root, `empty-${mode}-cache`) } });
+      const warning = readFileSync(join(root, `unknown-version-${mode}.stderr.log`), "utf8");
+      assert.match(warning, /Cannot verify update/);
+      assert.match(warning, /may be downgraded/);
+      assert.match(warning, /package\.json/);
+      assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "1.0.0");
       assert.equal(hash(join(env.PI_CODING_AGENT_DIR, "settings.json")), settingsBefore);
       assert.equal(existsSync(join(root, "work", "package.json")), false);
     }
@@ -123,6 +125,13 @@ async function verifyNoDowngrade() {
     assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "1.1.0");
     assert.ok(JSON.parse(readFileSync(join(env.PI_CODING_AGENT_DIR, "settings.json"), "utf8")).packages.includes(`npm:${name}@^1.0.0`));
     await run("remove-range-fixture", ["remove", `npm:${name}@^1.0.0`], { env: registryEnv });
+    await run("known-version-install", ["install", `npm:${name}`], { env: { ...registryEnv, BUN_INSTALL_CACHE_DIR: join(root, "known-install-cache") } });
+    assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "2.0.0");
+    latest = "1.0.0";
+    await run("known-version-no-downgrade", ["update", `npm:${name}`], { env: { ...registryEnv, BUN_INSTALL_CACHE_DIR: join(root, "known-update-cache") } });
+    assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "2.0.0");
+    assert.doesNotMatch(readFileSync(join(root, "known-version-no-downgrade.stderr.log"), "utf8"), /may be downgraded/);
+    await run("remove-known-version-fixture", ["remove", `npm:${name}`], { env: registryEnv });
   } finally {
     await new Promise(resolveClose => server.close(resolveClose));
   }
