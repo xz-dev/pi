@@ -1,11 +1,13 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { delimiter, dirname, join, relative } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as config from "../src/config.ts";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import * as childProcess from "../src/utils/child-process.ts";
 
 function normalizeForMatch(value: string): string {
 	return value.replace(/\\/g, "/");
@@ -26,7 +28,14 @@ class MockSpawnedProcess extends EventEmitter {
 }
 
 interface PackageManagerInternals {
-	runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void>;
+	getNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };
+	getPackageManagerName(): string;
+	getGlobalNpmRoot(): string;
+	getLatestNpmVersion(packageSpec: string, range?: string): Promise<string>;
+	runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void>;
+	runNpmCommandSync(args: string[]): string;
+	runCommandSync(command: string, args: string[], env?: Record<string, string>): string;
+	runCommand(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string> }): Promise<void>;
 	runCommandCapture(
 		command: string,
 		args: string[],
@@ -698,6 +707,449 @@ Content`,
 		});
 	});
 
+	describe("embedded Bun", () => {
+		let internals: PackageManagerInternals;
+
+		beforeEach(() => {
+			vi.spyOn(config, "isBunBinary", "get").mockReturnValue(true);
+			vi.spyOn(config, "DISTRIBUTION", "get").mockReturnValue("xz-dev");
+			internals = packageManager as unknown as PackageManagerInternals;
+		});
+
+		afterEach(() => {
+			vi.unstubAllEnvs();
+		});
+
+		it.each([{ command: undefined }, { command: [] }])(
+			"selects public pi without an override ($command)",
+			({ command }) => {
+				settingsManager.setNpmCommand(command);
+				expect(internals.getNpmCommand()).toEqual({ command: "pi", args: [], embeddedBun: true });
+				expect(internals.getPackageManagerName()).toBe("bun");
+			},
+		);
+
+		it.each([
+			[false, "xz-dev"],
+			[true, undefined],
+			[true, "other"],
+			[false, undefined],
+		] as const)("retains npm for binary=%s distribution=%s", (binary, distribution) => {
+			vi.spyOn(config, "isBunBinary", "get").mockReturnValue(binary);
+			vi.spyOn(config, "DISTRIBUTION", "get").mockReturnValue(distribution);
+			expect(internals.getNpmCommand()).toEqual({ command: "npm", args: [] });
+		});
+
+		it.each([
+			["npm"],
+			["bun"],
+			["pnpm"],
+			["pi"],
+			["mise", "exec", "node@20", "--", "npm"],
+			["C:\\Program Files\\wrapper.exe", "argument with spaces", "--", "bun"],
+		])("preserves explicit command %j without embedded mode", (...command) => {
+			settingsManager.setNpmCommand(command);
+			expect(internals.getNpmCommand()).toEqual({ command: command[0], args: command.slice(1) });
+		});
+
+		it("rejects an explicitly empty executable", () => {
+			settingsManager.setNpmCommand([""]);
+			expect(() => internals.getNpmCommand()).toThrow("Invalid npmCommand");
+		});
+
+		it.each([
+			{ command: undefined, executable: "pi", prefix: [], verb: "info", embedded: true },
+			{ command: ["bun"], executable: "bun", prefix: [], verb: "info", embedded: false },
+			{
+				command: ["mise", "exec", "bun@1", "--", "bun"],
+				executable: "mise",
+				prefix: ["exec", "bun@1", "--", "bun"],
+				verb: "info",
+				embedded: false,
+			},
+			{ command: ["npm"], executable: "npm", prefix: [], verb: "view", embedded: false },
+			{
+				command: ["wrapper", "argument with spaces"],
+				executable: "wrapper",
+				prefix: ["argument with spaces"],
+				verb: "view",
+				embedded: false,
+			},
+			{ command: ["pi"], executable: "pi", prefix: [], verb: "view", embedded: false },
+		])(
+			"uses $verb for $command and preserves the requested range",
+			async ({ command, executable, prefix, verb, embedded }) => {
+				settingsManager.setNpmCommand(command);
+				const capture = vi.spyOn(internals, "runCommandCapture").mockResolvedValue('["1.0.0","2.0.0","1.1.0"]');
+				await expect(internals.getLatestNpmVersion("@scope/pkg@^1.0.0", "^1.0.0")).resolves.toBe("1.1.0");
+				expect(capture).toHaveBeenCalledWith(
+					executable,
+					[...prefix, verb, "@scope/pkg@^1.0.0", "version", "--json"],
+					{
+						cwd: tempDir,
+						timeoutMs: 10000,
+						...(embedded ? { env: { BUN_BE_BUN: "1" } } : {}),
+					},
+				);
+			},
+		);
+
+		// Captured via BUN_BE_BUN=1 pi info <spec> version --json on Windows,
+		// embedded Bun 1.4.0 in pi 0.85.1-xz.143.2.g367c709a, with an empty fixture package.json.
+		it.each([
+			{ spec: "is-number", response: '"7.0.0"\n', version: "7.0.0", range: undefined },
+			{ spec: "@types/is-number", response: '"7.0.5"\n', version: "7.0.5", range: undefined },
+			{ spec: "is-number@latest", response: '"7.0.0"\n', version: "7.0.0", range: undefined },
+			{ spec: "is-number@^6.0.0", response: '"6.0.0"\n', version: "6.0.0", range: "^6.0.0" },
+		])("accepts captured Bun metadata for $spec", async ({ spec, response, version, range }) => {
+			vi.spyOn(internals, "runCommandCapture").mockResolvedValue(response);
+			await expect(internals.getLatestNpmVersion(spec, range)).resolves.toBe(version);
+		});
+
+		it.each(["", "not json", '"not a version"', "[]", "{}", '["invalid"]', '"2.0.0"'])(
+			"rejects invalid or incompatible metadata: %s",
+			async (response) => {
+				vi.spyOn(internals, "runCommandCapture").mockResolvedValue(response);
+				await expect(internals.getLatestNpmVersion("fixture@^1.0.0", "^1.0.0")).rejects.toThrow();
+			},
+		);
+
+		it.each([
+			{ spec: "fixture@^1.0.0", installed: "1.0.0", response: '["1.0.0","1.1.0","2.0.0"]', update: true },
+			{ spec: "fixture@1.0.0", installed: "1.0.0", response: '"2.0.0"', update: false },
+			{ spec: "fixture@next", installed: "1.0.0", response: '"1.1.0"', update: true },
+			{ spec: "fixture", installed: "1.1.0", response: '"1.1.0"', update: false },
+			{ spec: "fixture", installed: "2.0.0", response: '"1.1.0"', update: false },
+		])("retains update policy for $spec at $installed ($response)", async ({ spec, installed, response, update }) => {
+			const source = `npm:${spec}`;
+			settingsManager.setPackages([source]);
+			const installedPath = join(agentDir, "npm", "node_modules", "fixture");
+			mkdirSync(installedPath, { recursive: true });
+			writeFileSync(join(installedPath, "package.json"), JSON.stringify({ name: "fixture", version: installed }));
+			const capture = vi.spyOn(internals, "runCommandCapture").mockImplementation(async () => {
+				if (response === undefined) throw new Error("metadata unavailable");
+				return response;
+			});
+			const run = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+			const available = await packageManager.checkForAvailableUpdates();
+			expect(available).toHaveLength(update && response !== undefined && response !== "malformed" ? 1 : 0);
+			await packageManager.update();
+			if (update) {
+				expect(run).toHaveBeenCalledWith(
+					"pi",
+					["install", spec.includes("@") ? spec : `${spec}@latest`, "--cwd", join(agentDir, "npm"), "--omit=peer"],
+					{ env: { BUN_BE_BUN: "1" } },
+				);
+			} else {
+				expect(run).not.toHaveBeenCalled();
+			}
+			if (spec === "fixture@1.0.0") expect(capture).not.toHaveBeenCalled();
+			else
+				expect(capture).toHaveBeenCalledWith(
+					"pi",
+					["info", spec, "version", "--json"],
+					expect.objectContaining({ env: { BUN_BE_BUN: "1" } }),
+				);
+			expect(settingsManager.getGlobalSettings().packages).toEqual([source]);
+		});
+
+		// Regression: xz-dev/pi#5. A failed metadata query must not permit a downgrade.
+		it.each(["malformed", undefined])(
+			"stops embedded updates when metadata cannot be verified (%s)",
+			async (response) => {
+				settingsManager.setPackages(["npm:fixture"]);
+				const installedPath = join(agentDir, "npm", "node_modules", "fixture");
+				mkdirSync(installedPath, { recursive: true });
+				writeFileSync(join(installedPath, "package.json"), JSON.stringify({ name: "fixture", version: "2.0.0" }));
+				vi.spyOn(internals, "runCommandCapture").mockImplementation(async () => {
+					if (response === undefined) throw new Error("metadata unavailable");
+					return response;
+				});
+				const run = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+				await expect(packageManager.checkForAvailableUpdates()).resolves.toEqual([]);
+				await expect(packageManager.update()).rejects.toThrow(
+					"Cannot verify update for fixture; installed version 2.0.0 was left unchanged",
+				);
+				await expect(packageManager.update("npm:fixture")).rejects.toThrow("Cannot verify update for fixture");
+				expect(run).not.toHaveBeenCalled();
+				expect(settingsManager.getGlobalSettings().packages).toEqual(["npm:fixture"]);
+			},
+		);
+
+		it("batches embedded npm updates per scope", async () => {
+			settingsManager.setPackages(["npm:one", "npm:two"]);
+			settingsManager.setProjectPackages(["npm:three"]);
+			const run = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+			await packageManager.update();
+			expect(run).toHaveBeenCalledTimes(2);
+			expect(run).toHaveBeenCalledWith(
+				"pi",
+				["install", "one@latest", "two@latest", "--cwd", join(agentDir, "npm"), "--omit=peer"],
+				{ env: { BUN_BE_BUN: "1" } },
+			);
+			expect(run).toHaveBeenCalledWith(
+				"pi",
+				["install", "three@latest", "--cwd", join(tempDir, ".pi", "npm"), "--omit=peer"],
+				{ env: { BUN_BE_BUN: "1" } },
+			);
+		});
+
+		describe("public PATH entry", () => {
+			let logPath: string;
+			let binDir: string;
+			let legacyBin: string;
+
+			beforeEach(() => {
+				binDir = join(tempDir, "public entry with spaces");
+				mkdirSync(binDir);
+				logPath = join(tempDir, "package-command.jsonl");
+				legacyBin = join(tempDir, "legacy bun", "bin");
+				const script = join(binDir, "record.cjs");
+				writeFileSync(
+					script,
+					`const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({
+  args, cwd: process.cwd(), mode: process.env.BUN_BE_BUN,
+  path: process.env.PATH, registry: process.env.npm_config_registry
+}) + "\\n");
+if (process.env.PI_TEST_PM_FAIL === "1") process.exit(37);
+if (args[0] === "info") console.log(JSON.stringify("1.1.0"));
+if (args[0] === "pm") console.log(${JSON.stringify(legacyBin)});
+if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit root"))});
+`,
+				);
+				const entry = join(binDir, process.platform === "win32" ? "pi.cmd" : "pi");
+				writeFileSync(
+					entry,
+					process.platform === "win32"
+						? `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`
+						: `#!${process.execPath}\nrequire(${JSON.stringify(script)});\n`,
+				);
+				chmodSync(entry, 0o755);
+				vi.stubEnv("PATH", `${binDir}${delimiter}${process.env.PATH ?? ""}`);
+				vi.stubEnv("BUN_BE_BUN", undefined);
+				vi.stubEnv("npm_config_registry", "https://registry.fixture.invalid/");
+				vi.stubEnv("PI_TEST_PM_FAIL", undefined);
+			});
+
+			it("passes child-only mode, cwd, PATH and argv through all three spawn paths", async () => {
+				const spawnSpy = vi.spyOn(childProcess, "spawnProcess");
+				const cwd = join(tempDir, "cwd with spaces");
+				mkdirSync(cwd);
+				await internals.runNpmCommand(["install", "argument with spaces"], { cwd });
+				await expect(internals.getLatestNpmVersion("@scope/pkg@^1.0.0", "^1.0.0")).resolves.toBe("1.1.0");
+				expect(internals.getGlobalNpmRoot()).toBe(join(dirname(legacyBin), "install", "global", "node_modules"));
+
+				const calls = readFileSync(logPath, "utf8")
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				expect(calls).toEqual([
+					{
+						args: ["install", "argument with spaces"],
+						cwd,
+						mode: "1",
+						path: process.env.PATH,
+						registry: process.env.npm_config_registry,
+					},
+					{
+						args: ["info", "@scope/pkg@^1.0.0", "version", "--json"],
+						cwd: tempDir,
+						mode: "1",
+						path: process.env.PATH,
+						registry: process.env.npm_config_registry,
+					},
+					{
+						args: ["pm", "bin", "-g"],
+						cwd: process.cwd(),
+						mode: "1",
+						path: process.env.PATH,
+						registry: process.env.npm_config_registry,
+					},
+				]);
+				expect(process.env.BUN_BE_BUN).toBeUndefined();
+				await internals.runCommand("pi", ["ordinary"], { cwd });
+				const ordinary: { mode?: string } = JSON.parse(readFileSync(logPath, "utf8").trim().split("\n").at(-1)!);
+				expect(ordinary.mode).toBeUndefined();
+				await internals.runCommandCapture("git", ["--version"], { cwd });
+				expect(spawnSpy).toHaveBeenLastCalledWith(
+					"git",
+					["--version"],
+					expect.objectContaining({
+						cwd,
+						env: expect.not.objectContaining({ BUN_BE_BUN: "1" }),
+					}),
+				);
+			});
+
+			it("does not inject mode into explicit pi and invalidates the legacy root cache", async () => {
+				const embeddedRoot = join(dirname(legacyBin), "install", "global", "node_modules");
+				expect(internals.getGlobalNpmRoot()).toBe(embeddedRoot);
+				settingsManager.setNpmCommand(["pi"]);
+				expect(internals.getPackageManagerName()).toBe("pi");
+				expect(internals.getGlobalNpmRoot()).toBe(join(tempDir, "explicit root"));
+				await internals.runNpmCommand(["install"]);
+				settingsManager.setNpmCommand([]);
+				expect(internals.getGlobalNpmRoot()).toBe(embeddedRoot);
+				expect(internals.getGlobalNpmRoot()).toBe(embeddedRoot);
+				const calls: Array<{ args: string[]; mode?: string }> = readFileSync(logPath, "utf8")
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				expect(calls.map(({ args, mode }) => ({ args, mode }))).toEqual([
+					{ args: ["pm", "bin", "-g"], mode: "1" },
+					{ args: ["root", "-g"], mode: undefined },
+					{ args: ["install"], mode: undefined },
+					{ args: ["pm", "bin", "-g"], mode: "1" },
+				]);
+			});
+
+			it.each(["user", "project", "temporary"] as const)(
+				"routes %s installs through Bun managed arguments",
+				async (scope) => {
+					if (scope === "temporary")
+						await packageManager.resolveExtensionSources(["npm:fixture"], { temporary: true });
+					else await packageManager.install("npm:fixture", { local: scope === "project" });
+					const installPath = internals.getNpmInstallPath(
+						{ type: "npm", spec: "fixture", name: "fixture", pinned: false },
+						scope,
+					);
+					const root = dirname(dirname(installPath));
+					const calls: Array<{ args: string[]; mode?: string }> = readFileSync(logPath, "utf8")
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line));
+					expect(calls[0].args).toEqual(["install", "fixture", "--cwd", root, "--omit=peer"]);
+					expect(calls[0].mode).toBe("1");
+					mkdirSync(installPath, { recursive: true });
+					const rootQuery = vi.spyOn(internals, "runNpmCommandSync");
+					expect(
+						internals.getNpmInstallPath({ type: "npm", spec: "fixture", name: "fixture", pinned: false }, scope),
+					).toBe(installPath);
+					expect(rootQuery).not.toHaveBeenCalled();
+					if (scope !== "temporary") {
+						await packageManager.remove("npm:fixture", { local: scope === "project" });
+						const last: { args: string[]; mode?: string } = JSON.parse(
+							readFileSync(logPath, "utf8").trim().split("\n").at(-1)!,
+						);
+						expect(last.args).toEqual(["uninstall", "fixture", "--cwd", root]);
+						expect(last.mode).toBe("1");
+					}
+				},
+			);
+
+			it.each([false, true])(
+				"routes fresh Git dependencies and preserves failure cleanup (fail=%s)",
+				async (fail) => {
+					const source = "git:github.com/example/fixture";
+					const target = join(agentDir, "git", "github.com", "example", "fixture");
+					const originalRun = internals.runCommand.bind(internals);
+					vi.spyOn(internals, "runCommand").mockImplementation(async (command, args, options) => {
+						if (command !== "git") return originalRun(command, args, options);
+						expect(args).toEqual(["clone", "https://github.com/example/fixture", target]);
+						expect(options?.env?.BUN_BE_BUN).toBeUndefined();
+						mkdirSync(target, { recursive: true });
+						writeFileSync(join(target, "package.json"), JSON.stringify({ dependencies: { fixture: "1.0.0" } }));
+					});
+					if (fail) vi.stubEnv("PI_TEST_PM_FAIL", "1");
+					if (fail) await expect(packageManager.installAndPersist(source)).rejects.toThrow("failed with code 37");
+					else await packageManager.installAndPersist(source);
+					const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
+						readFileSync(logPath, "utf8").trim(),
+					);
+					expect(call.args).toEqual(["install", "--omit=dev"]);
+					expect(call.cwd).toBe(target);
+					expect(call.mode).toBe("1");
+					expect(existsSync(target)).toBe(!fail);
+					expect(settingsManager.getGlobalSettings().packages ?? []).toEqual(fail ? [] : [source]);
+				},
+			);
+
+			it.each([
+				{ scenario: "changed revision", current: false, marker: false, cleanFails: false },
+				{ scenario: "missing dependency repair", current: true, marker: false, cleanFails: false },
+				{ scenario: "incomplete update retry", current: true, marker: true, cleanFails: false },
+				{ scenario: "repair after clean failure", current: false, marker: false, cleanFails: true },
+			])("routes $scenario through embedded Bun", async ({ current, marker, cleanFails }) => {
+				const source = "git:github.com/example/fixture";
+				const target = join(agentDir, "git", "github.com", "example", "fixture");
+				mkdirSync(target, { recursive: true });
+				writeFileSync(join(target, "package.json"), JSON.stringify({ dependencies: { fixture: "1.0.0" } }));
+				const markerPath = join(dirname(target), ".fixture.pi-update-incomplete");
+				if (marker) writeFileSync(markerPath, "");
+				settingsManager.setPackages([source]);
+				vi.spyOn(internals, "getLocalGitUpdateTarget").mockResolvedValue({
+					ref: "@{upstream}",
+					head: "new",
+					fetchArgs: ["fetch", "origin", "main"],
+				});
+				vi.spyOn(internals, "runCommandCapture").mockImplementation(async (_command, args) =>
+					!current && args[1] === "HEAD" ? "old" : "new",
+				);
+				const originalRun = internals.runCommand.bind(internals);
+				const run = vi.spyOn(internals, "runCommand").mockImplementation(async (command, args, options) => {
+					if (command !== "git") return originalRun(command, args, options);
+					expect(options?.env?.BUN_BE_BUN).toBeUndefined();
+					if (cleanFails && args[0] === "clean") throw new Error("fixture clean failure");
+				});
+				if (cleanFails) await expect(packageManager.update()).rejects.toThrow("fixture clean failure");
+				else await packageManager.update();
+				const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
+					readFileSync(logPath, "utf8").trim(),
+				);
+				expect(call.args).toEqual(["install", "--omit=dev"]);
+				expect(call.cwd).toBe(target);
+				expect(call.mode).toBe("1");
+				expect(existsSync(markerPath)).toBe(cleanFails);
+				expect(run.mock.calls.filter(([command, args]) => command === "git" && args[0] === "clean")).toHaveLength(
+					!current || marker ? 1 : 0,
+				);
+				expect(settingsManager.getGlobalSettings().packages).toEqual([source]);
+			});
+
+			it("preserves plain Git install and inherited mode for an explicit command", async () => {
+				settingsManager.setNpmCommand(["pi"]);
+				vi.stubEnv("BUN_BE_BUN", "0");
+				const source = "git:github.com/example/fixture";
+				const target = join(agentDir, "git", "github.com", "example", "fixture");
+				mkdirSync(target, { recursive: true });
+				writeFileSync(join(target, "package.json"), JSON.stringify({ dependencies: { fixture: "1.0.0" } }));
+				settingsManager.setPackages([source]);
+				vi.spyOn(internals, "getLocalGitUpdateTarget").mockResolvedValue({
+					ref: "@{upstream}",
+					head: "same",
+					fetchArgs: ["fetch", "origin", "main"],
+				});
+				vi.spyOn(internals, "runCommandCapture").mockResolvedValue("same");
+				const originalRun = internals.runCommand.bind(internals);
+				vi.spyOn(internals, "runCommand").mockImplementation(async (command, args, options) => {
+					if (command !== "git") return originalRun(command, args, options);
+				});
+				await packageManager.update();
+				const call: { args: string[]; mode?: string } = JSON.parse(readFileSync(logPath, "utf8").trim());
+				expect(call.args).toEqual(["install"]);
+				expect(call.mode).toBe("0");
+				expect(process.env.BUN_BE_BUN).toBe("0");
+			});
+
+			it("reports a missing public pi without falling back to npm", async () => {
+				vi.stubEnv("PATH", "");
+				await expect(packageManager.installAndPersist("npm:fixture")).rejects.toThrow();
+				expect(settingsManager.getGlobalSettings().packages ?? []).toEqual([]);
+				expect(existsSync(logPath)).toBe(false);
+			});
+
+			it("reports selected-entry failure without a fallback or registration", async () => {
+				vi.stubEnv("PI_TEST_PM_FAIL", "1");
+				await expect(packageManager.installAndPersist("npm:fixture")).rejects.toThrow("failed with code 37");
+				expect(settingsManager.getGlobalSettings().packages ?? []).toEqual([]);
+				expect(readFileSync(logPath, "utf8").trim().split("\n")).toHaveLength(1);
+				expect(process.env.BUN_BE_BUN).toBeUndefined();
+			});
+		});
+	});
+
 	describe("npmCommand", () => {
 		it("should use npmCommand argv for npm installs", async () => {
 			settingsManager = SettingsManager.inMemory({
@@ -1058,12 +1510,22 @@ Content`,
 				});
 
 			expect(packageManager.getInstalledPath("npm:@scope/pkg", "user")).toBe(join(root20, "@scope", "pkg"));
-			expect(runCommandSyncSpy).toHaveBeenNthCalledWith(1, "mise", ["exec", "node@20", "--", "npm", "root", "-g"]);
+			expect(runCommandSyncSpy).toHaveBeenNthCalledWith(
+				1,
+				"mise",
+				["exec", "node@20", "--", "npm", "root", "-g"],
+				undefined,
+			);
 
 			settingsManager.setNpmCommand(["mise", "exec", "node@22", "--", "npm"]);
 
 			expect(packageManager.getInstalledPath("npm:@scope/pkg", "user")).toBeUndefined();
-			expect(runCommandSyncSpy).toHaveBeenNthCalledWith(2, "mise", ["exec", "node@22", "--", "npm", "root", "-g"]);
+			expect(runCommandSyncSpy).toHaveBeenNthCalledWith(
+				2,
+				"mise",
+				["exec", "node@22", "--", "npm", "root", "-g"],
+				undefined,
+			);
 		});
 
 		it("should install user npm packages into the pi-managed npm root", async () => {

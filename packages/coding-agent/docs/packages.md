@@ -7,6 +7,7 @@ Pi packages bundle extensions, skills, prompt templates, and themes so you can s
 ## Table of Contents
 
 - [Install and Manage](#install-and-manage)
+- [Package-manager Selection](#package-manager-selection)
 - [Package Sources](#package-sources)
 - [Creating a Pi Package](#creating-a-pi-package)
 - [Package Structure](#package-structure)
@@ -49,6 +50,26 @@ pi -e npm:@foo/bar
 pi -e git:github.com/user/repo
 ```
 
+## Package-manager Selection
+
+A non-empty `npmCommand` array overrides the package manager, preserving executable and wrapper arguments. An empty array selects the default; `[""]` is invalid.
+
+Only the **xz-dev Bun-compiled standalone distribution** defaults to its embedded Bun. It invokes public `pi` through inherited `PATH`, adding `BUN_BE_BUN=1` only to package-manager child processes. This default applies even when npm is installed. Other distributions and source/npm installations retain npm, including source runs under Bun. This selection does not change Pi self-update.
+
+Keep a compatible public `pi` on `PATH`. The first matching wrapper or installation wins, even if it differs from the one that launched the session. Launching Pi by absolute path does not bypass this requirement. A missing or failing entry produces an error; Pi does not fall back to npm or invoke `pi-native` directly.
+
+To use an installed external manager instead:
+
+```json
+{ "npmCommand": ["npm"] }
+```
+
+Explicit `npmCommand` commands receive no injected embedded-Bun flag. Wrappers remain supported, for example `["mise", "exec", "node@20", "--", "npm"]`. Recognized Bun commands use `info` for version queries instead of npm's `view`.
+
+User, trusted-project, and temporary package locations are unchanged. Git remains separately required for Git sources. Bun compatibility is not npm equivalence: registry/`.npmrc` handling, lockfiles, lifecycle scripts, and native dependencies can differ. Pi does not add blanket script trust or install missing native build tools. Use an explicit compatible `npmCommand` when needed; switching managers does not undo lockfile or dependency changes.
+
+Official Bun 1.4.2 rejects metadata queries from a working directory without `package.json`. With the embedded-Bun default, if an installed package's target version cannot be verified, Pi reports an error and stops the update before installing anything. This prevents a failed lookup from allowing a downgrade. Availability checks still omit failed lookups. Pi does not create a project manifest or change the query directory to work around this; use an explicit compatible `npmCommand` when needed. Explicit overrides and other installations retain their existing lookup-error policy.
+
 ## Package Sources
 
 Pi accepts three source types in settings and `pi install`.
@@ -60,7 +81,7 @@ npm:@scope/pkg@1.2.3
 npm:pkg
 ```
 
-- Versioned specs are pinned and skipped by package updates (`pi update --extensions`, `pi update --all`).
+- Exact versions are pinned and skipped by package updates (`pi update --extensions`, `pi update --all`). Ranges and tags retain their configured selectors during updates.
 - User installs go under `~/.pi/agent/npm/`.
 - Project installs go under `.pi/npm/`.
 - Set `npmCommand` in `settings.json` to pin npm package lookup and install operations to a specific wrapper command such as `mise` or `asdf`.
@@ -90,7 +111,7 @@ ssh://git@github.com/user/repo@v1
 - Refs are pinned tags or commits. `pi update --extensions` and `pi update --all` do not move them to newer refs, but they do reconcile an existing clone to the configured ref.
 - Use `pi install git:host/user/repo@new-ref` to update settings and move an existing package to a new pinned ref.
 - Cloned to `~/.pi/agent/git/<host>/<path>` (global) or `.pi/git/<host>/<path>` (project).
-- When reconciliation changes the checkout, pi resets and cleans the clone, then runs `npm install` if `package.json` exists.
+- When reconciliation changes the checkout, pi resets and cleans the clone, then installs dependencies if `package.json` exists. Default npm/embedded-Bun commands use `install --omit=dev`; explicit `npmCommand` commands use plain `install`. A current checkout with missing runtime dependencies is repaired without cleaning it.
 
 **SSH examples:**
 ```bash
@@ -166,7 +187,7 @@ If no `pi` manifest is present, pi auto-discovers resources from these directori
 
 ## Dependencies
 
-Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When pi installs a package from npm or git, it runs `npm install`, so those dependencies are installed automatically.
+Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When pi installs a package from npm or git, the [selected package manager](#package-manager-selection) installs those dependencies.
 
 Pi bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `typebox`.
 
