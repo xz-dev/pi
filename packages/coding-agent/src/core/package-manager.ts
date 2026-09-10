@@ -1180,7 +1180,13 @@ export class DefaultPackageManager implements PackageManager {
 		const specs = sources.map((entry) => (entry.parsed.version ? entry.parsed.spec : `${entry.parsed.name}@latest`));
 
 		await this.withProgress("update", sourceLabel, message, async () => {
-			await this.installNpmBatch(specs, scope);
+			if (this.getNpmCommand().embeddedBun) {
+				const installRoot = this.getNpmInstallRoot(scope, false);
+				this.ensureNpmProject(installRoot);
+				await this.runNpmCommand(["update", ...specs, "--cwd", installRoot, "--omit=peer"]);
+			} else {
+				await this.installNpmBatch(specs, scope);
+			}
 		});
 	}
 

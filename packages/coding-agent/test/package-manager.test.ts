@@ -837,7 +837,7 @@ Content`,
 			if (update) {
 				expect(run).toHaveBeenCalledWith(
 					"pi",
-					["install", spec.includes("@") ? spec : `${spec}@latest`, "--cwd", join(agentDir, "npm"), "--omit=peer"],
+					["update", spec.includes("@") ? spec : `${spec}@latest`, "--cwd", join(agentDir, "npm"), "--omit=peer"],
 					{ env: { BUN_BE_BUN: "1" } },
 				);
 			} else {
@@ -884,12 +884,12 @@ Content`,
 			expect(run).toHaveBeenCalledTimes(2);
 			expect(run).toHaveBeenCalledWith(
 				"pi",
-				["install", "one@latest", "two@latest", "--cwd", join(agentDir, "npm"), "--omit=peer"],
+				["update", "one@latest", "two@latest", "--cwd", join(agentDir, "npm"), "--omit=peer"],
 				{ env: { BUN_BE_BUN: "1" } },
 			);
 			expect(run).toHaveBeenCalledWith(
 				"pi",
-				["install", "three@latest", "--cwd", join(tempDir, ".pi", "npm"), "--omit=peer"],
+				["update", "three@latest", "--cwd", join(tempDir, ".pi", "npm"), "--omit=peer"],
 				{ env: { BUN_BE_BUN: "1" } },
 			);
 		});
