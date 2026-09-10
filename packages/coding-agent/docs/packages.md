@@ -68,7 +68,7 @@ Explicit `npmCommand` commands receive no injected embedded-Bun flag. Wrappers r
 
 User, trusted-project, and temporary package locations are unchanged. Git remains separately required for Git sources. Bun compatibility is not npm equivalence: registry/`.npmrc` handling, lockfiles, lifecycle scripts, and native dependencies can differ. Pi does not add blanket script trust or install missing native build tools. Use an explicit compatible `npmCommand` when needed; switching managers does not undo lockfile or dependency changes.
 
-Official Bun 1.4.2 rejects metadata queries from a working directory without `package.json`. With the embedded-Bun default, if an installed package's target version cannot be verified, Pi reports an error and stops the update before installing anything. This prevents a failed lookup from allowing a downgrade. Availability checks still omit failed lookups. Pi does not create a project manifest or change the query directory to work around this; use an explicit compatible `npmCommand` when needed. Explicit overrides and other installations retain their existing lookup-error policy.
+Official Bun 1.4.2 rejects metadata queries from a working directory without `package.json`. If the embedded default cannot verify an installed package's target version, Pi prints the lookup error and warns that continuing with Bun may downgrade the package, then attempts the requested update. Successful version queries still skip equal or older targets, and exact pins remain pinned. Availability checks omit failed lookups. Pi does not create a project manifest, change the query directory, or switch managers. Explicit overrides and other installations retain their existing lookup-error policy.
 
 ## Package Sources
 

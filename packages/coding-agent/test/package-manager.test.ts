@@ -853,9 +853,9 @@ Content`,
 			expect(settingsManager.getGlobalSettings().packages).toEqual([source]);
 		});
 
-		// Regression: xz-dev/pi#5. A failed metadata query must not permit a downgrade.
+		// Regression: xz-dev/pi#5. Metadata failures warn but do not block requested updates.
 		it.each(["malformed", undefined])(
-			"stops embedded updates when metadata cannot be verified (%s)",
+			"warns and continues embedded updates when metadata cannot be verified (%s)",
 			async (response) => {
 				settingsManager.setPackages(["npm:fixture"]);
 				const installedPath = join(agentDir, "npm", "node_modules", "fixture");
@@ -866,12 +866,23 @@ Content`,
 					return response;
 				});
 				const run = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+				const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 				await expect(packageManager.checkForAvailableUpdates()).resolves.toEqual([]);
-				await expect(packageManager.update()).rejects.toThrow(
-					"Cannot verify update for fixture; installed version 2.0.0 was left unchanged",
+				expect(warn).not.toHaveBeenCalled();
+				await expect(packageManager.update()).resolves.toBeUndefined();
+				await expect(packageManager.update("npm:fixture")).resolves.toBeUndefined();
+				expect(run).toHaveBeenCalledTimes(2);
+				expect(run).toHaveBeenCalledWith(
+					"pi",
+					["update", "fixture@latest", "--cwd", join(agentDir, "npm"), "--omit=peer"],
+					{ env: { BUN_BE_BUN: "1" } },
 				);
-				await expect(packageManager.update("npm:fixture")).rejects.toThrow("Cannot verify update for fixture");
-				expect(run).not.toHaveBeenCalled();
+				expect(warn).toHaveBeenCalledTimes(2);
+				expect(warn).toHaveBeenCalledWith(
+					expect.stringContaining("Continuing with Bun; installed version 2.0.0 may be downgraded"),
+				);
+				if (response === undefined)
+					expect(warn).toHaveBeenCalledWith(expect.stringContaining("metadata unavailable"));
 				expect(settingsManager.getGlobalSettings().packages).toEqual(["npm:fixture"]);
 			},
 		);

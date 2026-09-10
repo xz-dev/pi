@@ -1159,10 +1159,10 @@ export class DefaultPackageManager implements PackageManager {
 			return gt(targetVersion, installedVersion);
 		} catch (cause) {
 			if (this.getNpmCommand().embeddedBun) {
-				throw new Error(
-					`Cannot verify update for ${source.spec}; installed version ${installedVersion} was left unchanged. ` +
-						`Check registry access and the working directory, or configure an explicit npmCommand.`,
-					{ cause },
+				const reason = cause instanceof Error ? cause.message : String(cause);
+				console.warn(
+					`Warning: Cannot verify update for ${source.spec}: ${reason}\n` +
+						`Continuing with Bun; installed version ${installedVersion} may be downgraded.`,
 				);
 			}
 			// Preserve the existing lookup-error policy for explicitly configured managers and other installations.
