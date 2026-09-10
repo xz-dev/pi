@@ -155,6 +155,15 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 	return undefined;
 }
 
+function normalizeNonRetryableErrorPatterns(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const patterns = value
+		.filter((entry): entry is string => typeof entry === "string")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0);
+	return patterns.length > 0 ? patterns : undefined;
+}
+
 export type SettingsScope = "global" | "project";
 
 export interface SettingsManagerCreateOptions {
@@ -888,12 +897,22 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number; maxAgentDelayMs: number } {
+	getRetrySettings(): {
+		enabled: boolean;
+		maxRetries: number;
+		baseDelayMs: number;
+		maxAgentDelayMs: number;
+		nonRetryableErrorPatterns?: string[];
+	} {
+		const nonRetryableErrorPatterns = normalizeNonRetryableErrorPatterns(
+			this.settings.retry?.nonRetryableErrorPatterns,
+		);
 		return {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? SETTINGS_DEFAULTS.retry.maxRetries,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? SETTINGS_DEFAULTS.retry.baseDelayMs,
 			maxAgentDelayMs: this.settings.retry?.maxAgentDelayMs ?? SETTINGS_DEFAULTS.retry.maxAgentDelayMs,
+			...(nonRetryableErrorPatterns ? { nonRetryableErrorPatterns } : {}),
 		};
 	}
 
