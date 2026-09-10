@@ -3,9 +3,11 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
 	Agent,
+	type AgentContext,
 	type AgentEvent,
 	type AgentTool,
 	type AgentToolUpdateCallback,
+	agentLoop,
 	type StreamFn,
 	setDefaultStreamFn,
 } from "../src/index.ts";
@@ -305,6 +307,365 @@ describe("Agent", () => {
 		await promptPromise;
 
 		expect(receivedSignal?.aborted).toBe(true);
+	});
+
+	it("should abort a stuck lifecycle listener and clear streaming state", async () => {
+		const agent = new Agent({
+			streamFn: () => new MockAssistantStream(),
+		});
+		let listenerStarted = false;
+
+		agent.subscribe((event) => {
+			if (event.type === "agent_start") {
+				listenerStarted = true;
+				return new Promise(() => {});
+			}
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(listenerStarted).toBe(true);
+		expect(agent.state.isStreaming).toBe(true);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	for (const stuckEvent of ["message_end", "turn_end", "agent_end"] as const) {
+		it(`should terminalize once when aborting a stuck ${stuckEvent} listener`, async () => {
+			const agent = new Agent({
+				streamFn: () => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+					});
+					return stream;
+				},
+			});
+
+			const events: AgentEvent[] = [];
+			let stuckStarted = false;
+			agent.subscribe((event) => {
+				events.push(event);
+				if (event.type !== stuckEvent) {
+					return;
+				}
+				if (event.type === "message_end" && event.message.role !== "assistant") {
+					return;
+				}
+				stuckStarted = true;
+				return new Promise(() => {});
+			});
+
+			const promptPromise = agent.prompt("hello");
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(stuckStarted).toBe(true);
+			expect(agent.state.isStreaming).toBe(true);
+
+			agent.abort();
+			await promptPromise;
+			await agent.waitForIdle();
+			// Let any detached recovery listeners settle.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+
+			const assistantMessages = agent.state.messages.filter((message) => message.role === "assistant");
+			expect(assistantMessages).toHaveLength(1);
+			expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
+			expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+			expect(agent.state.isStreaming).toBe(false);
+			expect(agent.state.streamingMessage).toBeUndefined();
+			expect(agent.state.pendingToolCalls.size).toBe(0);
+		});
+	}
+
+	it("should synthesize one aborted assistant after aborting a completed tool result", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "tool",
+			label: "Tool",
+			description: "Return a result",
+			parameters: toolSchema,
+			execute: async () => ({ content: [{ type: "text", text: "done" }], details: undefined }),
+		};
+		let providerCalls = 0;
+		const agent = new Agent({
+			initialState: { tools: [tool] },
+			streamFn: () => {
+				providerCalls++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantToolUseMessage([
+							{ type: "toolCall", id: "call-1", name: "tool", arguments: {} },
+						]),
+					});
+				});
+				return stream;
+			},
+		});
+		const events: AgentEvent[] = [];
+		agent.subscribe((event) => {
+			events.push(event);
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				agent.abort();
+			}
+		});
+
+		await agent.prompt("hello");
+
+		expect(providerCalls).toBe(1);
+		expect(agent.state.messages.slice(1)).toMatchObject([
+			{ role: "assistant", stopReason: "toolUse" },
+			{ role: "toolResult" },
+			{ role: "assistant", stopReason: "aborted" },
+		]);
+		expect(events.filter((event) => event.type === "run_failure")).toHaveLength(1);
+		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	for (const interruptedEvent of ["message_end", "turn_end", "agent_end"] as const) {
+		it(`should deliver an abort-interrupted ${interruptedEvent} once to later listeners`, async () => {
+			const agent = new Agent({
+				streamFn: () => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+					});
+					return stream;
+				},
+			});
+			let stuckStarted = false;
+			agent.subscribe((event) => {
+				if (event.type !== interruptedEvent) {
+					return;
+				}
+				if (event.type === "message_end" && event.message.role !== "assistant") {
+					return;
+				}
+				stuckStarted = true;
+				return new Promise(() => {});
+			});
+			const laterListenerEvents: AgentEvent[] = [];
+			agent.subscribe((event) => {
+				laterListenerEvents.push(event);
+			});
+
+			const promptPromise = agent.prompt("hello");
+			await expect.poll(() => stuckStarted).toBe(true);
+			agent.abort();
+			await promptPromise;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+
+			const interruptedEvents = laterListenerEvents.filter((event) => {
+				if (event.type !== interruptedEvent) {
+					return false;
+				}
+				return event.type !== "message_end" || event.message.role === "assistant";
+			});
+			expect(interruptedEvents).toHaveLength(1);
+			expect(laterListenerEvents.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		});
+	}
+
+	for (const terminalEvent of ["message_end", "turn_end", "agent_end"] as const) {
+		for (const failureMode of ["sync throw", "async rejection"] as const) {
+			it(`should preserve a non-abort ${failureMode} from a ${terminalEvent} listener`, async () => {
+				const agent = new Agent({
+					streamFn: () => {
+						const stream = new MockAssistantStream();
+						queueMicrotask(() => {
+							stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+						});
+						return stream;
+					},
+				});
+				let failed = false;
+				agent.subscribe((event) => {
+					if (failed || event.type !== terminalEvent) {
+						return;
+					}
+					if (event.type === "message_end" && event.message.role !== "assistant") {
+						return;
+					}
+					failed = true;
+					if (failureMode === "async rejection") {
+						return Promise.reject(new Error("terminal listener failed"));
+					}
+					throw new Error("terminal listener failed");
+				});
+
+				await agent.prompt("hello");
+
+				const errorMessages = agent.state.messages.filter(
+					(message): message is AssistantMessage => message.role === "assistant" && message.stopReason === "error",
+				);
+				expect(errorMessages).toHaveLength(1);
+				expect(errorMessages[0]?.errorMessage).toBe("terminal listener failed");
+				expect(agent.state.errorMessage).toBe("terminal listener failed");
+				expect(agent.state.isStreaming).toBe(false);
+			});
+		}
+	}
+
+	it("should swallow sync throw and async reject during aborted detached dispatch and keep notifying later listeners", async () => {
+		const unhandledRejections: unknown[] = [];
+		const onUnhandledRejection = (reason: unknown) => {
+			unhandledRejections.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandledRejection);
+
+		try {
+			const agent = new Agent({
+				streamFn: () => new MockAssistantStream(),
+			});
+
+			const recorded: string[] = [];
+			let recoveryAgentEnd = false;
+
+			agent.subscribe((event) => {
+				if (event.type === "agent_start") {
+					return new Promise(() => {});
+				}
+			});
+			agent.subscribe((_event, signal) => {
+				if (!signal.aborted) {
+					return;
+				}
+				throw new Error("sync detached boom");
+			});
+			agent.subscribe(async (_event, signal) => {
+				if (!signal.aborted) {
+					return;
+				}
+				throw new Error("async detached boom");
+			});
+			agent.subscribe((event, signal) => {
+				if (!signal.aborted) {
+					return;
+				}
+				recorded.push(event.type);
+				if (event.type === "agent_end") {
+					recoveryAgentEnd = true;
+				}
+			});
+
+			const promptPromise = agent.prompt("hello");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			agent.abort();
+			await promptPromise;
+			await agent.waitForIdle();
+			await new Promise((resolve) => setTimeout(resolve, 20));
+
+			expect(recoveryAgentEnd).toBe(true);
+			expect(recorded).toEqual(expect.arrayContaining(["message_start", "message_end", "turn_end", "agent_end"]));
+			expect(unhandledRejections).toEqual([]);
+			expect(agent.state.isStreaming).toBe(false);
+			expect(agent.state.streamingMessage).toBeUndefined();
+			expect(agent.state.pendingToolCalls.size).toBe(0);
+		} finally {
+			process.off("unhandledRejection", onUnhandledRejection);
+		}
+	});
+
+	it("should abort a stuck context transform before the provider request", async () => {
+		let providerCalled = false;
+		const agent = new Agent({
+			transformContext: () => new Promise(() => {}),
+			streamFn: () => {
+				providerCalled = true;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(agent.state.isStreaming).toBe(true);
+		expect(providerCalled).toBe(false);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(agent.state.isStreaming).toBe(false);
+		expect(providerCalled).toBe(false);
+	});
+
+	it("should abort while waiting for the provider stream to be created", async () => {
+		const agent = new Agent({
+			streamFn: () => new Promise(() => {}),
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(agent.state.isStreaming).toBe(true);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("should abort while waiting for an already-created provider stream event", async () => {
+		let streamCreated = false;
+		const agent = new Agent({
+			streamFn: () => {
+				streamCreated = true;
+				return new MockAssistantStream();
+			},
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		expect(streamCreated).toBe(true);
+		expect(agent.state.isStreaming).toBe(true);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("should abort a direct agentLoop stream while waiting for a stuck provider stream event", async () => {
+		const controller = new AbortController();
+		const events: AgentEvent[] = [];
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [],
+		};
+		const stream = agentLoop(
+			[{ role: "user", content: "hello", timestamp: Date.now() }],
+			context,
+			{
+				model: getModel("openai", "gpt-4o-mini")!,
+				convertToLlm: () => [{ role: "user", content: "hello", timestamp: Date.now() }],
+			},
+			controller.signal,
+			() => new MockAssistantStream(),
+		);
+
+		void (async () => {
+			for await (const event of stream) {
+				events.push(event);
+			}
+		})();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		controller.abort();
+		await expect(stream.result()).resolves.toEqual([]);
+		expect(events.some((event) => event.type === "agent_start")).toBe(true);
 	});
 
 	it("should ignore tool updates after the tool execution settles", async () => {
