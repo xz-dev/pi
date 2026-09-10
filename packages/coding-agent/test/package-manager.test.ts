@@ -858,6 +858,11 @@ Content`,
 			"warns and continues embedded updates when metadata cannot be verified (%s)",
 			async (response) => {
 				settingsManager.setPackages(["npm:fixture"]);
+				mkdirSync(join(agentDir, "npm"), { recursive: true });
+				writeFileSync(
+					join(agentDir, "npm", "package.json"),
+					JSON.stringify({ dependencies: { fixture: "latest" } }),
+				);
 				const installedPath = join(agentDir, "npm", "node_modules", "fixture");
 				mkdirSync(installedPath, { recursive: true });
 				writeFileSync(join(installedPath, "package.json"), JSON.stringify({ name: "fixture", version: "2.0.0" }));
@@ -890,6 +895,13 @@ Content`,
 		it("batches embedded npm updates per scope", async () => {
 			settingsManager.setPackages(["npm:one", "npm:two"]);
 			settingsManager.setProjectPackages(["npm:three"]);
+			for (const [root, dependencies] of [
+				[join(agentDir, "npm"), { one: "latest", two: "latest" }],
+				[join(tempDir, ".pi", "npm"), { three: "latest" }],
+			] as const) {
+				mkdirSync(root, { recursive: true });
+				writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies }));
+			}
 			const run = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
 			await packageManager.update();
 			expect(run).toHaveBeenCalledTimes(2);

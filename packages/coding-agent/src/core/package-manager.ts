@@ -1184,6 +1184,26 @@ export class DefaultPackageManager implements PackageManager {
 			if (this.getNpmCommand().embeddedBun) {
 				const installRoot = this.getNpmInstallRoot(scope, false);
 				this.ensureNpmProject(installRoot);
+				// Bun update requires manifest declarations, not just Pi settings or installed files (#6).
+				const manifest = JSON.parse(stripBom(readFileSync(join(installRoot, "package.json"), "utf-8"))) as {
+					dependencies?: Record<string, unknown>;
+					devDependencies?: Record<string, unknown>;
+					optionalDependencies?: Record<string, unknown>;
+				};
+				const missing = sources.filter(
+					({ parsed }) =>
+						![manifest.dependencies, manifest.devDependencies, manifest.optionalDependencies].some(
+							(dependencies) => typeof dependencies?.[parsed.name] === "string",
+						),
+				);
+				if (missing.length > 0) {
+					await this.runNpmCommand(
+						this.getNpmInstallArgs(
+							missing.map(({ parsed }) => (parsed.version ? parsed.spec : `${parsed.name}@latest`)),
+							installRoot,
+						),
+					);
+				}
 				await this.runNpmCommand(["update", ...specs, "--cwd", installRoot, "--omit=peer"]);
 			} else {
 				await this.installNpmBatch(specs, scope);
