@@ -49,6 +49,29 @@ type UpdateTarget = { type: "all" } | { type: "self" } | { type: "extensions"; s
 
 const DEFAULT_INSTALLER_API_BASE = "https://pi.dev/api/installer/releases";
 const MANAGED_INSTALL_MARKER = "managed-install.json";
+const CHANNEL_LOCK_SUFFIX = ".managed.lock";
+
+/**
+ * Package-manager channel that owns this installation, for example "scoop" or
+ * "portage". A channel marks its install by writing an empty
+ * `.<channel>.managed.lock` file next to the executable. When present,
+ * `pi update --self` must not replace the binary itself; the channel upgrades
+ * it instead.
+ */
+function getChannelManager(): string | undefined {
+	let entries: string[];
+	try {
+		entries = readdirSync(getPackageDir());
+	} catch {
+		return undefined;
+	}
+	for (const entry of entries) {
+		if (entry.endsWith(CHANNEL_LOCK_SUFFIX) && entry.length > CHANNEL_LOCK_SUFFIX.length) {
+			return entry.slice(0, entry.length - CHANNEL_LOCK_SUFFIX.length).replace(/^\.+/, "");
+		}
+	}
+	return undefined;
+}
 const MANAGED_RELEASE_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 function getActiveManagedInstallRoot(): string | undefined {
@@ -1020,6 +1043,20 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
+					// A channel-managed installation owns the binary; never replace it
+					// from here. Check for a `*.<channel>.managed.lock` marker before any
+					// release lookup so the refusal works offline.
+					const channelManager = getChannelManager();
+					if (channelManager) {
+						console.error(
+							chalk.red(
+								`error: this ${APP_NAME} installation is managed by ${channelManager}; self-update is disabled.`,
+							),
+						);
+						console.error(chalk.dim(`Upgrade ${APP_NAME} through ${channelManager} instead.`));
+						process.exitCode = 1;
+						return true;
+					}
 					const managedInstallRoot = getActiveManagedInstallRoot();
 					if (managedInstallRoot && options.force) {
 						console.error(
