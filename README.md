@@ -54,6 +54,9 @@ It tracks upstream `main` with a minimal downstream patch stack.
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
   - Use case: Recover control when Esc is pressed during a hook, provider setup, stream, or listener that does not settle.
   - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
+- Refuse `pi update --self` for channel-managed installations. A package manager marks its install by writing an empty `.<channel>.managed.lock` file next to the executable; `pi update --self` detects any `*.managed.lock` marker before any release lookup, refuses to replace the binary offline, and points the user at the owning channel.
+  - Use case: Stop Scoop or a Gentoo ebuild install from fighting the package manager's own upgrades, while keeping the direct-download Release zip channel-neutral.
+  - Patch branch: [`patch/self-update-managed-by`](https://github.com/xz-dev/pi/tree/patch/self-update-managed-by)
 
 The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://github.com/xz-dev/pi/tree/patch/agent-run-failure-seam). Managed tool executions are integrated before those two patches; the `ci` overlay owns their narrowly scoped conflict handling. See [downstream maintenance](MAINTAIN.md) for the current integration rules.
 
@@ -99,6 +102,8 @@ scoop install xz-dev/pi
 ```
 
 Scoop installs the x64 `modern` asset, or the native arm64 asset on Windows arm64. The x64 asset uses the same runtime-dispatched Bun target as the `baseline` alias. Update with `scoop update pi`.
+
+The Scoop install writes an empty `.scoop.managed.lock` next to the executable, so `pi update --self` refuses and points at `scoop update pi` instead; scoop owns the upgrade. Direct ZIP downloads carry no lock file and keep self-update enabled.
 
 ### Windows PowerShell
 

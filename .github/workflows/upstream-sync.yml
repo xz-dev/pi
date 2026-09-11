@@ -52,7 +52,8 @@ jobs:
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
-            +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta
+            +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
+            +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by
 
           patch_refs=(
             origin/patch/contributor-approval
@@ -74,6 +75,7 @@ jobs:
             origin/patch/slow-hook-tui-only
             origin/patch/session-tree-splice
             origin/patch/ws-cached-empty-delta
+            origin/patch/self-update-managed-by
           )
 
           # Upstream-maintained changelogs move every release cycle, so patch

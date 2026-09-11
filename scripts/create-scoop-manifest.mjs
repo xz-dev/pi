@@ -29,6 +29,12 @@ const architecture = Object.fromEntries(
 	}),
 );
 
+// Mark the installation as scoop-managed by dropping an empty
+// .scoop.managed.lock next to the executable. `pi update --self` detects the
+// *.managed.lock marker, refuses to replace the binary, and points at scoop.
+// The zip itself stays channel-neutral for users who download it directly.
+const postInstall = ["New-Item -Force -ItemType File (Join-Path $dir '.scoop.managed.lock') | Out-Null"];
+
 writeFileSync(
 	resolve(outputArg),
 	stableStringify({
@@ -38,5 +44,6 @@ writeFileSync(
 		license: "MIT",
 		architecture,
 		bin: "pi.exe",
+		post_install: postInstall,
 	}),
 );
