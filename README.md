@@ -1,8 +1,8 @@
 # xz-dev/pi
 
-This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
+This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi). Star this fork to show your support for its direction and encourage change in upstream Pi.
 
-It tracks upstream `main` with a minimal downstream patch stack.
+It tracks upstream `main` with a minimal downstream patch stack, using [downstream-fork-maintain-skill](https://github.com/xz-dev/downstream-fork-maintain-skill) as the blueprint for ongoing maintenance.
 
 > [!WARNING]
 > This fork relies heavily on vibe coding. Logic changes are manually reviewed, and tests are also written by AI under human direction before the full test gate is run.
