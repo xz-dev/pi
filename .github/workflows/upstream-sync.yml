@@ -397,6 +397,14 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/ws-cached-empty-delta branch"
 
+          git merge --squash origin/patch/self-update-managed-by
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/self-update-managed-by'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/self-update-managed-by branch"
+
           git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 
 
