@@ -40,6 +40,11 @@ test("creates Scoop manifest for Windows x64 modern and arm64", () => {
 			url: `https://github.com/xz-dev/pi/releases/download/${TAG}/pi-windows-arm64.zip`,
 			hash: ARM64_HASH,
 		});
+		// The install marks itself scoop-managed with an empty lock file, so
+		// `pi update --self` refuses and points at scoop; the zip stays neutral.
+		assert.deepEqual(scoop.post_install, [
+			"New-Item -Force -ItemType File (Join-Path $dir '.scoop.managed.lock') | Out-Null",
+		]);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
