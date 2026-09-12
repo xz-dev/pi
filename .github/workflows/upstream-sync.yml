@@ -53,7 +53,8 @@ jobs:
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
-            +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by
+            +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
+            +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls
 
           patch_refs=(
             origin/patch/contributor-approval
@@ -76,6 +77,7 @@ jobs:
             origin/patch/session-tree-splice
             origin/patch/ws-cached-empty-delta
             origin/patch/self-update-managed-by
+            origin/patch/google-toomany-toolcalls
           )
 
           # Upstream-maintained changelogs move every release cycle, so patch
@@ -405,6 +407,19 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/self-update-managed-by branch"
 
+          # Temporary upstream-build fix (earendil-works/pi#9502): upstream
+          # 71dca871b removed the TOO_MANY_TOOL_CALLS case that 4a6ed0194 added
+          # with the @google/genai 2.21.0 upgrade, so mapStopReason no longer
+          # compiles. An empty squash means upstream restored the identical case;
+          # retire this patch (and this block) instead of forcing the merge.
+          git merge --squash origin/patch/google-toomany-toolcalls
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/google-toomany-toolcalls; upstream restored the case itself, retire this patch'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/google-toomany-toolcalls branch"
+
           git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 
 
@@ -431,6 +446,7 @@ jobs:
             node ../../node_modules/vitest/dist/cli.js --run \
               test/event-stream.test.ts \
               test/openai-responses-compat.test.ts \
+              test/google-stop-reason-exhaustive.test.ts \
               test/providers.test.ts \
               test/retry.test.ts
           )
