@@ -87,6 +87,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 			"version",
 			"help",
 			"list-models",
+			"usage-claim",
 			"clipboard",
 			...(libc === "musl" ? ["musl-provenance"] : []),
 			...(os === "windows"

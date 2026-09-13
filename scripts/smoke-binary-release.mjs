@@ -53,6 +53,24 @@ try {
 	if (!help.stdout.includes("Usage") && !help.stdout.includes("pi")) throw new Error("help output was not recognized");
 	const listModels = run("list-models", executable, ["--list-models"], { env, maxMs: SMOKE_LIMITS.listModelsMs });
 	if (!listModels.stdout.trim()) throw new Error("list-models produced no output");
+	const usageClaimModule = join(root, "native", "usage-claim", "pi-usage-claim.node");
+	const usageGuard = join(root, "usage.lock");
+	const usageClaim = run(
+		"usage-claim",
+		process.execPath,
+		[join(process.cwd(), "scripts", "test-bundle-usage-claim.mjs"), usageClaimModule, usageGuard],
+		{ env, timeout: 30_000 },
+	);
+	const usageClaimEvidence = JSON.parse(usageClaim.stdout.trim().split(/\r?\n/).at(-1));
+	if (
+		usageClaimEvidence.sharedContention !== true ||
+		usageClaimEvidence.multipleShared !== true ||
+		usageClaimEvidence.crashRelease !== true ||
+		usageClaimEvidence.payloadReadableUnderExclusive !== true ||
+		usageClaimEvidence.renameUnderExclusive !== true
+	) {
+		throw new Error("bundle usage claim smoke returned invalid evidence");
+	}
 	const noticesPath = join(root, "THIRD_PARTY_NOTICES.md");
 	const notices = readFileSync(noticesPath, "utf8");
 	if (!notices.startsWith("# Third-Party Notices") || !notices.includes("License SHA-256:")) throw new Error("third-party notices are missing or invalid");
@@ -144,6 +162,7 @@ try {
 		runner: { name: process.env.RUNNER_NAME ?? "local", os: process.env.RUNNER_OS ?? platform(), arch: process.env.RUNNER_ARCH ?? osArchitecture, osArchitecture, imageOs: process.env.ImageOS ?? null, imageVersion: process.env.ImageVersion ?? null, cpuModel: cpus()[0]?.model ?? "unknown", cpuFeatures: cpuFeatures(), libc: target.libc ?? null },
 		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, libraries: muslLibraries, emulated: false },
 		commands, tui, clipboard,
+		usageClaim: { helper: "native/usage-claim/pi-usage-claim.node", sha256: sha256(usageClaimModule), ...usageClaimEvidence },
 		filesystemSnapshot: filesystemSnapshot ?? null,
 		thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: sha256(noticesPath), bytes: statSync(noticesPath).size },
 		timingsMs: { coldVersion: coldVersion.elapsedMs, version: version.elapsedMs, help: help.elapsedMs, listModels: listModels.elapsedMs, interactive: commands.filter(({ name }) => name.startsWith("tui-")).reduce((sum, entry) => sum + entry.elapsedMs, 0) },
