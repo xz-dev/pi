@@ -436,6 +436,7 @@ Key methods for working with sessions programmatically.
 - `branch(entryId)` - Move leaf to earlier entry
 - `resetLeaf()` - Reset leaf to null (before any entries)
 - `branchWithSummary(entryId, summary, details?, fromHook?, usage?)` - Branch with context summary; `entryId` may be `null` to branch from the root
+- `spliceEntry(entryId)` - Remove one non-root entry and reparent its children
 
 ### Instance Methods - Context & Info
 - `buildContextEntries()` - Get active branch entries with compaction applied
