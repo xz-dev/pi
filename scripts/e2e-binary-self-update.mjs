@@ -340,6 +340,13 @@ try {
 	for (const required of [target.wrapper, target.executable]) {
 		writeFileSync(join(staleBundle, required), `stale ${required}\n`);
 	}
+	writeFileSync(join(staleBundle, "usage.lock"), "P");
+	const staleUsageClaimDir = join(staleBundle, "native", "usage-claim");
+	mkdirSync(staleUsageClaimDir, { recursive: true });
+	copyFileSync(
+		join(activatedBundle, "native", "usage-claim", "pi-usage-claim.node"),
+		join(staleUsageClaimDir, "pi-usage-claim.node"),
+	);
 	const stalePackage = { ...packageJson, version: staleVersion };
 	writeFileSync(join(staleBundle, "package.json"), `${JSON.stringify(stalePackage, null, 2)}\n`);
 	console.log(`Cleaning stale bundle: ${targetId} ${staleVersion}`);

@@ -65,6 +65,9 @@ export function binaryRequiredPaths(platform) {
 		"export-html",
 		"docs",
 		"examples",
+		"usage.lock",
+		"native/usage-claim",
+		"native/usage-claim/pi-usage-claim.node",
 	];
 	if (info.libc === "musl") paths.push("clipboard-native-provenance.json");
 	if (info.nativeHelperDir) {
@@ -98,6 +101,7 @@ export const ALLOWED_BUNDLE_TOP_LEVEL = Object.freeze([
 	"node_modules",
 	"native",
 	"clipboard-native-provenance.json",
+	"usage.lock",
 ]);
 
 function normalizeArchiveEntry(entry) {

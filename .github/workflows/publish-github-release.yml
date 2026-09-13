@@ -43,6 +43,8 @@ jobs:
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: "22", cache: npm }
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with: { version: "0.15.2" }
       - run: npm ci --ignore-scripts
       - run: sudo apt-get update && sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep tmux
       - run: sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd

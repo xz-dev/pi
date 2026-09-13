@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { bunTarget } from "./lib/bun-targets.mjs";
+
 const target = "linux-x64-gnu-baseline";
 const bunAvailable = spawnSync("bun", ["--version"]).status === 0;
 const smokeScript = readFileSync(join(import.meta.dirname, "smoke-binary-release.mjs"), "utf8");
@@ -107,6 +109,16 @@ test("external TUI evidence contributes the authoritative pseudoterminal command
 		const pi = join(stage, "pi"); writeFileSync(pi, "#!/bin/sh\ncase \"$1\" in --version) echo 1.2.3;; --help) echo Usage: pi;; --list-models) echo model;; *) exit 1;; esac\n"); chmodSync(pi, 0o755);
 		const piNative = join(stage, "pi-native"); writeFileSync(piNative, "#!/bin/sh\necho '[Disk Cache] Cache hit for sourceCode' >&2\n[ \"$1\" = --version ] && echo 1.2.3\n"); chmodSync(piNative, 0o755);
 		writeFileSync(join(stage, "native", "LICENSE"), "fixture clipboard license\n");
+		mkdirSync(join(stage, "native", "usage-claim"), { recursive: true });
+		writeFileSync(join(stage, "usage.lock"), "P");
+		writeFileSync(
+			join(stage, "native", "usage-claim", "pi-usage-claim.node"),
+			`const fs=require("node:fs");module.exports={acquire(path,mode,scope){const marker=path+".shared";if(mode==="shared"){fs.writeFileSync(marker,String(process.pid));return scope==="session"?"acquired":{mockUsageClaim:true}}if(fs.existsSync(marker))return "busy";return {mockUsageClaim:true}},releaseScoped(){return "released"},sessionHeld(){return false}};\n`,
+		);
+		writeFileSync(
+			join(stage, "package.json"),
+			JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.2.3", piConfig: { distribution: "xz-dev", releaseTarget: target, usageClaimProtocol: 1 } }),
+		);
 		// This protocol fixture mocks N-API loading; native execution is a separate CI gate.
 		writeFileSync(join(nativeDir, "linux-platform-x11.node"), "module.exports = { getText: async () => null, getImage: async () => null };\n");
 		const preload = join(root, "native-fixture.cjs");
@@ -121,12 +133,14 @@ test("external TUI evidence contributes the authoritative pseudoterminal command
 		const bin = join(root, "bin"); mkdirSync(bin); const bun = join(bin, "bun"); writeFileSync(bun, `#!/bin/sh\nexec "${process.execPath}" "$@"\n`); chmodSync(bun, 0o755);
 		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: null, exitSent: true, cleanExit: true }));
 		const recordPath = join(root, "record.json");
-		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), archive, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_TUI_EVIDENCE: evidence, RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
+		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), archive, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_USAGE_CLAIM_MOCK: "1", PI_XZ_TUI_EVIDENCE: evidence, RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
 		const record = JSON.parse(readFileSync(recordPath, "utf8"));
-		assert.deepEqual(record.commands.map(({ name }) => name), ["extract", "measure-extracted-size", "cold-version", "bytecode", "version", "help", "list-models", "clipboard", "tui-pseudoterminal"]);
+		assert.deepEqual(record.commands.map(({ name }) => name), bunTarget(target).requiredCommands);
 		assert.deepEqual(record.commands.at(-1), { name: "tui-pseudoterminal", command: `external:${evidence}`, status: 0, elapsedMs: 37 });
 		assert.ok(Number.isSafeInteger(record.timingsMs.coldVersion));
 		assert.ok(Number.isSafeInteger(record.timingsMs.version));
+		assert.equal(record.usageClaim.sharedContention, true);
+		assert.equal(record.usageClaim.crashRelease, true);
 		assert.equal(record.clipboard.loadedAndCalled, true);
 		assert.equal(record.clipboard.textRead, true);
 		assert.equal(record.clipboard.imageRead, true);

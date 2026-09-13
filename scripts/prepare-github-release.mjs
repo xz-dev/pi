@@ -128,6 +128,9 @@ function main() {
 		if (bundledPackageJson.piConfig?.distribution !== DISTRIBUTION) {
 			throw new Error(`${platform} bundle missing piConfig.distribution=${DISTRIBUTION}`);
 		}
+		if (bundledPackageJson.piConfig?.usageClaimProtocol !== 1) {
+			throw new Error(`${platform} bundle missing piConfig.usageClaimProtocol=1`);
+		}
 		const destination = join(outDir, archiveName);
 		renameSync(archivePath, destination);
 		bundles[platform] = {
