@@ -133,6 +133,7 @@ interface QuarantinedBundleSnapshot {
 	root: string;
 	rootIdentity: string;
 	bundleDirectory: string;
+	guardPath: string;
 	bundle: InstalledBundleSnapshot;
 	version: string;
 }
@@ -142,6 +143,7 @@ interface BundleValidationOptions {
 	helper?: WindowsFilesystemSnapshotHelper;
 	requireFilesystemHelper?: boolean;
 	requireFilesystemHelperFile?: boolean;
+	usageGuardPath?: string;
 }
 
 export function cleanXzBundles(executablePath = process.execPath): number {
@@ -215,6 +217,9 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 			try {
 				const quarantine = mkdtempSync(join(bundlesRoot, ".cleanup-"));
 				const detachedBundle = join(quarantine, candidate);
+				const originalGuardPath = join(bundleDirectory, BUNDLE_USAGE_GUARD_NAME);
+				let quarantineGuardPath = join(detachedBundle, BUNDLE_USAGE_GUARD_NAME);
+				let guardRelocated = false;
 				let quarantined: QuarantinedBundleSnapshot | undefined;
 				try {
 					const installRootAtQuarantine = directorySnapshot(
@@ -238,14 +243,29 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 					) {
 						fail("Pi managed installation changed before quarantine");
 					}
+					if (process.platform === "win32") {
+						// Windows rejects renaming a directory that contains an open
+						// child handle, even when the child handle shares delete access.
+						// Move the locked guard itself into the quarantine root first;
+						// LockFileEx ownership follows the same open handle, while the
+						// published bundle becomes unstartable before its directory moves.
+						quarantineGuardPath = join(quarantine, BUNDLE_USAGE_GUARD_NAME);
+						renameSync(originalGuardPath, quarantineGuardPath);
+						guardRelocated = true;
+					}
 					renameSync(bundleDirectory, detachedBundle);
-					const after = validateInstalledBundle(detachedBundle, candidate, target, { detached: true, helper });
+					const after = validateInstalledBundle(detachedBundle, candidate, target, {
+						detached: true,
+						helper,
+						usageGuardPath: quarantineGuardPath,
+					});
 					if (!sameInstalledBundleSnapshot(before, after)) fail("Release bundle changed while being quarantined");
 					const quarantineSnapshot = directorySnapshot(quarantine, "Release quarantine path is invalid", helper);
 					quarantined = {
 						root: quarantine,
 						rootIdentity: quarantineSnapshot.identity,
 						bundleDirectory: detachedBundle,
+						guardPath: quarantineGuardPath,
 						bundle: after,
 						version: candidate,
 					};
@@ -264,6 +284,22 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 							throw new AggregateError(
 								[error, restoreError],
 								`Failed to restore quarantined bundle ${candidate}: ${message}`,
+							);
+						}
+					}
+					if (guardRelocated && existsSync(quarantineGuardPath)) {
+						if (!existsSync(bundleDirectory) || existsSync(originalGuardPath)) {
+							throw new Error(
+								`Cannot restore quarantined usage guard for ${candidate}; guard retained at ${quarantineGuardPath}`,
+								{ cause: error },
+							);
+						}
+						try {
+							renameSync(quarantineGuardPath, originalGuardPath);
+						} catch (restoreError: unknown) {
+							throw new AggregateError(
+								[error, restoreError],
+								`Failed to restore quarantined usage guard for ${candidate}`,
 							);
 						}
 					}
@@ -291,30 +327,34 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 					{
 						detached: true,
 						helper,
+						usageGuardPath: quarantined.guardPath,
 					},
 				);
 				if (!sameInstalledBundleSnapshot(quarantined.bundle, bundleBeforeDelete)) {
 					fail("Release quarantine changed before deletion");
 				}
+				const guardInsideBundle = samePath(dirname(quarantined.guardPath), quarantined.bundleDirectory);
 				for (const entry of readdirSync(quarantined.bundleDirectory, { withFileTypes: true })) {
-					if (entry.name === BUNDLE_USAGE_GUARD_NAME) continue;
+					if (guardInsideBundle && entry.name === BUNDLE_USAGE_GUARD_NAME) continue;
 					rmSync(join(quarantined.bundleDirectory, entry.name), { recursive: true, force: true });
 				}
 				const remaining = readdirSync(quarantined.bundleDirectory, { withFileTypes: true });
-				if (remaining.length !== 1 || remaining[0].name !== BUNDLE_USAGE_GUARD_NAME) {
+				const expectedGuardOnly =
+					guardInsideBundle && remaining.length === 1 && remaining[0].name === BUNDLE_USAGE_GUARD_NAME;
+				if ((!guardInsideBundle && remaining.length !== 0) || (guardInsideBundle && !expectedGuardOnly)) {
 					fail("Release quarantine resources could not be fully removed");
 				}
-				// Guard-last: unlink the guard while still holding ownership.
-				// On Windows a lingering startup handle can defer physical
-				// removal; the directory is already unreachable at the published
-				// path and residual paths are reported instead of swept by name.
-				rmSync(join(quarantined.bundleDirectory, BUNDLE_USAGE_GUARD_NAME), { force: true });
+				// On Windows the locked guard lives at the quarantine root, so the
+				// now-empty bundle directory can be removed before guard-last.
+				if (!guardInsideBundle) rmdirSync(quarantined.bundleDirectory);
+				// Guard-last: unlink the guarded path while still holding ownership.
+				rmSync(quarantined.guardPath, { force: true });
 				// All bundle resources and the guard pathname are gone. Release
 				// before removing the now-empty directories: on Windows the final
 				// handle close completes a pending DeleteFile operation.
 				claim.release();
 				try {
-					rmdirSync(quarantined.bundleDirectory);
+					if (guardInsideBundle) rmdirSync(quarantined.bundleDirectory);
 					rmdirSync(quarantined.root);
 				} catch (error: unknown) {
 					const message = error instanceof Error ? error.message : String(error);
@@ -636,7 +676,13 @@ function validateInstalledBundle(
 	target: string,
 	options: BundleValidationOptions = {},
 ): InstalledBundleSnapshot {
-	const { detached = false, helper, requireFilesystemHelper = false, requireFilesystemHelperFile = false } = options;
+	const {
+		detached = false,
+		helper,
+		requireFilesystemHelper = false,
+		requireFilesystemHelperFile = false,
+		usageGuardPath = join(bundleDirectory, BUNDLE_USAGE_GUARD_NAME),
+	} = options;
 	const isStaging = basename(bundleDirectory).startsWith(".update-");
 	if (!isStaging && !detached && basename(bundleDirectory) !== version) {
 		fail("Release bundle path is invalid");
@@ -669,7 +715,7 @@ function validateInstalledBundle(
 	// absence makes the candidate unverifiable, and neither startup nor
 	// cleanup may create it in place (design.md D2).
 	const guardSnapshot = regularFileSnapshot(
-		join(bundleDirectory, BUNDLE_USAGE_GUARD_NAME),
+		usageGuardPath,
 		BUNDLE_USAGE_GUARD_MAX_BYTES,
 		true,
 		`Release bundle is missing required path ${BUNDLE_USAGE_GUARD_NAME} at ${bundleDirectory}`,
@@ -1430,18 +1476,30 @@ export async function runXzSelfUpdate(
 							`Cannot replace existing bundle ${release.version} while it is in use or its usage state cannot be verified`,
 						);
 					}
+					let rejectedRoot: string | undefined;
+					let rejectedDestination: string | undefined;
+					const originalGuardPath = join(destination, BUNDLE_USAGE_GUARD_NAME);
+					let quarantineGuardPath = originalGuardPath;
+					let guardRelocated = false;
 					try {
 						const rejectedAtClaim = validateInstalledBundle(destination, release.version, target, { helper });
 						if (!sameInstalledBundleSnapshot(rejectedBefore, rejectedAtClaim)) {
 							throw new Error(`Cannot replace existing bundle ${release.version}: it changed before quarantine`);
 						}
-						const rejectedRoot = mkdtempSync(join(bundlesRoot, ".update-rejected-"));
-						const rejectedDestination = join(rejectedRoot, release.version);
+						rejectedRoot = mkdtempSync(join(bundlesRoot, ".update-rejected-"));
+						rejectedDestination = join(rejectedRoot, release.version);
+						quarantineGuardPath = join(rejectedDestination, BUNDLE_USAGE_GUARD_NAME);
 						try {
+							if (process.platform === "win32") {
+								quarantineGuardPath = join(rejectedRoot, BUNDLE_USAGE_GUARD_NAME);
+								renameSync(originalGuardPath, quarantineGuardPath);
+								guardRelocated = true;
+							}
 							renameSync(destination, rejectedDestination);
 							const rejectedAfter = validateInstalledBundle(rejectedDestination, release.version, target, {
 								detached: true,
 								helper,
+								usageGuardPath: quarantineGuardPath,
 							});
 							if (!sameInstalledBundleSnapshot(rejectedBefore, rejectedAfter)) {
 								throw new Error(
@@ -1449,9 +1507,17 @@ export async function runXzSelfUpdate(
 								);
 							}
 						} catch (quarantineError: unknown) {
-							try {
-								rmdirSync(rejectedRoot);
-							} catch {}
+							if (rejectedDestination && existsSync(rejectedDestination) && !existsSync(destination)) {
+								renameSync(rejectedDestination, destination);
+							}
+							if (guardRelocated && existsSync(quarantineGuardPath) && !existsSync(originalGuardPath)) {
+								renameSync(quarantineGuardPath, originalGuardPath);
+							}
+							if (rejectedRoot) {
+								try {
+									rmdirSync(rejectedRoot);
+								} catch {}
+							}
 							const message =
 								quarantineError instanceof Error ? quarantineError.message : String(quarantineError);
 							throw new Error(
@@ -1461,6 +1527,9 @@ export async function runXzSelfUpdate(
 						}
 					} finally {
 						rejectedClaim.release();
+					}
+					if (guardRelocated && rejectedDestination) {
+						renameSync(quarantineGuardPath, join(rejectedDestination, BUNDLE_USAGE_GUARD_NAME));
 					}
 				}
 			}
