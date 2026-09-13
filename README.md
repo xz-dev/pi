@@ -77,9 +77,9 @@ The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
   - Use case: Keep downstream prerelease display and changelog lookup correct when package and release versions differ.
   - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
-- Remove old managed binary bundles with `pi update --clean` while keeping the current bundle and `.update-*` staging directories.
-  - Use case: Free disk after several `pi update --self` cycles without deleting the active version or an in-progress update.
-  - Patch branch: [`patch/update-clean`](https://github.com/xz-dev/pi/tree/patch/update-clean)
+- Remove old managed binary bundles with `pi update --clean` while preserving the executing version, the currently installed launcher target, and every participating bundle with a live kernel-held usage claim.
+  - Use case: Free disk after several `pi update --self` cycles without deleting resources still needed by interactive, print, RPC, background, or subagent processes. Cleanup warns for recognized remote filesystems and continues; generic FUSE is not blocked or warned solely by type.
+  - Patch branches: [`patch/update-clean`](https://github.com/xz-dev/pi/tree/patch/update-clean), then dependent [`patch/bundle-usage-claims`](https://github.com/xz-dev/pi/tree/patch/bundle-usage-claims)
 
 ## Installation
 
@@ -141,7 +141,7 @@ For standalone extension operations, keep public `pi` on `PATH`; launching by ab
 
 The first update converts the extracted directory into a managed layout: the complete ZIP is staged under `bundles/<version>`, then `current` is atomically replaced. On POSIX, the root wrapper is also atomically refreshed. On Windows, `pi.exe` remains stable, waits for `pi-native.exe`, and returns its exit status without overwriting the running wrapper. A new invocation reads `current` and starts the activated bundle.
 
-`pi update --clean` keeps only `bundles/<current>`, deletes other ordinary bundle directories and the top-level `previous` pointer, and leaves `.update-*` staging directories untouched.
+`pi update --clean` validates each supported bundle generation and takes an exclusive kernel-held retirement claim before quarantining or deleting it. A running Pi process holds a shared claim for its bundle lifetime, so cleanup retains that version until its last participating process exits; crash and forced termination release claims through the OS. The executing version and every bundle matching the installed launcher are retained independently. Known NFS/SMB/CIFS/Ceph/AFS/NCP/9P filesystems produce a warning and cleanup continues using the actual lock result; generic FUSE is neither blocked nor warned solely by type. Invalid, old-protocol, or otherwise unverifiable bundle directories remain untouched, as do `.update-*`, `.cleanup-*`, and `.update-rejected-*` maintenance paths.
 
 ### Source checkout
 

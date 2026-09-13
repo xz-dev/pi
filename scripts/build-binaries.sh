@@ -81,7 +81,7 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	(cd ../.. && scripts/build-pi-wrapper.sh "$target" "$target_dir/$wrapper" "$DISTRIBUTION_VERSION")
 	cp package.json README.md CHANGELOG.md "$target_dir/"
 	if [[ -n "$DISTRIBUTION_VERSION" ]]; then
-		node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const base=p.version;p.version=process.argv[2];p.piConfig={...(p.piConfig??{}),distribution:'xz-dev',releaseTarget:process.argv[3],changelogVersion:p.piConfig?.changelogVersion??base};fs.writeFileSync(process.argv[1],JSON.stringify(p,null,2)+'\n')" "$target_dir/package.json" "$DISTRIBUTION_VERSION" "$target"
+		node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const base=p.version;p.version=process.argv[2];p.piConfig={...(p.piConfig??{}),distribution:'xz-dev',releaseTarget:process.argv[3],usageClaimProtocol:1,changelogVersion:p.piConfig?.changelogVersion??base};fs.writeFileSync(process.argv[1],JSON.stringify(p,null,2)+'\n')" "$target_dir/package.json" "$DISTRIBUTION_VERSION" "$target"
 	fi
 	cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm "$target_dir/"
 	mkdir -p "$target_dir/theme" "$target_dir/assets"
@@ -107,6 +107,12 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		mkdir -p "$target_dir/$filesystem_helper_dir"
 		(cd ../.. && scripts/build-win32-filesystem-snapshot.sh "$target" "$target_dir/$filesystem_helper_dir/$filesystem_helper_file")
 	fi
+	# Bundle usage-claim guard and native module for every target: the guard is
+	# an immutable one-byte payload, and the module is built per target by
+	# scripts/build-pi-usage-claim.sh (cc on POSIX hosts, zig cc on Windows).
+	mkdir -p "$target_dir/native/usage-claim"
+	printf 'P' > "$target_dir/usage.lock"
+	(cd ../.. && scripts/build-pi-usage-claim.sh "$target" "$target_dir/native/usage-claim/pi-usage-claim.node")
 	node ../../scripts/generate-third-party-notices.mjs "$target_dir" "$target_dir/THIRD_PARTY_NOTICES.md"
 
 	[[ "$archive" == zip ]]
