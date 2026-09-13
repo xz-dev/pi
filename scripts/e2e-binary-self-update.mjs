@@ -84,6 +84,28 @@ function fileEvidence(path) {
 	};
 }
 
+function usageClaimGenerationEvidence(root, label, expectedPackageVersion) {
+	const packagePath = join(root, "package.json");
+	const guardPath = join(root, "usage.lock");
+	const claimPath = join(root, "native", "usage-claim", "pi-usage-claim.node");
+	const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+	if (packageJson.version !== expectedPackageVersion || packageJson.piConfig?.usageClaimProtocol !== 1) {
+		throw new Error(`${label} usage-claim package identity is invalid`);
+	}
+	if (!existsSync(guardPath) || !readFileSync(guardPath).equals(Buffer.from("P"))) {
+		throw new Error(`${label} usage-claim guard is missing or invalid: ${guardPath}`);
+	}
+	if (!existsSync(claimPath)) throw new Error(`${label} usage-claim module is missing: ${claimPath}`);
+	return {
+		label,
+		root,
+		packageVersion: packageJson.version,
+		usageClaimProtocol: packageJson.piConfig.usageClaimProtocol,
+		guard: fileEvidence(guardPath),
+		module: fileEvidence(claimPath),
+	};
+}
+
 function runChecked(command, args, options = {}) {
 	const result = spawnSync(command, args, { encoding: "utf8", windowsHide: true, ...options });
 	if (result.status !== 0) {
@@ -275,6 +297,21 @@ try {
 		copyFileSync(
 			join(install, "native", "usage-claim", "pi-usage-claim.node"),
 			join(rejectedUsageClaimDir, "pi-usage-claim.node"),
+		);
+		const archiveListing = spawnSync(windowsTar, ["-tf", archive], { encoding: "utf8" });
+		if (archiveListing.status !== 0) {
+			throw new Error(`Could not list original Windows bundle: ${archiveListing.stderr || archiveListing.stdout}`);
+		}
+		const archiveEntries = archiveListing.stdout.split(/\r?\n/).map((entry) => entry.replaceAll("\\", "/").replace(/^\.\//, ""));
+		for (const required of ["usage.lock", "native/usage-claim/pi-usage-claim.node"]) {
+			if (!archiveEntries.includes(required)) throw new Error(`Original Windows bundle is missing ${required}`);
+		}
+		console.log(
+			`Windows usage-claim preflight: ${JSON.stringify({
+				executing: usageClaimGenerationEvidence(install, "flat executing bundle", oldVersion),
+				destination: usageClaimGenerationEvidence(rejectedDestination, "existing rejected destination", expectedVersion),
+				archive: { path: archive, usageGuard: true, nativeClaim: true },
+			})}`,
 		);
 		servedBundle = fileEvidence(archive);
 	}
