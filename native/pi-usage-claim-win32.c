@@ -1,6 +1,6 @@
 // Pi bundle usage-claim module (Windows).
 //
-// Session claims: CreateFileW(guard, GENERIC_READ|GENERIC_WRITE,
+// Session claims: CreateFileW(guard, GENERIC_READ,
 //   FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, not inheritable) +
 //   LockFileEx(offset 1, length 1, LOCKFILE_FAIL_IMMEDIATELY, shared), held
 //   natively for the whole process lifetime.
@@ -141,7 +141,7 @@ static napi_value acquire(napi_env env, napi_callback_info info) {
 	security.bInheritHandle = FALSE;
 	HANDLE handle = CreateFileW(
 		wide_path,
-		GENERIC_READ | GENERIC_WRITE,
+		GENERIC_READ,
 		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 		&security,
 		OPEN_EXISTING,
