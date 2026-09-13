@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	copyFileSync,
+	cpSync,
 	createReadStream,
 	existsSync,
 	mkdirSync,
@@ -15,10 +16,8 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { types as utilTypes } from "node:util";
 import { binaryArchiveName, bunTarget } from "./lib/bun-targets.mjs";
 import { BUNDLE_LAYOUT_VERSION, MANIFEST_SCHEMA_VERSION } from "./lib/github-release.mjs";
 
@@ -113,6 +112,20 @@ function runChecked(command, args, options = {}) {
 	if (result.status !== 0) {
 		throw new Error(`${command} ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
 	}
+}
+
+function probeExclusiveUsageClaim(modulePath, guardPath) {
+	const probeScript = `const { types } = require("node:util"); const claim = require(process.argv[1]); const result = claim.acquire(process.argv[2], "exclusive", "scoped"); if (result === "busy") process.stdout.write("busy"); else if (types.isExternal(result)) { claim.releaseScoped(result); process.stdout.write("acquired"); } else process.exit(3);`;
+	const probe = spawnSync(process.execPath, ["--eval", probeScript, modulePath, guardPath], {
+		encoding: "utf8",
+		windowsHide: true,
+	});
+	if (probe.status !== 0) {
+		throw new Error(`Usage claim probe failed: ${probe.stderr || probe.stdout}`);
+	}
+	const outcome = probe.stdout.trim();
+	if (outcome !== "busy" && outcome !== "acquired") throw new Error(`Unexpected usage claim probe: ${outcome}`);
+	return outcome;
 }
 
 function createWindowsBundleVariant(label, mutateHelper) {
@@ -380,81 +393,81 @@ try {
 		throw new Error("Managed update did not start the activated bundle");
 	}
 
-	// Real running-bundle cleanup acceptance: keep a non-current managed RPC
-	// process alive, prove update --clean retains its bundle and that another
-	// process can still start from it, then stop the last holder and prove a
-	// subsequent clean removes it.
-	const currentUsageClaim = createRequire(import.meta.url)(
-		join(activatedBundle, "native", "usage-claim", "pi-usage-claim.node"),
-	);
-	const previousGuard = join(managedPreviousBundle, "usage.lock");
-	const previousSession = spawn(join(managedPreviousBundle, target.executable), ["--mode", "rpc"], {
-		env: offlineEnv,
+	// Real running-bundle cleanup acceptance: create a complete non-current
+	// generation whose wrapper deliberately does not match the root launcher,
+	// then keep its packaged pi-native alive in RPC mode. This isolates the
+	// usage-claim signal from independent launcher-retention policy.
+	const liveVersion = `${version[1]}-xz.0.3.g22222222`;
+	const liveBundle = join(install, "bundles", liveVersion);
+	cpSync(activatedBundle, liveBundle, { recursive: true });
+	const livePackagePath = join(liveBundle, "package.json");
+	const livePackage = JSON.parse(readFileSync(livePackagePath, "utf8"));
+	livePackage.version = liveVersion;
+	writeFileSync(livePackagePath, `${JSON.stringify(livePackage, null, 2)}\n`);
+	writeFileSync(join(liveBundle, target.wrapper), `nonmatching live wrapper ${liveVersion}\n`);
+	const liveGuard = join(liveBundle, "usage.lock");
+	const probeModule = join(activatedBundle, "native", "usage-claim", "pi-usage-claim.node");
+	const liveSession = spawn(join(liveBundle, target.executable), ["--mode", "rpc"], {
+		env: { ...offlineEnv, PI_CODING_AGENT_DIR: join(work, "live-agent") },
 		windowsHide: true,
 		stdio: ["pipe", "ignore", "ignore"],
 	});
 	try {
 		let registered = false;
 		for (let attempt = 0; attempt < 500; attempt++) {
-			if (previousSession.exitCode !== null) {
-				throw new Error(`Previous managed session exited before claim readiness: ${previousSession.exitCode}`);
+			if (liveSession.exitCode !== null) {
+				throw new Error(`Live managed session exited before claim readiness: ${liveSession.exitCode}`);
 			}
-			const probe = currentUsageClaim.acquire(previousGuard, "exclusive", "scoped");
-			if (probe === "busy") {
+			if (probeExclusiveUsageClaim(probeModule, liveGuard) === "busy") {
 				registered = true;
 				break;
 			}
-			if (!utilTypes.isExternal(probe)) throw new Error(`Unexpected previous-session claim probe: ${String(probe)}`);
-			currentUsageClaim.releaseScoped(probe);
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
 		}
-		if (!registered) throw new Error("Previous managed session never acquired its usage claim");
-		console.log(`Cleaning while previous bundle is running: ${targetId} ${managedPreviousVersion}`);
+		if (!registered) throw new Error("Live managed session never acquired its usage claim");
+		console.log(`Cleaning while non-current bundle is running: ${targetId} ${liveVersion}`);
 		await run(wrapper, ["update", "--clean"], offlineEnv);
-		if (!existsSync(managedPreviousBundle)) throw new Error("Cleanup removed a live previous bundle");
-		if ((await run(join(managedPreviousBundle, target.executable), ["--version"], offlineEnv)).trim() !== managedPreviousVersion) {
-			throw new Error("Live previous bundle stopped working after cleanup");
+		if (!existsSync(liveBundle)) throw new Error("Cleanup removed a live non-current bundle");
+		if ((await run(join(liveBundle, target.executable), ["--version"], offlineEnv)).trim() !== liveVersion) {
+			throw new Error("Live non-current bundle stopped working after cleanup");
 		}
 	} finally {
-		if (previousSession.exitCode === null) {
+		if (liveSession.exitCode === null) {
 			await new Promise((resolveExit) => {
 				const timer = setTimeout(() => {
-					if (process.platform === "win32" && previousSession.pid) {
+					if (process.platform === "win32" && liveSession.pid) {
 						const taskkill = join(
-							process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
+							process.env.SystemRoot ?? process.env.WINDIR ?? "C:\Windows",
 							"System32",
 							"taskkill.exe",
 						);
-						spawnSync(taskkill, ["/pid", String(previousSession.pid), "/T", "/F"], { windowsHide: true });
+						spawnSync(taskkill, ["/pid", String(liveSession.pid), "/T", "/F"], { windowsHide: true });
 					} else {
-						previousSession.kill("SIGKILL");
+						liveSession.kill("SIGKILL");
 					}
 				}, 5_000);
-				previousSession.once("exit", () => {
+				liveSession.once("exit", () => {
 					clearTimeout(timer);
 					resolveExit();
 				});
-				previousSession.stdin.end();
+				liveSession.stdin.end();
 			});
 		}
 	}
-	let previousReleased = false;
+	let liveReleased = false;
 	for (let attempt = 0; attempt < 500; attempt++) {
-		const probe = currentUsageClaim.acquire(previousGuard, "exclusive", "scoped");
-		if (utilTypes.isExternal(probe)) {
-			currentUsageClaim.releaseScoped(probe);
-			previousReleased = true;
+		if (probeExclusiveUsageClaim(probeModule, liveGuard) === "acquired") {
+			liveReleased = true;
 			break;
 		}
-		if (probe !== "busy") throw new Error(`Unexpected released-session claim probe: ${String(probe)}`);
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
 	}
-	if (!previousReleased) throw new Error("Previous managed session claim did not release");
+	if (!liveReleased) throw new Error("Live managed session claim did not release");
 	const postSessionClean = await run(wrapper, ["update", "--clean"], offlineEnv);
 	if (!postSessionClean.includes("Removed 1 old bundle")) {
 		throw new Error(`Post-session cleanup output was not recognized: ${postSessionClean}`);
 	}
-	if (existsSync(managedPreviousBundle)) throw new Error("Previous bundle survived after its last session exited");
+	if (existsSync(liveBundle)) throw new Error("Live test bundle survived after its last session exited");
 
 	const staleVersion = `${version[1]}-xz.0.0.gffffffff`;
 	const staleBundle = join(install, "bundles", staleVersion);
@@ -475,8 +488,8 @@ try {
 	const cleanOutput = await run(wrapper, ["update", "--clean"], offlineEnv);
 	if (!cleanOutput.includes("Removed 1 old bundle")) throw new Error(`Cleanup output was not recognized: ${cleanOutput}`);
 	if (existsSync(staleBundle)) throw new Error("Stale bundle survived update --clean");
-	if (!existsSync(activatedBundle) || existsSync(managedPreviousBundle)) {
-		throw new Error("Cleanup did not preserve only the active bundle");
+	if (!existsSync(activatedBundle) || !existsSync(managedPreviousBundle)) {
+		throw new Error("Cleanup removed a protected bundle");
 	}
 	console.log(`Reapplying from managed bundle: ${targetId} ${expectedVersion}`);
 	await run(wrapper, ["update", "--self", "--force"], {
