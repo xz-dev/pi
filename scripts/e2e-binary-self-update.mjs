@@ -269,6 +269,13 @@ try {
 			"-C",
 			rejectedDestination,
 		]);
+		const rejectedUsageClaimDir = join(rejectedDestination, "native", "usage-claim");
+		mkdirSync(rejectedUsageClaimDir, { recursive: true });
+		writeFileSync(join(rejectedDestination, "usage.lock"), "P");
+		copyFileSync(
+			join(install, "native", "usage-claim", "pi-usage-claim.node"),
+			join(rejectedUsageClaimDir, "pi-usage-claim.node"),
+		);
 		servedBundle = fileEvidence(archive);
 	}
 	console.log(`Updating from local Release: ${targetId} ${expectedVersion}`);
