@@ -672,7 +672,7 @@ function validateInstalledBundle(
 		join(bundleDirectory, BUNDLE_USAGE_GUARD_NAME),
 		BUNDLE_USAGE_GUARD_MAX_BYTES,
 		true,
-		`Release bundle is missing required path ${BUNDLE_USAGE_GUARD_NAME}`,
+		`Release bundle is missing required path ${BUNDLE_USAGE_GUARD_NAME} at ${bundleDirectory}`,
 		helper,
 	);
 	if (!guardSnapshot.contents || !guardSnapshot.contents.equals(Buffer.from("P"))) {
@@ -683,7 +683,7 @@ function validateInstalledBundle(
 		join(bundleDirectory, "native", "usage-claim", "pi-usage-claim.node"),
 		BUNDLE_USAGE_CLAIM_MAX_BYTES,
 		false,
-		`Release bundle is missing the usage-claim module`,
+		`Release bundle is missing the usage-claim module at ${bundleDirectory}`,
 		helper,
 	);
 	requiredFileIdentities.push(claimModuleSnapshot.identity);
