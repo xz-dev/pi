@@ -1452,9 +1452,11 @@ export async function runXzSelfUpdate(
 							try {
 								rmdirSync(rejectedRoot);
 							} catch {}
-							throw new Error(`Failed to quarantine existing unactivated bundle ${release.version}`, {
-								cause: quarantineError,
-							});
+							const message = quarantineError instanceof Error ? quarantineError.message : String(quarantineError);
+							throw new Error(
+								`Failed to quarantine existing unactivated bundle ${release.version}: ${message}`,
+								{ cause: quarantineError },
+							);
 						}
 					} finally {
 						rejectedClaim.release();
