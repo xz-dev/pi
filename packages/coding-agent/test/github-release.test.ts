@@ -68,7 +68,7 @@ async function writePrebuiltFixture(directory: string, version: string) {
 				writeFileSync(
 					path,
 					required === "package.json"
-						? `${JSON.stringify({ name: ENTRY_PACKAGE, version, piConfig: { distribution: "xz-dev", releaseTarget: target } })}\n`
+						? `${JSON.stringify({ name: ENTRY_PACKAGE, version, piConfig: { distribution: "xz-dev", releaseTarget: target, usageClaimProtocol: 1 } })}\n`
 						: `${required}\n`,
 				);
 			}
