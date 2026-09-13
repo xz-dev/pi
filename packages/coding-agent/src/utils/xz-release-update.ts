@@ -1452,7 +1452,8 @@ export async function runXzSelfUpdate(
 							try {
 								rmdirSync(rejectedRoot);
 							} catch {}
-							const message = quarantineError instanceof Error ? quarantineError.message : String(quarantineError);
+							const message =
+								quarantineError instanceof Error ? quarantineError.message : String(quarantineError);
 							throw new Error(
 								`Failed to quarantine existing unactivated bundle ${release.version}: ${message}`,
 								{ cause: quarantineError },
