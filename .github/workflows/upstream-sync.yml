@@ -233,18 +233,17 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/use-embedded-bun-package-manager branch"
 
-          git merge --squash origin/patch/git-package-storage || true
+          git merge --squash origin/patch/git-package-storage
           if ! git diff --quiet --diff-filter=U --; then
-            echo '::warning::Conflicts in git-package-storage; content already matches embedded-Bun revert state'
-            git checkout origin/main -- packages/coding-agent/src/core/package-manager.ts packages/coding-agent/test/package-manager.test.ts packages/coding-agent/test/package-manager-git-shallow.test.ts 2>/dev/null || true
-            git add -A 2>/dev/null || true
+            echo '::error::Unresolved conflicts remain after applying git-package-storage'
+            exit 1
           fi
           if git diff --cached --quiet; then
-            echo '::warning::Empty patch integration for patch/git-package-storage; already represented in main through the pre-split merge'
-          else
-            git diff --cached --check
-            git commit -m "merge patch/git-package-storage branch"
+            echo '::error::Empty patch integration for patch/git-package-storage'
+            exit 1
           fi
+          git diff --cached --check
+          git commit -m "merge patch/git-package-storage branch"
 
           git merge --squash origin/patch/agent-run-failure-seam
           if git diff --cached --quiet; then
