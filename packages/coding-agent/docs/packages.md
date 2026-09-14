@@ -9,9 +9,22 @@ A package is an ordinary directory or npm package. It can expose conventional re
 Install from npm, git, or a local path:
 
 ```bash
-pi install npm:@example/pi-tools@1.0.0
-pi install git:github.com/example/pi-tools@v1
-pi install ./local-package
+pi install npm:@foo/bar@1.0.0
+pi install git:github.com/user/repo@v1
+pi install https://github.com/user/repo  # raw URLs work too
+pi install /absolute/path/to/package
+pi install ./relative/path/to/package
+
+pi remove npm:@foo/bar
+pi list                     # show installed packages from settings
+pi update                   # update pi only
+pi update --all             # update pi, update packages, and reconcile pinned git refs
+pi update --extensions      # update packages and reconcile pinned git refs only
+pi update --models          # refresh Pi-managed catalogs without loading extensions
+pi update --self            # update pi only
+pi update --self --force    # reinstall pi even if current
+pi update npm:@foo/bar      # update one package
+pi update --extension npm:@foo/bar
 ```
 
 `pi list` shows configured packages. Use `pi remove <source>` to remove one and `pi update --extensions` to reconcile package installations. See [Command Line](cli.md#package-commands) for every package command and option.
@@ -125,7 +138,9 @@ For each resource type:
 - Use `+path` to include one exact allowed path.
 - Use `-path` to exclude one exact path.
 
-Filters narrow the package manifest. They do not expose resources that the package itself did not declare.
+A package may also set `skillOverrides` keyed by each skill's resolved `name`. Setting `disableModelInvocation` to `true` hides that skill from the model prompt while keeping `/skill:name` available; `false` overrides the skill's frontmatter. Unknown skill names are ignored, and overrides apply only to skills from that package. For an `autoload: false` project delta, same-name overrides replace global entries while unspecified skill overrides are inherited.
+
+## Enable and Disable Resources
 
 Run `pi config` to enable or disable discovered resources. It starts with personal configuration; press Tab to switch scope, or run `pi config --local` to start with project overrides.
 
