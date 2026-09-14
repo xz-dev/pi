@@ -233,7 +233,18 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/use-embedded-bun-package-manager branch"
 
-          git merge --squash origin/patch/git-package-storage
+          if ! git merge-base --is-ancestor origin/patch/use-embedded-bun-package-manager origin/patch/git-package-storage; then
+            echo '::error::patch/git-package-storage must descend from patch/use-embedded-bun-package-manager'
+            exit 1
+          fi
+          if [[ -n "$(git rev-list --min-parents=2 origin/patch/use-embedded-bun-package-manager..origin/patch/git-package-storage)" ]]; then
+            echo '::error::patch/git-package-storage descendant range must be linear'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/use-embedded-bun-package-manager..origin/patch/git-package-storage; then
+            echo '::error::Failed to apply patch/git-package-storage descendant range'
+            exit 1
+          fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying git-package-storage'
             exit 1
