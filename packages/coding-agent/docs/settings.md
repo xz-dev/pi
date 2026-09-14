@@ -176,6 +176,7 @@ See [compaction.md](compaction.md) for trigger and summarization behavior.
 | `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
 | `retry.maxAgentDelayMs` | number | `60000` | Max agent-level retry delay (60s) |
+| `retry.nonRetryableErrorPatterns` | string[] | - | Extra case-insensitive `errorMessage` substrings that skip auto-retry (in addition to built-in quota/billing patterns) |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
 | `retry.provider.maxRetries` | number | `0` | Provider/SDK retry attempts |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
@@ -186,6 +187,8 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 
 Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed. Setting it above `0` can make SDK/provider retries handle out-of-usage-limit errors before Pi sees them, which may block the agent until the provider quota resets in some circumstances.
 
+`retry.nonRetryableErrorPatterns` is useful when a gateway returns a terminal quota/limit error that still looks retryable (for example a plain HTTP 429 whose body is not covered by the built-in patterns).
+
 ```json
 {
   "retry": {
@@ -193,6 +196,9 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
     "maxRetries": 3,
     "baseDelayMs": 2000,
     "maxAgentDelayMs": 60000,
+    "nonRetryableErrorPatterns": [
+      "quota threshold"
+    ],
     "provider": {
       "timeoutMs": 3600000,
       "maxRetries": 0,
