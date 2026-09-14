@@ -30,6 +30,7 @@ class MockSpawnedProcess extends EventEmitter {
 interface PackageManagerInternals {
 	getNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };
 	getPackageManagerName(): string;
+	getGitDependencyInstallArgs(): string[];
 	getGlobalNpmRoot(): string;
 	getLatestNpmVersion(packageSpec: string, range?: string): Promise<string>;
 	runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void>;
@@ -753,6 +754,17 @@ Content`,
 			expect(internals.getNpmCommand()).toEqual({ command: command[0], args: command.slice(1) });
 		});
 
+		it.each([{ command: undefined }, { command: [] }, { command: ["npm"] }, { command: ["bun"] }])(
+			"omits Git host peers only for the default manager ($command)",
+			({ command }) => {
+				settingsManager.setNpmCommand(command);
+				// A host package can be both a dev and peer dependency; omitting dev alone installs it again.
+				expect(internals.getGitDependencyInstallArgs()).toEqual(
+					command?.length ? ["install"] : ["install", "--omit=dev", "--omit=peer"],
+				);
+			},
+		);
+
 		it("rejects an explicitly empty executable", () => {
 			settingsManager.setNpmCommand([""]);
 			expect(() => internals.getNpmCommand()).toThrow("Invalid npmCommand");
@@ -1073,7 +1085,14 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					const originalRun = internals.runCommand.bind(internals);
 					vi.spyOn(internals, "runCommand").mockImplementation(async (command, args, options) => {
 						if (command !== "git") return originalRun(command, args, options);
-						expect(args).toEqual(["clone", "https://github.com/example/fixture", target]);
+						expect(args).toEqual([
+							"clone",
+							"--depth=1",
+							"--single-branch",
+							"--no-tags",
+							"https://github.com/example/fixture",
+							target,
+						]);
 						expect(options?.env?.BUN_BE_BUN).toBeUndefined();
 						mkdirSync(target, { recursive: true });
 						writeFileSync(join(target, "package.json"), JSON.stringify({ dependencies: { fixture: "1.0.0" } }));
@@ -1084,7 +1103,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
 						readFileSync(logPath, "utf8").trim(),
 					);
-					expect(call.args).toEqual(["install", "--omit=dev"]);
+					expect(call.args).toEqual(["install", "--omit=dev", "--omit=peer"]);
 					expect(call.cwd).toBe(target);
 					expect(call.mode).toBe("1");
 					expect(existsSync(target)).toBe(!fail);
@@ -1124,7 +1143,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 				const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
 					readFileSync(logPath, "utf8").trim(),
 				);
-				expect(call.args).toEqual(["install", "--omit=dev"]);
+				expect(call.args).toEqual(["install", "--omit=dev", "--omit=peer"]);
 				expect(call.cwd).toBe(target);
 				expect(call.mode).toBe("1");
 				expect(existsSync(markerPath)).toBe(cleanFails);
@@ -1257,7 +1276,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.install(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should remove a newly created checkout when git clone fails", async () => {
@@ -1316,12 +1337,16 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.install(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("git", ["fetch", "origin", "v2"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("git", ["fetch", "--depth=1", "--no-tags", "origin", "v2"], {
+				cwd: targetDir,
+			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["reset", "--hard", "FETCH_HEAD^{commit}"], {
 				cwd: targetDir,
 			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should reconcile an existing git checkout to its update target when installing without a ref", async () => {
@@ -1470,7 +1495,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should repair missing git package dependencies when the checkout is already current", async () => {
@@ -1495,7 +1522,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 			expect(runCommandSpy).not.toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
 		});
 
@@ -1527,7 +1556,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await expect(packageManager.update(source)).rejects.toThrow("simulated clean failure");
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should disable peer installation through wrapped pnpm when updating git dependencies", async () => {
@@ -1787,7 +1818,14 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await expect(packageManager.install(source)).rejects.toThrow("simulated git clone failure");
 
-			expect(runCommand).toHaveBeenCalledWith("git", ["clone", source, expect.any(String)]);
+			expect(runCommand).toHaveBeenCalledWith("git", [
+				"clone",
+				"--depth=1",
+				"--single-branch",
+				"--no-tags",
+				source,
+				expect.any(String),
+			]);
 			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
 		});
 

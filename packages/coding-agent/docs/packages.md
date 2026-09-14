@@ -40,6 +40,11 @@ Versioned npm specifications are pinned. Git tags and commits are also pinned; p
 Only the **xz-dev Bun-compiled standalone distribution** defaults to its embedded Bun for package operations. It invokes public `pi` through inherited `PATH`, adding `BUN_BE_BUN=1` only to package-manager child processes. This default applies even when npm is installed. Other distributions and source/npm installations retain npm, including source runs under Bun. This selection does not change Pi self-update.
 
 Bun compatibility is not npm equivalence: registry/`.npmrc` handling, lockfiles, lifecycle scripts, and native dependencies can differ. Pi does not add blanket script trust or install missing native build tools. Use an explicit compatible `npmCommand` when needed; switching managers does not undo lockfile or dependency changes.
+New git installs use depth-one, single-branch clones without unrelated tags. Branches and tags are selected during cloning; full commit IDs are fetched directly without cloning another branch. Abbreviated commit IDs require a full clone for local resolution; use a full commit ID to avoid downloading history.
+
+Git updates fetch only the selected ref at depth one and discard stale commit-graph caches. Existing refs, reflogs, and stored objects are not automatically deleted; making an old clone shallow does not by itself reclaim all of its history.
+
+When reconciliation changes the checkout, Pi resets and cleans the clone, then installs dependencies if `package.json` exists. Default npm uses `install --omit=dev --legacy-peer-deps`; embedded Bun uses `install --omit=dev --omit=peer`. This avoids installing Pi-provided host APIs again through peer dependencies. Explicit `npmCommand` commands use plain `install`. A current checkout with missing runtime dependencies is repaired without cleaning it; existing extra dependencies are not automatically pruned.
 
 Relative local paths resolve from the settings file that contains them. A file path loads one extension. A directory follows normal package discovery rules.
 
