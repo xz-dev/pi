@@ -1,5 +1,5 @@
 import type { NativeClipboard } from "@earendil-works/pi-tui";
-import { writeFileSync } from "fs";
+import * as fs from "fs";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { readClipboardImage } from "../src/utils/clipboard-image.ts";
 
@@ -11,6 +11,17 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../src/utils/clipboard-command.ts", () => ({ runClipboardCommand: mocks.command }));
 vi.mock("@earendil-works/pi-tui", () => ({ getNativeClipboard: mocks.getNativeClipboard }));
+
+// Simulated Linux cases must not inherit the host's WSL kernel detection.
+// WSL-specific cases select that path explicitly through WSL_DISTRO_NAME.
+vi.mock("fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof fs>();
+	return {
+		...actual,
+		readFileSync: (...args: Parameters<typeof fs.readFileSync>) =>
+			args[0] === "/proc/version" ? "Linux version 6.8.0 (test fixture)" : actual.readFileSync(...args),
+	};
+});
 
 function commandResult(stdout: Buffer, status = 0): Buffer | undefined {
 	return status === 0 ? stdout : undefined;
@@ -81,7 +92,7 @@ describe("readClipboardImage", () => {
 				expect(spawnOptions.env?.PI_WSL_CLIPBOARD_IMAGE_PATH).toBeUndefined();
 				expect(args[2]).toContain("$path = 'C:\\Users\\O''Hare\\clip.png'");
 				if (!tmpFile) throw new Error("wslpath should be called before powershell.exe");
-				writeFileSync(tmpFile, png);
+				fs.writeFileSync(tmpFile, png);
 				return commandResult(Buffer.from("ok\n"));
 			}
 			throw new Error(`Unexpected command: ${command}`);
