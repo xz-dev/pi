@@ -107,12 +107,14 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		mkdir -p "$target_dir/$filesystem_helper_dir"
 		(cd ../.. && scripts/build-win32-filesystem-snapshot.sh "$target" "$target_dir/$filesystem_helper_dir/$filesystem_helper_file")
 	fi
-	# Bundle usage-claim guard and native module for every target: the guard is
-	# an immutable one-byte payload, and the module is built per target by
-	# scripts/build-pi-usage-claim.sh (cc on POSIX hosts, zig cc on Windows).
-	mkdir -p "$target_dir/native/usage-claim"
-	printf 'P' > "$target_dir/usage.lock"
-	(cd ../.. && scripts/build-pi-usage-claim.sh "$target" "$target_dir/native/usage-claim/pi-usage-claim.node")
+	if [[ "$SKIP_BUILD" == false ]]; then
+		# Bundle usage-claim guard and native module for every target: the guard is
+		# an immutable one-byte payload, and the module is built per target by
+		# scripts/build-pi-usage-claim.sh (cc on POSIX hosts, zig cc on Windows).
+		mkdir -p "$target_dir/native/usage-claim"
+		printf 'P' > "$target_dir/usage.lock"
+		(cd ../.. && scripts/build-pi-usage-claim.sh "$target" "$target_dir/native/usage-claim/pi-usage-claim.node")
+	fi
 	node ../../scripts/generate-third-party-notices.mjs "$target_dir" "$target_dir/THIRD_PARTY_NOTICES.md"
 
 	[[ "$archive" == zip ]]
