@@ -113,9 +113,7 @@ ssh://git@github.com/user/repo@v1
 - Refs are pinned tags or commits. `pi update --extensions` and `pi update --all` do not move them to newer refs, but they do reconcile an existing clone to the configured ref.
 - Use `pi install git:host/user/repo@new-ref` to update settings and move an existing package to a new pinned ref.
 - Cloned to `~/.pi/agent/git/<host>/<path>` (global) or `.pi/git/<host>/<path>` (project).
-- New installs use depth-one, single-branch clones without unrelated tags. Branches and tags are selected during cloning; full commit IDs are fetched directly without cloning another branch. Abbreviated commit IDs require a full clone for local resolution; use a full commit ID to avoid downloading history.
-- Updates fetch only the selected ref at depth one and discard stale commit-graph caches. Existing refs, reflogs, and stored objects are not automatically deleted; making an old clone shallow does not by itself reclaim all of its history.
-- When reconciliation changes the checkout, pi resets and cleans the clone, then installs dependencies if `package.json` exists. Default npm uses `install --omit=dev --legacy-peer-deps`; embedded Bun uses `install --omit=dev --omit=peer`. This avoids installing Pi-provided host APIs again through peer dependencies. Explicit `npmCommand` commands use plain `install`. A current checkout with missing runtime dependencies is repaired without cleaning it; existing extra dependencies are not automatically pruned.
+- When reconciliation changes the checkout, pi resets and cleans the clone, then installs dependencies if `package.json` exists. Default npm/embedded-Bun commands use `install --omit=dev`; explicit `npmCommand` commands use plain `install`. A current checkout with missing runtime dependencies is repaired without cleaning it.
 
 **SSH examples:**
 ```bash
