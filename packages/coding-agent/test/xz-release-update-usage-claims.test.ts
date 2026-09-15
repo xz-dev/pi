@@ -1,5 +1,14 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync as renameSyncReal,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -213,28 +222,23 @@ describe("bundle usage-claim cleanup protocol", () => {
 		}
 	});
 
-	it("retries quarantine rename through a transient Windows sharing violation", async () => {
-		vi.stubGlobal("process", { ...process, platform: "win32", pid: process.pid });
-		const fs = await import("node:fs");
-		const realRename = fs.renameSync;
+	it("retries quarantine rename through a transient Windows sharing violation", () => {
+		let calls = 0;
 		const attempts: Array<[string, string]> = [];
-		vi.spyOn(fs, "renameSync").mockImplementation(((source: string, destination: string) => {
+		const flakyRename = (source: string, destination: string): void => {
+			calls++;
 			attempts.push([source, destination]);
-			// Refuse the first quarantine move the way a transient open child
-			// child handle does on Windows, then let the retry through.
-			if (attempts.length === 1) {
-				const error = new Error(`EPERM: operation not permitted, rename '${source}' -> '${destination}'`);
-				Object.assign(error, { code: "EPERM" });
-				throw error;
-			}
-			return realRename(source, destination);
-		}) as typeof fs.renameSync);
+			// Refuse the first quarantine move the way a transient open
+			// handle does on Windows, then let the production retry through.
+			if (calls === 1) throw Object.assign(new Error("EPERM injected"), { code: "EPERM" });
+			renameSyncReal(source, destination);
+		};
 		const { root, currentBundle, staleBundle } = createFixture("pi-claim-rename-retry");
 		try {
-			expect(cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toBe(1);
-			expect(existsSync(staleBundle)).toBe(false);
-			expect(attempts.length).toBeGreaterThan(1);
+			expect(cleanXzBundles(join(currentBundle, EXECUTABLE_NAME), { renameSync: flakyRename })).toBe(1);
+			expect(calls).toBe(2);
 			expect(attempts[0]).toEqual(attempts[1]);
+			expect(existsSync(staleBundle)).toBe(false);
 			const leftovers = readdirSync(join(root, "bundles")).filter((name) => name.startsWith("."));
 			expect(leftovers).toEqual([]);
 		} finally {
