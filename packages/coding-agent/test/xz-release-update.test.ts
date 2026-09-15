@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { allowNetwork } from "./test-network-env.ts";
+import { buildUsageClaimFixture } from "./usage-claim-fixture.ts";
+
+const usageClaimFixture = buildUsageClaimFixture();
 
 const CURRENT_VERSION = "0.84.1-xz.68.1.g11111111";
 const NEXT_VERSION = "0.84.1-xz.69.1.g22222222";
@@ -84,8 +87,14 @@ function writeInstalledBundle(installRoot: string, version: string): string {
 		`${JSON.stringify({
 			name: "@earendil-works/pi-coding-agent",
 			version,
-			piConfig: { distribution: "xz-dev", releaseTarget: TARGET },
+			piConfig: { distribution: "xz-dev", releaseTarget: TARGET, usageClaimProtocol: 1 },
 		})}\n`,
+	);
+	writeFileSync(join(bundleDirectory, "usage.lock"), "P");
+	mkdirSync(join(bundleDirectory, "native", "usage-claim"), { recursive: true });
+	writeFileSync(
+		join(bundleDirectory, "native", "usage-claim", "pi-usage-claim.node"),
+		readFileSync(usageClaimFixture),
 	);
 	return bundleDirectory;
 }
