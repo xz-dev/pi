@@ -29,6 +29,10 @@ jobs:
           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
+      # Vitest builds the usage-claim fixture through
+      # scripts/build-pi-usage-claim.sh, which targets linux via `zig cc`.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
