@@ -57,7 +57,7 @@ jobs:
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
-            +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection
+            +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/remote-client-run-end-wait:refs/remotes/origin/patch/remote-client-run-end-wait
 
           patch_refs=(
