@@ -20,6 +20,36 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
+
+/** Rename one path, retrying transient Windows sharing violations. */
+function renameSyncRetryable(source: string, destination: string): void {
+	try {
+		renameSync(source, destination);
+		return;
+	} catch (error: unknown) {
+		if (!isTransientWindowsShareViolation(error)) throw error;
+	}
+	// Windows briefly reports EPERM/EACCES when another process holds an open
+	// child handle without delete sharing - shell indexers, antivirus scans,
+	// and handle-duplicating child processes all close them again on their
+	// own. Wait, and recheck the destination after every failed attempt: the
+	// caller that won the race may have already moved the path for us.
+	for (let attempt = 0; attempt < 30; attempt++) {
+		if (existsSync(destination) && !existsSync(source)) return;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+		try {
+			renameSync(source, destination);
+			return;
+		} catch (error: unknown) {
+			if (attempt === 29 || !isTransientWindowsShareViolation(error)) throw error;
+		}
+	}
+}
+
+function isTransientWindowsShareViolation(error: unknown): boolean {
+	return error instanceof Error && "code" in error && (error.code === "EPERM" || error.code === "EACCES");
+}
+
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path";
 import lockfile from "proper-lockfile";
@@ -150,7 +180,8 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 	const target = RELEASE_TARGET;
 	if (!target) return fail("xz-dev Release target metadata is missing from this binary");
 	const helper =
-		process.platform === "win32"
+		process.platform === "win32" &&
+		existsSync(join(dirname(executablePath), getWindowsFilesystemSnapshotRelativePath()))
 			? loadWindowsFilesystemSnapshotHelper({
 					candidates: [join(dirname(executablePath), getWindowsFilesystemSnapshotRelativePath())],
 				})
@@ -250,10 +281,10 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 						// LockFileEx ownership follows the same open handle, while the
 						// published bundle becomes unstartable before its directory moves.
 						quarantineGuardPath = join(quarantine, BUNDLE_USAGE_GUARD_NAME);
-						renameSync(originalGuardPath, quarantineGuardPath);
+						renameSyncRetryable(originalGuardPath, quarantineGuardPath);
 						guardRelocated = true;
 					}
-					renameSync(bundleDirectory, detachedBundle);
+					renameSyncRetryable(bundleDirectory, detachedBundle);
 					const after = validateInstalledBundle(detachedBundle, candidate, target, {
 						detached: true,
 						helper,
@@ -278,7 +309,7 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 							);
 						}
 						try {
-							renameSync(detachedBundle, bundleDirectory);
+							renameSyncRetryable(detachedBundle, bundleDirectory);
 						} catch (restoreError: unknown) {
 							const message = restoreError instanceof Error ? restoreError.message : String(restoreError);
 							throw new AggregateError(
@@ -295,7 +326,7 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 							);
 						}
 						try {
-							renameSync(quarantineGuardPath, originalGuardPath);
+							renameSyncRetryable(quarantineGuardPath, originalGuardPath);
 						} catch (restoreError: unknown) {
 							throw new AggregateError(
 								[error, restoreError],
@@ -1492,10 +1523,10 @@ export async function runXzSelfUpdate(
 						try {
 							if (process.platform === "win32") {
 								quarantineGuardPath = join(rejectedRoot, BUNDLE_USAGE_GUARD_NAME);
-								renameSync(originalGuardPath, quarantineGuardPath);
+								renameSyncRetryable(originalGuardPath, quarantineGuardPath);
 								guardRelocated = true;
 							}
-							renameSync(destination, rejectedDestination);
+							renameSyncRetryable(destination, rejectedDestination);
 							const rejectedAfter = validateInstalledBundle(rejectedDestination, release.version, target, {
 								detached: true,
 								helper,
@@ -1508,10 +1539,10 @@ export async function runXzSelfUpdate(
 							}
 						} catch (quarantineError: unknown) {
 							if (rejectedDestination && existsSync(rejectedDestination) && !existsSync(destination)) {
-								renameSync(rejectedDestination, destination);
+								renameSyncRetryable(rejectedDestination, destination);
 							}
 							if (guardRelocated && existsSync(quarantineGuardPath) && !existsSync(originalGuardPath)) {
-								renameSync(quarantineGuardPath, originalGuardPath);
+								renameSyncRetryable(quarantineGuardPath, originalGuardPath);
 							}
 							if (rejectedRoot) {
 								try {
@@ -1529,12 +1560,12 @@ export async function runXzSelfUpdate(
 						rejectedClaim.release();
 					}
 					if (guardRelocated && rejectedDestination) {
-						renameSync(quarantineGuardPath, join(rejectedDestination, BUNDLE_USAGE_GUARD_NAME));
+						renameSyncRetryable(quarantineGuardPath, join(rejectedDestination, BUNDLE_USAGE_GUARD_NAME));
 					}
 				}
 			}
 			const installedFromStaging = !existingDestination;
-			if (installedFromStaging) renameSync(staging, destination);
+			if (installedFromStaging) renameSyncRetryable(staging, destination);
 			const installedDestination = existingDestination ?? {
 				bundle: validateInstalledBundle(destination, release.version, target, {
 					helper,
@@ -1570,7 +1601,7 @@ export async function runXzSelfUpdate(
 				const nextWrapper = join(installRoot, `.${wrapperName}.next-${process.pid}`);
 				copyFileSync(nextWrapperSource, nextWrapper);
 				chmodSync(nextWrapper, 0o755);
-				renameSync(nextWrapper, rootWrapperPath);
+				renameSyncRetryable(nextWrapper, rootWrapperPath);
 			} else {
 				// Windows cannot overwrite a running executable, but renaming it is
 				// allowed. Move the old root launcher back into its version bundle
@@ -1590,7 +1621,7 @@ export async function runXzSelfUpdate(
 					}
 					let oldWrapperMoved = false;
 					try {
-						renameSync(rootWrapperPath, executingBundleWrapper);
+						renameSyncRetryable(rootWrapperPath, executingBundleWrapper);
 						oldWrapperMoved = true;
 					} catch {
 						// Locked (still running). Leave the old launcher in place; the
@@ -1604,10 +1635,10 @@ export async function runXzSelfUpdate(
 						const nextWrapper = join(installRoot, `.${wrapperName}.next-${process.pid}`);
 						copyFileSync(nextWrapperSource, nextWrapper);
 						try {
-							renameSync(nextWrapper, rootWrapperPath);
+							renameSyncRetryable(nextWrapper, rootWrapperPath);
 						} catch (error: unknown) {
 							// Restore the old launcher so the installation stays bootable.
-							renameSync(executingBundleWrapper, rootWrapperPath);
+							renameSyncRetryable(executingBundleWrapper, rootWrapperPath);
 							throw error;
 						}
 					}
