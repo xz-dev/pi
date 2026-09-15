@@ -212,4 +212,33 @@ describe("bundle usage-claim cleanup protocol", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("retries quarantine rename through a transient Windows sharing violation", async () => {
+		vi.stubGlobal("process", { ...process, platform: "win32", pid: process.pid });
+		const fs = await import("node:fs");
+		const realRename = fs.renameSync;
+		const attempts: Array<[string, string]> = [];
+		vi.spyOn(fs, "renameSync").mockImplementation(((source: string, destination: string) => {
+			attempts.push([source, destination]);
+			// Refuse the first quarantine move the way a transient open child
+			// child handle does on Windows, then let the retry through.
+			if (attempts.length === 1) {
+				const error = new Error(`EPERM: operation not permitted, rename '${source}' -> '${destination}'`);
+				Object.assign(error, { code: "EPERM" });
+				throw error;
+			}
+			return realRename(source, destination);
+		}) as typeof fs.renameSync);
+		const { root, currentBundle, staleBundle } = createFixture("pi-claim-rename-retry");
+		try {
+			expect(cleanXzBundles(join(currentBundle, EXECUTABLE_NAME))).toBe(1);
+			expect(existsSync(staleBundle)).toBe(false);
+			expect(attempts.length).toBeGreaterThan(1);
+			expect(attempts[0]).toEqual(attempts[1]);
+			const leftovers = readdirSync(join(root, "bundles")).filter((name) => name.startsWith("."));
+			expect(leftovers).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
