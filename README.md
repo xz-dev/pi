@@ -57,6 +57,9 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 - Refuse `pi update --self` for channel-managed installations. A package manager marks its install by writing an empty `.<channel>.managed.lock` file next to the executable; `pi update --self` detects any `*.managed.lock` marker before any release lookup, refuses to replace the binary offline, and points the user at the owning channel.
   - Use case: Stop Scoop or a Gentoo ebuild install from fighting the package manager's own upgrades, while keeping the direct-download Release zip channel-neutral.
   - Patch branch: [`patch/self-update-managed-by`](https://github.com/xz-dev/pi/tree/patch/self-update-managed-by)
+- Preserve the `/model` picker's highlighted row when a background model catalog refresh completes while the picker is open. The selection is restored by provider and model id after the list rebuild; a removed model falls back to the existing current-model highlight. Mirrors the scoped-models selector behavior.
+  - Use case: Browse the model list and press refresh-in-progress without the cursor snapping back to the first row mid-selection.
+  - Patch branch: [`patch/model-selector-refresh-selection`](https://github.com/xz-dev/pi/tree/patch/model-selector-refresh-selection)
 - Keep the Google Generative AI `TOO_MANY_TOOL_CALLS` finish reason mapped to the error stop reason. Upstream [earendil-works/pi#9502](https://github.com/earendil-works/pi/issues/9502) removed the exhaustive-switch case that the `@google/genai` 2.21.0 upgrade added, breaking `mapStopReason` compilation; this patch restores it until upstream fixes its own build.
   - Use case: Keep upstream sync and release builds green when upstream main cannot compile.
   - Temporary: Retire once upstream restores the case; the empty-integration guard then fails the sync and retirement is manual.
