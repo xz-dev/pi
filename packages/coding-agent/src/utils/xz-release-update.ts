@@ -22,9 +22,13 @@ import {
 } from "node:fs";
 
 /** Rename one path, retrying transient Windows sharing violations. */
-function renameSyncRetryable(source: string, destination: string): void {
+function renameSyncRetryable(
+	source: string,
+	destination: string,
+	rename: (source: string, destination: string) => void = renameSync,
+): void {
 	try {
-		renameSync(source, destination);
+		rename(source, destination);
 		return;
 	} catch (error: unknown) {
 		if (!isTransientWindowsShareViolation(error)) throw error;
@@ -38,7 +42,7 @@ function renameSyncRetryable(source: string, destination: string): void {
 		if (existsSync(destination) && !existsSync(source)) return;
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
 		try {
-			renameSync(source, destination);
+			rename(source, destination);
 			return;
 		} catch (error: unknown) {
 			if (attempt === 29 || !isTransientWindowsShareViolation(error)) throw error;
@@ -96,6 +100,11 @@ interface GitHubReleaseAsset {
 	browser_download_url: string;
 	size: number;
 	digest: string;
+}
+
+export interface XzCleanupOptions {
+	/** Injectable raw rename for tests; retry behavior always applies. */
+	renameSync?: (source: string, destination: string) => void;
 }
 
 export interface XzLatestRelease {
@@ -176,12 +185,16 @@ interface BundleValidationOptions {
 	usageGuardPath?: string;
 }
 
-export function cleanXzBundles(executablePath = process.execPath): number {
+export function cleanXzBundles(executablePath = process.execPath, options: XzCleanupOptions = {}): number {
+	const { renameSync: rawRename } = options;
+	// Tests inject a raw rename that throws a transient EPERM; the retry loop
+	// below is production behavior and must still sit between the caller and
+	// any injected failure.
+	const rename = (source: string, destination: string): void => renameSyncRetryable(source, destination, rawRename);
 	const target = RELEASE_TARGET;
 	if (!target) return fail("xz-dev Release target metadata is missing from this binary");
 	const helper =
-		process.platform === "win32" &&
-		existsSync(join(dirname(executablePath), getWindowsFilesystemSnapshotRelativePath()))
+		process.platform === "win32"
 			? loadWindowsFilesystemSnapshotHelper({
 					candidates: [join(dirname(executablePath), getWindowsFilesystemSnapshotRelativePath())],
 				})
@@ -281,10 +294,10 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 						// LockFileEx ownership follows the same open handle, while the
 						// published bundle becomes unstartable before its directory moves.
 						quarantineGuardPath = join(quarantine, BUNDLE_USAGE_GUARD_NAME);
-						renameSyncRetryable(originalGuardPath, quarantineGuardPath);
+						rename(originalGuardPath, quarantineGuardPath);
 						guardRelocated = true;
 					}
-					renameSyncRetryable(bundleDirectory, detachedBundle);
+					rename(bundleDirectory, detachedBundle);
 					const after = validateInstalledBundle(detachedBundle, candidate, target, {
 						detached: true,
 						helper,
@@ -309,7 +322,7 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 							);
 						}
 						try {
-							renameSyncRetryable(detachedBundle, bundleDirectory);
+							rename(detachedBundle, bundleDirectory);
 						} catch (restoreError: unknown) {
 							const message = restoreError instanceof Error ? restoreError.message : String(restoreError);
 							throw new AggregateError(
@@ -326,7 +339,7 @@ export function cleanXzBundles(executablePath = process.execPath): number {
 							);
 						}
 						try {
-							renameSyncRetryable(quarantineGuardPath, originalGuardPath);
+							rename(quarantineGuardPath, originalGuardPath);
 						} catch (restoreError: unknown) {
 							throw new AggregateError(
 								[error, restoreError],
