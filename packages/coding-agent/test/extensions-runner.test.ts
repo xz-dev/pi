@@ -12,6 +12,7 @@ import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } fro
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
+	ExtensionAPI,
 	ExtensionContextActions,
 	ExtensionUIContext,
 	ProviderConfig,
@@ -20,6 +21,7 @@ import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import type { ScopedModel } from "../src/core/model-resolver.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { createTestExtensionsResult } from "./utilities.ts";
 
 describe("ExtensionRunner", () => {
 	let tempDir: string;
@@ -115,6 +117,95 @@ describe("ExtensionRunner", () => {
 			const scoped = [{ model: { id: "scoped-test" }, thinkingLevel: "high" }] as unknown as ScopedModel[];
 			runner.bindCore(extensionActions, { ...extensionContextActions, getScopedModels: () => scoped });
 			expect(runner.createContext().scopedModels).toBe(scoped);
+		});
+	});
+
+	describe("uninterruptible message_end handlers", () => {
+		it("requires synchronous handlers at the public type boundary", () => {
+			const register = (pi: ExtensionAPI): void => {
+				// @ts-expect-error Abort-safe terminal cleanup must not return a promise.
+				pi.on("message_end", async () => undefined, { uninterruptible: true });
+			};
+			expect(register).toBeTypeOf("function");
+		});
+
+		it("classifies duplicate callback registrations independently", async () => {
+			const calls: string[] = [];
+			const sharedHandler = () => {
+				calls.push("shared");
+				return undefined;
+			};
+			const extensionsResult = await createTestExtensionsResult([
+				(pi) => {
+					pi.on("message_end", sharedHandler);
+					pi.on("message_end", sharedHandler, { uninterruptible: true });
+				},
+			]);
+			const runner = new ExtensionRunner(
+				extensionsResult.extensions,
+				extensionsResult.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			const message = {
+				role: "custom" as const,
+				customType: "private",
+				content: "private",
+				display: false,
+				timestamp: Date.now(),
+			};
+
+			await runner.emitMessageEnd({ type: "message_end", message });
+			expect(calls).toEqual(["shared"]);
+			runner.emitUninterruptibleMessageEnd({ type: "message_end", message });
+			expect(calls).toEqual(["shared", "shared"]);
+		});
+
+		it("separates ordinary handlers from abort-safe terminal cleanup", async () => {
+			const calls: string[] = [];
+			const extensionsResult = await createTestExtensionsResult([
+				(pi) => {
+					pi.on("message_end", () => {
+						calls.push("ordinary");
+					});
+					pi.on(
+						"message_end",
+						(event) => {
+							calls.push("cleanup");
+							return { message: { ...event.message, content: [] } };
+						},
+						{ uninterruptible: true },
+					);
+				},
+			]);
+			const runner = new ExtensionRunner(
+				extensionsResult.extensions,
+				extensionsResult.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			const message = {
+				role: "custom" as const,
+				customType: "private",
+				content: "private",
+				display: false,
+				timestamp: Date.now(),
+			};
+
+			expect(await runner.emitMessageEnd({ type: "message_end", message })).toBeUndefined();
+			expect(calls).toEqual(["ordinary"]);
+
+			const replacement = runner.emitUninterruptibleMessageEnd({ type: "message_end", message });
+			expect(replacement?.role === "custom" ? replacement.content : undefined).toEqual([]);
+			expect(calls).toEqual(["ordinary", "cleanup"]);
+
+			calls.length = 0;
+			const current = (await runner.emitMessageEnd({ type: "message_end", message })) ?? message;
+			const finalized = runner.emitUninterruptibleMessageEnd({ type: "message_end", message: current });
+			expect(finalized?.role === "custom" ? finalized.content : undefined).toEqual([]);
+			expect(calls).toEqual(["ordinary", "cleanup"]);
 		});
 	});
 
