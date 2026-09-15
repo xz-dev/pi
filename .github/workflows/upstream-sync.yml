@@ -56,7 +56,8 @@ jobs:
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
-            +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls
+            +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
+            +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection
 
           patch_refs=(
             origin/patch/contributor-approval
@@ -82,6 +83,7 @@ jobs:
             origin/patch/ws-cached-empty-delta
             origin/patch/self-update-managed-by
             origin/patch/google-toomany-toolcalls
+            origin/patch/model-selector-refresh-selection
           )
 
           # Upstream-maintained changelogs move every release cycle, so patch
@@ -470,6 +472,14 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/google-toomany-toolcalls branch"
 
+          git merge --squash origin/patch/model-selector-refresh-selection
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/model-selector-refresh-selection'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/model-selector-refresh-selection branch"
+
           git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 
 
@@ -568,7 +578,8 @@ jobs:
               test/suite/regressions/5724-sigterm-signal-exit.test.ts \
               test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
               test/suite/regressions/6949-unavailable-scoped-model.test.ts \
-              test/suite/regressions/7209-model-selector-filter-resets-selection.test.ts
+              test/suite/regressions/7209-model-selector-filter-resets-selection.test.ts \
+              test/model-selector.test.ts
           )
           node --test --test-reporter=dot \
             packages/tui/test/tui-render.test.ts
