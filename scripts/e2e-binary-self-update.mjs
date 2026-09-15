@@ -367,7 +367,18 @@ try {
 
 	const managedPreviousVersion = `${version[1]}-xz.0.2.g11111111`;
 	const managedPreviousBundle = join(install, "bundles", managedPreviousVersion);
-	renameSync(activatedBundle, managedPreviousBundle);
+	// Windows runners transiently hold open handles on freshly extracted exe
+	// files (antivirus/indexer scans), so the rename can fail with EPERM for
+	// a second or two. Retry with the same bounded backoff the update code uses.
+	for (let attempt = 1; ; attempt++) {
+		try {
+			renameSync(activatedBundle, managedPreviousBundle);
+			break;
+		} catch (error) {
+			if (attempt >= 10 || (error.code !== "EPERM" && error.code !== "EACCES")) throw error;
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+		}
+	}
 	const managedPreviousPackagePath = join(managedPreviousBundle, "package.json");
 	const managedPreviousPackage = JSON.parse(readFileSync(managedPreviousPackagePath, "utf8"));
 	managedPreviousPackage.version = managedPreviousVersion;
