@@ -1,3 +1,5 @@
+禁止向上游（earendil-works/pi）发送任何信息，包括但不限于 issues、PR、评论、review。
+
 # Development Rules
 
 ## Downstream Distribution Workflow
