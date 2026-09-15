@@ -58,7 +58,7 @@ jobs:
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
-            +refs/heads/patch/remote-client-run-end-wait:refs/remotes/origin/patch/remote-client-run-end-wait
+            +refs/heads/patch/remote-client-run-end-wait-v2:refs/remotes/origin/patch/remote-client-run-end-wait-v2
 
           patch_refs=(
             origin/patch/contributor-approval
@@ -85,7 +85,7 @@ jobs:
             origin/patch/self-update-managed-by
             origin/patch/google-toomany-toolcalls
             origin/patch/model-selector-refresh-selection
-            origin/patch/remote-client-run-end-wait
+            origin/patch/remote-client-run-end-wait-v2
           )
 
           # Upstream-maintained changelogs move every release cycle, so patch
@@ -482,13 +482,13 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/model-selector-refresh-selection branch"
 
-          git merge --squash origin/patch/remote-client-run-end-wait
+          git merge --squash origin/patch/remote-client-run-end-wait-v2
           if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/remote-client-run-end-wait'
+            echo '::error::Empty patch integration for patch/remote-client-run-end-wait-v2'
             exit 1
           fi
           git diff --cached --check
-          git commit -m "merge patch/remote-client-run-end-wait branch"
+          git commit -m "merge patch/remote-client-run-end-wait-v2 branch"
 
           git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 
