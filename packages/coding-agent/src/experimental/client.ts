@@ -99,6 +99,30 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 		let response: AgentOperationResponse;
 		try {
 			response = await agent.prompt({ message: command.prompt, images: null }, BACKGROUND_CONTEXT);
+			// The prompt response resolves on the lane result while the run_end
+			// watch event reaches this client one step later through the
+			// transcript stream. Wait for that event (bounded) so consumers that
+			// rely on the transcript for full lifecycle events never lose it.
+			if (response.accepted && response.error === null) {
+				const state = match.transcript.state;
+				const observed = (): boolean =>
+					state.value?.event?.type === "run_end" && state.value?.event.runId === response.operationId;
+				if (!observed()) {
+					await new Promise<void>((resolveWait) => {
+						const timeout = setTimeout(resolveWait, 2_000);
+						const stop = state.subscribe((value) => {
+							if (value.event?.type !== "run_end" || value.event.runId !== response.operationId) return;
+							stop();
+							resolveWait();
+						});
+						if (observed()) {
+							clearTimeout(timeout);
+							stop();
+							resolveWait();
+						}
+					});
+				}
+			}
 		} finally {
 			unsubscribe();
 			await deliveryTail;
