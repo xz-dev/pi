@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import { sanitizeTerminalSingleLine } from "../../utils/ansi.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -58,6 +59,7 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionShutdownEvent,
+	SlowExtensionHookEntry,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolResultEvent,
@@ -186,25 +188,51 @@ export type ReloadHandler = () => Promise<void>;
 
 export type ShutdownHandler = () => void;
 
-/**
- * Helper function to emit session_shutdown event to extensions.
- * Returns true if the event was emitted, false if there were no handlers.
- */
+export interface ExtensionShutdownProgress {
+	status: "start" | "end" | "error";
+	extensionPath: string;
+	handlerIndex: number;
+	elapsedMs?: number;
+	slow?: boolean;
+}
+
+export type ExtensionShutdownProgressListener = (entry: ExtensionShutdownProgress) => void;
+
+export function formatSlowExtensionHook(entry: SlowExtensionHookEntry): string {
+	return `Slow ${entry.executionKind} extension hook: ${sanitizeTerminalSingleLine(entry.event)} · ${sanitizeTerminalSingleLine(entry.extensionPath)}#${entry.handlerIndex} · ${Math.round(entry.elapsedMs)} ms`;
+}
+
+function resolveHandlerResult<T>(value: T, markAsync: () => void): Promise<Awaited<T>> {
+	const promise = Promise.resolve(value);
+	if (promise === value) {
+		markAsync();
+	} else if (value !== null && (typeof value === "object" || typeof value === "function")) {
+		let reachedCheckpoint = false;
+		promise.then(() => {
+			if (reachedCheckpoint) markAsync();
+		}, markAsync);
+		queueMicrotask(() => {
+			reachedCheckpoint = true;
+		});
+	}
+	return promise;
+}
+
+/** Emit session_shutdown handlers. Interactive TUI may show transient progress. */
 export async function emitSessionShutdownEvent(
 	extensionRunner: ExtensionRunner,
 	event: SessionShutdownEvent,
 ): Promise<boolean> {
-	if (extensionRunner.hasHandlers("session_shutdown")) {
-		await extensionRunner.emit(event);
-		return true;
-	}
-	return false;
+	if (!extensionRunner.hasHandlers(event.type)) return false;
+	await extensionRunner.emit(event);
+	return true;
 }
 
 export async function emitProjectTrustEvent(
 	extensionsResult: LoadExtensionsResult,
 	event: ProjectTrustEvent,
 	ctx: ProjectTrustContext,
+	slowHookThresholdMs = 100,
 ): Promise<{ result?: ProjectTrustEventResult; errors: ExtensionError[] }> {
 	const errors: ExtensionError[] = [];
 	for (const ext of extensionsResult.extensions) {
@@ -213,12 +241,15 @@ export async function emitProjectTrustEvent(
 		const handlers = ext.handlers.get("project_trust");
 		if (!handlers || handlers.length === 0) continue;
 
-		for (const handler of handlers) {
+		for (const [handlerIndex, handler] of handlers.entries()) {
+			const startedAt = performance.now();
+			let executionKind: SlowExtensionHookEntry["executionKind"] = "sync";
 			try {
-				const handlerResult = (await handler(event, ctx)) as ProjectTrustEventResult;
-				if (handlerResult.trusted === "undecided") {
-					continue;
-				}
+				const returned = handler(event, ctx);
+				const handlerResult = (await resolveHandlerResult(returned, () => {
+					executionKind = "async";
+				})) as ProjectTrustEventResult;
+				if (handlerResult.trusted === "undecided") continue;
 				return { result: handlerResult, errors };
 			} catch (error) {
 				errors.push({
@@ -227,6 +258,21 @@ export async function emitProjectTrustEvent(
 					error: error instanceof Error ? error.message : String(error),
 					stack: error instanceof Error ? error.stack : undefined,
 				});
+			} finally {
+				const elapsedMs = performance.now() - startedAt;
+				try {
+					if (ctx.mode === "tui" && ctx.hasUI && elapsedMs > slowHookThresholdMs) {
+						ctx.onSlowHook?.({
+							event: event.type,
+							extensionPath: ext.resolvedPath,
+							handlerIndex,
+							elapsedMs,
+							executionKind,
+						});
+					}
+				} catch {
+					// Diagnostics must never alter extension behavior.
+				}
 			}
 		}
 	}
@@ -299,6 +345,9 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
+	private getSlowHookThresholdMs: () => number;
+	private shutdownProgressListener?: ExtensionShutdownProgressListener;
+	private onSlowHook?: (entry: SlowExtensionHookEntry) => void;
 
 	constructor(
 		extensions: Extension[],
@@ -306,6 +355,7 @@ export class ExtensionRunner {
 		cwd: string,
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
+		getSlowHookThresholdMs: () => number = () => 100,
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
@@ -313,6 +363,15 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		this.getSlowHookThresholdMs = getSlowHookThresholdMs;
+	}
+
+	setShutdownProgressListener(listener?: ExtensionShutdownProgressListener): void {
+		this.shutdownProgressListener = listener;
+	}
+
+	setSlowHookSink(onSlowHook?: (entry: SlowExtensionHookEntry) => void): void {
+		this.onSlowHook = onSlowHook;
 	}
 
 	bindCore(
@@ -865,6 +924,72 @@ export class ExtensionRunner {
 		);
 	}
 
+	private emitShutdownProgress(entry: ExtensionShutdownProgress): void {
+		try {
+			this.shutdownProgressListener?.(entry);
+		} catch {
+			// Diagnostics must never alter extension behavior.
+		}
+	}
+
+	private async runHandler<T>(
+		event: string,
+		extension: Extension,
+		handlerIndex: number,
+		handler: () => T | Promise<T>,
+	): Promise<T> {
+		const startedAt = performance.now();
+		let status: "end" | "error" = "end";
+		let executionKind: SlowExtensionHookEntry["executionKind"] = "sync";
+		const isShutdown = event === "session_shutdown";
+		if (isShutdown) {
+			this.emitShutdownProgress({
+				status: "start",
+				extensionPath: extension.resolvedPath,
+				handlerIndex,
+			});
+		}
+		try {
+			const returned = handler();
+			return await resolveHandlerResult(returned, () => {
+				executionKind = "async";
+			});
+		} catch (error) {
+			status = "error";
+			throw error;
+		} finally {
+			const elapsedMs = performance.now() - startedAt;
+			try {
+				let slow = false;
+				try {
+					slow = elapsedMs > this.getSlowHookThresholdMs();
+				} catch {
+					// Diagnostics must never alter extension behavior.
+				}
+				if (isShutdown) {
+					this.emitShutdownProgress({
+						status,
+						extensionPath: extension.resolvedPath,
+						handlerIndex,
+						elapsedMs,
+						slow,
+					});
+				}
+				if (slow && this.mode === "tui" && this.hasUI() && (!isShutdown || !this.shutdownProgressListener)) {
+					this.onSlowHook?.({
+						event,
+						extensionPath: extension.resolvedPath,
+						handlerIndex,
+						elapsedMs,
+						executionKind,
+					});
+				}
+			} catch {
+				// Diagnostics must never alter extension behavior.
+			}
+		}
+	}
+
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		const ctx = this.createContext();
 		let result: SessionBeforeEventResult | undefined;
@@ -873,9 +998,9 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runHandler(event.type, ext, handlerIndex, () => handler(event, ctx));
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
@@ -951,11 +1076,13 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("message_end");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				if (ext.uninterruptibleHandlers?.has(handler) === true) continue;
 				try {
 					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
-					const handlerResult = (await handler(currentEvent, ctx)) as MessageEndEventResult | undefined;
+					const handlerResult = (await this.runHandler("message_end", ext, handlerIndex, () =>
+						handler(currentEvent, ctx),
+					)) as MessageEndEventResult | undefined;
 					if (!handlerResult?.message) continue;
 
 					if (handlerResult.message.role !== currentMessage.role) {
@@ -994,9 +1121,11 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("tool_result");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				try {
-					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
+					const handlerResult = (await this.runHandler("tool_result", ext, handlerIndex, () =>
+						handler(currentEvent, ctx),
+					)) as ToolResultEventResult | undefined;
 					if (!handlerResult) continue;
 
 					if (handlerResult.content !== undefined) {
@@ -1048,8 +1177,8 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
-				const handlerResult = await handler(event, ctx);
+			for (const [handlerIndex, handler] of handlers.entries()) {
+				const handlerResult = await this.runHandler("tool_call", ext, handlerIndex, () => handler(event, ctx));
 
 				if (handlerResult) {
 					result = handlerResult as ToolCallEventResult;
@@ -1070,9 +1199,9 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("user_bash");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runHandler("user_bash", ext, handlerIndex, () => handler(event, ctx));
 					if (handlerResult) {
 						return handlerResult as UserBashEventResult;
 					}
@@ -1100,10 +1229,10 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("context");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				try {
 					const event: ContextEvent = { type: "context", messages: currentMessages };
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runHandler("context", ext, handlerIndex, () => handler(event, ctx));
 
 					if (handlerResult && (handlerResult as ContextEventResult).messages) {
 						currentMessages = (handlerResult as ContextEventResult).messages!;
@@ -1132,13 +1261,15 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("before_provider_request");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				try {
 					const event: BeforeProviderRequestEvent = {
 						type: "before_provider_request",
 						payload: currentPayload,
 					};
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runHandler("before_provider_request", ext, handlerIndex, () =>
+						handler(event, ctx),
+					);
 					if (handlerResult !== undefined) {
 						currentPayload = handlerResult;
 					}
@@ -1165,14 +1296,14 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("before_provider_headers");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				try {
 					// Handlers mutate `headers` in place; the return value is ignored.
 					const event: BeforeProviderHeadersEvent = {
 						type: "before_provider_headers",
 						headers,
 					};
-					await handler(event, ctx);
+					await this.runHandler("before_provider_headers", ext, handlerIndex, () => handler(event, ctx));
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
@@ -1211,7 +1342,7 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("before_agent_start");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				try {
 					const event: BeforeAgentStartEvent = {
 						type: "before_agent_start",
@@ -1220,7 +1351,9 @@ export class ExtensionRunner {
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
 					};
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runHandler("before_agent_start", ext, handlerIndex, () =>
+						handler(event, ctx),
+					);
 
 					if (handlerResult) {
 						const result = handlerResult as BeforeAgentStartEventResult;
@@ -1272,10 +1405,12 @@ export class ExtensionRunner {
 			const handlers = ext.handlers.get("resources_discover");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [handlerIndex, handler] of handlers.entries()) {
 				try {
 					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runHandler("resources_discover", ext, handlerIndex, () =>
+						handler(event, ctx),
+					);
 					const result = handlerResult as ResourcesDiscoverResult | undefined;
 
 					if (result?.skillPaths?.length) {
@@ -1315,7 +1450,7 @@ export class ExtensionRunner {
 		let currentImages = images;
 
 		for (const ext of this.extensions) {
-			for (const handler of ext.handlers.get("input") ?? []) {
+			for (const [handlerIndex, handler] of (ext.handlers.get("input") ?? []).entries()) {
 				try {
 					const event: InputEvent = {
 						type: "input",
@@ -1324,7 +1459,9 @@ export class ExtensionRunner {
 						source,
 						streamingBehavior,
 					};
-					const result = (await handler(event, ctx)) as InputEventResult | undefined;
+					const result = (await this.runHandler("input", ext, handlerIndex, () => handler(event, ctx))) as
+						| InputEventResult
+						| undefined;
 					if (result?.action === "handled") return result;
 					if (result?.action === "transform") {
 						currentText = result.text;
