@@ -57,6 +57,34 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
 }
 
 /**
+ * True when a message carries no meaningful content and would only cause provider
+ * API errors (empty text parts, empty content arrays). Extension-injected custom
+ * messages can legitimately be empty (e.g., inquiry fold markers), so they are
+ * dropped here at the choke point before every provider request.
+ *
+ * Kept regardless of emptiness:
+ * - toolResult messages: they answer tool calls and must not be dropped
+ * - assistant messages with tool calls: dropping them orphans the tool results
+ * - assistant blocks carrying signatures (textSignature/thinkingSignature,
+ *   including redacted thinking): providers require them echoed back
+ */
+function isEmptyContent(msg: Message): boolean {
+	if (msg.role === "toolResult") return false;
+	if (msg.role === "user") {
+		if (typeof msg.content === "string") return msg.content.trim().length === 0;
+		return msg.content.every((block) => block.type === "text" && block.text.trim().length === 0);
+	}
+	const assistantMsg = msg as AssistantMessage;
+	return assistantMsg.content.every((block) => {
+		if (block.type === "toolCall") return false;
+		if (block.type === "text") return !block.textSignature && block.text.trim().length === 0;
+		if (block.type === "thinking") return !block.thinkingSignature && block.thinking.trim().length === 0;
+		// Unknown block types: keep, provider converters decide how to handle them.
+		return false;
+	});
+}
+
+/**
  * Normalize tool call ID for cross-provider compatibility.
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
  * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
@@ -219,5 +247,6 @@ export function transformMessages<TApi extends Api>(
 	// If the conversation ends with unresolved tool calls, synthesize results now.
 	insertSyntheticToolResults();
 
-	return result;
+	// Final pass: drop empty-content messages that providers reject.
+	return result.filter((msg) => !isEmptyContent(msg));
 }
