@@ -21,6 +21,19 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 4. Run all pre-push build, check, focused integration, packed-release, GitHub Release candidate, audit, and signature gates.
 5. Update `main` only with `--force-with-lease`; a lease failure requires investigation and a fresh rebuild.
 
+## Local commits on `ci`
+
+The pre-commit hook runs repo-wide `npm run check` (including `tsgo`) against the working tree, while `packages/ai/src/providers/data/` is gitignored and hydrated from the latest remote catalog. `ci` freezes product tests at their patch-time upstream revision, so after hydration the local data can contain model ids those frozen tests do not reference (or vice versa) and the hook fails with `TS2345` errors that are unrelated to the staged change. This mismatch is expected local friction, not a defect; the sync workflow never sees it because it rebuilds `main` from a fresh upstream and hydrates before checking.
+
+Committing a `ci`-only change (workflows, README, this guide, scripts) locally:
+
+1. Verify the staged diff touches only `ci`-owned files. Never edit product test files on `ci` to chase hydrated model ids.
+2. Temporarily align the product worktree with upstream: `git restore --source=review-upstream/main --worktree -- packages/ai/` (adjust the remote name if it differs). This is worktree-only; the index is untouched.
+3. Commit. The hook now type-checks upstream code against upstream-hydrated data and passes.
+4. Immediately restore the `ci` worktree: `git restore --worktree -- packages/ai/`, then `git clean -fd packages/ai/src packages/ai/test` to drop files that exist only upstream. Skipping this step leaves the `ci` checkout silently swapped to upstream sources.
+
+If the hook still fails after alignment, stop and investigate instead of repeating the ritual: the failure is real.
+
 ## README synchronization checklist
 
 Run this checklist whenever a downstream feature, fix, default, command, installation requirement, release target, or patch activation/retirement changes. README updates belong on `ci`, alongside the corresponding integration change.
