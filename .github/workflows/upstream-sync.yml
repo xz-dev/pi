@@ -58,7 +58,8 @@ jobs:
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
-            +refs/heads/patch/remote-client-run-end-wait-v2:refs/remotes/origin/patch/remote-client-run-end-wait-v2
+            +refs/heads/patch/remote-client-run-end-wait-v2:refs/remotes/origin/patch/remote-client-run-end-wait-v2 \
+            +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages
 
           patch_refs=(
             origin/patch/contributor-approval
@@ -86,6 +87,7 @@ jobs:
             origin/patch/google-toomany-toolcalls
             origin/patch/model-selector-refresh-selection
             origin/patch/remote-client-run-end-wait-v2
+            origin/patch/ai-drop-empty-messages
           )
 
           # Upstream-maintained changelogs move every release cycle, so patch
@@ -489,6 +491,16 @@ jobs:
           fi
           git diff --cached --check
           git commit -m "merge patch/remote-client-run-end-wait-v2 branch"
+
+          # Independent upstream-based runtime patch; an empty squash means
+          # upstream filters empty messages itself, so retire this patch.
+          git merge --squash origin/patch/ai-drop-empty-messages
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/ai-drop-empty-messages; upstream filters empty messages itself, retire this patch'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/ai-drop-empty-messages branch"
 
           git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 
