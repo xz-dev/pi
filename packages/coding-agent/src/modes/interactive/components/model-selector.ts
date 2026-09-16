@@ -70,6 +70,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private scopeText?: Text;
 	private scopeHintText?: Text;
 	private readonly refreshAbortController = new AbortController();
+	private selectedKeyBeforeRefresh?: string;
 	private refreshTimeout?: ReturnType<typeof setTimeout>;
 	private closed = false;
 
@@ -182,6 +183,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private async refreshModels(): Promise<void> {
+		const selected = this.filteredModels[this.selectedIndex];
+		this.selectedKeyBeforeRefresh = selected ? `${selected.provider}\0${selected.id}` : undefined;
 		const timeoutMs = 15_000;
 		let timedOut = false;
 		this.refreshTimeout = setTimeout(() => {
@@ -207,6 +210,21 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			}
 			this.loadModelsFromSnapshot();
 			this.filterModels(this.searchInput.getValue());
+			// Restore the user's highlight after the rebuild: loadModelsFromSnapshot
+			// re-derives the index from currentModel (sorted to row 0) and
+			// filterModels resets to 0 under a query, both of which would otherwise
+			// yank the cursor back to the top mid-selection.
+			const selectedKey = this.selectedKeyBeforeRefresh;
+			this.selectedKeyBeforeRefresh = undefined;
+			if (selectedKey !== undefined) {
+				const restoredIndex = this.filteredModels.findIndex(
+					(item) => `${item.provider}\0${item.id}` === selectedKey,
+				);
+				if (restoredIndex >= 0) {
+					this.selectedIndex = restoredIndex;
+					this.updateList();
+				}
+			}
 			this.tui.requestRender();
 		} catch (error) {
 			if (this.closed) return;
