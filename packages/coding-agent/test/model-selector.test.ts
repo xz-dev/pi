@@ -148,9 +148,9 @@ describe("model selector", () => {
 			const result = await refreshPromise;
 			// Simulate the model vanishing from the catalog between selection and refresh.
 			const runtime = harness!.session.modelRuntime as unknown as {
-				availableModels: Array<{ id: string }> | undefined;
+				snapshot: { available: Array<{ id: string }> };
 			};
-			runtime.availableModels = runtime.availableModels?.filter((model) => model.id !== "browsed-model");
+			runtime.snapshot.available = runtime.snapshot.available.filter((model) => model.id !== "browsed-model");
 			return result;
 		});
 

@@ -182,7 +182,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
 		this.filteredModels = this.activeModels;
 		const anchorModel = highlightedModel ?? this.currentModel;
-		const anchorIndex = this.filteredModels.findIndex((item) => modelsAreEqual(anchorModel, item.model));
+		let anchorIndex = this.filteredModels.findIndex((item) => modelsAreEqual(anchorModel, item.model));
+		// If the browsed model vanished in the refresh, fall back to the confirmed
+		// model instead of an arbitrary row at the same index.
+		if (anchorIndex < 0 && highlightedModel) {
+			anchorIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
+		}
 		this.selectedIndex =
 			anchorIndex >= 0 ? anchorIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 	}
