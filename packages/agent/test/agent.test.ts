@@ -162,23 +162,32 @@ describe("Agent", () => {
 				throw new Error("provider exploded");
 			},
 		});
-		const events: string[] = [];
+		const events: AgentEvent[] = [];
 		agent.subscribe((event) => {
-			events.push(event.type);
+			events.push(event);
 		});
 
 		await agent.prompt("hello");
 
-		expect(events).toEqual([
+		expect(events.map((event) => event.type)).toEqual([
 			"agent_start",
 			"turn_start",
 			"message_start",
 			"message_end",
+			"run_failure",
 			"message_start",
 			"message_end",
 			"turn_end",
 			"agent_end",
 		]);
+		expect(events.find((event) => event.type === "run_failure")).toMatchObject({
+			type: "run_failure",
+			message: {
+				role: "assistant",
+				stopReason: "error",
+				errorMessage: "provider exploded",
+			},
+		});
 		const lastMessage = agent.state.messages[agent.state.messages.length - 1];
 		expect(lastMessage?.role).toBe("assistant");
 		if (lastMessage?.role !== "assistant") throw new Error("Expected assistant message");
