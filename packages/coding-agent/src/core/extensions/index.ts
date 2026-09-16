@@ -149,6 +149,7 @@ export type {
 	SetModelHandler,
 	SetThinkingLevelHandler,
 	SlowExtensionHookEntry,
+	SpliceEntryHandler,
 	TerminalInputHandler,
 	ThinkingLevelSelectEvent,
 	// Events - Tool
