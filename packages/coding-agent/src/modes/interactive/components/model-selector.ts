@@ -70,7 +70,6 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private scopeText?: Text;
 	private scopeHintText?: Text;
 	private readonly refreshAbortController = new AbortController();
-	private selectedKeyBeforeRefresh?: string;
 	private refreshTimeout?: ReturnType<typeof setTimeout>;
 	private closed = false;
 
@@ -160,6 +159,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private loadModelsFromSnapshot(): void {
+		// Preserve the highlighted item by identity across catalog refreshes so a
+		// background refresh never yanks the cursor back to the confirmed model
+		// while the user is browsing. On the first load there is no highlight yet,
+		// so fall back to anchoring on the current model.
+		const highlightedModel = this.filteredModels[this.selectedIndex]?.model;
 		const models = this.modelRuntime.getAvailableSnapshot().map((model: Model<any>) => ({
 			provider: model.provider,
 			id: model.id,
@@ -177,14 +181,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}));
 		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
 		this.filteredModels = this.activeModels;
-		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
+		const anchorModel = highlightedModel ?? this.currentModel;
+		const anchorIndex = this.filteredModels.findIndex((item) => modelsAreEqual(anchorModel, item.model));
 		this.selectedIndex =
-			currentIndex >= 0 ? currentIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+			anchorIndex >= 0 ? anchorIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 	}
 
 	private async refreshModels(): Promise<void> {
-		const selected = this.filteredModels[this.selectedIndex];
-		this.selectedKeyBeforeRefresh = selected ? `${selected.provider}\0${selected.id}` : undefined;
 		const timeoutMs = 15_000;
 		let timedOut = false;
 		this.refreshTimeout = setTimeout(() => {
@@ -209,22 +212,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				}
 			}
 			this.loadModelsFromSnapshot();
-			this.filterModels(this.searchInput.getValue());
-			// Restore the user's highlight after the rebuild: loadModelsFromSnapshot
-			// re-derives the index from currentModel (sorted to row 0) and
-			// filterModels resets to 0 under a query, both of which would otherwise
-			// yank the cursor back to the top mid-selection.
-			const selectedKey = this.selectedKeyBeforeRefresh;
-			this.selectedKeyBeforeRefresh = undefined;
-			if (selectedKey !== undefined) {
-				const restoredIndex = this.filteredModels.findIndex(
-					(item) => `${item.provider}\0${item.id}` === selectedKey,
-				);
-				if (restoredIndex >= 0) {
-					this.selectedIndex = restoredIndex;
-					this.updateList();
-				}
-			}
+			this.filterModels(this.searchInput.getValue(), true);
 			this.tui.requestRender();
 		} catch (error) {
 			if (this.closed) return;
@@ -294,7 +282,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 	}
 
-	private filterModels(query: string): void {
+	private filterModels(query: string, preserveSelection = false): void {
+		const highlightedModel = preserveSelection ? this.filteredModels[this.selectedIndex]?.model : undefined;
 		if (query) {
 			const filtered = fuzzyFilter(this.activeModels, query, (item) => {
 				const defaultText = this.isDefaultModel(item.model) ? " default" : "";
@@ -315,8 +304,17 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 		// When filtering by a query, move the selector to the top row so the best
 		// match is highlighted. When the query is cleared, keep the current position
-		// clamped to the (restored) list length.
-		this.selectedIndex = query ? 0 : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		// clamped to the (restored) list length. A background refresh instead keeps
+		// the highlighted item by identity so it never yanks the cursor.
+		if (highlightedModel) {
+			const highlightedIndex = this.filteredModels.findIndex((item) => modelsAreEqual(highlightedModel, item.model));
+			this.selectedIndex =
+				highlightedIndex >= 0
+					? highlightedIndex
+					: Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		} else {
+			this.selectedIndex = query ? 0 : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		}
 		this.updateList();
 	}
 
