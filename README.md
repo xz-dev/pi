@@ -64,6 +64,9 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
   - Use case: Keep upstream sync and release builds green when upstream main cannot compile.
   - Temporary: Retire once upstream restores the case; the empty-integration guard then fails the sync and retirement is manual.
   - Patch branch: [`patch/google-toomany-toolcalls`](https://github.com/xz-dev/pi/tree/patch/google-toomany-toolcalls)
+- Drop user and assistant messages whose content is empty or whitespace-only in `transformMessages`, the choke point shared by every provider converter. Tool results, assistant messages with tool calls, and blocks carrying thinking/text signatures are always kept.
+  - Use case: Extension-injected custom messages (for example watchdog inquiry fold markers) become empty user messages that some providers reject, e.g. Gemini `contents.parts must not be empty`.
+  - Patch branch: [`patch/ai-drop-empty-messages`](https://github.com/xz-dev/pi/tree/patch/ai-drop-empty-messages)
 
 The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://github.com/xz-dev/pi/tree/patch/agent-run-failure-seam). Managed tool executions are integrated before those two patches; the `ci` overlay owns their narrowly scoped conflict handling. See [downstream maintenance](MAINTAIN.md) for the current integration rules.
 
