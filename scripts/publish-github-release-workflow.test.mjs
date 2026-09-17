@@ -56,11 +56,11 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
   const resolver = readFileSync(join(ROOT, "scripts", "resolve-managed-tool-esc-conflicts.py"), "utf8");
   assert.match(
     syncWorkflowText,
-    /\+refs\/heads\/patch\/managed-tool-executions:refs\/remotes\/origin\/patch\/managed-tool-executions/,
+    /\+refs\/heads\/patch\/managed-tool-executions-v2:refs\/remotes\/origin\/patch\/managed-tool-executions-v2/,
   );
-  const seamIndex = syncWorkflowText.indexOf('git commit -m "merge patch/agent-run-failure-seam branch"');
-  const managedIndex = syncWorkflowText.indexOf('git commit -m "merge patch/managed-tool-executions branch"');
-  const escIndex = syncWorkflowText.indexOf('git commit -m "merge patch/esc-abort branch"');
+  const seamIndex = syncWorkflowText.indexOf('git commit -m "merge patch/agent-run-failure-seam-v2 branch"');
+  const managedIndex = syncWorkflowText.indexOf('git commit -m "merge patch/managed-tool-executions-v2 branch"');
+  const escIndex = syncWorkflowText.indexOf('git commit -m "merge patch/esc-abort-v2 branch"');
   assert.ok(seamIndex >= 0 && seamIndex < managedIndex && managedIndex < escIndex);
   assert.match(syncWorkflowText, /python3 scripts\/resolve-managed-tool-esc-conflicts\.py/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
@@ -132,9 +132,9 @@ test("upstream sync keeps provider-transparent compaction temporarily retired", 
 test("upstream sync carries the unified TUI-only slow-hook patch", () => {
   assert.match(
     syncWorkflowText,
-    /\+refs\/heads\/patch\/slow-hook-tui-only:refs\/remotes\/origin\/patch\/slow-hook-tui-only/,
+    /\+refs\/heads\/patch\/slow-hook-tui-only-v2:refs\/remotes\/origin\/patch\/slow-hook-tui-only-v2/,
   );
-  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/slow-hook-tui-only/);
+  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/slow-hook-tui-only-v2/);
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
@@ -146,7 +146,11 @@ test("upstream sync preserves bounded slow-hook and session-tree compatibility",
   );
   assert.match(
     syncWorkflowText,
-    /git cherry-pick --no-commit origin\/patch\/slow-hook-tui-only\.\.origin\/patch\/session-tree-splice/,
+    /git rev-list --reverse origin\/patch\/slow-hook-tui-only-v2\.\.origin\/patch\/session-tree-splice-v2/,
+  );
+  assert.match(
+    syncWorkflowText,
+    /for commit in "\$\{session_tree_commits\[@\]\}"; do\s+if git cherry-pick --no-commit "\$commit"/,
   );
   assert.match(
     syncWorkflowText,
@@ -154,11 +158,11 @@ test("upstream sync preserves bounded slow-hook and session-tree compatibility",
   );
   assert.match(
     syncWorkflowText,
-    /patch\/session-tree-splice must descend from patch\/slow-hook-tui-only/,
+    /patch\/session-tree-splice-v2 must descend from patch\/slow-hook-tui-only-v2/,
   );
   assert.ok(
-    syncWorkflowText.indexOf('git commit -m "merge patch/slow-hook-tui-only branch"') <
-      syncWorkflowText.indexOf('git commit -m "merge patch/session-tree-splice branch"'),
+    syncWorkflowText.indexOf('git commit -m "merge patch/slow-hook-tui-only-v2 branch"') <
+      syncWorkflowText.indexOf('git commit -m "merge patch/session-tree-splice-v2 branch"'),
   );
   assert.doesNotMatch(syncWorkflowText, /patch\/provider-transparent-compaction/);
   assert.doesNotMatch(syncWorkflowText, /patch\/pre-provider-compaction/);
