@@ -548,8 +548,10 @@ jobs:
             cd packages/coding-agent
             node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
               test/github-release.test.ts \
+              test/config.test.ts \
               test/settings-manager.test.ts \
               test/settings-diagnostics.test.ts \
+              test/system-prompt-updates.test.ts \
               test/default-tools-setting.test.ts \
               test/model-runtime-cloudflare-compat.test.ts \
               test/extensions-runner.test.ts \

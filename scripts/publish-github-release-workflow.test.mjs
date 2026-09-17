@@ -70,6 +70,8 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
   assert.match(syncWorkflowText, /test\/suite\/managed-tool-executions\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/system-prompt-updates\.test\.ts/);
+  assert.match(syncWorkflowText, /test\/config\.test\.ts/);
   assert.match(resolver, /const toolController = new AbortController\(\);/);
   assert.match(resolver, /const interruptController = new AbortController\(\);/);
   assert.match(resolver, /controller: toolController,/);
