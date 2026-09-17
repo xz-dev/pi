@@ -514,7 +514,15 @@ jobs:
         run: npm run build
 
       - name: Check rebuilt main
-        run: npm run check
+        run: |
+          npm run check
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf '::error::Check mutated rebuilt main\n%s\n' "$status"
+            git diff --stat
+            git diff --name-status
+            exit 1
+          fi
 
       - name: Setup Zig for native fixture tests
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
