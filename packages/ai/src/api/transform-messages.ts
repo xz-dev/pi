@@ -70,6 +70,7 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
  */
 function isEmptyContent(msg: Message): boolean {
 	if (msg.role === "toolResult") return false;
+	if (msg.role === "system") return false;
 	if (msg.role === "user") {
 		if (typeof msg.content === "string") return msg.content.trim().length === 0;
 		return msg.content.every((block) => block.type === "text" && block.text.trim().length === 0);
