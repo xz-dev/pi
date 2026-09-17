@@ -276,7 +276,13 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/agent-run-failure-seam branch"
 
-          git merge --squash origin/patch/managed-tool-executions
+          if ! git merge --squash origin/patch/managed-tool-executions; then
+            python3 scripts/resolve-managed-tool-executions-squash-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying patch/managed-tool-executions'
+            exit 1
+          fi
           if git diff --cached --quiet; then
             echo '::error::Empty patch integration for patch/managed-tool-executions'
             exit 1
@@ -640,6 +646,7 @@ jobs:
         run: |
           python3 scripts/resolve-embedded-bun-squash-conflicts.test.py
           python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.test.py
+          python3 scripts/resolve-managed-tool-executions-squash-conflicts.test.py
 
       - name: Install Linux smoke display
         run: |
