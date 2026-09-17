@@ -21,7 +21,7 @@ marker = r"[^\n]* \(feat\(coding-agent\): splice session tree entries\)"
 manager_path = Path("packages/coding-agent/src/core/session-manager.ts")
 manager = manager_path.read_text()
 manager_pattern = re.compile(
-    rf"<<<<<<< HEAD\n\trmSync,\n=======\n>>>>>>> {marker}"
+    rf"<<<<<<< (?:HEAD|ours)\n\trmSync,\n=======\n>>>>>>> (?:theirs|{marker})"
 )
 manager, manager_count = manager_pattern.subn("\trmSync,", manager)
 if manager_count != 1:
@@ -31,22 +31,22 @@ manager_path.write_text(manager)
 harness_path = Path("packages/coding-agent/test/suite/harness.ts")
 harness = harness_path.read_text()
 option_pattern = re.compile(
-    rf"<<<<<<< HEAD\n"
+    rf"<<<<<<< (?:HEAD|ours)\n"
     rf"\tsessionManagerFactory\?: \(tempDir: string\) => SessionManager;\n"
     rf"=======\n"
     rf"\tpersist\?: boolean;\n"
-    rf">>>>>>> {marker}"
+    rf">>>>>>> (?:theirs|{marker})"
 )
 option_resolution = '''\tsessionManagerFactory?: (tempDir: string) => SessionManager;
 \tpersist?: boolean;'''
 factory_pattern = re.compile(
-    rf"<<<<<<< HEAD\n"
+    rf"<<<<<<< (?:HEAD|ours)\n"
     rf"\tconst sessionManager = options\.sessionManagerFactory\?\.\(tempDir\) \?\? SessionManager\.inMemory\(\);\n"
     rf"=======\n"
     rf"\tconst sessionManager = options\.persist\n"
     rf"\t\t\? SessionManager\.create\(tempDir, join\(tempDir, \"sessions\"\)\)\n"
     rf"\t\t: SessionManager\.inMemory\(\);\n"
-    rf">>>>>>> {marker}"
+    rf">>>>>>> (?:theirs|{marker})"
 )
 factory_resolution = '''\tconst sessionManager =
 \t\toptions.sessionManagerFactory?.(tempDir) ??

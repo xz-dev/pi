@@ -39,7 +39,7 @@ import { type ExtensionShutdownProgressListener, emitSessionShutdownEvent } from
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 '''
     + marker_end
-    + " origin/patch/slow-hook-tui-only-v2"
+    + " origin/patch/slow-hook-tui-only"
 )
 session_resolution = '''import { type ExtensionShutdownProgressListener, emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { planContinuation } from "./manual-retry.ts";
@@ -61,7 +61,7 @@ runner_conflict = (
 \t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
 '''
     + marker_end
-    + " origin/patch/slow-hook-tui-only-v2"
+    + " origin/patch/slow-hook-tui-only"
 )
 runner_resolution = '''\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
 \t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;'''
@@ -85,7 +85,7 @@ user_bash_conflict = (
 \t\t\t\t\t\treturn handlerResult as UserBashEventResult;
 '''
     + marker_end
-    + ''' origin/patch/slow-hook-tui-only-v2
+    + ''' origin/patch/slow-hook-tui-only
 \t\t\t\t\t}'''
 )
 user_bash_resolution = '''\t\t\t\t\tconst handlerResult = await this.runHandler("user_bash", ext, handlerIndex, () => handler(event, ctx));
@@ -109,7 +109,7 @@ interactive_conflict = (
 \tSlowExtensionHookEntry,
 '''
     + marker_end
-    + " origin/patch/slow-hook-tui-only-v2"
+    + " origin/patch/slow-hook-tui-only"
 )
 interactive_resolution = '''\tSlowExtensionHookEntry,
 \tUserBashEventResult,'''
