@@ -32,7 +32,8 @@ def resolve_conflict(
     source: str, ours: str, theirs: str, resolution: str, label: str
 ) -> str:
     pattern = re.compile(
-        re.escape("<<<<<<< HEAD\n" + ours + "=======\n" + theirs)
+        r"<<<<<<< (?:HEAD|ours)\n"
+        + re.escape(ours + "=======\n" + theirs)
         + r">>>>>>> [^\n]+\n"
     )
     resolved, count = pattern.subn(resolution, source)
@@ -104,8 +105,11 @@ combined_initial_messages = '''\tawait emitAbortable(emit, { type: "agent_start"
 \t\tawait emitAbortable(emit, { type: "message_start", message }, signal);
 \t\tawait emitAbortable(emit, { type: "message_end", message }, signal);
 '''
-initial_conflict_prefix = "<<<<<<< HEAD\n" + upstream_initial_messages + "=======\n" + esc_initial_messages
-if initial_conflict_prefix in text:
+initial_conflict_prefixes = (
+    "<<<<<<< HEAD\n" + upstream_initial_messages + "=======\n" + esc_initial_messages,
+    "<<<<<<< ours\n" + upstream_initial_messages + "=======\n" + esc_initial_messages,
+)
+if any(prefix in text for prefix in initial_conflict_prefixes):
     text = resolve_conflict(
         text,
         upstream_initial_messages,
@@ -138,8 +142,11 @@ combined_pending_messages = '''\t\t\t// Process prepared and queued messages bef
 \t\t\t\tcurrentContext.messages.push(message);
 \t\t\t\tnewMessages.push(message);
 '''
-pending_conflict_prefix = "<<<<<<< HEAD\n" + upstream_pending_messages + "=======\n" + esc_pending_messages
-if pending_conflict_prefix in text:
+pending_conflict_prefixes = (
+    "<<<<<<< HEAD\n" + upstream_pending_messages + "=======\n" + esc_pending_messages,
+    "<<<<<<< ours\n" + upstream_pending_messages + "=======\n" + esc_pending_messages,
+)
+if any(prefix in text for prefix in pending_conflict_prefixes):
     text = resolve_conflict(
         text,
         upstream_pending_messages,
