@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { streamSimple } from "../src/api/mistral-conversations.ts";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 interface MistralPayload {
 	promptMode?: "reasoning";
@@ -34,7 +35,7 @@ async function capturePayload(
 	options?: SimpleStreamOptions,
 ): Promise<MistralPayload> {
 	let capturedPayload: MistralPayload | undefined;
-	const stream = streamSimple(model, makeContext(), {
+	const stream = streamSimple(model, normalizeContext(makeContext()), {
 		...options,
 		apiKey: "fake-key",
 		onPayload: (payload) => {
@@ -72,6 +73,23 @@ describe("Mistral reasoning mode selection", () => {
 
 		expect(payload.promptMode).toBe("reasoning");
 		expect(payload.reasoningEffort).toBeUndefined();
+	});
+
+	// Regression for #9375: Mistral-hosted GLM-5.2 ignores prompt_mode.
+	describe("zai-glm-5-2", () => {
+		it("uses reasoning_effort when thinking is enabled", async () => {
+			const payload = await capturePayload(makeModel("zai-glm-5-2", true), { reasoning: "medium" });
+
+			expect(payload.reasoningEffort).toBe("high");
+			expect(payload.promptMode).toBeUndefined();
+		});
+
+		it("omits reasoning controls when thinking is off", async () => {
+			const payload = await capturePayload(makeModel("zai-glm-5-2", true));
+
+			expect(payload.reasoningEffort).toBeUndefined();
+			expect(payload.promptMode).toBeUndefined();
+		});
 	});
 
 	// Regression for #8700: Medium aliases must use reasoning_effort, not Magistral's prompt_mode.
