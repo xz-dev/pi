@@ -49,19 +49,26 @@ runner = runner.replace(runner_conflict, runner_resolution)
 marker_start = "<" * 7
 marker_middle = "=" * 7
 marker_end = ">" * 7
-user_bash_conflict = '''{marker_start} HEAD
+user_bash_conflict = (
+    marker_start
+    + ''' HEAD
 \t\t\t\t\tconst handlerResult = await handler(event, ctx);
 \t\t\t\t\tif (handlerResult === undefined) continue;
 \t\t\t\t\tif (!isUserBashEventResult(handlerResult)) {
 \t\t\t\t\t\tthrow new Error(
 \t\t\t\t\t\t\t"Invalid user_bash handler result: return undefined for local execution or exactly one valid { operations } or { result } object",
 \t\t\t\t\t\t);
-{marker_middle}
+'''
+    + marker_middle
+    + '''
 \t\t\t\t\tconst handlerResult = await this.runHandler("user_bash", ext, handlerIndex, () => handler(event, ctx));
 \t\t\t\t\tif (handlerResult) {
 \t\t\t\t\t\treturn handlerResult as UserBashEventResult;
-{marker_end} origin/patch/slow-hook-tui-only
-\t\t\t\t\t}'''.format(marker_start=marker_start, marker_middle=marker_middle, marker_end=marker_end)
+'''
+    + marker_end
+    + ''' origin/patch/slow-hook-tui-only
+\t\t\t\t\t}'''
+)
 user_bash_resolution = '''\t\t\t\t\tconst handlerResult = await this.runHandler("user_bash", ext, handlerIndex, () => handler(event, ctx));
 \t\t\t\t\tif (handlerResult === undefined) continue;
 \t\t\t\t\tif (!isUserBashEventResult(handlerResult)) {
@@ -75,12 +82,17 @@ runner_path.write_text(runner.replace(user_bash_conflict, user_bash_resolution))
 
 interactive_path = Path("packages/coding-agent/src/modes/interactive/interactive-mode.ts")
 interactive = interactive_path.read_text()
-interactive_conflict = '''{marker_start} HEAD
+interactive_conflict = (
+    marker_start
+    + ''' HEAD
 \tUserBashEventResult,
-{marker_middle}
+'''
+    + marker_middle
+    + '''
 \tSlowExtensionHookEntry,
-{marker_end} origin/patch/slow-hook-tui-only'''.format(
-    marker_start=marker_start, marker_middle=marker_middle, marker_end=marker_end
+'''
+    + marker_end
+    + " origin/patch/slow-hook-tui-only"
 )
 interactive_resolution = '''\tSlowExtensionHookEntry,
 \tUserBashEventResult,'''
