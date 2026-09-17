@@ -176,6 +176,17 @@ describe("empty message filtering", () => {
 		expect(result[1].role).toBe("assistant");
 	});
 
+	it("keeps empty system messages as transcript control deltas", () => {
+		const message: Message = {
+			role: "system",
+			content: "",
+			sections: { tools: "<tools>\n(none)\n" },
+			timestamp: Date.now(),
+		};
+
+		expect(transformMessages([message], makeTextOnlyModel())).toEqual([message]);
+	});
+
 	it("keeps empty tool results", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "hi", timestamp: Date.now() },
