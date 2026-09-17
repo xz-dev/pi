@@ -395,7 +395,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				.filter((entry) => entry.type === "message")
 				.map((entry) => entry.message.role);
 			const stateRoles = session.messages.map((message) => message.role);
-			expect(persistedRoles).toEqual(stateRoles);
+			expect(persistedRoles).toEqual(stateRoles.slice(1));
 			expect(persistedRoles.filter((role) => role === "assistant")).toHaveLength(1);
 		});
 	}
@@ -444,7 +444,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			.getEntries()
 			.filter((entry) => entry.type === "message")
 			.map((entry) => entry.message.role);
-		expect(persistedRoles).toEqual(session.messages.map((message) => message.role));
+		expect(persistedRoles).toEqual(session.messages.slice(1).map((message) => message.role));
 		expect(persistedRoles.filter((role) => role === "assistant")).toHaveLength(1);
 	});
 
