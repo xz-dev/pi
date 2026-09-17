@@ -139,7 +139,7 @@ describe("session tree splice", () => {
 		expect(sawPersistedTarget).toBe(true);
 		expect(targetId).toBeDefined();
 		expect(harness.sessionManager.getEntry(targetId!)).toBeUndefined();
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "user"]);
 		expect(publicOrder).toEqual(["session_entry_spliced", "agent_settled"]);
 		expect(harness.eventsOfType("session_entry_spliced")).toHaveLength(1);
 
@@ -149,7 +149,7 @@ describe("session tree splice", () => {
 		expect(reopened.getEntry(targetId!)).toBeUndefined();
 		expect(
 			reopened.getEntries().map((entry) => (entry.type === "message" ? entry.message.role : entry.type)),
-		).toEqual(["user"]);
-		expect(reopened.getLeafId()).toBe(reopened.getEntries()[0]?.id);
+		).toEqual(["system", "user"]);
+		expect(reopened.getLeafId()).toBe(reopened.getEntries().at(-1)?.id);
 	});
 });
