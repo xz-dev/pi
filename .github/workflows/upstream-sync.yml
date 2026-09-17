@@ -352,7 +352,11 @@ jobs:
           git commit -m "merge patch/esc-abort branch"
 
           if ! git cherry-pick --no-commit "$terminal_seam..origin/patch/manual-retry"; then
-            echo '::error::Failed to apply patch/manual-retry descendant range'
+            python3 scripts/resolve-manual-retry-conflicts.py
+            git cherry-pick --quit
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying patch/manual-retry'
             exit 1
           fi
           if git diff --cached --quiet; then
@@ -401,6 +405,7 @@ jobs:
             expected_conflicts=(
               packages/coding-agent/src/core/agent-session.ts
               packages/coding-agent/src/core/extensions/runner.ts
+              packages/coding-agent/src/modes/interactive/interactive-mode.ts
             )
             if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )) ||
               [[ ${conflicts[*]} != "${expected_conflicts[*]}" ]]; then

@@ -3,7 +3,9 @@ from pathlib import Path
 import re
 import subprocess
 
-expected = {Path("packages/agent/src/agent-loop.ts")}
+agent_loop_path = Path("packages/agent/src/agent-loop.ts")
+extensions_test_path = Path("packages/coding-agent/test/extensions-runner.test.ts")
+expected = {agent_loop_path, extensions_test_path}
 conflicts = {
     Path(path)
     for path in subprocess.check_output(
@@ -13,7 +15,7 @@ conflicts = {
 if conflicts != expected:
     raise SystemExit(f"unexpected managed-tool/Esc conflicts: {sorted(map(str, conflicts))}")
 
-path = next(iter(expected))
+path = agent_loop_path
 text = path.read_text()
 
 
@@ -79,6 +81,64 @@ text = resolve_conflict(
     esc_parallel,
     combined_parallel,
     "managed-tool/Esc parallel execution",
+)
+
+upstream_initial_messages = '''\tawait emit({ type: "agent_start" });
+\tawait emit({ type: "turn_start" });
+\tfor (const message of initialMessages) {
+\t\tawait emit({ type: "message_start", message });
+\t\tawait emit({ type: "message_end", message });
+'''
+esc_initial_messages = '''\tawait emitAbortable(emit, { type: "agent_start" }, signal);
+\tawait emitAbortable(emit, { type: "turn_start" }, signal);
+\tfor (const prompt of prompts) {
+\t\tawait emitAbortable(emit, { type: "message_start", message: prompt }, signal);
+\t\tawait emitAbortable(emit, { type: "message_end", message: prompt }, signal);
+'''
+combined_initial_messages = '''\tawait emitAbortable(emit, { type: "agent_start" }, signal);
+\tawait emitAbortable(emit, { type: "turn_start" }, signal);
+\tfor (const message of initialMessages) {
+\t\tawait emitAbortable(emit, { type: "message_start", message }, signal);
+\t\tawait emitAbortable(emit, { type: "message_end", message }, signal);
+'''
+text = resolve_conflict(
+    text,
+    upstream_initial_messages,
+    esc_initial_messages,
+    combined_initial_messages,
+    "upstream tool declarations/Esc initial messages",
+)
+
+upstream_pending_messages = '''\t\t\t// Process prepared and queued messages before the next assistant response.
+\t\t\tfor (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
+\t\t\t\tawait emit({ type: "message_start", message });
+\t\t\t\tawait emit({ type: "message_end", message });
+\t\t\t\tcurrentContext.messages.push(message);
+\t\t\t\tnewMessages.push(message);
+'''
+esc_pending_messages = '''\t\t\t// Process pending messages (inject before next assistant response)
+\t\t\tif (pendingMessages.length > 0) {
+\t\t\t\tfor (const message of pendingMessages) {
+\t\t\t\t\tawait emitAbortable(emit, { type: "message_start", message }, signal);
+\t\t\t\t\tawait emitAbortable(emit, { type: "message_end", message }, signal);
+\t\t\t\t\tcurrentContext.messages.push(message);
+\t\t\t\t\tnewMessages.push(message);
+\t\t\t\t}
+\t\t\t\tpendingMessages = [];
+'''
+combined_pending_messages = '''\t\t\t// Process prepared and queued messages before the next assistant response.
+\t\t\tfor (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
+\t\t\t\tawait emitAbortable(emit, { type: "message_start", message }, signal);
+\t\t\t\tawait emitAbortable(emit, { type: "message_end", message }, signal);
+\t\t\t\tcurrentContext.messages.push(message);
+\t\t\t\tnewMessages.push(message);
+'''
+text = resolve_conflict(
+    text,
+    upstream_pending_messages,
+    esc_pending_messages,
+    combined_pending_messages,
+    "upstream tool declarations/Esc pending messages",
 )
 
 
@@ -258,7 +318,7 @@ text = rewrite_section(
     "tool finalizer",
 )
 
-if any(marker in text for marker in ("<<<<<<<", "=======", ">>>>>>>")):
+if any(line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")) for line in text.splitlines()):
     raise SystemExit("conflict markers remain after managed-tool/Esc resolution")
 
 required = (
@@ -275,4 +335,17 @@ for source in required:
         raise SystemExit(f"missing combined invariant: {source}")
 
 path.write_text(text)
-subprocess.run(["git", "add", str(path)], check=True)
+
+test_text = extensions_test_path.read_text()
+test_text = resolve_conflict(
+    test_text,
+    'import { buildSystemPrompt } from "../src/core/system-prompt.ts";\n',
+    'import { createTestExtensionsResult } from "./utilities.ts";\n',
+    'import { buildSystemPrompt } from "../src/core/system-prompt.ts";\n'
+    'import { createTestExtensionsResult } from "./utilities.ts";\n',
+    "extension runner test imports",
+)
+if any(line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")) for line in test_text.splitlines()):
+    raise SystemExit("conflict markers remain in extension runner tests")
+extensions_test_path.write_text(test_text)
+subprocess.run(["git", "add", str(agent_loop_path), str(extensions_test_path)], check=True)
