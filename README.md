@@ -3,7 +3,7 @@
 This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
 > [!NOTE]
-> Star this fork to show your support for its direction and encourage change in upstream Pi.
+> 🌟 Star this fork to show your support for its direction and encourage change in upstream Pi.
 
 It tracks upstream `main` with a minimal downstream patch stack, using [downstream-fork-maintain-skill](https://github.com/xz-dev/downstream-fork-maintain-skill) as the blueprint for ongoing maintenance.
 
