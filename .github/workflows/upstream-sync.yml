@@ -262,7 +262,13 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/git-package-storage branch"
 
-          git merge --squash origin/patch/agent-run-failure-seam
+          if ! git merge --squash origin/patch/agent-run-failure-seam; then
+            python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying patch/agent-run-failure-seam'
+            exit 1
+          fi
           if git diff --cached --quiet; then
             echo '::error::Empty patch integration for patch/agent-run-failure-seam'
             exit 1
@@ -633,6 +639,7 @@ jobs:
       - name: Test squash conflict resolvers
         run: |
           python3 scripts/resolve-embedded-bun-squash-conflicts.test.py
+          python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.test.py
 
       - name: Install Linux smoke display
         run: |
