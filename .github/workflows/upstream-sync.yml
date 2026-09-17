@@ -45,21 +45,21 @@ jobs:
             +refs/heads/patch/bundle-usage-claims:refs/remotes/origin/patch/bundle-usage-claims \
             +refs/heads/patch/use-embedded-bun-package-manager:refs/remotes/origin/patch/use-embedded-bun-package-manager \
             +refs/heads/patch/git-package-storage:refs/remotes/origin/patch/git-package-storage \
-            +refs/heads/patch/agent-run-failure-seam-v2:refs/remotes/origin/patch/agent-run-failure-seam-v2 \
-            +refs/heads/patch/managed-tool-executions-v2:refs/remotes/origin/patch/managed-tool-executions-v2 \
-            +refs/heads/patch/esc-abort-v2:refs/remotes/origin/patch/esc-abort-v2 \
-            +refs/heads/patch/manual-retry-v2:refs/remotes/origin/patch/manual-retry-v2 \
+            +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
+            +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
+            +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
+            +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
-            +refs/heads/patch/slow-hook-tui-only-v2:refs/remotes/origin/patch/slow-hook-tui-only-v2 \
-            +refs/heads/patch/session-tree-splice-v2:refs/remotes/origin/patch/session-tree-splice-v2 \
-            +refs/heads/patch/ws-cached-empty-delta-v2:refs/remotes/origin/patch/ws-cached-empty-delta-v2 \
+            +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
+            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
+            +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/remote-client-run-end-wait:refs/remotes/origin/patch/remote-client-run-end-wait \
-            +refs/heads/patch/ai-drop-empty-messages-v2:refs/remotes/origin/patch/ai-drop-empty-messages-v2
+            +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages
 
           patch_refs=(
             origin/patch/contributor-approval
@@ -73,21 +73,21 @@ jobs:
             origin/patch/bundle-usage-claims
             origin/patch/use-embedded-bun-package-manager
             origin/patch/git-package-storage
-            origin/patch/agent-run-failure-seam-v2
-            origin/patch/managed-tool-executions-v2
-            origin/patch/esc-abort-v2
-            origin/patch/manual-retry-v2
+            origin/patch/agent-run-failure-seam
+            origin/patch/managed-tool-executions
+            origin/patch/esc-abort
+            origin/patch/manual-retry
             origin/patch/changelog-prerelease
             origin/patch/skill-overrides
             origin/patch/retry-non-retryable-patterns
-            origin/patch/slow-hook-tui-only-v2
-            origin/patch/session-tree-splice-v2
-            origin/patch/ws-cached-empty-delta-v2
+            origin/patch/slow-hook-tui-only
+            origin/patch/session-tree-splice
+            origin/patch/ws-cached-empty-delta
             origin/patch/self-update-managed-by
             origin/patch/google-toomany-toolcalls
             origin/patch/model-selector-refresh-selection
             origin/patch/remote-client-run-end-wait
-            origin/patch/ai-drop-empty-messages-v2
+            origin/patch/ai-drop-empty-messages
           )
 
           # Upstream-maintained changelogs move every release cycle, so patch
@@ -262,57 +262,53 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/git-package-storage branch"
 
-          if ! git merge --squash origin/patch/agent-run-failure-seam-v2; then
+          if ! git merge --squash origin/patch/agent-run-failure-seam; then
             python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.py
           fi
           if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/agent-run-failure-seam-v2'
+            echo '::error::Unresolved conflicts remain after applying patch/agent-run-failure-seam'
             exit 1
           fi
           if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/agent-run-failure-seam-v2'
+            echo '::error::Empty patch integration for patch/agent-run-failure-seam'
             exit 1
           fi
           git diff --cached --check
-          git commit -m "merge patch/agent-run-failure-seam-v2 branch"
+          git commit -m "merge patch/agent-run-failure-seam branch"
 
-          if ! git merge --squash origin/patch/managed-tool-executions-v2; then
+          if ! git merge --squash origin/patch/managed-tool-executions; then
             python3 scripts/resolve-managed-tool-executions-squash-conflicts.py
           fi
           if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/managed-tool-executions-v2'
+            echo '::error::Unresolved conflicts remain after applying patch/managed-tool-executions'
             exit 1
           fi
           if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/managed-tool-executions-v2'
+            echo '::error::Empty patch integration for patch/managed-tool-executions'
             exit 1
           fi
           git diff --cached --check
-          git commit -m "merge patch/managed-tool-executions-v2 branch"
+          git commit -m "merge patch/managed-tool-executions branch"
 
-          terminal_seam=origin/patch/agent-run-failure-seam-v2
-          for child in origin/patch/esc-abort-v2 origin/patch/manual-retry-v2; do
+          terminal_seam=origin/patch/agent-run-failure-seam
+          for child in origin/patch/esc-abort origin/patch/manual-retry; do
             if ! git merge-base --is-ancestor "$terminal_seam" "$child"; then
-              echo "::error::$child must descend from patch/agent-run-failure-seam-v2"
-              exit 1
-            fi
-            if [[ -n "$(git rev-list --min-parents=2 "$terminal_seam..$child")" ]]; then
-              echo "::error::$child descendant range must be linear"
+              echo "::error::$child must descend from patch/agent-run-failure-seam"
               exit 1
             fi
           done
-          if ! git diff --quiet "$terminal_seam..origin/patch/esc-abort-v2" -- packages/agent/src/types.ts; then
-            echo '::error::patch/esc-abort-v2 must not redefine the shared run_failure event type'
+          if ! git diff --quiet "$terminal_seam..origin/patch/esc-abort" -- packages/agent/src/types.ts; then
+            echo '::error::patch/esc-abort must not redefine the shared run_failure event type'
             exit 1
           fi
-          if ! git diff --quiet "$terminal_seam..origin/patch/manual-retry-v2" -- packages/agent; then
-            echo '::error::patch/manual-retry-v2 must not modify packages/agent after the shared seam'
+          if ! git diff --quiet "$terminal_seam..origin/patch/manual-retry" -- packages/agent; then
+            echo '::error::patch/manual-retry must not modify packages/agent after the shared seam'
             exit 1
           fi
           mapfile -t terminal_child_overlap < <(
             comm -12 \
-              <(git diff --name-only "$terminal_seam..origin/patch/esc-abort-v2" | sort) \
-              <(git diff --name-only "$terminal_seam..origin/patch/manual-retry-v2" | sort)
+              <(git diff --name-only "$terminal_seam..origin/patch/esc-abort" | sort) \
+              <(git diff --name-only "$terminal_seam..origin/patch/manual-retry" | sort)
           )
           expected_terminal_child_overlap=(packages/coding-agent/src/core/agent-session.ts)
           if (( ${#terminal_child_overlap[@]} != ${#expected_terminal_child_overlap[@]} )) ||
@@ -323,19 +319,16 @@ jobs:
             exit 1
           fi
 
-          # Apply each commit separately so resolving a conflict cannot discard later commits.
-          while IFS= read -r esc_commit; do
-            if ! git cherry-pick --no-commit "$esc_commit"; then
-              python3 scripts/resolve-managed-tool-esc-conflicts.py
-              git cherry-pick --quit
-            fi
-          done < <(git rev-list --reverse "$terminal_seam..origin/patch/esc-abort-v2")
+          git diff --binary "$terminal_seam" origin/patch/esc-abort -- > /tmp/esc-abort.patch
+          if ! git apply --3way --index /tmp/esc-abort.patch; then
+            python3 scripts/resolve-managed-tool-esc-conflicts.py
+          fi
           if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/esc-abort-v2'
+            echo '::error::Unresolved conflicts remain after applying patch/esc-abort'
             exit 1
           fi
           if git diff --cached --quiet; then
-            echo '::error::patch/esc-abort-v2 descendant range is empty'
+            echo '::error::patch/esc-abort descendant range is empty'
             exit 1
           fi
           agent_loop=packages/agent/src/agent-loop.ts
@@ -349,22 +342,22 @@ jobs:
           test "$(grep -Fc 'const execution = createPreparedToolExecution(' "$agent_loop")" -eq 2
           test "$(grep -Fc 'const executed = await executePreparedToolCall(preparation, signal, emit);' "$agent_loop")" -eq 0
           git diff --cached --check
-          git commit -m "merge patch/esc-abort-v2 branch"
+          git commit -m "merge patch/esc-abort branch"
 
-          if ! git cherry-pick --no-commit "$terminal_seam..origin/patch/manual-retry-v2"; then
+          git diff --binary "$terminal_seam" origin/patch/manual-retry -- > /tmp/manual-retry.patch
+          if ! git apply --3way --index /tmp/manual-retry.patch; then
             python3 scripts/resolve-manual-retry-conflicts.py
-            git cherry-pick --quit
           fi
           if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/manual-retry-v2'
+            echo '::error::Unresolved conflicts remain after applying patch/manual-retry'
             exit 1
           fi
           if git diff --cached --quiet; then
-            echo '::error::patch/manual-retry-v2 descendant range is empty'
+            echo '::error::patch/manual-retry descendant range is empty'
             exit 1
           fi
           git diff --cached --check
-          git commit -m "merge patch/manual-retry-v2 branch"
+          git commit -m "merge patch/manual-retry branch"
 
           if ! git merge --squash origin/patch/changelog-prerelease; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
@@ -400,7 +393,7 @@ jobs:
           git merge --squash origin/patch/retry-non-retryable-patterns
           git commit -m "merge patch/retry-non-retryable-patterns branch"
 
-          if ! git merge --squash origin/patch/slow-hook-tui-only-v2; then
+          if ! git merge --squash origin/patch/slow-hook-tui-only; then
             python3 scripts/resolve-slow-hook-squash-conflicts.py
           fi
           if ! git diff --quiet --diff-filter=U --; then
@@ -408,25 +401,22 @@ jobs:
             exit 1
           fi
           if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/slow-hook-tui-only-v2'
+            echo '::error::Empty patch integration for patch/slow-hook-tui-only'
             exit 1
           fi
           grep -Fq 'if (ext.uninterruptibleHandlers?.has(handler) === true) continue;' packages/coding-agent/src/core/extensions/runner.ts
           grep -Fq 'this.runHandler("message_end", ext, handlerIndex' packages/coding-agent/src/core/extensions/runner.ts
           git diff --cached --check
-          git commit -m "merge patch/slow-hook-tui-only-v2 branch"
+          git commit -m "merge patch/slow-hook-tui-only branch"
 
-          if ! git merge-base --is-ancestor origin/patch/slow-hook-tui-only-v2 origin/patch/session-tree-splice-v2; then
-            echo '::error::patch/session-tree-splice-v2 must descend from patch/slow-hook-tui-only-v2'
+          if ! git merge-base --is-ancestor origin/patch/slow-hook-tui-only origin/patch/session-tree-splice; then
+            echo '::error::patch/session-tree-splice must descend from patch/slow-hook-tui-only'
             exit 1
           fi
-          mapfile -t session_tree_commits < <(
-            git rev-list --reverse origin/patch/slow-hook-tui-only-v2..origin/patch/session-tree-splice-v2
-          )
-          for commit in "${session_tree_commits[@]}"; do
-            if git cherry-pick --no-commit "$commit"; then
-              continue
-            fi
+          git diff --binary \
+            origin/patch/slow-hook-tui-only \
+            origin/patch/session-tree-splice -- > /tmp/session-tree-splice.patch
+          if ! git apply --3way --index /tmp/session-tree-splice.patch; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
             expected_conflicts=(
               packages/coding-agent/src/core/session-manager.ts
@@ -440,14 +430,13 @@ jobs:
               exit 1
             fi
             python3 scripts/resolve-session-tree-splice-conflicts.py
-            git cherry-pick --quit
-          done
+          fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying session-tree splice'
             exit 1
           fi
           if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/session-tree-splice-v2'
+            echo '::error::Empty patch integration for patch/session-tree-splice'
             exit 1
           fi
           grep -Fq 'rmSync,' packages/coding-agent/src/core/session-manager.ts
@@ -455,15 +444,15 @@ jobs:
           grep -Fq 'sessionManagerFactory?: (tempDir: string) => SessionManager;' packages/coding-agent/test/suite/harness.ts
           grep -Fq 'persist?: boolean;' packages/coding-agent/test/suite/harness.ts
           git diff --cached --check
-          git commit -m "merge patch/session-tree-splice-v2 branch"
+          git commit -m "merge patch/session-tree-splice branch"
 
-          git merge --squash origin/patch/ws-cached-empty-delta-v2
+          git merge --squash origin/patch/ws-cached-empty-delta
           if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/ws-cached-empty-delta-v2'
+            echo '::error::Empty patch integration for patch/ws-cached-empty-delta'
             exit 1
           fi
           git diff --cached --check
-          git commit -m "merge patch/ws-cached-empty-delta-v2 branch"
+          git commit -m "merge patch/ws-cached-empty-delta branch"
 
           git merge --squash origin/patch/self-update-managed-by
           if git diff --cached --quiet; then
@@ -504,13 +493,13 @@ jobs:
 
           # Independent upstream-based runtime patch; an empty squash means
           # upstream filters empty messages itself, so retire this patch.
-          git merge --squash origin/patch/ai-drop-empty-messages-v2
+          git merge --squash origin/patch/ai-drop-empty-messages
           if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/ai-drop-empty-messages-v2; upstream filters empty messages itself, retire this patch'
+            echo '::error::Empty patch integration for patch/ai-drop-empty-messages; upstream filters empty messages itself, retire this patch'
             exit 1
           fi
           git diff --cached --check
-          git commit -m "merge patch/ai-drop-empty-messages-v2 branch"
+          git commit -m "merge patch/ai-drop-empty-messages branch"
 
           git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 

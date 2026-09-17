@@ -56,12 +56,16 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
   const resolver = readFileSync(join(ROOT, "scripts", "resolve-managed-tool-esc-conflicts.py"), "utf8");
   assert.match(
     syncWorkflowText,
-    /\+refs\/heads\/patch\/managed-tool-executions-v2:refs\/remotes\/origin\/patch\/managed-tool-executions-v2/,
+    /\+refs\/heads\/patch\/managed-tool-executions:refs\/remotes\/origin\/patch\/managed-tool-executions/,
   );
-  const seamIndex = syncWorkflowText.indexOf('git commit -m "merge patch/agent-run-failure-seam-v2 branch"');
-  const managedIndex = syncWorkflowText.indexOf('git commit -m "merge patch/managed-tool-executions-v2 branch"');
-  const escIndex = syncWorkflowText.indexOf('git commit -m "merge patch/esc-abort-v2 branch"');
+  const seamIndex = syncWorkflowText.indexOf('git commit -m "merge patch/agent-run-failure-seam branch"');
+  const managedIndex = syncWorkflowText.indexOf('git commit -m "merge patch/managed-tool-executions branch"');
+  const escIndex = syncWorkflowText.indexOf('git commit -m "merge patch/esc-abort branch"');
   assert.ok(seamIndex >= 0 && seamIndex < managedIndex && managedIndex < escIndex);
+  assert.match(syncWorkflowText, /git diff --binary "\$terminal_seam" origin\/patch\/esc-abort/);
+  assert.match(syncWorkflowText, /git diff --binary "\$terminal_seam" origin\/patch\/manual-retry/);
+  assert.match(syncWorkflowText, /git apply --3way --index \/tmp\/esc-abort\.patch/);
+  assert.match(syncWorkflowText, /git apply --3way --index \/tmp\/manual-retry\.patch/);
   assert.match(syncWorkflowText, /python3 scripts\/resolve-managed-tool-esc-conflicts\.py/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
@@ -132,9 +136,9 @@ test("upstream sync keeps provider-transparent compaction temporarily retired", 
 test("upstream sync carries the unified TUI-only slow-hook patch", () => {
   assert.match(
     syncWorkflowText,
-    /\+refs\/heads\/patch\/slow-hook-tui-only-v2:refs\/remotes\/origin\/patch\/slow-hook-tui-only-v2/,
+    /\+refs\/heads\/patch\/slow-hook-tui-only:refs\/remotes\/origin\/patch\/slow-hook-tui-only/,
   );
-  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/slow-hook-tui-only-v2/);
+  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/slow-hook-tui-only/);
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
@@ -146,23 +150,23 @@ test("upstream sync preserves bounded slow-hook and session-tree compatibility",
   );
   assert.match(
     syncWorkflowText,
-    /git rev-list --reverse origin\/patch\/slow-hook-tui-only-v2\.\.origin\/patch\/session-tree-splice-v2/,
+    /git diff --binary[\s\\]+origin\/patch\/slow-hook-tui-only[\s\\]+origin\/patch\/session-tree-splice -- > \/tmp\/session-tree-splice\.patch/,
   );
   assert.match(
     syncWorkflowText,
-    /for commit in "\$\{session_tree_commits\[@\]\}"; do\s+if git cherry-pick --no-commit "\$commit"/,
+    /git apply --3way --index \/tmp\/session-tree-splice\.patch/,
   );
   assert.match(
     syncWorkflowText,
-    /python3 scripts\/resolve-session-tree-splice-conflicts\.py\s+git cherry-pick --quit/,
+    /python3 scripts\/resolve-session-tree-splice-conflicts\.py/,
   );
   assert.match(
     syncWorkflowText,
-    /patch\/session-tree-splice-v2 must descend from patch\/slow-hook-tui-only-v2/,
+    /patch\/session-tree-splice must descend from patch\/slow-hook-tui-only/,
   );
   assert.ok(
-    syncWorkflowText.indexOf('git commit -m "merge patch/slow-hook-tui-only-v2 branch"') <
-      syncWorkflowText.indexOf('git commit -m "merge patch/session-tree-splice-v2 branch"'),
+    syncWorkflowText.indexOf('git commit -m "merge patch/slow-hook-tui-only branch"') <
+      syncWorkflowText.indexOf('git commit -m "merge patch/session-tree-splice branch"'),
   );
   assert.doesNotMatch(syncWorkflowText, /patch\/provider-transparent-compaction/);
   assert.doesNotMatch(syncWorkflowText, /patch\/pre-provider-compaction/);
