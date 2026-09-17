@@ -600,7 +600,9 @@ describe("Agent", () => {
 		await agent.prompt("hello");
 
 		expect(providerCalls).toBe(1);
-		expect(agent.state.messages.slice(1)).toMatchObject([
+		expect(
+			agent.state.messages.filter((message) => message.role !== "system" && message.role !== "user"),
+		).toMatchObject([
 			{ role: "assistant", stopReason: "toolUse" },
 			{ role: "toolResult" },
 			{ role: "assistant", stopReason: "aborted" },
