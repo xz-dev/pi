@@ -74,6 +74,22 @@ async function loadUpdater(executablePath = process.execPath) {
 	return import("../src/utils/xz-release-update.ts");
 }
 
+function writeInstalledBundle(installRoot: string, version: string): string {
+	const bundleDirectory = join(installRoot, "bundles", version);
+	mkdirSync(bundleDirectory, { recursive: true });
+	writeFileSync(join(bundleDirectory, "pi"), "wrapper\n");
+	writeFileSync(join(bundleDirectory, "pi-native"), "binary\n");
+	writeFileSync(
+		join(bundleDirectory, "package.json"),
+		`${JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			version,
+			piConfig: { distribution: "xz-dev", releaseTarget: TARGET },
+		})}\n`,
+	);
+	return bundleDirectory;
+}
+
 afterEach(() => {
 	vi.doUnmock("../src/config.ts");
 	vi.doUnmock("node:process");
@@ -236,8 +252,7 @@ describe("xz-dev native Release updates", () => {
 		if (process.platform === "win32") return;
 		allowNetwork();
 		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
-		const oldBundle = join(root, "bundles", CURRENT_VERSION);
-		mkdirSync(oldBundle, { recursive: true });
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		try {
 			const source = join(root, "source");
@@ -281,8 +296,7 @@ describe("xz-dev native Release updates", () => {
 		allowNetwork();
 		vi.useFakeTimers();
 		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
-		const oldBundle = join(root, "bundles", CURRENT_VERSION);
-		mkdirSync(oldBundle, { recursive: true });
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		const { manifestBytes, sums } = discoveryFiles();
 		const fetchMock = vi.fn(async (input: string | URL) => {
@@ -332,8 +346,7 @@ describe("xz-dev native Release updates", () => {
 		allowNetwork();
 		vi.useFakeTimers();
 		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
-		const oldBundle = join(root, "bundles", CURRENT_VERSION);
-		mkdirSync(oldBundle, { recursive: true });
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		const { manifestBytes, sums } = discoveryFiles();
 		const fetchMock = vi.fn(async (input: string | URL) => {
@@ -402,8 +415,7 @@ describe("xz-dev native Release updates", () => {
 		allowNetwork();
 		vi.useFakeTimers();
 		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
-		const oldBundle = join(root, "bundles", CURRENT_VERSION);
-		mkdirSync(oldBundle, { recursive: true });
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		const { manifestBytes, sums } = discoveryFiles();
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -446,8 +458,7 @@ describe("xz-dev native Release updates", () => {
 		allowNetwork();
 		vi.useFakeTimers();
 		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
-		const oldBundle = join(root, "bundles", CURRENT_VERSION);
-		mkdirSync(oldBundle, { recursive: true });
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		const { manifestBytes, sums } = discoveryFiles();
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -490,8 +501,7 @@ describe("xz-dev native Release updates", () => {
 	it("does not classify a bundle HTTP failure as retryable discovery", async () => {
 		allowNetwork();
 		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
-		const oldBundle = join(root, "bundles", CURRENT_VERSION);
-		mkdirSync(oldBundle, { recursive: true });
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
 		const { manifestBytes, sums } = discoveryFiles();
 		const fetchMock = vi.fn(async (input: string | URL) => {
@@ -525,10 +535,10 @@ describe("xz-dev native Release updates", () => {
 	it("leaves activation pointers unchanged when bundle digest fails", async () => {
 		allowNetwork();
 		const root = join(tmpdir(), `pi-xz-update-${process.pid}-${Date.now()}`);
-		const oldBundle = join(root, "bundles", CURRENT_VERSION);
-		mkdirSync(oldBundle, { recursive: true });
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
 		writeFileSync(join(root, "current"), `${CURRENT_VERSION}\n`);
-		writeFileSync(join(root, "previous"), "older\n");
+		writeInstalledBundle(root, "0.84.1-xz.67.1.g00000000");
+		writeFileSync(join(root, "previous"), "0.84.1-xz.67.1.g00000000\n");
 		const { manifestBytes, sums } = discoveryFiles();
 		const fetchMock = vi.fn(async (input: string | URL, _init?: RequestInit) => {
 			if (String(input) === SUMS_URL) return new Response(sums);
@@ -545,7 +555,7 @@ describe("xz-dev native Release updates", () => {
 				runXzSelfUpdate(latest!, CURRENT_VERSION, false, { executablePath: join(oldBundle, "pi-native") }),
 			).rejects.toThrow(/sha256 mismatch/);
 			expect(readFileSync(join(root, "current"), "utf8")).toBe(`${CURRENT_VERSION}\n`);
-			expect(readFileSync(join(root, "previous"), "utf8")).toBe("older\n");
+			expect(readFileSync(join(root, "previous"), "utf8")).toBe("0.84.1-xz.67.1.g00000000\n");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
