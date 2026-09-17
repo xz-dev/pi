@@ -14,7 +14,8 @@ import {
 	resetOpenAICodexWebSocketDebugStats,
 	stream as streamOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { Model } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 function mockToken(accountId = "acc_test"): string {
 	const payload = Buffer.from(
@@ -120,10 +121,10 @@ describe("ws-cached continuation after empty length-stopped response", () => {
 		}
 		vi.stubGlobal("WebSocket", MockWebSocket);
 
-		const context: Context = {
+		const context = normalizeContext({
 			systemPrompt: "You are a helpful assistant.",
 			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
-		};
+		});
 		const first = await streamOpenAICodexResponses(model, context, {
 			apiKey: mockToken(),
 			sessionId: "stale-repro",
