@@ -1,6 +1,6 @@
 import {
-	createInitialSystemMessage,
 	type AssistantMessage,
+	createInitialSystemMessage,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
 	type ImageContent,
