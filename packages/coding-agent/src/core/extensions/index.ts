@@ -99,12 +99,14 @@ export type {
 	MarkdownTransformer,
 	// Events - Message
 	MessageEndEvent,
+	MessageEndEventResult,
 	MessageRenderer,
 	MessageRenderOptions,
 	MessageStartEvent,
 	MessageUpdateEvent,
 	ModelSelectEvent,
 	ModelSelectSource,
+	NormalizedBuildSystemPromptOptions,
 	PowerShellToolCallEvent,
 	PowerShellToolResultEvent,
 	ProjectTrustContext,
@@ -149,6 +151,7 @@ export type {
 	SetThinkingLevelHandler,
 	SlowExtensionHookEntry,
 	TerminalInputHandler,
+	ThinkingLevelSelectEvent,
 	// Events - Tool
 	ToolCallEvent,
 	ToolCallEventResult,

@@ -20,7 +20,6 @@ import type {
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	ConstrainedSamplingConfig,
-	Context,
 	ImageContent,
 	Model,
 	OAuthCredentials,
@@ -31,6 +30,7 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	ToolResultMessage,
+	TranscriptContext,
 	Usage,
 } from "@earendil-works/pi-ai";
 import type {
@@ -65,7 +65,7 @@ import type {
 } from "../session-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
-import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
 import type { BashOperations } from "../tools/bash.ts";
 import type { EditToolDetails } from "../tools/edit.ts";
 import type {
@@ -86,7 +86,7 @@ import type {
 } from "../tools/index.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
-export type { BuildSystemPromptOptions } from "../system-prompt.ts";
+export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
 
@@ -722,10 +722,10 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	/** Images attached to the user prompt, if any. */
 	images?: ImageContent[];
-	/** The fully assembled system prompt string. */
-	systemPrompt: string;
-	/** Structured options used to build the system prompt. Extensions can inspect this to understand what Pi loaded without re-discovering resources. */
-	systemPromptOptions: BuildSystemPromptOptions;
+	/** The current system prompt, rendered from systemPromptOptions and earlier handler changes. */
+	readonly systemPrompt: string;
+	/** Mutable prompt sections. Later handlers observe mutations made by earlier handlers. */
+	systemPromptOptions: NormalizedBuildSystemPromptOptions;
 }
 
 /** Fired when an agent loop starts */
@@ -1136,12 +1136,17 @@ export interface ToolCallEventResult {
 }
 
 /** Result from user_bash event handler */
-export interface UserBashEventResult {
-	/** Custom operations to use for execution */
-	operations?: BashOperations;
-	/** Full replacement: extension handled execution, use this result */
-	result?: BashResult;
-}
+export type UserBashEventResult =
+	| {
+			/** Custom operations to use for execution */
+			operations: BashOperations;
+			result?: never;
+	  }
+	| {
+			operations?: never;
+			/** Full replacement: extension handled execution, use this result */
+			result: BashResult;
+	  };
 
 export interface ToolResultEventResult {
 	content?: (TextContent | ImageContent)[];
@@ -1157,7 +1162,7 @@ export interface MessageEndEventResult {
 
 export interface BeforeAgentStartEventResult {
 	message?: Pick<CustomMessage, "customType" | "content" | "display" | "details">;
-	/** Replace the system prompt for this turn. If multiple extensions return this, they are chained. */
+	/** Replace the complete system prompt for this turn. Later handlers observe this exact override. */
 	systemPrompt?: string;
 }
 
@@ -1523,11 +1528,17 @@ export interface ProviderConfig {
 	api?: Api;
 	/**
 	 * Optional streamSimple handler for custom APIs.
+	 * The context is a normalized transcript: read the prompt and tools from its system messages
+	 * (`getCurrentSystemPrompt(context.messages)`, `getCurrentTools(context.messages)`).
 	 * Implementations must invoke `options.onPayload` before sending the provider request and use any
 	 * returned replacement payload. They must invoke `options.onResponse` after receiving the response
 	 * and before consuming its body, matching built-in providers.
 	 */
-	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
+	streamSimple?: (
+		model: Model<Api>,
+		context: TranscriptContext,
+		options?: SimpleStreamOptions,
+	) => AssistantMessageEventStream;
 	/** Custom headers to include in requests. */
 	headers?: Record<string, string>;
 	/** If true, adds Authorization: Bearer header with the resolved API key. */
