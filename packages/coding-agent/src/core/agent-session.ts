@@ -25,7 +25,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, getCurrentSystemMessage, retryDelayMs } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -33,6 +33,7 @@ import type {
 	Message,
 	Model,
 	ProviderHeaders,
+	SystemMessage,
 	TextContent,
 	Usage,
 } from "@earendil-works/pi-ai/compat";
@@ -109,7 +110,13 @@ import { getLatestCompactionEntry } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
-import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import {
+	buildSystemPrompt,
+	buildSystemPromptState,
+	diffSystemPromptSections,
+	type NormalizedBuildSystemPromptOptions,
+	normalizeBuildSystemPromptOptions,
+} from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -302,10 +309,6 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 }
 
 // ============================================================================
-// Constants
-// ============================================================================
-
-// ============================================================================
 // AgentSession Class
 // ============================================================================
 
@@ -393,10 +396,9 @@ export class AgentSession {
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
-	// Base system prompt (without extension appends) - used to apply fresh appends each turn
-	private _baseSystemPrompt = "";
-	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
-	private _systemPromptOverride?: string;
+	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
+	/** Prompt options after before_agent_start mutations for the active run. */
+	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -424,6 +426,7 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -558,7 +561,7 @@ export class AgentSession {
 
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
 		const model = this.model;
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this.settingsManager.getCompactionSettings(model);
 
 		if (
 			!model ||
@@ -585,14 +588,26 @@ export class AgentSession {
 			const context = await this._compactBeforeNextAssistantResponse(turn.context);
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
+			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
+			const options = normalizeBuildSystemPromptOptions({
+				...runOptions,
+				selectedTools: this.getActiveToolNames(),
+				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
+				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
+			});
+			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
+			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
+			this._runSystemPromptOptions = options;
 
 			return {
 				...previousSnapshot,
 				context: {
 					...nextContext,
-					systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
 				},
+				messages: updateMessage
+					? [...(previousSnapshot?.messages ?? []), updateMessage]
+					: previousSnapshot?.messages,
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
@@ -693,6 +708,16 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			let bufferedFirstRetryMessage = false;
+			if (
+				event.message.role === "system" &&
+				this._manualRetryCommit &&
+				!this._manualRetryCommit.committed &&
+				!this._manualRetryCommit.runFailedBeforeCommit
+			) {
+				this._manualRetryCommit.recoveryMessages.push(event.message);
+				bufferedFirstRetryMessage = true;
+			}
 			let committedFirstRetryAssistant = false;
 			if (
 				event.message.role === "assistant" &&
@@ -727,13 +752,17 @@ export class AgentSession {
 					event.message.details,
 				);
 			} else if (
+				!bufferedFirstRetryMessage &&
 				!committedFirstRetryAssistant &&
 				!(
 					event.message.role === "assistant" &&
 					this._manualRetryCommit?.runFailedBeforeCommit &&
 					!this._manualRetryCommit.committed
 				) &&
-				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
+				(event.message.role === "system" ||
+					event.message.role === "user" ||
+					event.message.role === "assistant" ||
+					event.message.role === "toolResult")
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
@@ -976,9 +1005,9 @@ export class AgentSession {
 		return !this._isAgentRunActive && !this.isCompacting;
 	}
 
-	/** Current effective system prompt (includes any per-turn extension modifications) */
+	/** Current effective system prompt, including changes not yet sent to the model. */
 	get systemPrompt(): string {
-		return this.agent.state.systemPrompt;
+		return buildSystemPrompt(this._runSystemPromptOptions ?? this._baseSystemPromptOptions);
 	}
 
 	/** Current retry attempt (0 if not retrying) */
@@ -1028,10 +1057,7 @@ export class AgentSession {
 			}
 		}
 		this.agent.state.tools = tools;
-
-		// Rebuild base system prompt with new tool set
-		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-		this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
+		this._rebuildSystemPrompt(validToolNames);
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -1112,30 +1138,21 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
-	private _rebuildSystemPrompt(toolNames: string[]): string {
+	private _rebuildSystemPrompt(toolNames: string[]): void {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
-		const promptGuidelines: string[] = [];
-		for (const name of validToolNames) {
+		for (const name of this._toolRegistry.keys()) {
 			const snippet = this._toolPromptSnippets.get(name);
-			if (snippet) {
-				toolSnippets[name] = snippet;
-			}
-
-			const toolGuidelines = this._toolPromptGuidelines.get(name);
-			if (toolGuidelines) {
-				promptGuidelines.push(...toolGuidelines);
-			}
+			if (snippet) toolSnippets[name] = snippet;
 		}
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const appendSystemPrompt = loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : "";
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
-		this._baseSystemPromptOptions = {
+		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			cwd: this._cwd,
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,
@@ -1143,9 +1160,55 @@ export class AgentSession {
 			appendSystemPrompt,
 			selectedTools: validToolNames,
 			toolSnippets,
-			promptGuidelines,
-		};
-		return buildSystemPrompt(this._baseSystemPromptOptions);
+			toolGuidelines: Object.fromEntries(this._toolPromptGuidelines),
+		});
+	}
+
+	/**
+	 * Apply a prompt and tool loadout for the next request. Sets the executable tools and
+	 * returns a system message patching the prompt sections the model currently has (replayed
+	 * from `messages`), or undefined when the prompt is unchanged. Tool changes are declared by
+	 * the agent loop before the request.
+	 *
+	 * A forced prompt is opaque, so entering, changing, or leaving one cannot be expressed as
+	 * a section patch: it returns a `replace` message that discards the replayed state. The
+	 * agent loop fills in the full tool set, since replay through a replacement starts empty.
+	 */
+	private _preparePromptAndToolLoadout(
+		options: NormalizedBuildSystemPromptOptions,
+		messages: AgentMessage[] = this.agent.state.messages,
+	): SystemMessage | undefined {
+		options.selectedTools = [...new Set(options.selectedTools)].filter((name) => this._toolRegistry.has(name));
+		this.agent.state.tools = options.selectedTools.flatMap((name) => {
+			const tool = this._toolRegistry.get(name);
+			return tool ? [tool] : [];
+		});
+		const current = getCurrentSystemMessage(messages);
+		const desired = buildSystemPromptState(options);
+		const currentIsOpaque = current !== undefined && current.sections === undefined;
+		if (desired.sections === undefined || currentIsOpaque) {
+			const unchanged =
+				currentIsOpaque &&
+				desired.sections === undefined &&
+				contentText(current.content) === contentText(desired.content);
+			return unchanged ? undefined : { role: "system", ...desired, replace: true, timestamp: Date.now() };
+		}
+		const sections = diffSystemPromptSections(current?.sections ?? {}, desired.sections);
+		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
+	}
+
+	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
+	private _restoreToolsFromTranscript(): void {
+		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
+		if (!current) return;
+		const toolNames = (current.toolsAdded ?? [])
+			.map((tool) => tool.name)
+			.filter((name) => this._toolRegistry.has(name));
+		this.agent.state.tools = toolNames.flatMap((name) => {
+			const registered = this._toolRegistry.get(name);
+			return registered ? [registered] : [];
+		});
+		this._rebuildSystemPrompt(toolNames);
 	}
 
 	// =========================================================================
@@ -1162,7 +1225,7 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 		} finally {
-			this._systemPromptOverride = undefined;
+			this._runSystemPromptOptions = undefined;
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
 			await this._emitAgentSettled();
@@ -1261,7 +1324,7 @@ export class AgentSession {
 			}
 			this._manualRetryCommit = undefined;
 			this._manualRetryActive = false;
-			this._systemPromptOverride = undefined;
+			this._runSystemPromptOptions = undefined;
 			await this._emitAgentSettled();
 		}
 	}
@@ -1294,6 +1357,26 @@ export class AgentSession {
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
 		return this.agent.hasQueuedMessages();
+	}
+
+	private async _runInputHandlers(
+		text: string,
+		images: ImageContent[] | undefined,
+		source: InputSource,
+		streamingBehavior?: "steer" | "followUp",
+	): Promise<{ text: string; images: ImageContent[] | undefined } | undefined> {
+		if (!this._extensionRunner.hasHandlers("input")) {
+			return { text, images };
+		}
+
+		const inputResult = await this._extensionRunner.emitInput(text, images, source, streamingBehavior);
+		if (inputResult.action === "handled") {
+			return undefined;
+		}
+		if (inputResult.action === "transform") {
+			return { text: inputResult.text, images: inputResult.images ?? images };
+		}
+		return { text, images };
 	}
 
 	/**
@@ -1329,24 +1412,17 @@ export class AgentSession {
 			}
 
 			// Emit input event for extension interception (before skill/template expansion)
-			let currentText = text;
-			let currentImages = options?.images;
-			if (this._extensionRunner.hasHandlers("input")) {
-				const inputResult = await this._extensionRunner.emitInput(
-					currentText,
-					currentImages,
-					options?.source ?? "interactive",
-					this.isStreaming ? options?.streamingBehavior : undefined,
-				);
-				if (inputResult.action === "handled") {
-					preflightResult?.(true);
-					return;
-				}
-				if (inputResult.action === "transform") {
-					currentText = inputResult.text;
-					currentImages = inputResult.images ?? currentImages;
-				}
+			const processedInput = await this._runInputHandlers(
+				text,
+				options?.images,
+				options?.source ?? "interactive",
+				this.isStreaming ? options?.streamingBehavior : undefined,
+			);
+			if (!processedInput) {
+				preflightResult?.(true);
+				return;
 			}
+			const { text: currentText, images: currentImages } = processedInput;
 
 			// Expand skill commands (/skill:name args) and prompt templates (/template args)
 			let expandedText = currentText;
@@ -1423,35 +1499,33 @@ export class AgentSession {
 			this._pendingNextTurnMessages = [];
 
 			// Emit before_agent_start extension event
+			const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 			const result = await this._extensionRunner.emitBeforeAgentStart(
 				expandedText,
 				currentImages,
-				this._baseSystemPrompt,
 				this._baseSystemPromptOptions,
 			);
-			// Add all custom messages from extensions
-			if (result?.messages) {
-				for (const msg of result.messages) {
-					messages.push({
-						role: "custom",
-						customType: msg.customType,
-						// Untyped extensions can pass null/missing content; normalize at ingestion.
-						content: msg.content ?? [],
-						display: msg.display,
-						details: msg.details,
-						timestamp: Date.now(),
-					});
-				}
+			// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
+			// which updates the live loadout instead. An explicit edit wins; otherwise the live
+			// loadout is authoritative, so a setActiveTools() call is not undone here.
+			const handlerEditedTools =
+				result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
+				result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
+			if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
+			for (const msg of result.messages) {
+				messages.push({
+					role: "custom",
+					customType: msg.customType,
+					// Untyped extensions can pass null/missing content; normalize at ingestion.
+					content: msg.content ?? [],
+					display: msg.display,
+					details: msg.details,
+					timestamp: Date.now(),
+				});
 			}
-			// Apply extension-modified system prompt, or reset to base
-			if (result?.systemPrompt !== undefined) {
-				this._systemPromptOverride = result.systemPrompt;
-				this.agent.state.systemPrompt = result.systemPrompt;
-			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
-				this._systemPromptOverride = undefined;
-				this.agent.state.systemPrompt = this._baseSystemPrompt;
-			}
+			const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
+			this._runSystemPromptOptions = result.systemPromptOptions;
+			if (updateMessage) messages.unshift(updateMessage);
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -1525,25 +1599,45 @@ export class AgentSession {
 		}
 	}
 
+	private async _queueUserInput(
+		text: string,
+		images: ImageContent[] | undefined,
+		behavior: "steer" | "followUp",
+		source: InputSource,
+	): Promise<void> {
+		if (text.startsWith("/")) {
+			this._throwIfExtensionCommand(text);
+		}
+
+		const processedInput = await this._runInputHandlers(
+			text,
+			images,
+			source,
+			this.isStreaming ? behavior : undefined,
+		);
+		if (!processedInput) return;
+
+		let expandedText = this._expandSkillCommand(processedInput.text);
+		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+
+		if (behavior === "steer") {
+			await this._queueSteer(expandedText, processedInput.images);
+		} else {
+			await this._queueFollowUp(expandedText, processedInput.images);
+		}
+	}
+
 	/**
 	 * Queue a steering message while the agent is running.
 	 * Delivered after the current assistant turn finishes executing its tool calls,
 	 * before the next LLM call.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
+	 * @param options Input source; defaults to interactive
 	 * @throws Error if text is an extension command
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		// Check for extension commands (cannot be queued)
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
-		}
-
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-
-		await this._queueSteer(expandedText, images);
+	async steer(text: string, images?: ImageContent[], options?: { source?: InputSource }): Promise<void> {
+		await this._queueUserInput(text, images, "steer", options?.source ?? "interactive");
 	}
 
 	/**
@@ -1551,19 +1645,11 @@ export class AgentSession {
 	 * Delivered only when agent has no more tool calls or steering messages.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
+	 * @param options Input source; defaults to interactive
 	 * @throws Error if text is an extension command
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		// Check for extension commands (cannot be queued)
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
-		}
-
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-
-		await this._queueFollowUp(expandedText, images);
+	async followUp(text: string, images?: ImageContent[], options?: { source?: InputSource }): Promise<void> {
+		await this._queueUserInput(text, images, "followUp", options?.source ?? "interactive");
 	}
 
 	/**
@@ -2099,14 +2185,15 @@ export class AgentSession {
 		let fromExtension = false;
 
 		try {
-			if (!this.model) {
+			const model = this.model;
+			if (!model) {
 				throw new Error(formatNoModelSelectedMessage());
 			}
 
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
+			const settings = this.settingsManager.getCompactionSettings(model);
+			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
 
 			const pathEntries = this.sessionManager.getBranch();
-			const settings = this.settingsManager.getCompactionSettings();
 
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
@@ -2279,7 +2366,7 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
 	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this.settingsManager.getCompactionSettings(this.model);
 		if (!settings.enabled) return false;
 
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
@@ -2395,16 +2482,17 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
+		const model = this.model;
+		const settings = this.settingsManager.getCompactionSettings(model);
 		let started = false;
 		let fromExtension = false;
 
 		try {
-			if (!this.model) {
+			if (!model) {
 				return false;
 			}
 
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
+			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
 
 			const pathEntries = this.sessionManager.getBranch();
 
@@ -2637,8 +2725,7 @@ export class AgentSession {
 		};
 
 		this._resourceLoader.extendResources(extensionPaths);
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		this._rebuildSystemPrompt(this.getActiveToolNames());
 	}
 
 	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
@@ -3054,7 +3141,7 @@ export class AgentSession {
 			return false;
 		}
 
-		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+		const delayMs = retryDelayMs(settings, this._retryAttempt);
 
 		this._emit({
 			type: "auto_retry_start",
@@ -3447,6 +3534,7 @@ export class AgentSession {
 			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
+			this._restoreToolsFromTranscript();
 
 			// Emit session_tree event
 			await this._extensionRunner.emit({
