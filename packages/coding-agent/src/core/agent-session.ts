@@ -708,6 +708,16 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			let bufferedFirstRetryMessage = false;
+			if (
+				event.message.role === "system" &&
+				this._manualRetryCommit &&
+				!this._manualRetryCommit.committed &&
+				!this._manualRetryCommit.runFailedBeforeCommit
+			) {
+				this._manualRetryCommit.recoveryMessages.push(event.message);
+				bufferedFirstRetryMessage = true;
+			}
 			let committedFirstRetryAssistant = false;
 			if (
 				event.message.role === "assistant" &&
@@ -742,6 +752,7 @@ export class AgentSession {
 					event.message.details,
 				);
 			} else if (
+				!bufferedFirstRetryMessage &&
 				!committedFirstRetryAssistant &&
 				!(
 					event.message.role === "assistant" &&

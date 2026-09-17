@@ -32,6 +32,10 @@ function toolResult(toolCallId: string, toolName: string, text: string): ToolRes
 }
 
 function setBranch(harness: Harness, messages: Message[]): string[] {
+	const initialSystem = harness.session.agent.state.messages.find((message) => message.role === "system");
+	if (initialSystem && harness.sessionManager.getEntries().length === 0) {
+		harness.sessionManager.appendMessage(initialSystem);
+	}
 	const ids = messages.map((message) => harness.sessionManager.appendMessage(message));
 	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 	return ids;
@@ -77,15 +81,21 @@ describe("manual /retry continuation", () => {
 			await created.session.retry();
 
 			const leaf = created.sessionManager.getLeafEntry();
-			expect(leaf).toMatchObject({ type: "message", parentId: requestId, message: { role: "assistant" } });
+			expect(leaf).toMatchObject({ type: "message", message: { role: "assistant" } });
+			const retrySystem = created.sessionManager.getEntry(leaf!.parentId!);
+			expect(retrySystem).toMatchObject({
+				type: "message",
+				parentId: requestId,
+				message: { role: "system" },
+			});
 			expect(getUserTexts(created)).toEqual(["original request"]);
 			expect(getAssistantTexts(created)).toEqual(["recovered continuation"]);
-			expect(requestMessages.map((message) => message.role)).toEqual(["user", "user"]);
-			expect(requestMessages.at(-1)).toMatchObject({
+			expect(requestMessages.map((message) => message.role)).toEqual(["user", "user", "system"]);
+			expect(requestMessages.at(-2)).toMatchObject({
 				role: "user",
 				content: [{ type: "text", text: createManualRetryRecoveryCue("safe partial") }],
 			});
-			expect(created.sessionManager.getEntries()).toHaveLength(3);
+			expect(created.sessionManager.getEntries()).toHaveLength(4);
 			expect(created.sessionManager.getEntry(failureId)).toMatchObject({
 				type: "message",
 				parentId: requestId,
@@ -257,10 +267,12 @@ describe("manual /retry continuation", () => {
 		await created.session.retry();
 
 		const leaf = created.sessionManager.getLeafEntry();
-		expect(leaf).toMatchObject({ parentId: userId, message: { role: "assistant" } });
+		expect(leaf).toMatchObject({ message: { role: "assistant" } });
+		const retrySystem = created.sessionManager.getEntry(leaf!.parentId!);
+		expect(retrySystem).toMatchObject({ parentId: userId, message: { role: "system" } });
 		expect(getAssistantTexts(created)).toEqual(["recovered sibling"]);
 		expect(created.sessionManager.getChildren(userId!).map((entry) => entry.id)).toEqual(
-			expect.arrayContaining([failureId, leaf?.id]),
+			expect.arrayContaining([failureId, retrySystem?.id]),
 		);
 	});
 
@@ -277,10 +289,12 @@ describe("manual /retry continuation", () => {
 
 		expect(getUserTexts(created)).toEqual(["reuse me"]);
 		expect(getAssistantTexts(created)).toEqual(["regenerated"]);
-		expect(created.sessionManager.getBranch().map((entry) => entry.id)).toEqual([
-			userId,
-			created.sessionManager.getLeafId(),
+		expect(created.sessionManager.getBranch().map((entry) => entry.type === "message" && entry.message.role)).toEqual([
+			"user",
+			"system",
+			"assistant",
 		]);
+		expect(created.sessionManager.getBranch()[0]?.id).toBe(userId);
 	});
 
 	it("keeps a completed tool result when retrying the selected tool-call assistant", async () => {
@@ -340,10 +354,12 @@ describe("manual /retry continuation", () => {
 		await created.session.retry();
 
 		expect(getUserTexts(created)).toEqual(["reuse me"]);
-		expect(created.sessionManager.getBranch().map((entry) => entry.id)).toEqual([
-			originalUserId,
-			created.sessionManager.getLeafId(),
+		expect(created.sessionManager.getBranch().map((entry) => entry.type === "message" && entry.message.role)).toEqual([
+			"user",
+			"system",
+			"assistant",
 		]);
+		expect(created.sessionManager.getBranch()[0]?.id).toBe(originalUserId);
 	});
 
 	it("survives JSONL reopen with both the failed side branch and new active branch", async () => {
@@ -353,6 +369,8 @@ describe("manual /retry continuation", () => {
 		});
 		harnesses.push(created);
 		const persisted = created.sessionManager;
+		const initialSystem = created.session.agent.state.messages.find((message) => message.role === "system");
+		if (initialSystem) persisted.appendMessage(initialSystem);
 		const userId = persisted.appendMessage(userMessage("persist me"));
 		const failureId = persisted.appendMessage(
 			fauxAssistantMessage("old failure", { stopReason: "error", errorMessage: "failed" }),
@@ -368,8 +386,10 @@ describe("manual /retry continuation", () => {
 		const reopened = SessionManager.open(file!, created.tempDir);
 		expect(reopened.getLeafId()).toBe(newLeafId);
 		expect(reopened.getEntry(failureId)).toMatchObject({ parentId: userId, message: { stopReason: "error" } });
-		expect(reopened.getEntry(newLeafId!)).toMatchObject({ parentId: userId, message: { stopReason: "stop" } });
-		expect(reopened.getChildren(userId).map((entry) => entry.id)).toEqual([failureId, newLeafId]);
+		expect(reopened.getEntry(newLeafId!)).toMatchObject({ message: { stopReason: "stop" } });
+		const retrySystemId = reopened.getEntry(newLeafId!)?.parentId;
+		expect(reopened.getEntry(retrySystemId!)).toMatchObject({ parentId: userId, message: { role: "system" } });
+		expect(reopened.getChildren(userId).map((entry) => entry.id)).toEqual([failureId, retrySystemId]);
 	});
 
 	it.each([
