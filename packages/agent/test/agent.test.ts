@@ -822,7 +822,6 @@ describe("Agent", () => {
 		const controller = new AbortController();
 		const events: AgentEvent[] = [];
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [],
 		};
