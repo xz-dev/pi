@@ -15,6 +15,11 @@ def main():
     subprocess.run(["git", "checkout", "--ours", "--", filename], check=True)
     path = Path(filename)
     text = path.read_text()
+    import_anchor = "\tcreateInitialSystemMessage,\n"
+    if text.count(import_anchor) != 1:
+        raise SystemExit("Unexpected pi-ai import shape for run-failure seam")
+    text = text.replace(import_anchor, import_anchor + "\ttype AssistantMessage,\n", 1)
+
     old = (
         '\t\t} satisfies AgentMessage;\n'
         '\t\tawait this.processEvents({ type: "message_start", message: failureMessage });\n'

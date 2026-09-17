@@ -14,7 +14,9 @@ spec.loader.exec_module(resolver)
 class ResolverTests(unittest.TestCase):
     def test_preserves_upstream_imports_and_adds_run_failure_event(self):
         original = (
-            'import { AssistantMessage } from "@earendil-works/pi-ai";\n'
+            'import {\n'
+            '\tcreateInitialSystemMessage,\n'
+            '} from "@earendil-works/pi-ai";\n'
             '\t\t} satisfies AgentMessage;\n'
             '\t\tawait this.processEvents({ type: "message_start", message: failureMessage });\n'
         )
@@ -29,7 +31,7 @@ class ResolverTests(unittest.TestCase):
                 resolver.main()
 
             result = target.read_text()
-            self.assertIn('import { AssistantMessage }', result)
+            self.assertIn("\ttype AssistantMessage,", result)
             self.assertIn("} satisfies AssistantMessage;", result)
             self.assertIn('type: "run_failure"', result)
             self.assertEqual(run.call_count, 2)
@@ -48,7 +50,7 @@ class ResolverTests(unittest.TestCase):
                 "check_output",
                 return_value="packages/agent/src/agent.ts\n",
             ), patch.object(resolver.subprocess, "run"):
-                with self.assertRaisesRegex(SystemExit, "run-failure seam shape"):
+                with self.assertRaisesRegex(SystemExit, "run-failure seam"):
                     resolver.main()
             self.assertEqual(target.read_text(), "unexpected content\n")
 
