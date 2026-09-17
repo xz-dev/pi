@@ -1,19 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-	AnthropicMessagesCompat,
-	Api,
-	Context,
-	Model,
-	OpenAICompletionsCompat,
-} from "@earendil-works/pi-ai/compat";
+import { normalizeContext } from "@earendil-works/pi-ai";
+import type { AnthropicMessagesCompat, Api, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai/compat";
 import { getApiProvider, getModels, getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ModelsJsonProvider } from "../src/core/model-config.ts";
 import { clearApiKeyCache, type ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
-
 import { createModelRegistry } from "./model-runtime-test-utils.ts";
 
 describe("ModelRegistry", () => {
@@ -93,9 +87,9 @@ describe("ModelRegistry", () => {
 		maxTokens: 4096,
 	};
 
-	const emptyContext: Context = {
+	const emptyContext = normalizeContext({
 		messages: [],
-	};
+	});
 
 	describe("baseUrl override (no custom models)", () => {
 		test("overriding baseUrl keeps all built-in models", async () => {
@@ -712,6 +706,52 @@ describe("ModelRegistry", () => {
 			// Other models should be unchanged
 			const opus = models.find((m) => m.id === "anthropic/claude-opus-4");
 			expect(opus?.name).not.toBe("Custom Sonnet Name");
+		});
+
+		test("Anthropic model override replaces allowed fallback metadata", async () => {
+			const allowedFallbackModels = [
+				{
+					provider: "anthropic",
+					model: "claude-opus-5",
+					cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+				},
+				{
+					provider: "anthropic",
+					model: "claude-opus-4-8",
+					cost: { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
+				},
+			];
+			writeRawModelsJson({
+				anthropic: {
+					modelOverrides: {
+						"claude-fable-5": {
+							compat: { allowedFallbackModels },
+						},
+					},
+				},
+			});
+
+			const registry = await createModelRegistry(authStorage, modelsJsonPath);
+			const compat = registry.find("anthropic", "claude-fable-5")?.compat as AnthropicMessagesCompat | undefined;
+
+			expect(registry.getError()).toBeUndefined();
+			expect(compat?.allowedFallbackModels).toEqual(allowedFallbackModels);
+		});
+
+		test("empty allowed fallback model override disables server-side fallback", async () => {
+			writeRawModelsJson({
+				anthropic: {
+					modelOverrides: {
+						"claude-fable-5": { compat: { allowedFallbackModels: [] } },
+					},
+				},
+			});
+
+			const registry = await createModelRegistry(authStorage, modelsJsonPath);
+			const compat = registry.find("anthropic", "claude-fable-5")?.compat as AnthropicMessagesCompat | undefined;
+
+			expect(registry.getError()).toBeUndefined();
+			expect(compat?.allowedFallbackModels).toEqual([]);
 		});
 
 		test("custom model and model override carry sampling params", async () => {
