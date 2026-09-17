@@ -76,6 +76,7 @@ import type {
 	ExtensionWidgetOptions,
 	MarkdownTransformer,
 	ProjectTrustContext,
+	UserBashEventResult,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
@@ -3620,6 +3621,8 @@ export class InteractiveMode {
 				this.chatContainer.addChild(component);
 				break;
 			}
+			case "system":
+				break;
 			case "user": {
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
@@ -6514,12 +6517,18 @@ export class InteractiveMode {
 		const extensionRunner = this.session.extensionRunner;
 
 		// Emit user_bash event to let extensions intercept
-		const eventResult = await extensionRunner.emitUserBash({
-			type: "user_bash",
-			command,
-			excludeFromContext,
-			cwd: this.sessionManager.getCwd(),
-		});
+		let eventResult: UserBashEventResult | undefined;
+		try {
+			eventResult = await extensionRunner.emitUserBash({
+				type: "user_bash",
+				command,
+				excludeFromContext,
+				cwd: this.sessionManager.getCwd(),
+			});
+		} catch {
+			// The extension runner already reported the error. Do not fall back to local execution.
+			return;
+		}
 
 		// If extension returned a full result, use it directly
 		if (eventResult?.result) {

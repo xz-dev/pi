@@ -600,7 +600,7 @@ describe("managed execution session lifecycle", () => {
 		return { runtime, faux };
 	}
 
-	it("preserves added tool metadata when a detached extension tool completes after reload", async () => {
+	it("preserves active tools when a detached extension tool completes after reload", async () => {
 		const changedTools = createDeferred<void>();
 		const finish = createDeferred<string>();
 		hangCleanups.push(() => finish.resolve("cleanup"));
@@ -645,10 +645,23 @@ describe("managed execution session lifecycle", () => {
 		await harness.session.reload();
 		harness.session.agent.managedExecutions.setCompletionHandler(undefined);
 		expect(harness.session.getActiveToolNames()).toContain("after_load");
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "system" &&
+						entry.message.toolsAdded?.some((tool) => tool.name === "after_load"),
+				),
+		).toBe(true);
 
 		finish.resolve("completed after reload");
 		const cachedOutcome = await managedFromSession(harness.session).wait(taskId, 1);
-		expect((cachedOutcome as { addedToolNames?: string[] }).addedToolNames).toContain("after_load");
+		expect(cachedOutcome).toMatchObject({
+			isError: false,
+			content: [{ type: "text", text: "completed after reload" }],
+		});
 	}, 10_000);
 
 	it("preserves managed executions across reload and cancels them on newSession", async () => {
