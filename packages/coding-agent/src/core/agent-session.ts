@@ -1313,7 +1313,7 @@ export class AgentSession {
 			}
 			this._manualRetryCommit = undefined;
 			this._manualRetryActive = false;
-			this._systemPromptOverride = undefined;
+			this._runSystemPromptOptions = undefined;
 			await this._emitAgentSettled();
 		}
 	}
