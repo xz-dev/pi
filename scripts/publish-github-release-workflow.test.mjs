@@ -79,6 +79,12 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /tool cancellation signal from the current-run interrupt signal/);
 });
 
+test("upstream sync requires formatter-stable rebuilt sources", () => {
+  assert.match(syncWorkflowText, /status="\$\(git status --porcelain=v1 --untracked-files=all\)"/);
+  assert.match(syncWorkflowText, /::error::Check mutated rebuilt main/);
+  assert.match(syncWorkflowText, /git diff --name-status/);
+});
+
 test("upstream sync carries and tests the model catalog list refresh patch", () => {
   assert.match(
     syncWorkflowText,
