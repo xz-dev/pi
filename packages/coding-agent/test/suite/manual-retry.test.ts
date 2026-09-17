@@ -289,11 +289,9 @@ describe("manual /retry continuation", () => {
 
 		expect(getUserTexts(created)).toEqual(["reuse me"]);
 		expect(getAssistantTexts(created)).toEqual(["regenerated"]);
-		expect(created.sessionManager.getBranch().map((entry) => entry.type === "message" && entry.message.role)).toEqual([
-			"user",
-			"system",
-			"assistant",
-		]);
+		expect(created.sessionManager.getBranch().map((entry) => entry.type === "message" && entry.message.role)).toEqual(
+			["user", "system", "assistant"],
+		);
 		expect(created.sessionManager.getBranch()[0]?.id).toBe(userId);
 	});
 
@@ -354,11 +352,9 @@ describe("manual /retry continuation", () => {
 		await created.session.retry();
 
 		expect(getUserTexts(created)).toEqual(["reuse me"]);
-		expect(created.sessionManager.getBranch().map((entry) => entry.type === "message" && entry.message.role)).toEqual([
-			"user",
-			"system",
-			"assistant",
-		]);
+		expect(created.sessionManager.getBranch().map((entry) => entry.type === "message" && entry.message.role)).toEqual(
+			["user", "system", "assistant"],
+		);
 		expect(created.sessionManager.getBranch()[0]?.id).toBe(originalUserId);
 	});
 
