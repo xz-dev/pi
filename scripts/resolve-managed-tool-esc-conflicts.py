@@ -5,14 +5,17 @@ import subprocess
 
 agent_loop_path = Path("packages/agent/src/agent-loop.ts")
 extensions_test_path = Path("packages/coding-agent/test/extensions-runner.test.ts")
-expected = {agent_loop_path, extensions_test_path}
+allowed_conflicts = {
+    frozenset({agent_loop_path}),
+    frozenset({agent_loop_path, extensions_test_path}),
+}
 conflicts = {
     Path(path)
     for path in subprocess.check_output(
         ["git", "diff", "--name-only", "--diff-filter=U"], text=True
     ).splitlines()
 }
-if conflicts != expected:
+if frozenset(conflicts) not in allowed_conflicts:
     raise SystemExit(f"unexpected managed-tool/Esc conflicts: {sorted(map(str, conflicts))}")
 
 path = agent_loop_path
@@ -101,13 +104,15 @@ combined_initial_messages = '''\tawait emitAbortable(emit, { type: "agent_start"
 \t\tawait emitAbortable(emit, { type: "message_start", message }, signal);
 \t\tawait emitAbortable(emit, { type: "message_end", message }, signal);
 '''
-text = resolve_conflict(
-    text,
-    upstream_initial_messages,
-    esc_initial_messages,
-    combined_initial_messages,
-    "upstream tool declarations/Esc initial messages",
-)
+initial_conflict_prefix = "<<<<<<< HEAD\n" + upstream_initial_messages + "=======\n" + esc_initial_messages
+if initial_conflict_prefix in text:
+    text = resolve_conflict(
+        text,
+        upstream_initial_messages,
+        esc_initial_messages,
+        combined_initial_messages,
+        "upstream tool declarations/Esc initial messages",
+    )
 
 upstream_pending_messages = '''\t\t\t// Process prepared and queued messages before the next assistant response.
 \t\t\tfor (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
@@ -133,13 +138,15 @@ combined_pending_messages = '''\t\t\t// Process prepared and queued messages bef
 \t\t\t\tcurrentContext.messages.push(message);
 \t\t\t\tnewMessages.push(message);
 '''
-text = resolve_conflict(
-    text,
-    upstream_pending_messages,
-    esc_pending_messages,
-    combined_pending_messages,
-    "upstream tool declarations/Esc pending messages",
-)
+pending_conflict_prefix = "<<<<<<< HEAD\n" + upstream_pending_messages + "=======\n" + esc_pending_messages
+if pending_conflict_prefix in text:
+    text = resolve_conflict(
+        text,
+        upstream_pending_messages,
+        esc_pending_messages,
+        combined_pending_messages,
+        "upstream tool declarations/Esc pending messages",
+    )
 
 
 def split_execution_signals(section: str) -> str:
@@ -336,16 +343,19 @@ for source in required:
 
 path.write_text(text)
 
-test_text = extensions_test_path.read_text()
-test_text = resolve_conflict(
-    test_text,
-    'import { buildSystemPrompt } from "../src/core/system-prompt.ts";\n',
-    'import { createTestExtensionsResult } from "./utilities.ts";\n',
-    'import { buildSystemPrompt } from "../src/core/system-prompt.ts";\n'
-    'import { createTestExtensionsResult } from "./utilities.ts";\n',
-    "extension runner test imports",
-)
-if any(line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")) for line in test_text.splitlines()):
-    raise SystemExit("conflict markers remain in extension runner tests")
-extensions_test_path.write_text(test_text)
-subprocess.run(["git", "add", str(agent_loop_path), str(extensions_test_path)], check=True)
+staged_paths = [agent_loop_path]
+if extensions_test_path in conflicts:
+    test_text = extensions_test_path.read_text()
+    test_text = resolve_conflict(
+        test_text,
+        'import { buildSystemPrompt } from "../src/core/system-prompt.ts";\n',
+        'import { createTestExtensionsResult } from "./utilities.ts";\n',
+        'import { buildSystemPrompt } from "../src/core/system-prompt.ts";\n'
+        'import { createTestExtensionsResult } from "./utilities.ts";\n',
+        "extension runner test imports",
+    )
+    if any(line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")) for line in test_text.splitlines()):
+        raise SystemExit("conflict markers remain in extension runner tests")
+    extensions_test_path.write_text(test_text)
+    staged_paths.append(extensions_test_path)
+subprocess.run(["git", "add", *map(str, staged_paths)], check=True)
