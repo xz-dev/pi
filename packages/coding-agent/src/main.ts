@@ -609,6 +609,10 @@ export async function main(args: string[], options?: MainOptions) {
 			process.exit(1);
 		}
 	}
+	if (parsed.refreshModels && offlineMode) {
+		console.error(chalk.red("Error: --refresh cannot be used with --offline or PI_OFFLINE."));
+		process.exit(1);
+	}
 	time("parseArgs");
 
 	if (parsed.version) {
@@ -860,9 +864,38 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (parsed.listModels !== undefined) {
 		reportDiagnostics(startupSettingsDiagnostics);
+		let refreshFailed = false;
+		if (parsed.refreshModels) {
+			reportDiagnostics(runtime.diagnostics);
+			if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+				if (runtime.diagnostics.some((diagnostic) => diagnostic.message.includes("Failed to load extension"))) {
+					console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
+				}
+				refreshFailed = true;
+			}
+			try {
+				const result = await modelRuntime.refresh({
+					allowNetwork: true,
+					force: true,
+					signal: AbortSignal.timeout(15_000),
+				});
+				if (result.aborted) {
+					console.error(chalk.red("Error: Model catalog refresh timed out; showing cached models."));
+					refreshFailed = true;
+				}
+				for (const [provider, error] of result.errors) {
+					console.error(chalk.red(`Error: ${provider}: ${error.message}; showing cached models.`));
+					refreshFailed = true;
+				}
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : "Unknown model catalog refresh error";
+				console.error(chalk.red(`Error: ${message}; showing cached models.`));
+				refreshFailed = true;
+			}
+		}
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRuntime, searchPattern, AbortSignal.timeout(15_000));
-		process.exit(0);
+		process.exit(refreshFailed ? 1 : 0);
 	}
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
