@@ -412,7 +412,7 @@ def resolve_types() -> None:
     """Keep Esc overloads, upgrade signatures to upstream unsubscribe returns."""
     types = types_path.read_text()
     match = re.search(
-        r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>> [^\n]*\n", types, re.DOTALL
+        r"<<<<<<< (?:HEAD|ours)\n(.*?)=======\n(.*?)>>>>>>> [^\n]*\n", types, re.DOTALL
     )
     if not match:
         raise SystemExit("missing Esc types conflict block")
@@ -438,7 +438,7 @@ if agent_file in conflicts:
     # Esc-abort terminalization replaces the unconditional failure sequence.
     agent_text = agent_file.read_text()
     agent_resolved, agent_count = re.subn(
-        r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>[^\n]*\n",
+        r"<<<<<<< (?:HEAD|ours)\n(.*?)=======\n(.*?)>>>[^\n]*\n",
         lambda m: m.group(2),
         agent_text,
         flags=re.DOTALL,
