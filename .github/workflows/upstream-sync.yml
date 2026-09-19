@@ -124,8 +124,20 @@ jobs:
           git reset --hard upstream/main
 
           if ! git merge --squash origin/ci; then
-            echo '::error::Unexpected ci squash conflict; ci must merge cleanly onto current upstream'
-            exit 1
+            # The fork README is a full rewrite maintained on ci; upstream README
+            # edits (package tables, badges) conflict with it by construction.
+            # Take the ci version (theirs in a squash merge) when README.md is
+            # the only conflicted file.
+            readme_only=true
+            while IFS= read -r conflicted; do
+              if [[ "$conflicted" != README.md ]]; then readme_only=false; fi
+            done < <(git diff --name-only --diff-filter=U)
+            if [[ "$readme_only" != true ]]; then
+              echo '::error::Unexpected ci squash conflict; ci must merge cleanly onto current upstream'
+              exit 1
+            fi
+            git checkout --theirs -- README.md
+            git add README.md
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying ci'
