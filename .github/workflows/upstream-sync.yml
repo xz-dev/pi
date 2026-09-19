@@ -644,6 +644,7 @@ jobs:
           python3 scripts/resolve-embedded-bun-squash-conflicts.test.py
           python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.test.py
           python3 scripts/resolve-managed-tool-executions-squash-conflicts.test.py
+          python3 scripts/resolve-managed-tool-esc-conflicts.test.py
 
       - name: Install Linux smoke display
         run: |

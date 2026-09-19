@@ -1,11 +1,28 @@
 #!/usr/bin/env python3
+"""Resolve session-tree-splice squash conflicts.
+
+Upstream #9630 snapshot loops (ours) must survive; the splice patch's
+per-extension loops and its pre-#9630 shapes do not. Keep ours for runner,
+session imports, and session-manager rmSync; adopt the splice-only additions
+(SpliceEntryHandler export, lifecycle stub) and union both harness options.
+"""
 from pathlib import Path
 import re
 import subprocess
 
+runner_path = Path("packages/coding-agent/src/core/extensions/runner.ts")
+session_path = Path("packages/coding-agent/src/core/agent-session.ts")
+index_path = Path("packages/coding-agent/src/core/extensions/index.ts")
+manager_path = Path("packages/coding-agent/src/core/session-manager.ts")
+lifecycle_path = Path("packages/coding-agent/test/lifecycle-diagnostics.test.ts")
+harness_path = Path("packages/coding-agent/test/suite/harness.ts")
 expected = {
-    Path("packages/coding-agent/src/core/session-manager.ts"),
-    Path("packages/coding-agent/test/suite/harness.ts"),
+    runner_path,
+    session_path,
+    index_path,
+    manager_path,
+    lifecycle_path,
+    harness_path,
 }
 conflicts = {
     Path(path)
@@ -16,45 +33,70 @@ conflicts = {
 if conflicts != expected:
     raise SystemExit(f"unexpected conflicts: {sorted(map(str, conflicts))}")
 
-marker = r"[^\n]* \(feat\(coding-agent\): splice session tree entries\)"
 
-manager_path = Path("packages/coding-agent/src/core/session-manager.ts")
-manager = manager_path.read_text()
-manager_pattern = re.compile(
-    rf"<<<<<<< (?:HEAD|ours)\n\trmSync,\n=======\n>>>>>>> (?:theirs|{marker})"
-)
-manager, manager_count = manager_pattern.subn("\trmSync,", manager)
-if manager_count != 1:
-    raise SystemExit("unexpected SessionManager splice conflict shape")
-manager_path.write_text(manager)
+def check_markers(text: str, label: str) -> None:
+    if any(line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")) for line in text.splitlines()):
+        raise SystemExit(f"conflict markers remain in {label}")
 
-harness_path = Path("packages/coding-agent/test/suite/harness.ts")
+
+def resolve_side(path: Path, label: str, side: int) -> None:
+    text = path.read_text()
+    resolved, count = re.subn(
+        r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>[^\n]*\n",
+        lambda m: m.group(side),
+        text,
+        flags=re.DOTALL,
+    )
+    if count == 0:
+        raise SystemExit(f"no {label} conflicts found")
+    check_markers(resolved, label)
+    path.write_text(resolved)
+
+
+# runner: upstream snapshotEventHandlers infra stays
+resolve_side(runner_path, "runner", 1)
+# session imports: manual-retry additions are the superset
+resolve_side(session_path, "agent session imports", 1)
+# session-manager: rmSync import stays
+resolve_side(manager_path, "session manager rmSync", 1)
+# index.ts: splice-only SpliceEntryHandler export
+resolve_side(index_path, "extensions index SpliceEntryHandler", 2)
+# lifecycle test: splice-only spliceEntry stub
+resolve_side(lifecycle_path, "lifecycle spliceEntry stub", 2)
+
+# harness: union both options and prefer the factory
 harness = harness_path.read_text()
-option_pattern = re.compile(
-    rf"<<<<<<< (?:HEAD|ours)\n"
-    rf"\tsessionManagerFactory\?: \(tempDir: string\) => SessionManager;\n"
-    rf"=======\n"
-    rf"\tpersist\?: boolean;\n"
-    rf">>>>>>> (?:theirs|{marker})"
+options_pattern = re.compile(
+    r"<<<<<<< HEAD\n"
+    + re.escape("\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n")
+    + r"=======\n"
+    + re.escape("\tpersist?: boolean;\n")
+    + r">>>[^\n]*\n"
 )
-option_resolution = '''\tsessionManagerFactory?: (tempDir: string) => SessionManager;
-\tpersist?: boolean;'''
-factory_pattern = re.compile(
-    rf"<<<<<<< (?:HEAD|ours)\n"
-    rf"\tconst sessionManager = options\.sessionManagerFactory\?\.\(tempDir\) \?\? SessionManager\.inMemory\(\);\n"
-    rf"=======\n"
-    rf"\tconst sessionManager = options\.persist\n"
-    rf"\t\t\? SessionManager\.create\(tempDir, join\(tempDir, \"sessions\"\)\)\n"
-    rf"\t\t: SessionManager\.inMemory\(\);\n"
-    rf">>>>>>> (?:theirs|{marker})"
+harness, count = options_pattern.subn(
+    "\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n\tpersist?: boolean;\n",
+    harness,
 )
-factory_resolution = '''\tconst sessionManager =
-\t\toptions.sessionManagerFactory?.(tempDir) ??
-\t\t(options.persist ? SessionManager.create(tempDir, join(tempDir, "sessions")) : SessionManager.inMemory());'''
-harness, option_count = option_pattern.subn(option_resolution, harness)
-harness, factory_count = factory_pattern.subn(factory_resolution, harness)
-if option_count != 1 or factory_count != 1:
-    raise SystemExit("unexpected harness splice conflict shape")
+if count != 1:
+    raise SystemExit("unexpected harness options conflict shape")
+
+construct_pattern = re.compile(
+    r"<<<<<<< HEAD\n"
+    + re.escape(
+        "\tconst sessionManager = options.sessionManagerFactory?.(tempDir) ?? SessionManager.inMemory();\n"
+    )
+    + r"=======\n(.*?)>>>[^\n]*\n",
+    re.DOTALL,
+)
+m2 = construct_pattern.search(harness)
+if not m2:
+    raise SystemExit("unexpected harness construction conflict shape")
+replacement2 = (
+    "\tconst sessionManager = options.sessionManagerFactory?.(tempDir)\n"
+    "\t\t?? (options.persist ? SessionManager.create(tempDir, join(tempDir, \"sessions\")) : SessionManager.inMemory());\n"
+)
+harness = harness[: m2.start()] + replacement2 + harness[m2.end():]
+check_markers(harness, "harness")
 harness_path.write_text(harness)
 
 subprocess.run(["git", "add", *map(str, sorted(expected))], check=True)

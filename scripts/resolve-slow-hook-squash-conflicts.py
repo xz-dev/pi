@@ -50,24 +50,190 @@ session_path.write_text(session.replace(session_conflict, session_resolution))
 
 runner_path = Path("packages/coding-agent/src/core/extensions/runner.ts")
 runner = runner_path.read_text()
-runner_conflict = (
-    marker_start
-    + ''' HEAD
-\t\t\tfor (const handler of handlers) {
-\t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;
-'''
-    + marker_middle
-    + '''
-\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
-'''
-    + marker_end
-    + " origin/patch/slow-hook-tui-only"
+
+
+def replace_conflict(text: str, ours: str, theirs: str, resolution: str, label: str) -> str:
+    conflict = (
+        marker_start
+        + " HEAD\n"
+        + ours
+        + marker_middle
+        + "\n"
+        + theirs
+        + marker_end
+        + " origin/patch/slow-hook-tui-only\n"
+    )
+    if text.count(conflict) != 1:
+        raise SystemExit(f"unexpected {label} slow-hook conflict shape")
+    return text.replace(conflict, resolution)
+
+
+# Upstream snapshots handler lists per extension (snapshotEventHandlers); the
+# slow-hook patch still iterates ext.handlers.get per extension. Keep the
+# upstream snapshot loop and adopt the slow-hook indexed inner loop so
+# runHandler diagnostics keep their handlerIndex.
+indexed_inner = "\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n"
+
+# b1: project_trust standalone inner loop (ours already inside snapshot loop)
+runner = replace_conflict(
+    runner,
+    "\t\tfor (const handler of handlers) {\n",
+    '''\t\tconst handlers = ext.handlers.get("project_trust");
+\t\tif (!handlers || handlers.length === 0) continue;
+
+\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
+\t\t\tconst startedAt = performance.now();
+\t\t\tlet executionKind: SlowExtensionHookEntry["executionKind"] = "sync";
+''',
+    '''\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
+\t\t\tconst startedAt = performance.now();
+\t\t\tlet executionKind: SlowExtensionHookEntry["executionKind"] = "sync";
+''',
+    "project_trust loop",
 )
+
+# b2: generic emit loop
+runner = replace_conflict(
+    runner,
+    '\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {\n\t\t\tfor (const handler of handlers) {\n',
+    '''\t\tfor (const ext of this.extensions) {
+\t\t\tconst handlers = ext.handlers.get(event.type);
+\t\t\tif (!handlers || handlers.length === 0) continue;
+
+\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
+''',
+    '\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {\n' + indexed_inner,
+    "generic emit loop",
+)
+
+# b3: message_end methods. Ours holds the sync emitUninterruptibleMessageEnd
+# body start plus the async emitMessageEnd start; the shared tail after the
+# conflict is the slow-hook async body (runHandler + handlerIndex). Keep the
+# sync method on plain for-of (no runHandler, handlerIndex unused otherwise)
+# and start the async method indexed so the tail's handlerIndex binds.
+b3_ours = """			for (const handler of handlers) {
+				if (ext.uninterruptibleHandlers?.has(handler) !== true) continue;
+				try {
+					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
+					const handlerResult = handler(currentEvent, ctx) as MessageEndEventResult | undefined;
+					if (!handlerResult?.message) continue;
+
+					if (handlerResult.message.role !== currentMessage.role) {
+						this.emitError({
+							extensionPath: ext.path,
+							event: "message_end",
+							error: "message_end handlers must return a message with the same role",
+						});
+						continue;
+					}
+
+					currentMessage = handlerResult.message;
+					modified = true;
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: "message_end",
+						error: message,
+						stack,
+					});
+				}
+			}
+		}
+
+		return modified ? currentMessage : undefined;
+	}
+
+	async emitMessageEnd(event: MessageEndEvent): Promise<AgentMessage | undefined> {
+		const ctx = this.createContext();
+		let currentMessage = event.message;
+		let modified = false;
+
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "message_end")) {
+			for (const handler of handlers) {
+				if (ext.uninterruptibleHandlers?.has(handler) === true) continue;
+"""
+# Ours ends with the async method's plain loop + guard lines; those must be
+# replaced by the indexed loop (the shared tail binds handlerIndex), so strip
+# them from the ours block and re-append the indexed variant.
+b3_ours_async_tail = (
+    "\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, \"message_end\")) {\n"
+    "\t\t\tfor (const handler of handlers) {\n"
+    "\t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;\n"
+)
+if not b3_ours.endswith(b3_ours_async_tail):
+    raise SystemExit("unexpected message_end ours tail shape")
+b3_sync = b3_ours[: -len(b3_ours_async_tail)]
+b3_async_head = (
+    "\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, \"message_end\")) {\n"
+    "\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n"
+    "\t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;\n"
+)
+runner = replace_conflict(
+    runner,
+    b3_ours,
+    "\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n",
+    b3_sync + b3_async_head,
+    "message_end methods",
+)
+
+# b4..b11: per-event snapshot loops (tool_result, user_bash, context,
+# before_provider_request/headers, before_agent_start, resources_discover)
+for event_name in (
+    "tool_result",
+    "user_bash",
+    "context",
+    "before_provider_request",
+    "before_provider_headers",
+    "before_agent_start",
+    "resources_discover",
+):
+    runner = replace_conflict(
+        runner,
+        f'\t\tfor (const {{ ext, handlers }} of snapshotEventHandlers(this.extensions, "{event_name}")) {{\n\t\t\tfor (const handler of handlers) {{\n',
+        f'''\t\tfor (const ext of this.extensions) {{
+\t\t\tconst handlers = ext.handlers.get("{event_name}");
+\t\t\tif (!handlers || handlers.length === 0) continue;
+
+\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {{
+''',
+        f'\t\tfor (const {{ ext, handlers }} of snapshotEventHandlers(this.extensions, "{event_name}")) {{\n' + indexed_inner,
+        f"{event_name} loop",
+    )
+
+# b5: tool_call loses its runHandler call line below the conflict; re-add it
+runner = replace_conflict(
+    runner,
+    '\t\tfor (const { handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {\n\t\t\tfor (const handler of handlers) {\n\t\t\t\tconst handlerResult = await handler(event, ctx);\n',
+    '''\t\tfor (const ext of this.extensions) {
+\t\t\tconst handlers = ext.handlers.get("tool_call");
+\t\t\tif (!handlers || handlers.length === 0) continue;
+
+\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
+\t\t\t\tconst handlerResult = await this.runHandler("tool_call", ext, handlerIndex, () => handler(event, ctx));
+''',
+    '''\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {
+\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
+\t\t\t\tconst handlerResult = await this.runHandler("tool_call", ext, handlerIndex, () => handler(event, ctx));
+''',
+    "tool_call loop",
+)
+
+# b12: input loop (different theirs shape, no get-guard)
+runner = replace_conflict(
+    runner,
+    '\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, "input")) {\n\t\t\tfor (const handler of handlers) {\n',
+    '''\t\tfor (const ext of this.extensions) {
+\t\t\tfor (const [handlerIndex, handler] of (ext.handlers.get("input") ?? []).entries()) {
+''',
+    '\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, "input")) {\n\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n',
+    "input loop",
+)
+
 runner_resolution = '''\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {
 \t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;'''
-if runner.count(runner_conflict) != 1:
-    raise SystemExit("unexpected ExtensionRunner slow-hook conflict shape")
-runner = runner.replace(runner_conflict, runner_resolution)
+
 user_bash_conflict = (
     marker_start
     + ''' HEAD
