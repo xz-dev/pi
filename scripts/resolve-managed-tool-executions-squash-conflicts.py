@@ -8,6 +8,7 @@ import subprocess
 EXPECTED = [
     "packages/coding-agent/src/core/extensions/wrapper.ts",
     "packages/coding-agent/test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts",
+    "packages/coding-agent/src/core/agent-session.ts",
 ]
 
 
@@ -22,17 +23,16 @@ def resolve_conflict(text: str, ours: str, theirs: str, resolution: str, label: 
     return resolved
 
 
-def main():
-    conflicts = subprocess.check_output(
-        ["git", "diff", "--name-only", "--diff-filter=U"], text=True
-    ).splitlines()
-    if conflicts != EXPECTED:
-        raise SystemExit(f"Unexpected managed-tool conflicts: {conflicts}")
+def check_markers(path: Path) -> None:
+    for line in path.read_text().splitlines():
+        if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+            raise SystemExit(f"Conflict markers remain in {path}")
 
-    wrapper_path = Path(EXPECTED[0])
-    wrapper = wrapper_path.read_text()
-    ours_wrapper = "\treturn wrapToolDefinition(registeredTool.definition, () => runner.createContext());\n"
-    theirs_wrapper = '''\tconst tool = wrapToolDefinition(registeredTool.definition, () => runner.createContext());
+
+def resolve_wrapper(path: Path) -> None:
+    wrapper = path.read_text()
+    ours = "\treturn wrapToolDefinition(registeredTool.definition, () => runner.createContext());\n"
+    theirs = '''\tconst tool = wrapToolDefinition(registeredTool.definition, () => runner.createContext());
 \tconst execute = tool.execute;
 \treturn {
 \t\t...tool,
@@ -58,18 +58,20 @@ def main():
 \t\t},
 \t};
 '''
-    wrapper = resolve_conflict(wrapper, ours_wrapper, theirs_wrapper, theirs_wrapper, "wrapper")
-    wrapper_path.write_text(wrapper)
+    wrapper = resolve_conflict(wrapper, ours, theirs, theirs, "wrapper")
+    path.write_text(wrapper)
+    check_markers(path)
 
-    test_path = Path(EXPECTED[1])
-    test = test_path.read_text()
-    ours_test = (
+
+def resolve_regression_test(path: Path) -> None:
+    test = path.read_text()
+    ours = (
         '\t\texpect(session.getActiveToolNames()).toEqual([]);\n'
         + "\t\t"
         + r'expect(session.systemPrompt).toContain("<tools>\n(none)\n");'
         + "\n"
     )
-    theirs_test = (
+    theirs = (
         '\t\texpect(session.getActiveToolNames()).toEqual(["tool_task"]);\n'
         + "\t\t"
         + r'expect(session.systemPrompt).toContain("Available tools:\n(none)");'
@@ -81,13 +83,36 @@ def main():
         + r'expect(session.systemPrompt).toContain("<tools>\n(none)\n");'
         + "\n"
     )
-    test = resolve_conflict(test, ours_test, theirs_test, resolution, "regression test")
-    test_path.write_text(test)
+    test = resolve_conflict(test, ours, theirs, resolution, "regression test")
+    path.write_text(test)
+    check_markers(path)
 
-    for path in (wrapper_path, test_path):
-        if any(marker in path.read_text() for marker in ("<<<<<<<", "=======", ">>>>>>>")):
-            raise SystemExit(f"Conflict markers remain in {path}")
-    subprocess.run(["git", "add", *EXPECTED], check=True)
+
+def resolve_agent_session(path: Path) -> None:
+    session = path.read_text()
+    ours = "\t\tthis._installAgentForcedPromptProjection();\n"
+    theirs = "\t\tthis._syncManagedToolExecutions();\n"
+    session = resolve_conflict(session, ours, theirs, ours + theirs, "agent session")
+    path.write_text(session)
+    check_markers(path)
+
+
+RESOLVERS = {
+    EXPECTED[0]: resolve_wrapper,
+    EXPECTED[1]: resolve_regression_test,
+    EXPECTED[2]: resolve_agent_session,
+}
+
+
+def main():
+    conflicts = subprocess.check_output(
+        ["git", "diff", "--name-only", "--diff-filter=U"], text=True
+    ).splitlines()
+    if not conflicts or not set(conflicts) <= set(EXPECTED):
+        raise SystemExit(f"Unexpected managed-tool conflicts: {conflicts}")
+    for conflict in conflicts:
+        RESOLVERS[conflict](Path(conflict))
+    subprocess.run(["git", "add", *conflicts], check=True)
 
 
 if __name__ == "__main__":
