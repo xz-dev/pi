@@ -421,6 +421,26 @@ def resolve_types() -> None:
         "\t\toptions: UninterruptibleMessageEndHandlerOptions,\n\t): () => void;",
         "\t\toptions: UninterruptibleMessageEndHandlerOptions,\n\t): void;",
     )
+
+    # Fold on() signature lines that grew past the biome line width when the
+    # return type gained "() => "; the sync's check step would otherwise flag
+    # the file as unformatted.
+    def fold_long_on(line: str) -> str:
+        if len(line) <= 120 or not line.startswith("\ton(event: "):
+            return line
+        m2 = re.match(
+            r"\ton\(event: (\"[^\"]+\"), handler: (.*?)\): \(\) => void;\n$", line
+        )
+        if not m2:
+            raise SystemExit("unexpected Esc types on() line shape")
+        return (
+            "\ton(\n"
+            f"\t\tevent: {m2.group(1)},\n"
+            f"\t\thandler: {m2.group(2)},\n"
+            "\t): () => void;\n"
+        )
+
+    merged = "".join(fold_long_on(l) for l in merged.splitlines(keepends=True))
     types = types[: match.start()] + merged + types[match.end():]
     if any(line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")) for line in types.splitlines()):
         raise SystemExit("conflict markers remain after Esc types resolution")
