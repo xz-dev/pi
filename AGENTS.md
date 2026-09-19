@@ -1,5 +1,15 @@
 禁止向上游（earendil-works/pi）发送任何信息，包括但不限于 issues、PR、评论、review。
 
+# Known Pre-existing Failures — Always Ignore
+
+The pre-commit hook (`npm run check` → `tsgo --noEmit`) fails with model-catalog type errors in `packages/ai/test/*` (e.g. `"..." is not assignable to parameter of type ...`). Cause: test fixtures reference model IDs from models.dev's live catalog, which renames/retires models faster than the branch baseline tracks. These errors:
+
+- Never relate to the change being committed (they live in upstream-maintained test files).
+- Self-heal on the next upstream sync.
+- Have been hit hundreds of times.
+
+Rule: when `tsgo` failures are confined to model-ID/catalog type mismatches in `packages/ai/test/` (and equivalents such as stale model IDs in `packages/coding-agent/test/`), commit with `git commit --no-verify` without asking. Do not fix those test files, do not regenerate model data to satisfy the hook, and do not treat this as a blocker. Any other hook failure still requires fixing before commit.
+
 # Development Rules
 
 ## Downstream Distribution Workflow
