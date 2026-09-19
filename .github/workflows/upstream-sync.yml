@@ -59,7 +59,8 @@ jobs:
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/remote-client-run-end-wait:refs/remotes/origin/patch/remote-client-run-end-wait \
-            +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages
+            +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
+            +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion
 
           patch_refs=(
             origin/patch/contributor-approval
@@ -88,6 +89,7 @@ jobs:
             origin/patch/model-selector-refresh-selection
             origin/patch/remote-client-run-end-wait
             origin/patch/ai-drop-empty-messages
+            origin/patch/compaction-test-exclusion
           )
 
           # Upstream-maintained changelogs move every release cycle, so patch
@@ -513,6 +515,17 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/ai-drop-empty-messages branch"
 
+          # Temporary test-policy patch for an upstream characterization whose
+          # threshold/overflow result changes across GitHub-hosted runners.
+          git merge --squash origin/patch/compaction-test-exclusion
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/compaction-test-exclusion; retire the exclusion patch'
+            exit 1
+          fi
+          grep -Fq '"test/suite/agent-session-compaction.test.ts"' packages/coding-agent/vitest.config.ts
+          git diff --cached --check
+          git commit -m "merge patch/compaction-test-exclusion branch"
+
           git commit --allow-empty -F /tmp/upstream-sync-inputs-message
 
 
@@ -572,18 +585,12 @@ jobs:
               test/managed-tool-executions-esc-abort.test.ts
           )
           # Run the full coding-agent suite with vitest auto-discovery, matching
-          # upstream CI (npm test -> vitest --run). A serialized focused-file
-          # invocation changes pool sizing and file order, which flips upstream's
-          # razor-margin compaction test (8bdcd4498) from threshold to overflow.
-          # Exclude that one file entirely: its overflow decision point sits at
-          # ~2490/2600 tokens (4% margin), so CI runners land on the overflow side
-          # while local machines land on threshold regardless of invocation shape
-          # (same rebuilt main passed with no rg/fd and failed with rg/fd).
-          # It provides no merge-damage signal for the squash gate.
+          # upstream CI (npm test -> vitest --run). The integrated
+          # patch/compaction-test-exclusion config owns the runner-sensitive
+          # exclusion so sync, normal CI, and release validation share one policy.
           (
             cd packages/coding-agent
-            node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
-              --exclude test/suite/agent-session-compaction.test.ts
+            node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts
           )
           node --test --test-reporter=dot \
             packages/tui/test/tui-render.test.ts
