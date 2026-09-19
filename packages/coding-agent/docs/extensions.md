@@ -348,6 +348,8 @@ exit (Ctrl+C, Ctrl+D, SIGHUP, SIGTERM)
   └─► session_shutdown
 ```
 
+In interactive TUI, Pi shows slow extension handlers as transient notices. Timing diagnostics are not saved to the session, model context, RPC/print events, or disk. During shutdown, the current handler is shown while Pi waits; fast handlers are cleared and only slow handlers remain on the terminal. Outside interactive TUI, these diagnostics are dropped.
+
 ### Startup Events
 
 #### project_trust
