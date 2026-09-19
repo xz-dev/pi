@@ -541,6 +541,13 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Install test system dependencies
+        # Upstream ci.yml installs these before npm test; grep/find tool tests need them.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fd-find ripgrep
+          sudo ln -sf $(which fdfind) /usr/local/bin/fd
+
       - name: Run focused integration tests
         run: |
           npx vitest run \
