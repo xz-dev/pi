@@ -564,65 +564,13 @@ jobs:
               test/managed-tool-executions.test.ts \
               test/managed-tool-executions-esc-abort.test.ts
           )
+          # Run the full coding-agent suite with vitest auto-discovery, matching
+          # upstream CI (npm test -> vitest --run). A serialized focused-file
+          # invocation changes pool sizing and file order, which flips upstream's
+          # razor-margin compaction test (8bdcd4498) from threshold to overflow.
           (
             cd packages/coding-agent
-            node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
-              test/github-release.test.ts \
-              test/config.test.ts \
-              test/settings-manager.test.ts \
-              test/settings-diagnostics.test.ts \
-              test/system-prompt-updates.test.ts \
-              test/default-tools-setting.test.ts \
-              test/model-runtime-cloudflare-compat.test.ts \
-              test/extensions-runner.test.ts \
-              test/lifecycle-diagnostics.test.ts \
-              test/shutdown-screen-log.test.ts \
-              test/interactive-mode-compaction.test.ts \
-              test/agent-session-retry.test.ts \
-              test/agent-session-runtime-events.test.ts \
-              test/agent-session-concurrent.test.ts \
-              test/manual-retry-planner.test.ts \
-              test/manual-retry-commands.test.ts \
-              test/tree-selector.test.ts \
-              test/session-manager/custom-session-id.test.ts \
-              test/session-manager/tree-traversal.test.ts \
-              test/agent-session-stats.test.ts \
-              test/model-runtime-modify-models-compat.test.ts \
-              test/remote-catalog-provider.test.ts \
-              test/args.test.ts \
-              test/list-models-refresh.test.ts \
-              test/interactive-mode-selector-dispose.test.ts \
-              test/rpc-prompt-response-semantics.test.ts \
-              test/rpc-client-clone.test.ts \
-              test/interactive-mode-clone-command.test.ts \
-              test/interactive-mode-startup-input.test.ts \
-              test/startup-benchmark.test.ts \
-              test/tools-manager.test.ts \
-              test/tools-manager-timeout.test.ts \
-              test/xz-release-update.test.ts \
-              test/xz-release-update-safety.test.ts \
-              test/bundle-usage-claim-registration.test.ts \
-              test/xz-release-update-usage-claims.test.ts \
-              test/xz-release-update-usage-races.test.ts \
-              test/win32-filesystem-snapshot.test.ts \
-              test/package-command-paths.test.ts \
-              test/package-manager.test.ts \
-              test/package-manager-ssh.test.ts \
-              test/interactive-mode-queue-tui.test.ts \
-              test/suite/agent-session-compaction.test.ts \
-              test/suite/managed-tool-executions.test.ts \
-              test/suite/manual-retry.test.ts \
-              test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts \
-              test/suite/regressions/5109-exclude-tools.test.ts \
-              test/suite/regressions/7253-manual-compact-during-response.test.ts \
-              test/suite/regressions/8935-parallel-preflight-abort.test.ts \
-              test/suite/session-tree-splice.test.ts \
-              test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts \
-              test/suite/regressions/5724-sigterm-signal-exit.test.ts \
-              test/suite/regressions/6234-esc-abort-stuck-extension-tmux.test.ts \
-              test/suite/regressions/6949-unavailable-scoped-model.test.ts \
-              test/suite/regressions/7209-model-selector-filter-resets-selection.test.ts \
-              test/model-selector.test.ts
+            node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts
           )
           node --test --test-reporter=dot \
             packages/tui/test/tui-render.test.ts
