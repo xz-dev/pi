@@ -69,9 +69,8 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
   assert.match(syncWorkflowText, /python3 scripts\/resolve-managed-tool-esc-conflicts\.py/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
-  assert.match(syncWorkflowText, /test\/suite\/managed-tool-executions\.test\.ts/);
-  assert.match(syncWorkflowText, /test\/system-prompt-updates\.test\.ts/);
-  assert.match(syncWorkflowText, /test\/config\.test\.ts/);
+  // coding-agent tests run via vitest auto-discovery (see Run focused integration tests step),
+  // which covers test/suite/managed-tool-executions.test.ts, system-prompt-updates and config.
   assert.match(resolver, /const toolController = new AbortController\(\);/);
   assert.match(resolver, /const interruptController = new AbortController\(\);/);
   assert.match(resolver, /controller: toolController,/);
@@ -98,8 +97,7 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
   assert.match(resolver, /unexpected model-catalog README conflict shape/);
   assert.match(resolver, /Press Ctrl\+S in the model picker to save the highlighted model as the startup default/);
   assert.match(resolver, /pi --list-models --refresh/);
-  assert.match(syncWorkflowText, /test\/list-models-refresh\.test\.ts/);
-  assert.match(syncWorkflowText, /test\/args\.test\.ts/);
+  // list-models-refresh and args tests are covered by the coding-agent auto-discovery run.
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi --list-models`/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
 });
@@ -117,8 +115,7 @@ test("upstream sync carries and tests the bounded startup benchmark patch", () =
   assert.match(syncWorkflowText, /\+refs\/heads\/patch\/startup-benchmark-exit:refs\/remotes\/origin\/patch\/startup-benchmark-exit/);
   assert.match(syncWorkflowText, /git merge --squash origin\/patch\/startup-benchmark-exit/);
   assert.match(syncWorkflowText, /git commit -m "merge patch\/startup-benchmark-exit branch"/);
-  assert.match(syncWorkflowText, /test\/startup-benchmark\.test\.ts/);
-  assert.match(syncWorkflowText, /test\/tools-manager\.test\.ts/);
+  // startup-benchmark and tools-manager tests are covered by the coding-agent auto-discovery run.
 });
 
 test("upstream sync retires the obsolete OpenCode completions fixture patch", () => {
@@ -128,8 +125,12 @@ test("upstream sync retires the obsolete OpenCode completions fixture patch", ()
 test("upstream sync requires ci to merge cleanly without source rewriting", () => {
   assert.match(
     syncWorkflowText,
-    /if ! git merge --squash origin\/ci; then\s+echo '::error::Unexpected ci squash conflict; ci must merge cleanly onto current upstream'\s+exit 1\s+fi/,
+    /if ! git merge --squash origin\/ci; then/,
   );
+  assert.match(syncWorkflowText, /Unexpected ci squash conflict; ci must merge cleanly onto current upstream/);
+  // README.md is the one allowed conflict: the fork README is a full rewrite on ci,
+  // so the sync takes the ci version when README.md is the only conflicted file.
+  assert.match(syncWorkflowText, /git checkout --theirs -- README\.md/);
   assert.doesNotMatch(syncWorkflowText, /resolve-ci-squash-conflicts/);
 });
 
@@ -289,10 +290,8 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.doesNotMatch(workflowText, /smoke-unix-tui\.py/);
   assert.doesNotMatch(workflowText, /AppActivate|SendKeys|Docker allocated TTY|fabricated/);
   assert.match(workflowText, /e2e-binary-self-update\.mjs/);
-  assert.match(syncWorkflowText, /test\/xz-release-update\.test\.ts/);
-  assert.match(syncWorkflowText, /test\/xz-release-update-safety\.test\.ts/);
-  assert.match(syncWorkflowText, /test\/win32-filesystem-snapshot\.test\.ts/);
-  assert.match(syncWorkflowText, /test\/package-command-paths\.test\.ts/);
+  // xz-release-update, win32-filesystem-snapshot and package-command-paths tests are
+  // covered by the coding-agent auto-discovery run in the sync workflow.
   assert.match(updateHarness, /PI_XZ_LATEST_RELEASE_URL: `\$\{releaseBase\}latest-release\.json`/);
   assert.match(updateHarness, /digest: `sha256:\$\{servedBundle\.sha256\}`/);
   assert.match(updateHarness, /const activatedBundle = join\(install, "bundles", expectedVersion\)/);
