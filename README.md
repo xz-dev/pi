@@ -80,6 +80,7 @@ The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://
 ### Removed patches
 
 - Provider-transparent Responses remote compaction and its dependent pre-provider compaction patch have been removed, and both source branches have been permanently deleted. Classic compaction remains the default path. A third-party extension such as [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions) can provide Codex-native remote compaction without adding provider-specific behavior to core.
+- The remote-client run-end wait patch has been retired: upstream now waits on `run_end`/`run_suspend` operation boundaries before resolving an accepted prompt response (`operationBoundaries`/`boundaryWaiters` in `packages/coding-agent/src/experimental/client.ts`), which covers the same transcript-lifecycle guarantee without a timeout heuristic. The source branch is kept as `retired/remote-client-run-end-wait`.
 
 ### Maintenance
 
