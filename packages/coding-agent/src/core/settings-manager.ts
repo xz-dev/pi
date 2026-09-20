@@ -1008,6 +1008,14 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
+	getSlowHookThresholdMs(): number {
+		try {
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? 100;
+		} catch {
+			return 100;
+		}
+	}
+
 	getHideThinkingBlock(): boolean {
 		return this.settings.hideThinkingBlock ?? SETTINGS_DEFAULTS.hideThinkingBlock;
 	}
