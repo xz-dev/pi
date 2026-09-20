@@ -536,15 +536,22 @@ jobs:
 
       - name: Check rebuilt main
         run: |
+          # biome check --write may apply formatting fixes to merged files
+          # (union resolutions can produce non-canonical layout). Apply them
+          # first as a formatting commit; npm run check then verifies the
+          # tree stays clean.
+          npx biome check --write --error-on-warnings . >/dev/null 2>&1 || true
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "style: apply post-merge formatting"
+          fi
           npm run check
           status="$(git status --porcelain=v1 --untracked-files=all)"
           if [[ -n "$status" ]]; then
-            # biome check --write may apply formatting fixes to merged files
-            # (union resolutions can produce non-canonical layout). Commit
-            # them as a formatting commit rather than failing, since the
-            # rebuilt tree is generated anyway.
-            git add -A
-            git commit -m "style: apply post-merge formatting"
+            printf '::error::Check mutated rebuilt main\n%s\n' "$status"
+            git diff --stat
+            git diff --name-status
+            exit 1
           fi
 
       - name: Setup Zig for native fixture tests
