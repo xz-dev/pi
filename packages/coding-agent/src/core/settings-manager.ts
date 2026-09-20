@@ -11,6 +11,7 @@ import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
 import type {
+	BackgroundToolCallsSettings,
 	CacheWarmingMode,
 	CompactionModelOverride,
 	DefaultProjectTrust,
@@ -26,6 +27,8 @@ import type {
 } from "./settings-schema.ts";
 
 export type {
+	BackgroundToolCallSetting,
+	BackgroundToolCallsSettings,
 	BranchSummarySettings,
 	CacheWarmingMode,
 	CodemodeMode,
@@ -282,6 +285,9 @@ export class SettingsManager {
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 	private settingsPaths: SettingsPaths;
+	private lastValidBackgroundToolCalls: BackgroundToolCallsSettings = {};
+	private lastValidGlobalBackgroundToolCalls: BackgroundToolCallsSettings = {};
+	private lastValidProjectBackgroundToolCalls: BackgroundToolCallsSettings = {};
 
 	private constructor(
 		storage: SettingsStorage,
@@ -301,7 +307,8 @@ export class SettingsManager {
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
 		this.settingsPaths = settingsPaths;
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = {};
+		this.recomputeEffectiveSettings();
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -458,6 +465,72 @@ export class SettingsManager {
 		return structuredClone(this.settings);
 	}
 
+	private validateBackgroundToolCalls(value: unknown): BackgroundToolCallsSettings {
+		if (value === undefined) return {};
+		if (!isMergeableObject(value)) {
+			throw new Error("Invalid backgroundToolCalls setting: expected an object");
+		}
+		const validated: BackgroundToolCallsSettings = {};
+		for (const [toolName, rule] of Object.entries(value)) {
+			if (!isMergeableObject(rule)) {
+				throw new Error(`Invalid backgroundToolCalls.${toolName} setting: expected an object`);
+			}
+			const detachAfterSeconds = rule.detachAfterSeconds;
+			if (
+				detachAfterSeconds !== undefined &&
+				(typeof detachAfterSeconds !== "number" || !Number.isFinite(detachAfterSeconds) || detachAfterSeconds <= 0)
+			) {
+				throw new Error(
+					`Invalid backgroundToolCalls.${toolName}.detachAfterSeconds setting: expected a positive finite number`,
+				);
+			}
+			validated[toolName] = detachAfterSeconds === undefined ? {} : { detachAfterSeconds };
+		}
+		return validated;
+	}
+
+	private acceptBackgroundToolCalls(
+		value: unknown,
+		scope: SettingsScope,
+		previous: BackgroundToolCallsSettings,
+	): BackgroundToolCallsSettings {
+		try {
+			return this.validateBackgroundToolCalls(value);
+		} catch (error) {
+			this.recordError(scope, error);
+			return previous;
+		}
+	}
+
+	private recomputeEffectiveSettings(scope: SettingsScope = "global", overrides?: Partial<Settings>): void {
+		if (overrides) {
+			const nextSettings = deepMergeSettings(this.settings, overrides);
+			try {
+				this.lastValidBackgroundToolCalls = this.validateBackgroundToolCalls(nextSettings.backgroundToolCalls);
+				this.settings = nextSettings;
+			} catch (error) {
+				this.recordError(scope, error);
+			}
+			return;
+		}
+
+		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.lastValidGlobalBackgroundToolCalls = this.acceptBackgroundToolCalls(
+			this.globalSettings.backgroundToolCalls,
+			"global",
+			this.lastValidGlobalBackgroundToolCalls,
+		);
+		this.lastValidProjectBackgroundToolCalls = this.acceptBackgroundToolCalls(
+			this.projectSettings.backgroundToolCalls,
+			"project",
+			this.lastValidProjectBackgroundToolCalls,
+		);
+		this.lastValidBackgroundToolCalls = {
+			...this.lastValidGlobalBackgroundToolCalls,
+			...this.lastValidProjectBackgroundToolCalls,
+		};
+	}
+
 	getGlobalSettings(): Settings {
 		return structuredClone(this.globalSettings);
 	}
@@ -482,7 +555,7 @@ export class SettingsManager {
 		if (!trusted) {
 			this.projectSettings = {};
 			this.projectSettingsLoadError = null;
-			this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+			this.recomputeEffectiveSettings();
 			return;
 		}
 
@@ -492,7 +565,7 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeEffectiveSettings("project");
 	}
 
 	async reload(): Promise<void> {
@@ -520,12 +593,12 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeEffectiveSettings();
 	}
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.recomputeEffectiveSettings("global", overrides);
 	}
 
 	/** Mark a global field as modified during this session */
@@ -1326,6 +1399,10 @@ export class SettingsManager {
 	}
 
 	/** The resolved `defaultTools` selection, or undefined when no settings layer sets it. */
+	getBackgroundToolCalls(): BackgroundToolCallsSettings {
+		return structuredClone(this.lastValidBackgroundToolCalls);
+	}
+
 	getDefaultTools(): string[] | undefined {
 		const tools = this.settings.defaultTools;
 		if (tools === undefined) return undefined;
