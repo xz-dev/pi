@@ -165,7 +165,13 @@ jobs:
           git merge --squash origin/patch/model-startup-refresh-barrier
           git commit -m "merge patch/model-startup-refresh-barrier branch"
 
-          git merge --squash origin/patch/model-refresh-session-rebind
+          if ! git merge --squash origin/patch/model-refresh-session-rebind; then
+            python3 scripts/resolve-model-refresh-rebind-squash-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying model-refresh-session-rebind'
+            exit 1
+          fi
           git commit -m "merge patch/model-refresh-session-rebind branch"
 
           if ! git merge --squash origin/patch/model-catalog-extension-refresh; then
@@ -625,6 +631,7 @@ jobs:
           python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.test.py
           python3 scripts/resolve-managed-tool-executions-squash-conflicts.test.py
           python3 scripts/resolve-managed-tool-esc-conflicts.test.py
+          python3 scripts/resolve-model-refresh-rebind-squash-conflicts.test.py
 
       - name: Install Linux smoke display
         run: |
