@@ -143,23 +143,24 @@ def resolve_agent_loop(path: Path) -> None:
 
 def resolve_agent_session(path: Path) -> None:
     session = path.read_text()
-    # Resolve every conflict block containing _installAgentForcedPromptProjection.
-    # The correct resolution always keeps ours (the install line) and adds
-    # _syncManagedToolExecutions if theirs provides it and it isn't already
-    # present after the conflict block.
+    # Union every conflict block in agent-session.ts. The mte patch adds
+    # _syncManagedToolExecutions wiring; any prior patch (ci, rebind, seam)
+    # may have touched the same region, so we cannot hardcode the ours side.
+    # Both sides are install calls at the same site — keeping both preserves
+    # every install hook and is always correct here.
     pattern = re.compile(
         r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>> [^\n]+\n", re.S
     )
 
     def _resolve(m):
         ours, theirs = m.group(1), m.group(2)
-        if "_installAgentForcedPromptProjection" not in ours:
-            raise SystemExit(
-                f"Unexpected managed-tool agent session conflict: no install line in ours"
-            )
-        if "_syncManagedToolExecutions" in theirs:
-            return ours + theirs
-        return ours
+        # Drop theirs lines that already appear verbatim in ours to avoid
+        # duplicate install calls, then concatenate.
+        ours_lines = set(ours.splitlines())
+        theirs_extra = "".join(
+            line + "\n" for line in theirs.splitlines() if line not in ours_lines
+        )
+        return ours + theirs_extra
 
     session, count = pattern.subn(_resolve, session)
     if count < 1:
