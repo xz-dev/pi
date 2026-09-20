@@ -46,7 +46,7 @@ describe("system prompt updates", () => {
 			if (head?.role !== "system") throw new Error("expected system message");
 			expect(head.content).toBe("");
 			expect(Object.keys(head.sections ?? {})).toEqual(["preamble", "tools", "rules", "docs", "cwd"]);
-			expect(head.toolsAdded?.map((tool) => tool.name)).toEqual(["read", "bash", "edit", "write"]);
+			expect(head.toolsAdded?.map((tool) => tool.name)).toEqual(["read", "bash", "edit", "write", "tool_task"]);
 			expect(getSystemMessageText(head)).toBe(harness.session.systemPrompt);
 		} finally {
 			harness.cleanup();
@@ -207,7 +207,7 @@ describe("system prompt updates", () => {
 			expect(Object.keys(requests[0] ?? {})).toEqual(["messages"]);
 			const initial = requests[0]?.messages[0];
 			if (initial?.role !== "system") throw new Error("expected initial system message");
-			expect(initial.toolsAdded?.map((value) => value.name)).toEqual(["first", "second"]);
+			expect(initial.toolsAdded?.map((value) => value.name)).toEqual(["first", "tool_task", "second"]);
 			expect(initial.sections?.tools).toContain("first prompt snippet");
 
 			const update = requests[1]?.messages.filter((message) => message.role === "system").at(-1);
@@ -215,7 +215,7 @@ describe("system prompt updates", () => {
 				role: "system",
 				content: "",
 				sections: { tools: expect.stringContaining("second prompt snippet"), rules: expect.any(String) },
-				toolsRemoved: [{ name: "first" }],
+				toolsRemoved: [{ name: "first" }, { name: "tool_task" }],
 				timestamp: expect.any(Number),
 			});
 			expect(update?.sections?.tools).not.toContain("first prompt snippet");
@@ -265,7 +265,7 @@ describe("system prompt updates", () => {
 			await harness.session.prompt("second");
 			expect(requests).toHaveLength(2);
 			const update = requests[1]?.messages.filter((message) => message.role === "system").at(-1);
-			expect(update?.toolsRemoved).toEqual([{ name: "first" }]);
+			expect(update?.toolsRemoved).toEqual([{ name: "first" }, { name: "tool_task" }]);
 			expect(update?.toolsAdded).toBeUndefined();
 			expect(harness.session.getActiveToolNames()).toEqual(["second"]);
 		} finally {
