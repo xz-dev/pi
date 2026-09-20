@@ -58,7 +58,6 @@ jobs:
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
-            +refs/heads/patch/remote-client-run-end-wait:refs/remotes/origin/patch/remote-client-run-end-wait \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
             +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion
 
@@ -87,7 +86,6 @@ jobs:
             origin/patch/self-update-managed-by
             origin/patch/google-toomany-toolcalls
             origin/patch/model-selector-refresh-selection
-            origin/patch/remote-client-run-end-wait
             origin/patch/ai-drop-empty-messages
             origin/patch/compaction-test-exclusion
           )
@@ -502,14 +500,6 @@ jobs:
           fi
           git diff --cached --check
           git commit -m "merge patch/model-selector-refresh-selection branch"
-
-          git merge --squash origin/patch/remote-client-run-end-wait
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/remote-client-run-end-wait'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/remote-client-run-end-wait branch"
 
           # Independent upstream-based runtime patch; an empty squash means
           # upstream filters empty messages itself, so retire this patch.
