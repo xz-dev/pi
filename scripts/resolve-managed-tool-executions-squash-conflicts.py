@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Preserve upstream prompt behavior when integrating managed tool execution."""
+"""Resolve managed-tool-executions squash conflicts after the mte rebase.
+
+On a tree that already carries the Esc patch, the merge produces conflicts in
+agent-loop.ts (Esc's dual AbortController rework versus mte's single controller)
+and agent-session.ts (installAgentForcedPromptProjection versus
+syncManagedToolExecutions). Resolution: keep the Esc dual-controller shape for
+agent-loop (the Esc patch owns that code), and union both install lines in
+agent-session.
+"""
 from pathlib import Path
 import re
 import subprocess
 
 
 EXPECTED = [
-    "packages/coding-agent/src/core/extensions/wrapper.ts",
-    "packages/coding-agent/test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts",
+    "packages/agent/src/agent-loop.ts",
     "packages/coding-agent/src/core/agent-session.ts",
 ]
 
@@ -29,78 +36,126 @@ def check_markers(path: Path) -> None:
             raise SystemExit(f"Conflict markers remain in {path}")
 
 
-def resolve_wrapper(path: Path) -> None:
-    wrapper = path.read_text()
-    ours = "\treturn wrapToolDefinition(registeredTool.definition, () => runner.createContext());\n"
-    theirs = '''\tconst tool = wrapToolDefinition(registeredTool.definition, () => runner.createContext());
-\tconst execute = tool.execute;
-\treturn {
-\t\t...tool,
-\t\texecute: async (toolCallId, params, signal, onUpdate) => {
-\t\t\tconst activeBefore = runner.getActiveTools();
-\t\t\tconst activeToolChanges = runner.captureActiveToolChanges();
-\t\t\tlet result: Awaited<ReturnType<typeof execute>>;
-\t\t\ttry {
-\t\t\t\tresult = await execute(toolCallId, params, signal, onUpdate);
-\t\t\t} finally {
-\t\t\t\tactiveToolChanges.stop();
-\t\t\t}
-\t\t\tconst activeAfter = activeToolChanges.getLatest() ?? activeBefore;
-\t\t\tif (!activeBefore.every((name) => activeAfter.includes(name))) return result;
-
-\t\t\tconst beforeNames = new Set(activeBefore);
-\t\t\tconst addedToolNames = activeAfter.filter((name) => !beforeNames.has(name));
-\t\t\tif (addedToolNames.length === 0) return result;
-\t\t\treturn {
-\t\t\t\t...result,
-\t\t\t\taddedToolNames: [...new Set([...(result.addedToolNames ?? []), ...addedToolNames])],
-\t\t\t};
-\t\t},
-\t};
-'''
-    wrapper = resolve_conflict(wrapper, ours, theirs, theirs, "wrapper")
-    path.write_text(wrapper)
-    check_markers(path)
-
-
-def resolve_regression_test(path: Path) -> None:
-    test = path.read_text()
-    ours = (
-        '\t\texpect(session.getActiveToolNames()).toEqual([]);\n'
-        + "\t\t"
-        + r'expect(session.systemPrompt).toContain("<tools>\n(none)\n");'
-        + "\n"
+def resolve_agent_loop(path: Path) -> None:
+    """Keep ours (Esc patch dual-controller) for every agent-loop hunk."""
+    loop = path.read_text()
+    # h1: abortable import — keep ours
+    loop = resolve_conflict(
+        loop,
+        'import { abortable, callAbortable, throwIfAborted } from "./abort.ts";\n',
+        "",
+        'import { abortable, callAbortable, throwIfAborted } from "./abort.ts";\n',
+        "abort import",
     )
-    theirs = (
-        '\t\texpect(session.getActiveToolNames()).toEqual(["tool_task"]);\n'
-        + "\t\t"
-        + r'expect(session.systemPrompt).toContain("Available tools:\n(none)");'
-        + "\n"
+    # h2: emitToolExecutionEnd signal arg — keep ours
+    loop = resolve_conflict(
+        loop,
+        "\t\t\tawait emitToolExecutionEnd(finalized, emit, signal);\n",
+        "\t\t\tawait emitToolExecutionEnd(finalized, emit);\n",
+        "\t\t\tawait emitToolExecutionEnd(finalized, emit, signal);\n",
+        "emitToolExecutionEnd",
     )
-    resolution = (
-        '\t\texpect(session.getActiveToolNames()).toEqual(["tool_task"]);\n'
-        + "\t\t"
-        + r'expect(session.systemPrompt).toContain("<tools>\n(none)\n");'
-        + "\n"
+    # h3: dual-controller vs single-controller — keep ours
+    loop = resolve_conflict(
+        loop,
+        "\tconst toolController = new AbortController();\n"
+        "\tconst interruptController = new AbortController();\n"
+        "\tconst forwardAbort = () => {\n"
+        "\t\ttoolController.abort();\n"
+        "\t\tinterruptController.abort();\n"
+        "\t};\n"
+        "\tif (signal) {\n"
+        "\t\tif (signal.aborted) forwardAbort();\n",
+        "\tconst controller = new AbortController();\n"
+        "\tconst forwardAbort = () => controller.abort();\n"
+        "\tif (signal) {\n"
+        "\t\tif (signal.aborted) controller.abort();\n",
+        "\tconst toolController = new AbortController();\n"
+        "\tconst interruptController = new AbortController();\n"
+        "\tconst forwardAbort = () => {\n"
+        "\t\ttoolController.abort();\n"
+        "\t\tinterruptController.abort();\n"
+        "\t};\n"
+        "\tif (signal) {\n"
+        "\t\tif (signal.aborted) forwardAbort();\n",
+        "abort controllers",
     )
-    test = resolve_conflict(test, ours, theirs, resolution, "regression test")
-    path.write_text(test)
+    # h4: executePreparedToolCall call shape — keep ours
+    loop = resolve_conflict(
+        loop,
+        "\tconst completion = executePreparedToolCall(\n"
+        "\t\tprepared,\n"
+        "\t\ttoolController.signal,\n"
+        "\t\t(event) => {\n"
+        "\t\t\tif (detached) return;\n"
+        "\t\t\treturn emit(event);\n"
+        "\t\t},\n"
+        "\t\tinterruptController.signal,\n"
+        "\t)\n"
+        "\t\t.then((executed) =>\n"
+        "\t\t\tfinalizeExecutedToolCall(\n"
+        "\t\t\t\tcurrentContext,\n"
+        "\t\t\t\tassistantMessage,\n"
+        "\t\t\t\tprepared,\n"
+        "\t\t\t\texecuted,\n"
+        "\t\t\t\tconfig,\n"
+        "\t\t\t\ttoolController.signal,\n"
+        "\t\t\t\tinterruptController.signal,\n"
+        "\t\t\t),\n",
+        "\tconst completion = executePreparedToolCall(prepared, controller.signal, (event) => {\n"
+        "\t\tif (detached) return;\n"
+        "\t\treturn emit(event);\n"
+        "\t})\n"
+        "\t\t.then((executed) =>\n"
+        "\t\t\tfinalizeExecutedToolCall(currentContext, assistantMessage, prepared, executed, config, controller.signal),\n",
+        "\tconst completion = executePreparedToolCall(\n"
+        "\t\tprepared,\n"
+        "\t\ttoolController.signal,\n"
+        "\t\t(event) => {\n"
+        "\t\t\tif (detached) return;\n"
+        "\t\t\treturn emit(event);\n"
+        "\t\t},\n"
+        "\t\tinterruptController.signal,\n"
+        "\t)\n"
+        "\t\t.then((executed) =>\n"
+        "\t\t\tfinalizeExecutedToolCall(\n"
+        "\t\t\t\tcurrentContext,\n"
+        "\t\t\t\tassistantMessage,\n"
+        "\t\t\t\tprepared,\n"
+        "\t\t\t\texecuted,\n"
+        "\t\t\t\tconfig,\n"
+        "\t\t\t\ttoolController.signal,\n"
+        "\t\t\t\tinterruptController.signal,\n"
+        "\t\t\t),\n",
+        "executePreparedToolCall",
+    )
+    # h5: controller property — keep ours
+    loop = resolve_conflict(
+        loop,
+        "\t\tcontroller: toolController,\n",
+        "\t\tcontroller,\n",
+        "\t\tcontroller: toolController,\n",
+        "controller property",
+    )
+    path.write_text(loop)
     check_markers(path)
 
 
 def resolve_agent_session(path: Path) -> None:
     session = path.read_text()
+    # The rebased mte no longer adds _syncManagedToolExecutions here — it already
+    # exists from the esc/mr chain. The only conflict is mte removing
+    # _installAgentForcedPromptProjection which we keep.
     ours = "\t\tthis._installAgentForcedPromptProjection();\n"
-    theirs = "\t\tthis._syncManagedToolExecutions();\n"
-    session = resolve_conflict(session, ours, theirs, ours + theirs, "agent session")
+    theirs = ""
+    session = resolve_conflict(session, ours, theirs, ours, "agent session")
     path.write_text(session)
     check_markers(path)
 
 
 RESOLVERS = {
-    EXPECTED[0]: resolve_wrapper,
-    EXPECTED[1]: resolve_regression_test,
-    EXPECTED[2]: resolve_agent_session,
+    EXPECTED[0]: resolve_agent_loop,
+    EXPECTED[1]: resolve_agent_session,
 }
 
 
