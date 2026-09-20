@@ -143,26 +143,27 @@ def resolve_agent_loop(path: Path) -> None:
 
 def resolve_agent_session(path: Path) -> None:
     session = path.read_text()
-    # Two possible shapes depending on merge context:
-    # 1. Ours has _installAgentForcedPromptProjection, theirs is empty (mte
-    #    removed it). Keep ours — _syncManagedToolExecutions already exists.
-    # 2. Ours has _installAgentForcedPromptProjection, theirs has
-    #    _syncManagedToolExecutions. Union both.
-    ours = "\t\tthis._installAgentForcedPromptProjection();\n"
-    for theirs, resolution in (
-        ("", ours),
-        ("\t\tthis._syncManagedToolExecutions();\n", ours + "\t\tthis._syncManagedToolExecutions();\n"),
-    ):
-        pattern = re.compile(
-            re.escape("<<<<<<< HEAD\n" + ours + "=======\n" + theirs)
-            + r">>>>>>> [^\n]+\n"
-        )
-        resolved, count = pattern.subn(lambda _: resolution, session)
-        if count == 1:
-            session = resolved
-            break
-    else:
-        raise SystemExit("Unexpected managed-tool agent session conflict shape")
+    # Resolve every conflict block containing _installAgentForcedPromptProjection.
+    # The correct resolution always keeps ours (the install line) and adds
+    # _syncManagedToolExecutions if theirs provides it and it isn't already
+    # present after the conflict block.
+    pattern = re.compile(
+        r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>> [^\n]+\n", re.S
+    )
+
+    def _resolve(m):
+        ours, theirs = m.group(1), m.group(2)
+        if "_installAgentForcedPromptProjection" not in ours:
+            raise SystemExit(
+                f"Unexpected managed-tool agent session conflict: no install line in ours"
+            )
+        if "_syncManagedToolExecutions" in theirs:
+            return ours + theirs
+        return ours
+
+    session, count = pattern.subn(_resolve, session)
+    if count < 1:
+        raise SystemExit("No conflict blocks found in agent-session.ts")
     path.write_text(session)
     check_markers(path)
 
