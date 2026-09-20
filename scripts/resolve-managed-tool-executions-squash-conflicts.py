@@ -143,12 +143,26 @@ def resolve_agent_loop(path: Path) -> None:
 
 def resolve_agent_session(path: Path) -> None:
     session = path.read_text()
-    # The rebased mte no longer adds _syncManagedToolExecutions here — it already
-    # exists from the esc/mr chain. The only conflict is mte removing
-    # _installAgentForcedPromptProjection which we keep.
+    # Two possible shapes depending on merge context:
+    # 1. Ours has _installAgentForcedPromptProjection, theirs is empty (mte
+    #    removed it). Keep ours — _syncManagedToolExecutions already exists.
+    # 2. Ours has _installAgentForcedPromptProjection, theirs has
+    #    _syncManagedToolExecutions. Union both.
     ours = "\t\tthis._installAgentForcedPromptProjection();\n"
-    theirs = ""
-    session = resolve_conflict(session, ours, theirs, ours, "agent session")
+    for theirs, resolution in (
+        ("", ours),
+        ("\t\tthis._syncManagedToolExecutions();\n", ours + "\t\tthis._syncManagedToolExecutions();\n"),
+    ):
+        pattern = re.compile(
+            re.escape("<<<<<<< HEAD\n" + ours + "=======\n" + theirs)
+            + r">>>>>>> [^\n]+\n"
+        )
+        resolved, count = pattern.subn(lambda _: resolution, session)
+        if count == 1:
+            session = resolved
+            break
+    else:
+        raise SystemExit("Unexpected managed-tool agent session conflict shape")
     path.write_text(session)
     check_markers(path)
 
