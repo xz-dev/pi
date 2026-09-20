@@ -29,7 +29,7 @@ path = Path(filename)
 text = path.read_text()
 
 pattern = re.compile(
-    r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>> [^\n]+\n", re.S
+    r"<<<<<<< (?:HEAD|ours)\n(.*?)=======\n(.*?)>>>>>>> [^\n]+\n", re.S
 )
 
 
