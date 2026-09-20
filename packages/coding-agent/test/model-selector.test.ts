@@ -26,6 +26,13 @@ describe("model selector", () => {
 		harness = undefined;
 	});
 
+	function getRenderedRows(selector: ModelSelectorComponent): string[] {
+		return stripAnsi(selector.render(120).join("\n"))
+			.split("\n")
+			.filter((line) => line.trimStart().startsWith("→"))
+			.map((line) => line.trim());
+	}
+
 	it("keeps the current model marked while browsing", async () => {
 		harness = await createHarness({
 			models: [
@@ -53,6 +60,118 @@ describe("model selector", () => {
 		selector.handleInput("\x1b[B");
 		expect(getModelRow("current-model")).toBe(`  ✓ current-model [${currentModel.provider}]`);
 		expect(getModelRow("browsed-model")).toBe(`→   browsed-model [${currentModel.provider}]`);
+		selector.dispose();
+	});
+
+	it("preserves the browsed selection when a background refresh completes", async () => {
+		harness = await createHarness({
+			models: [
+				{ id: "current-model", name: "Current Model", reasoning: true },
+				{ id: "browsed-model", name: "Browsed Model", reasoning: true },
+				{ id: "third-model", name: "Third Model", reasoning: true },
+			],
+		});
+		let releaseRefresh: ((result: { aborted: boolean; errors: Map<string, Error> }) => void) | undefined;
+		const refreshPromise = new Promise<{ aborted: boolean; errors: Map<string, Error> }>((resolve) => {
+			releaseRefresh = resolve;
+		});
+		vi.spyOn(harness.session.modelRuntime, "refresh").mockReturnValue(refreshPromise);
+
+		const currentModel = harness.getModel("current-model")!;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			currentModel,
+			harness.session.modelRuntime,
+			[],
+			() => {},
+			() => {},
+		);
+
+		selector.handleInput("\x1b[B"); // move highlight to browsed-model (row 1)
+		expect(getRenderedRows(selector)[0]).toContain("browsed-model");
+
+		releaseRefresh!({ aborted: false, errors: new Map() });
+		await vi.waitFor(() => {
+			// Refresh completed: highlight must stay on browsed-model, not snap back to row 0.
+			expect(getRenderedRows(selector)).toEqual([expect.stringContaining("browsed-model")]);
+		});
+		selector.dispose();
+	});
+
+	it("preserves the filtered selection when a background refresh completes with an active query", async () => {
+		harness = await createHarness({
+			models: [
+				{ id: "current-model", name: "Current Model", reasoning: true },
+				{ id: "browsed-model", name: "Browsed Model", reasoning: true },
+				{ id: "third-model", name: "Third Model", reasoning: true },
+			],
+		});
+		let releaseRefresh: ((result: { aborted: boolean; errors: Map<string, Error> }) => void) | undefined;
+		const refreshPromise = new Promise<{ aborted: boolean; errors: Map<string, Error> }>((resolve) => {
+			releaseRefresh = resolve;
+		});
+		vi.spyOn(harness.session.modelRuntime, "refresh").mockReturnValue(refreshPromise);
+
+		const currentModel = harness.getModel("current-model")!;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			currentModel,
+			harness.session.modelRuntime,
+			[],
+			() => {},
+			() => {},
+		);
+
+		selector.handleInput("m"); // filter by query; highlight moves to top match
+		selector.handleInput("\x1b[B"); // move highlight off the first filtered row
+		const highlighted = getRenderedRows(selector)[0];
+
+		releaseRefresh!({ aborted: false, errors: new Map() });
+		await vi.waitFor(() => {
+			expect(getRenderedRows(selector)[0]).toBe(highlighted);
+		});
+		selector.dispose();
+	});
+
+	it("falls back to the current-model highlight when the browsed model disappears after refresh", async () => {
+		harness = await createHarness({
+			models: [
+				{ id: "current-model", name: "Current Model", reasoning: true },
+				{ id: "browsed-model", name: "Browsed Model", reasoning: true },
+			],
+		});
+		let releaseRefresh: ((result: { aborted: boolean; errors: Map<string, Error> }) => void) | undefined;
+		const refreshPromise = new Promise<{ aborted: boolean; errors: Map<string, Error> }>((resolve) => {
+			releaseRefresh = resolve;
+		});
+		vi.spyOn(harness.session.modelRuntime, "refresh").mockImplementation(async () => {
+			const result = await refreshPromise;
+			// Simulate the model vanishing from the catalog between selection and refresh.
+			const runtime = harness!.session.modelRuntime as unknown as {
+				snapshot: { available: Array<{ id: string }> };
+			};
+			runtime.snapshot.available = runtime.snapshot.available.filter((model) => model.id !== "browsed-model");
+			return result;
+		});
+
+		const currentModel = harness.getModel("current-model")!;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			currentModel,
+			harness.session.modelRuntime,
+			[],
+			() => {},
+			() => {},
+		);
+
+		selector.handleInput("\x1b[B"); // highlight browsed-model
+		expect(getRenderedRows(selector)[0]).toContain("browsed-model");
+
+		releaseRefresh!({ aborted: false, errors: new Map() });
+		await vi.waitFor(() => {
+			// browsed-model is gone; fallback highlights the current model row instead.
+			expect(getRenderedRows(selector)).toEqual([expect.stringContaining("current-model")]);
+		});
 		selector.dispose();
 	});
 
