@@ -447,7 +447,7 @@ jobs:
               printf '\n'
               exit 1
             fi
-            python3 scripts/resolve-session-tree-splice-conflicts.py
+            python3 scripts/resolve-session-tree-splice-conflicts.py || { echo '::group::sts conflict dump'; git diff --diff-filter=U | head -120; echo '::endgroup::'; }
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying session-tree splice'
