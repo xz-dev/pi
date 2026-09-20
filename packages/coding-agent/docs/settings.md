@@ -32,6 +32,7 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 | `doubleEscapeAction` | `"tree" \| "fork" \| "none"` | `"tree"` | Action for double Escape with an empty editor. |
 | `treeFilterMode` | `"default" \| "no-tools" \| "user-only" \| "labeled-only" \| "all"` | `"default"` | Initial filter used by `/tree`. |
 | `defaultProjectTrust` | `"ask" \| "always" \| "never"` | `"ask"` | Fallback project-trust behavior. **Can only be set in agent-directory settings.** |
+| `showStartupDiagnostics` | boolean | `false` | Show extension/resource diagnostic blocks at startup or `/reload`; suppressed by `quietStartup`. |
 
 ## Tools
 
@@ -125,6 +126,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are requir
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
+| `slowHookThresholdMs` | number | `-1` | Interactive TUI only: show a transient reminder for awaited extension hooks taking longer than this many milliseconds. Negative values disable it; `0` reports every hook. Timing diagnostics are not persisted. |
 | `shellPath` | string | Platform default | Custom shell executable path. Supports a leading `~`. |
 | `shellCommandPrefix` | string | None | Prefix prepended to every shell command. |
 | `npmCommand` | `string[]` | `npm` | Command and arguments used for npm package lookup and installation. |
