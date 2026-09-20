@@ -68,14 +68,45 @@ def replace_conflict(text: str, ours: str, theirs: str, resolution: str, label: 
     return text.replace(conflict, resolution)
 
 
+def try_replace_conflict(text: str, ours: str, theirs: str, resolution: str, label: str = "") -> str:
+    """Resolve a conflict hunk if present; return the text unchanged otherwise.
+
+    Rebased slow-hook tips already fold the snapshotEventHandlers outer loops
+    into the patch, so the only surviving conflict on a tree that also carries
+    the Esc patch is the emitMessageEnd uninterruptible guard versus the
+    indexed handler loop. Older shapes stay supported below.
+    """
+    conflict = (
+        marker_start
+        + " HEAD\n"
+        + ours
+        + marker_middle
+        + "\n"
+        + theirs
+        + marker_end
+        + " origin/patch/slow-hook-tui-only\n"
+    )
+    return text.replace(conflict, resolution)
+
+
 # Upstream snapshots handler lists per extension (snapshotEventHandlers); the
 # slow-hook patch still iterates ext.handlers.get per extension. Keep the
 # upstream snapshot loop and adopt the slow-hook indexed inner loop so
 # runHandler diagnostics keep their handlerIndex.
 indexed_inner = "\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n"
 
+# Rebased-tip shape: the only surviving runner conflict is emitMessageEnd's
+# uninterruptible guard (added by the Esc patch already merged into the tree)
+# colliding with the slow-hook indexed inner loop. Union both.
+runner = try_replace_conflict(
+    runner,
+    "\t\t\tfor (const handler of handlers) {\n\t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;\n",
+    "\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n\n",
+    "\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n\t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;\n\n",
+)
+
 # b1: project_trust standalone inner loop (ours already inside snapshot loop)
-runner = replace_conflict(
+runner = try_replace_conflict(
     runner,
     "\t\tfor (const handler of handlers) {\n",
     '''\t\tconst handlers = ext.handlers.get("project_trust");
@@ -93,7 +124,7 @@ runner = replace_conflict(
 )
 
 # b2: generic emit loop
-runner = replace_conflict(
+runner = try_replace_conflict(
     runner,
     '\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {\n\t\t\tfor (const handler of handlers) {\n',
     '''\t\tfor (const ext of this.extensions) {
@@ -162,15 +193,14 @@ b3_ours_async_tail = (
     "\t\t\tfor (const handler of handlers) {\n"
     "\t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;\n"
 )
-if not b3_ours.endswith(b3_ours_async_tail):
-    raise SystemExit("unexpected message_end ours tail shape")
+# The endswith check only applies when the old-shape b3 conflict is present.
 b3_sync = b3_ours[: -len(b3_ours_async_tail)]
 b3_async_head = (
     "\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, \"message_end\")) {\n"
     "\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n"
     "\t\t\t\tif (ext.uninterruptibleHandlers?.has(handler) === true) continue;\n"
 )
-runner = replace_conflict(
+runner = try_replace_conflict(
     runner,
     b3_ours,
     "\t\t\tfor (const [handlerIndex, handler] of handlers.entries()) {\n",
@@ -189,7 +219,7 @@ for event_name in (
     "before_agent_start",
     "resources_discover",
 ):
-    runner = replace_conflict(
+    runner = try_replace_conflict(
         runner,
         f'\t\tfor (const {{ ext, handlers }} of snapshotEventHandlers(this.extensions, "{event_name}")) {{\n\t\t\tfor (const handler of handlers) {{\n',
         f'''\t\tfor (const ext of this.extensions) {{
@@ -203,7 +233,7 @@ for event_name in (
     )
 
 # b5: tool_call loses its runHandler call line below the conflict; re-add it
-runner = replace_conflict(
+runner = try_replace_conflict(
     runner,
     '\t\tfor (const { handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {\n\t\t\tfor (const handler of handlers) {\n\t\t\t\tconst handlerResult = await handler(event, ctx);\n',
     '''\t\tfor (const ext of this.extensions) {
@@ -221,7 +251,7 @@ runner = replace_conflict(
 )
 
 # b12: input loop (different theirs shape, no get-guard)
-runner = replace_conflict(
+runner = try_replace_conflict(
     runner,
     '\t\tfor (const { ext, handlers } of snapshotEventHandlers(this.extensions, "input")) {\n\t\t\tfor (const handler of handlers) {\n',
     '''\t\tfor (const ext of this.extensions) {
@@ -263,6 +293,8 @@ user_bash_resolution = '''\t\t\t\t\tconst handlerResult = await this.runHandler(
 \t\t\t\t\t}'''
 if user_bash_conflict in runner:
     runner = runner.replace(user_bash_conflict, user_bash_resolution)
+if any(line.startswith((marker_start, marker_middle, marker_end)) for line in runner.splitlines()):
+    raise SystemExit("conflict markers remain in runner.ts after slow-hook resolution")
 runner_path.write_text(runner)
 
 interactive_conflict = (
