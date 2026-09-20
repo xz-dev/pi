@@ -14,6 +14,7 @@ allowed_conflicts = {
     frozenset({agent_loop_path, loader_path, types_path}),
     frozenset({loader_path, types_path}),
     frozenset({agent_file}),
+    frozenset({agent_file, agent_loop_path}),
     frozenset({agent_file, agent_loop_path, loader_path, types_path}),
 }
 conflicts = {
