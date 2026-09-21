@@ -185,16 +185,12 @@ jobs:
           fi
           git commit -m "merge patch/model-catalog-extension-refresh branch"
 
-          if ! git merge-base --is-ancestor origin/patch/model-startup-refresh-barrier origin/patch/model-refresh-timeout; then
-            echo '::error::patch/model-refresh-timeout must descend from patch/model-startup-refresh-barrier'
+          # Apply only the timeout delta (tip^..tip) — the compat base below it
+          # already exists in accumulated main and would conflict if re-applied.
+          git diff --binary origin/patch/model-refresh-timeout^ origin/patch/model-refresh-timeout -- > /tmp/model-refresh-timeout.patch
+          if ! git apply --3way --index /tmp/model-refresh-timeout.patch; then
+            echo '::error::Failed to apply patch/model-refresh-timeout delta'
             exit 1
-          fi
-          if [[ -n "$(git rev-list --min-parents=2 origin/patch/model-startup-refresh-barrier..origin/patch/model-refresh-timeout)" ]]; then
-            echo '::error::patch/model-refresh-timeout descendant range must be linear'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/model-startup-refresh-barrier..origin/patch/model-refresh-timeout; then
-            python3 scripts/resolve-model-refresh-timeout-conflicts.py
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying model-refresh-timeout'
