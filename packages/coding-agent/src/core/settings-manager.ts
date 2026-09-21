@@ -935,6 +935,22 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
+	getModelRefreshTimeoutMs(): number {
+		return parseTimeoutSetting(this.settings.models?.refreshTimeoutMs, "models.refreshTimeoutMs") ?? 60_000;
+	}
+
+	setModelRefreshTimeoutMs(timeoutMs: number): void {
+		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(timeoutMs)}`);
+		}
+		if (!this.globalSettings.models) {
+			this.globalSettings.models = {};
+		}
+		this.globalSettings.models.refreshTimeoutMs = Math.floor(timeoutMs);
+		this.markModified("models", "refreshTimeoutMs");
+		this.save();
+	}
+
 	getHideThinkingBlock(): boolean {
 		return this.settings.hideThinkingBlock ?? SETTINGS_DEFAULTS.hideThinkingBlock;
 	}

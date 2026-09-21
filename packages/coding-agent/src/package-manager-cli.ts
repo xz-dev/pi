@@ -602,9 +602,9 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 	return target.type === "all" || target.type === "extensions";
 }
 
-async function refreshModelCatalogs(agentDir: string): Promise<void> {
+async function refreshModelCatalogs(agentDir: string, refreshTimeoutMs: number): Promise<void> {
 	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), 15_000);
+	const timeout = setTimeout(() => controller.abort(), refreshTimeoutMs);
 	try {
 		const modelRuntime = await ModelRuntime.create({
 			authPath: join(agentDir, "auth.json"),
@@ -939,7 +939,8 @@ export async function handlePackageCommand(
 
 	if (options.command === "update" && options.updateTarget?.type === "models") {
 		try {
-			await refreshModelCatalogs(getAgentDir());
+			const settingsManager = SettingsManager.create(process.cwd(), getAgentDir(), { projectTrusted: false });
+			await refreshModelCatalogs(getAgentDir(), settingsManager.getModelRefreshTimeoutMs());
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : "Unknown model catalog refresh error";
 			console.error(chalk.red(`Error: ${message}`));
