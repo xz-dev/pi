@@ -49,8 +49,12 @@ def union_resolve_methods(text: str) -> str:
         end_line_end = text.find("\n", end_idx) + 1
         ours = text[head_idx + len(HEAD) : sep_idx]
         theirs = text[sep_idx + len(SEP) : end_idx]
-        # Keep both complete blocks; ours first, then theirs
-        text = text[:head_idx] + ours + theirs + text[end_line_end:]
+        # If both sides define the same method, theirs wins (patch intent)
+        if "getRetrySettings" in ours and "getRetrySettings" in theirs:
+            text = text[:head_idx] + theirs + text[end_line_end:]
+        else:
+            # Keep both complete blocks; ours first, then theirs
+            text = text[:head_idx] + ours + theirs + text[end_line_end:]
     return text
 
 
