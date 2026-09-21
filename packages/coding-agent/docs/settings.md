@@ -241,6 +241,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `httpIdleTimeoutMs` | number | `300000` | HTTP header/body idle timeout in milliseconds, also used by providers with explicit stream idle timeouts. Set to `0` to disable. |
 | `websocketConnectTimeoutMs` | number | `15000` | WebSocket connect/open handshake timeout in milliseconds for providers that support WebSocket transports. Set to `0` to disable. |
 | `models.refreshTimeoutMs` | number | `60000` | Timeout in milliseconds for model-catalog refresh operations (startup, `--refresh`, `/model`, post-login, `pi update --models`). Set to `0` to disable. |
+| `slowHookThresholdMs` | number | `100` | In interactive TUI, show a transient reminder for each registered extension hook taking longer than this many milliseconds. Timing diagnostics are not persisted. |
 
 ### Terminal & Images
 
