@@ -80,6 +80,7 @@ describe("Fireworks models", () => {
 			supportsStore: false,
 			supportsDeveloperRole: false,
 			requiresReasoningContentOnAssistantMessages: true,
+			supportsStrictMode: true,
 			thinkingFormat: "openai",
 			supportsMidConvoSystemMessages: true,
 			supportsMidConvoToolAdditions: true,
