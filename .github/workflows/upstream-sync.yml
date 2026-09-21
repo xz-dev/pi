@@ -185,6 +185,28 @@ jobs:
           fi
           git commit -m "merge patch/model-catalog-extension-refresh branch"
 
+          if ! git merge-base --is-ancestor origin/patch/model-startup-refresh-barrier origin/patch/model-refresh-timeout; then
+            echo '::error::patch/model-refresh-timeout must descend from patch/model-startup-refresh-barrier'
+            exit 1
+          fi
+          if [[ -n "$(git rev-list --min-parents=2 origin/patch/model-startup-refresh-barrier..origin/patch/model-refresh-timeout)" ]]; then
+            echo '::error::patch/model-refresh-timeout descendant range must be linear'
+            exit 1
+          fi
+          if ! git cherry-pick --no-commit origin/patch/model-startup-refresh-barrier..origin/patch/model-refresh-timeout; then
+            python3 scripts/resolve-model-refresh-timeout-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying model-refresh-timeout'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/model-refresh-timeout'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/model-refresh-timeout branch"
+
           git merge --squash origin/patch/bun-bytecode-entrypoint
           git commit -m "merge patch/bun-bytecode-entrypoint branch"
 
@@ -283,28 +305,6 @@ jobs:
           fi
           git diff --cached --check
           git commit -m "merge patch/git-package-storage branch"
-
-          if ! git merge-base --is-ancestor origin/patch/git-package-storage origin/patch/model-refresh-timeout; then
-            echo '::error::patch/model-refresh-timeout must descend from patch/git-package-storage'
-            exit 1
-          fi
-          if [[ -n "$(git rev-list --min-parents=2 origin/patch/git-package-storage..origin/patch/model-refresh-timeout)" ]]; then
-            echo '::error::patch/model-refresh-timeout descendant range must be linear'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/git-package-storage..origin/patch/model-refresh-timeout; then
-            python3 scripts/resolve-model-refresh-timeout-conflicts.py
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying model-refresh-timeout'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/model-refresh-timeout'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/model-refresh-timeout branch"
 
           if ! git merge --squash origin/patch/agent-run-failure-seam; then
             python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.py
