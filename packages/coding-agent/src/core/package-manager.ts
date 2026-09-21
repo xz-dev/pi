@@ -1157,7 +1157,11 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		try {
-			const targetVersion = await this.getLatestNpmVersion(source.version ? source.spec : source.name, source.range);
+			const targetVersion = await this.getLatestNpmVersion(
+				source.version ? source.spec : source.name,
+				source.range,
+				scope,
+			);
 			return gt(targetVersion, installedVersion);
 		} catch (cause) {
 			if (this.getNpmCommand().embeddedBun) {
@@ -1251,7 +1255,7 @@ export class DefaultPackageManager implements PackageManager {
 					if (!existsSync(installedPath)) {
 						return undefined;
 					}
-					const hasUpdate = await this.npmHasAvailableUpdate(parsed, installedPath);
+					const hasUpdate = await this.npmHasAvailableUpdate(parsed, installedPath, entry.scope);
 					if (!hasUpdate) {
 						return undefined;
 					}
@@ -1516,7 +1520,11 @@ export class DefaultPackageManager implements PackageManager {
 		return source.range ? satisfies(installedVersion, source.range) : true;
 	}
 
-	private async npmHasAvailableUpdate(source: NpmSource, installedPath: string): Promise<boolean> {
+	private async npmHasAvailableUpdate(
+		source: NpmSource,
+		installedPath: string,
+		scope: InstalledSourceScope,
+	): Promise<boolean> {
 		if (isOfflineModeEnabled()) {
 			return false;
 		}
@@ -1527,7 +1535,11 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		try {
-			const targetVersion = await this.getLatestNpmVersion(source.version ? source.spec : source.name, source.range);
+			const targetVersion = await this.getLatestNpmVersion(
+				source.version ? source.spec : source.name,
+				source.range,
+				scope,
+			);
 			return gt(targetVersion, installedVersion);
 		} catch {
 			return false;
@@ -1546,14 +1558,26 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async getLatestNpmVersion(packageSpec: string, range?: string): Promise<string> {
+	private async getLatestNpmVersion(
+		packageSpec: string,
+		range?: string,
+		scope: InstalledSourceScope = "user",
+	): Promise<string> {
 		const npmCommand = this.getNpmCommand();
 		const verb = this.getPackageManagerName() === "bun" ? "info" : "view";
+		// Bun `info` requires a package.json in cwd; run it inside the managed
+		// install root so version checks don't depend on the user's cwd.
+		let cwd = this.cwd;
+		if (npmCommand.embeddedBun) {
+			const installRoot = this.getNpmInstallRoot(scope, false);
+			this.ensureNpmProject(installRoot);
+			cwd = installRoot;
+		}
 		const stdout = await this.runCommandCapture(
 			npmCommand.command,
 			[...npmCommand.args, verb, packageSpec, "version", "--json"],
 			{
-				cwd: this.cwd,
+				cwd,
 				timeoutMs: NETWORK_TIMEOUT_MS,
 				...(npmCommand.embeddedBun ? { env: { BUN_BE_BUN: "1" } } : {}),
 			},

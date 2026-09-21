@@ -787,7 +787,9 @@ Content`,
 					executable,
 					[...prefix, verb, "@scope/pkg@^1.0.0", "version", "--json"],
 					{
-						cwd: tempDir,
+						// Embedded Bun runs `info` from the managed npm root so a
+						// missing package.json in the user's cwd cannot fail the check.
+						cwd: embedded ? join(agentDir, "npm") : tempDir,
 						timeoutMs: 10000,
 						...(embedded ? { env: { BUN_BE_BUN: "1" } } : {}),
 					},
@@ -979,7 +981,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					},
 					{
 						args: ["info", "@scope/pkg@^1.0.0", "version", "--json"],
-						cwd: tempDir,
+						cwd: join(agentDir, "npm"),
 						mode: "1",
 						path: process.env.PATH,
 						registry: process.env.npm_config_registry,
