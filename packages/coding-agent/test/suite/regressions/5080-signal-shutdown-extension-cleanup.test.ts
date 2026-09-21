@@ -36,6 +36,7 @@ type UncaughtCrashThis = EmergencyExitThis & {
 	ui: { stop: () => void };
 	recordCrash(kind: "uncaught_exception" | "fatal_error", error: unknown): boolean;
 	crashReportInstructions(): string;
+	getCrashExtensionHint(error: unknown): string | undefined;
 };
 
 type InteractiveModePrototypeWithShutdown = {
@@ -243,6 +244,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 			ui: { stop: vi.fn() },
 			recordCrash: () => false,
 			crashReportInstructions: () => "",
+			getCrashExtensionHint: () => undefined,
 		};
 
 		callUncaughtCrash(context, new Error("boom"));
@@ -263,6 +265,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 			ui: { stop: vi.fn() },
 			recordCrash: () => false,
 			crashReportInstructions: () => "",
+			getCrashExtensionHint: () => undefined,
 		};
 
 		callUncaughtCrash(context, new Error("boom"));
