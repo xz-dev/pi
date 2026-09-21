@@ -513,6 +513,16 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/ai-drop-empty-messages branch"
 
+          # Temporary test-drift patch for upstream strict-mode test expectations
+          # (upstream tip CI fails on the same assertions; retire when upstream fixes).
+          git merge --squash origin/patch/ai-strict-mode-test-drift
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/ai-strict-mode-test-drift; upstream fixed the tests, retire this patch'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/ai-strict-mode-test-drift branch"
+
           # Temporary test-policy patch for an upstream characterization whose
           # threshold/overflow result changes across GitHub-hosted runners.
           git merge --squash origin/patch/compaction-test-exclusion
