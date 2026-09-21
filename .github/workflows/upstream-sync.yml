@@ -550,7 +550,13 @@ jobs:
 
           # Temporary test-drift patch for upstream strict-mode test expectations
           # (upstream tip CI fails on the same assertions; retire when upstream fixes).
-          git merge --squash origin/patch/ai-strict-mode-test-drift
+          if ! git merge --squash origin/patch/ai-strict-mode-test-drift; then
+            python3 scripts/resolve-ai-strict-mode-drift-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying ai-strict-mode-test-drift'
+            exit 1
+          fi
           if git diff --cached --quiet; then
             echo '::error::Empty patch integration for patch/ai-strict-mode-test-drift; upstream fixed the tests, retire this patch'
             exit 1
