@@ -3009,7 +3009,12 @@ export class AgentSession {
 	private _refreshModelsFromRuntime(): void {
 		const currentModel = this.model;
 		if (currentModel) {
-			this.agent.state.model = this._modelRuntime.getModel(currentModel.provider, currentModel.id) ?? currentModel;
+			const refreshed = this._modelRuntime.getModel(currentModel.provider, currentModel.id);
+			if (refreshed) {
+				// Spread-merge so runtime-attached fields (e.g. inputLimits set in-memory by
+				// extensions/tests) survive when the registry copy lacks them.
+				this.agent.state.model = { ...currentModel, ...refreshed };
+			}
 		}
 		this._scopedModels = this._scopedModels.map((scoped) => ({
 			...scoped,
