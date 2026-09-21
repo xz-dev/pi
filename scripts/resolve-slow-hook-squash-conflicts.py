@@ -369,10 +369,15 @@ if settings_manager_path in conflicts:
             if method_start == -1:
                 raise SystemExit("getSlowHookThresholdMs method not found in theirs")
             # Method ends at the next \t} followed by blank line or end of theirs
-            method_end = theirs.find("\n\t}\n", method_start)
+            method_end = theirs.find("\n\t}\n\n", method_start)
             if method_end == -1:
-                raise SystemExit("getSlowHookThresholdMs method end not found")
-            method_block = theirs[method_start : method_end + len("\n\t}\n")]
+                # Try without trailing blank line (end of conflict block)
+                method_end = theirs.find("\n\t}\n", method_start)
+                if method_end == -1:
+                    raise SystemExit("getSlowHookThresholdMs method end not found")
+                method_block = theirs[method_start : method_end + len("\n\t}\n")]
+            else:
+                method_block = theirs[method_start : method_end + len("\n\t}\n\n")]
             text = text[:head_idx] + ours + method_block + "\n" + text[end_line:]
         else:
             text = text[:head_idx] + ours + text[end_line:]
