@@ -43,3 +43,6 @@ plans/
 .pi/hf-sessions-backup/
 collect.sh
 packages/agent/docs/extensions/pi-server-artifact/index.md
+
+# Built during test runs by buildUsageClaimFixture
+packages/coding-agent/test/fixtures/pi-usage-claim*.node

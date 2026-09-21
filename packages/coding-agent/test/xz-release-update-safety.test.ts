@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import type * as Fs from "node:fs";
 import {
@@ -20,6 +20,9 @@ import { main } from "../src/main.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
 import { cleanXzBundles, getLatestXzRelease, runXzSelfUpdate } from "../src/utils/xz-release-update.ts";
 import { allowNetwork } from "./test-network-env.ts";
+import { buildUsageClaimFixture } from "./usage-claim-fixture.ts";
+
+const usageClaimFixture = buildUsageClaimFixture();
 
 const TARGET = "linux-x64-gnu-modern";
 const EXEC_PATH_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "execPath");
@@ -102,12 +105,15 @@ function createReleaseBundle(root: string): Uint8Array {
 			{
 				name: "@earendil-works/pi-coding-agent",
 				version: NEXT_VERSION,
-				piConfig: { distribution: "xz-dev", releaseTarget: TARGET },
+				piConfig: { distribution: "xz-dev", releaseTarget: TARGET, usageClaimProtocol: 1 },
 			},
 			null,
 			2,
 		)}\n`,
 	);
+	writeFileSync(join(source, "usage.lock"), "P");
+	mkdirSync(join(source, "native", "usage-claim"), { recursive: true });
+	writeFileSync(join(source, "native", "usage-claim", "pi-usage-claim.node"), readFileSync(usageClaimFixture));
 	const archive = join(root, BUNDLE);
 	const zipped = spawnSync("zip", ["-qr", archive, "."], { cwd: source });
 	if (zipped.status !== 0) throw new Error(`zip failed: ${zipped.stderr?.toString() ?? ""}`);
@@ -131,8 +137,15 @@ function writeInstalledBundle(
 			piConfig: {
 				distribution: overrides.distribution ?? "xz-dev",
 				releaseTarget: overrides.releaseTarget ?? TARGET,
+				usageClaimProtocol: 1,
 			},
 		})}\n`,
+	);
+	writeFileSync(join(bundleDirectory, "usage.lock"), "P");
+	mkdirSync(join(bundleDirectory, "native", "usage-claim"), { recursive: true });
+	writeFileSync(
+		join(bundleDirectory, "native", "usage-claim", "pi-usage-claim.node"),
+		readFileSync(usageClaimFixture),
 	);
 	return bundleDirectory;
 }
@@ -159,6 +172,7 @@ function cleanupQuarantines(root: string): string[] {
 }
 
 beforeEach(() => {
+	vi.stubEnv("PI_USAGE_CLAIM_MODULE", usageClaimFixture);
 	fsMocks.lstatSync.mockReset();
 	fsMocks.renameSync.mockReset();
 	fsMocks.lstatSync.mockImplementation(fsMocks.realLstatSync!);
@@ -682,7 +696,7 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		}
 	});
 
-	it("quarantines an invalid unactivated destination before retrying installation", async () => {
+	it("refuses to replace an unverifiable unactivated destination without moving it", async () => {
 		if (process.platform === "win32") return;
 		allowNetwork();
 		const root = join(tmpdir(), `pi-xz-update-rejected-destination-${process.pid}-${Date.now()}`);
@@ -690,6 +704,58 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
 		const invalidDestination = writeInstalledBundle(root, NEXT_VERSION);
 		rmSync(join(invalidDestination, EXECUTABLE_NAME));
+		try {
+			const bytes = createReleaseBundle(root);
+			const value = manifest({
+				bundles: {
+					[TARGET]: {
+						file: BUNDLE,
+						bytes: bytes.byteLength,
+						sha256: createHash("sha256").update(bytes).digest("hex"),
+					},
+				},
+			});
+			const { manifestBytes, sums } = discoveryFiles(value);
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL) => {
+					if (String(input) === SUMS_URL) return new Response(sums);
+					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
+				}),
+			);
+
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			// Per design.md D5 / bundle-usage-claims: an unverifiable existing
+			// generation is retained, not moved or replaced. The update fails
+			// without touching the destination and without creating a
+			// rejected quarantine.
+			await expect(
+				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+					executablePath: join(oldBundle, EXECUTABLE_NAME),
+					writeProgress: () => {},
+				}),
+			).rejects.toThrow(/current state cannot be verified/);
+			expect(existsSync(join(root, "bundles", NEXT_VERSION, WRAPPER_NAME))).toBe(true);
+			const rejected = readdirSync(join(root, "bundles"), { withFileTypes: true }).filter(
+				(entry) => entry.isDirectory() && entry.name.startsWith(".update-rejected-"),
+			);
+			expect(rejected).toHaveLength(0);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("quarantines a valid unactivated destination before retrying installation", async () => {
+		if (process.platform === "win32") return;
+		allowNetwork();
+		const root = join(tmpdir(), `pi-xz-update-rejected-valid-${process.pid}-${Date.now()}`);
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
+		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
+		// A COMPLETE previous-generation destination is validated, claimed, and
+		// quarantined so the fresh install can take its place (design.md D5).
+		const validDestination = writeInstalledBundle(root, NEXT_VERSION);
+		writeFileSync(join(validDestination, WRAPPER_NAME), "older launcher\n");
 		try {
 			const bytes = createReleaseBundle(root);
 			const value = manifest({
@@ -725,8 +791,63 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 			);
 			expect(rejected).toHaveLength(1);
 			expect(existsSync(join(root, "bundles", rejected[0].name, NEXT_VERSION, WRAPPER_NAME))).toBe(true);
-			expect(existsSync(join(root, "bundles", rejected[0].name, NEXT_VERSION, EXECUTABLE_NAME))).toBe(false);
 		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses same-version replacement while a live process holds the destination claim", async () => {
+		if (process.platform === "win32") return;
+		allowNetwork();
+		const root = join(tmpdir(), `pi-xz-update-live-destination-${process.pid}-${Date.now()}`);
+		const oldBundle = writeInstalledBundle(root, CURRENT_VERSION);
+		writeFileSync(join(root, WRAPPER_NAME), "old root wrapper\n");
+		const liveDestination = writeInstalledBundle(root, NEXT_VERSION);
+		const marker = join(root, "holder-ready");
+		const holder = spawn(
+			process.execPath,
+			[
+				"--eval",
+				`const m=require(${JSON.stringify(usageClaimFixture)});const fs=require("node:fs");
+				if(m.acquire(${JSON.stringify(join(liveDestination, "usage.lock"))},"shared","session")!=="acquired")process.exit(3);
+				fs.writeFileSync(${JSON.stringify(marker)},"1");setInterval(()=>{},1000);`,
+			],
+			{ stdio: "ignore" },
+		);
+		try {
+			for (let i = 0; i < 200 && !existsSync(marker); i++) await new Promise((r) => setTimeout(r, 10));
+			expect(existsSync(marker)).toBe(true);
+			const bytes = createReleaseBundle(root);
+			const value = manifest({
+				bundles: {
+					[TARGET]: {
+						file: BUNDLE,
+						bytes: bytes.byteLength,
+						sha256: createHash("sha256").update(bytes).digest("hex"),
+					},
+				},
+			});
+			const { manifestBytes, sums } = discoveryFiles(value);
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL) => {
+					if (String(input) === SUMS_URL) return new Response(sums);
+					if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+					return new Response(bytes, { headers: { "content-length": String(bytes.byteLength) } });
+				}),
+			);
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			await expect(
+				runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+					executablePath: join(oldBundle, EXECUTABLE_NAME),
+					writeProgress: () => {},
+				}),
+			).rejects.toThrow(/while it is in use/);
+			expect(existsSync(liveDestination)).toBe(true);
+			expect(readdirSync(join(root, "bundles")).filter((name) => name.startsWith(".update-rejected-"))).toEqual([]);
+		} finally {
+			holder.kill("SIGKILL");
+			await new Promise((r) => holder.once("exit", r));
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -775,7 +896,7 @@ describe("xz-dev native Release cleanup and activation safety", () => {
 			expect(pkg).toMatchObject({
 				name: "@earendil-works/pi-coding-agent",
 				version: NEXT_VERSION,
-				piConfig: { distribution: "xz-dev", releaseTarget: TARGET },
+				piConfig: { distribution: "xz-dev", releaseTarget: TARGET, usageClaimProtocol: 1 },
 			});
 			expect(readFileSync(join(root, WRAPPER_NAME), "utf8")).toBe("next wrapper\n");
 			expect(readFileSync(join(destination, EXECUTABLE_NAME), "utf8")).toBe("next binary\n");
