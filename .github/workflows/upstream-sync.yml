@@ -45,6 +45,7 @@ jobs:
             +refs/heads/patch/bundle-usage-claims:refs/remotes/origin/patch/bundle-usage-claims \
             +refs/heads/patch/use-embedded-bun-package-manager:refs/remotes/origin/patch/use-embedded-bun-package-manager \
             +refs/heads/patch/git-package-storage:refs/remotes/origin/patch/git-package-storage \
+            +refs/heads/patch/model-refresh-timeout:refs/remotes/origin/patch/model-refresh-timeout \
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
             +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
@@ -74,6 +75,7 @@ jobs:
             origin/patch/bundle-usage-claims
             origin/patch/use-embedded-bun-package-manager
             origin/patch/git-package-storage
+            origin/patch/model-refresh-timeout
             origin/patch/agent-run-failure-seam
             origin/patch/managed-tool-executions
             origin/patch/esc-abort
@@ -281,6 +283,14 @@ jobs:
           fi
           git diff --cached --check
           git commit -m "merge patch/git-package-storage branch"
+
+          git merge --squash origin/patch/model-refresh-timeout
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/model-refresh-timeout'
+            exit 1
+          fi
+          git diff --cached --check
+          git commit -m "merge patch/model-refresh-timeout branch"
 
           if ! git merge --squash origin/patch/agent-run-failure-seam; then
             python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.py
