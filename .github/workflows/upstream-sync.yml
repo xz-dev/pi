@@ -61,7 +61,6 @@ jobs:
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
-            +refs/heads/patch/ai-strict-mode-test-drift:refs/remotes/origin/patch/ai-strict-mode-test-drift \
             +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion
 
           patch_refs=(
@@ -92,7 +91,6 @@ jobs:
             origin/patch/google-toomany-toolcalls
             origin/patch/model-selector-refresh-selection
             origin/patch/ai-drop-empty-messages
-            origin/patch/ai-strict-mode-test-drift
             origin/patch/compaction-test-exclusion
           )
 
@@ -539,21 +537,10 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/ai-drop-empty-messages branch"
 
-          # Temporary test-drift patch for upstream strict-mode test expectations
-          # (upstream tip CI fails on the same assertions; retire when upstream fixes).
-          if ! git merge --squash origin/patch/ai-strict-mode-test-drift; then
-            python3 scripts/resolve-ai-strict-mode-drift-conflicts.py
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying ai-strict-mode-test-drift'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/ai-strict-mode-test-drift; upstream fixed the tests, retire this patch'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/ai-strict-mode-test-drift branch"
+          # patch/ai-strict-mode-test-drift retired: upstream fixed the strict-mode
+          # assertions itself (supportsStrictMode emitted in the fireworks fixture,
+          # toBeUndefined in cache-retention), and patch/ai-drop-empty-messages
+          # already removes the cerebras test block the drift touched.
 
           # Temporary test-policy patch for an upstream characterization whose
           # threshold/overflow result changes across GitHub-hosted runners.
