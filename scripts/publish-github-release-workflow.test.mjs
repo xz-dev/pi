@@ -159,15 +159,16 @@ test("upstream sync carries the unified TUI-only slow-hook patch", () => {
     syncWorkflowText,
     /\+refs\/heads\/patch\/slow-hook-tui-only:refs\/remotes\/origin\/patch\/slow-hook-tui-only/,
   );
-  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/slow-hook-tui-only/);
+  assert.match(syncWorkflowText, /git diff --binary[\s\\]+'origin\/patch\/slow-hook-on-accumulated\^'[\s\\]+origin\/patch\/slow-hook-on-accumulated -- > \/tmp\/slow-hook-tui-only\.patch/);
+  assert.match(syncWorkflowText, /git apply --3way --index \/tmp\/slow-hook-tui-only\.patch/);
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
 
 test("upstream sync preserves bounded slow-hook and session-tree compatibility", () => {
-  assert.match(
+  assert.doesNotMatch(
     syncWorkflowText,
-    /python3 scripts\/resolve-slow-hook-squash-conflicts\.py/,
+    /resolve-slow-hook-squash-conflicts\.py/,
   );
   assert.match(
     syncWorkflowText,
