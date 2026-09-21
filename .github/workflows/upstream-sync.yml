@@ -284,17 +284,16 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/git-package-storage branch"
 
-          if ! git merge-base --is-ancestor origin/patch/model-catalog-extension-refresh origin/patch/model-refresh-timeout; then
-            echo '::error::patch/model-refresh-timeout must descend from patch/model-catalog-extension-refresh'
+          if ! git merge-base --is-ancestor origin/patch/git-package-storage origin/patch/model-refresh-timeout; then
+            echo '::error::patch/model-refresh-timeout must descend from patch/git-package-storage'
             exit 1
           fi
-          if [[ -n "$(git rev-list --min-parents=2 origin/patch/model-catalog-extension-refresh..origin/patch/model-refresh-timeout)" ]]; then
+          if [[ -n "$(git rev-list --min-parents=2 origin/patch/git-package-storage..origin/patch/model-refresh-timeout)" ]]; then
             echo '::error::patch/model-refresh-timeout descendant range must be linear'
             exit 1
           fi
-          if ! git cherry-pick --no-commit origin/patch/model-catalog-extension-refresh..origin/patch/model-refresh-timeout; then
-            echo '::error::Failed to apply patch/model-refresh-timeout descendant range'
-            exit 1
+          if ! git cherry-pick --no-commit origin/patch/git-package-storage..origin/patch/model-refresh-timeout; then
+            python3 scripts/resolve-model-refresh-timeout-conflicts.py
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying model-refresh-timeout'
