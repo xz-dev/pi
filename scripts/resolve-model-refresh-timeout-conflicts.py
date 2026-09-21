@@ -93,6 +93,8 @@ def main():
 
     path.write_text(text)
     subprocess.run(["git", "add", FILENAME], check=True)
+    # Clear cherry-pick state so subsequent merges see a clean sequencer
+    subprocess.run(["git", "cherry-pick", "--quit"], check=True)
 
 
 if __name__ == "__main__":
