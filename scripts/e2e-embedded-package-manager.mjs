@@ -105,16 +105,30 @@ async function verifyNoDowngrade() {
     assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "2.0.0");
     const settingsBefore = hash(join(env.PI_CODING_AGENT_DIR, "settings.json"));
     latest = "1.0.0";
+    // The version check must succeed from a work dir without a package.json:
+    // embedded Bun runs `info` inside the managed install root, so update is
+    // skipped (installed 2.0.0 > registry latest 1.0.0) and no warning appears.
     for (const mode of ["bulk", "explicit"]) {
       const args = mode === "bulk" ? ["update", "--extensions"] : ["update", `npm:${name}`];
       await run(`unknown-version-${mode}`, args, { env: { ...registryEnv, BUN_INSTALL_CACHE_DIR: join(root, `empty-${mode}-cache`) } });
       const warning = readFileSync(join(root, `unknown-version-${mode}.stderr.log`), "utf8");
-      assert.match(warning, /Cannot verify update/);
-      assert.match(warning, /may be downgraded/);
-      assert.match(warning, /package\.json/);
-      assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "1.0.0");
+      assert.doesNotMatch(warning, /Cannot verify update/);
+      assert.doesNotMatch(warning, /may be downgraded/);
+      assert.equal(JSON.parse(readFileSync(manifest, "utf8")).version, "2.0.0");
       assert.equal(hash(join(env.PI_CODING_AGENT_DIR, "settings.json")), settingsBefore);
       assert.equal(existsSync(join(root, "work", "package.json")), false);
+    }
+    // The warn-and-continue path still needs coverage: when metadata lookup
+    // fails outright (dead registry), the update is attempted anyway and
+    // warns before the download itself fails against the dead registry (exit 1).
+    const deadRegistryEnv = { npm_config_registry: "http://127.0.0.1:1" };
+    for (const mode of ["bulk", "explicit"]) {
+      const args = mode === "bulk" ? ["update", "--extensions"] : ["update", `npm:${name}`];
+      await run(`unreachable-version-${mode}`, args, { env: { ...deadRegistryEnv, BUN_INSTALL_CACHE_DIR: join(root, `dead-${mode}-cache`) }, code: 1 });
+      const warning = readFileSync(join(root, `unreachable-version-${mode}.stderr.log`), "utf8");
+      assert.match(warning, /Cannot verify update/);
+      assert.match(warning, /may be downgraded/);
+      assert.equal(hash(join(env.PI_CODING_AGENT_DIR, "settings.json")), settingsBefore);
     }
     await run("remove-version-fixture", ["remove", `npm:${name}`], { env: registryEnv });
     writeFileSync(join(root, "work", "package.json"), "{}\n");
