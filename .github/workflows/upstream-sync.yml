@@ -54,7 +54,7 @@ jobs:
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
-            +refs/heads/patch/slow-hook-on-model-refresh-timeout:refs/remotes/origin/patch/slow-hook-on-model-refresh-timeout \
+            +refs/heads/patch/slow-hook-on-accumulated:refs/remotes/origin/patch/slow-hook-on-accumulated \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
@@ -85,7 +85,7 @@ jobs:
             origin/patch/skill-overrides
             origin/patch/retry-non-retryable-patterns
             origin/patch/slow-hook-tui-only
-            origin/patch/slow-hook-on-model-refresh-timeout
+            origin/patch/slow-hook-on-accumulated
             origin/patch/session-tree-splice
             origin/patch/ws-cached-empty-delta
             origin/patch/self-update-managed-by
@@ -435,8 +435,12 @@ jobs:
           git merge --squash origin/patch/retry-non-retryable-patterns
           git commit -m "merge patch/retry-non-retryable-patterns branch"
 
-          if ! git merge --squash origin/patch/slow-hook-on-model-refresh-timeout; then
-            python3 scripts/resolve-slow-hook-squash-conflicts.py
+          git diff --binary \
+            'origin/patch/slow-hook-on-accumulated^' \
+            origin/patch/slow-hook-on-accumulated -- > /tmp/slow-hook-tui-only.patch
+          if ! git apply --3way --index /tmp/slow-hook-tui-only.patch; then
+            echo '::error::Failed to apply patch/slow-hook-on-accumulated compat diff'
+            exit 1
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying TUI-only slow-hook diagnostics'
@@ -451,12 +455,12 @@ jobs:
           git diff --cached --check
           git commit -m "merge patch/slow-hook-tui-only branch"
 
-          if ! git merge-base --is-ancestor origin/patch/slow-hook-on-model-refresh-timeout origin/patch/session-tree-splice; then
-            echo '::error::patch/session-tree-splice must descend from patch/slow-hook-on-model-refresh-timeout'
+          if ! git merge-base --is-ancestor origin/patch/slow-hook-tui-only origin/patch/session-tree-splice; then
+            echo '::error::patch/session-tree-splice must descend from patch/slow-hook-tui-only'
             exit 1
           fi
           git diff --binary \
-            origin/patch/slow-hook-on-model-refresh-timeout \
+            origin/patch/slow-hook-tui-only \
             origin/patch/session-tree-splice -- > /tmp/session-tree-splice.patch
           if ! git apply --3way --index /tmp/session-tree-splice.patch; then
             mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
