@@ -434,7 +434,18 @@ jobs:
           git merge --squash origin/patch/skill-overrides
           git commit -m "merge patch/skill-overrides branch"
 
-          git merge --squash origin/patch/retry-non-retryable-patterns
+          if ! git merge --squash origin/patch/retry-non-retryable-patterns; then
+            python3 scripts/resolve-retry-non-retryable-conflicts.py
+          fi
+          if ! git diff --quiet --diff-filter=U --; then
+            echo '::error::Unresolved conflicts remain after applying retry-non-retryable-patterns'
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo '::error::Empty patch integration for patch/retry-non-retryable-patterns'
+            exit 1
+          fi
+          git diff --cached --check
           git commit -m "merge patch/retry-non-retryable-patterns branch"
 
           if ! git merge --squash origin/patch/slow-hook-tui-only; then
