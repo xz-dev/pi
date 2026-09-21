@@ -3352,8 +3352,15 @@ export class AgentSession {
 			const refreshed = this._modelRuntime.getModel(currentModel.provider, currentModel.id);
 			if (refreshed) {
 				// Spread-merge so runtime-attached fields (e.g. inputLimits set in-memory by
-				// extensions/tests) survive when the registry copy lacks them.
-				this.agent.state.model = { ...currentModel, ...refreshed };
+				// extensions/tests) survive when the registry copy lacks them. The registry
+				// copy may carry inputLimits as an explicit undefined key, so use ?? fallback
+				// after the spread rather than relying on key absence.
+				this.agent.state.model = {
+					...currentModel,
+					...refreshed,
+					inputLimits: refreshed.inputLimits ?? currentModel.inputLimits,
+					thinkingLevelMap: refreshed.thinkingLevelMap ?? currentModel.thinkingLevelMap,
+				};
 			}
 		}
 		this._scopedModels = this._scopedModels.map((scoped) => ({
@@ -3484,11 +3491,9 @@ export class AgentSession {
 				},
 				registerVirtualModel: (definition) => {
 					this._modelRuntime.registerVirtualModel(definition);
-					this._refreshCurrentModelFromRegistry();
 				},
 				unregisterVirtualModel: (provider, id) => {
 					this._modelRuntime.unregisterVirtualModel(provider, id);
-					this._refreshCurrentModelFromRegistry();
 				},
 			},
 		);
