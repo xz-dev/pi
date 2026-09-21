@@ -37,6 +37,7 @@ jobs:
             +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
             +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
+            +refs/heads/patch/model-refresh-session-rebind-on-accumulated:refs/remotes/origin/patch/model-refresh-session-rebind-on-accumulated \
             +refs/heads/patch/model-catalog-extension-refresh:refs/remotes/origin/patch/model-catalog-extension-refresh \
             +refs/heads/patch/bun-bytecode-entrypoint:refs/remotes/origin/patch/bun-bytecode-entrypoint \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
@@ -67,6 +68,7 @@ jobs:
             origin/patch/contributor-approval
             origin/patch/model-startup-refresh-barrier
             origin/patch/model-refresh-session-rebind
+            origin/patch/model-refresh-session-rebind-on-accumulated
             origin/patch/model-catalog-extension-refresh
             origin/patch/bun-bytecode-entrypoint
             origin/patch/startup-benchmark-exit
@@ -167,13 +169,29 @@ jobs:
           git merge --squash origin/patch/model-startup-refresh-barrier
           git commit -m "merge patch/model-startup-refresh-barrier branch"
 
-          if ! git merge --squash origin/patch/model-refresh-session-rebind; then
-            python3 scripts/resolve-model-refresh-rebind-squash-conflicts.py
+          # Apply only the rebind delta (tip^..tip) — the accumulated pre-image
+          # (upstream + ci + contributor-approval + barrier) already exists in
+          # accumulated main and would conflict if re-applied.
+          git diff --binary \
+            'origin/patch/model-refresh-session-rebind-on-accumulated^' \
+            origin/patch/model-refresh-session-rebind-on-accumulated -- > /tmp/model-refresh-session-rebind.patch
+          if ! git apply --3way --index /tmp/model-refresh-session-rebind.patch; then
+            echo '::error::Failed to apply patch/model-refresh-session-rebind-on-accumulated compat diff'
+            exit 1
           fi
           if ! git diff --quiet --diff-filter=U --; then
             echo '::error::Unresolved conflicts remain after applying model-refresh-session-rebind'
             exit 1
           fi
+          agent_session=packages/coding-agent/src/core/agent-session.ts
+          grep -Fq 'private _cacheWarmer?:' "$agent_session"
+          grep -Fq 'private _unsubscribeModelsChanged: () => void;' "$agent_session"
+          grep -Fq 'this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime())' "$agent_session"
+          if grep -Fq '_refreshCurrentModelFromRegistry' "$agent_session"; then
+            echo '::error::Stale _refreshCurrentModelFromRegistry reference remains'
+            exit 1
+          fi
+          git diff --cached --check
           git commit -m "merge patch/model-refresh-session-rebind branch"
 
           if ! git merge --squash origin/patch/model-catalog-extension-refresh; then
@@ -662,7 +680,6 @@ jobs:
           python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.test.py
           python3 scripts/resolve-managed-tool-executions-squash-conflicts.test.py
           python3 scripts/resolve-managed-tool-esc-conflicts.test.py
-          python3 scripts/resolve-model-refresh-rebind-squash-conflicts.test.py
 
       - name: Install Linux smoke display
         run: |
