@@ -1,24 +1,41 @@
 #!/usr/bin/env python3
 """Resolve the model-refresh-timeout cherry-pick conflict in main.ts.
 
-The conflict arises because patch/git-package-storage (which precedes us in
-the sync order) lacks the --refresh block that patch/model-catalog-extension-refresh
-adds. When our commit is cherry-picked onto accumulated main, the merge base
-for main.ts is the git-package-storage version (no --refresh), while ours has
-the --refresh block with 15_000 and theirs has it with getModelRefreshTimeoutMs().
-The resolution keeps the --refresh block with the configurable timeout.
+The patch sits on patch/model-startup-refresh-barrier and applies after
+model-catalog-extension-refresh in sync order. Conflicts arise because
+intermediate patches (use-embedded-bun, git-package-storage) changed main.ts
+regions we touch: the timeout parameter name and the --refresh block.
+
+Known conflict shapes:
+1. modelRuntimeTimeoutMs vs modelRuntimeSignal: startup-refresh-barrier
+   renamed the parameter. Ours has `modelRuntimeTimeoutMs: 15_000`, theirs
+   has `modelRuntimeSignal: AbortSignal.timeout(...)`. Keep timeoutMs param
+   with configurable value.
+2. signal timeout on resolveModelScope/refresh calls: ours has
+   `signal: AbortSignal.timeout(15_000)`, theirs has getModelRefreshTimeoutMs.
+3. --refresh block missing in ours: git-package-storage dropped it, ours
+   has plain listModels exit, theirs has full --refresh block. Keep theirs.
 """
 from pathlib import Path
 import subprocess
 
 FILENAME = "packages/coding-agent/src/main.ts"
 
-OURS_BLOCK = """\t\tconst searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
-\t\tawait listModels(modelRuntime, searchPattern, AbortSignal.timeout(15_000));
-\t\tprocess.exit(0);
-"""
+HEAD = "<<<<<<< HEAD\n"
+SEP = "=======\n"
+END = ">>>>>>> "
 
-THEIRS_MARKER_END = ">>>>>>> "
+
+def extract_conflict(text: str, start: int):
+    """Extract ours/theirs from conflict at start. Returns (ours, theirs, end_pos)."""
+    sep_idx = text.find(SEP, start)
+    end_idx = text.find(END, sep_idx)
+    if sep_idx == -1 or end_idx == -1:
+        raise SystemExit("Malformed conflict block")
+    end_line_end = text.find("\n", end_idx) + 1
+    ours = text[start + len(HEAD) : sep_idx]
+    theirs = text[sep_idx + len(SEP) : end_idx]
+    return ours, theirs, end_line_end
 
 
 def main():
@@ -31,51 +48,50 @@ def main():
     path = Path(FILENAME)
     text = path.read_text()
 
-    # Find the conflict block: <<<<<<< HEAD ... ======= ... >>>>>>> <ref>
-    head_marker = "<<<<<<< HEAD\n"
-    sep_marker = "=======\n"
+    while True:
+        head_idx = text.find(HEAD)
+        if head_idx == -1:
+            break
+        ours, theirs, end_pos = extract_conflict(text, head_idx)
 
-    head_idx = text.find(head_marker)
-    if head_idx == -1:
-        raise SystemExit("No conflict markers found")
-
-    sep_idx = text.find(sep_marker, head_idx)
-    end_idx = text.find(THEIRS_MARKER_END, sep_idx)
-    if end_idx == -1:
-        raise SystemExit("Malformed conflict block")
-
-    # end_idx points to start of >>>>>>> line; find its newline
-    end_line_end = text.find("\n", end_idx) + 1
-
-    ours = text[head_idx + len(head_marker) : sep_idx]
-    theirs = text[sep_idx + len(sep_marker) : end_idx]
-
-    if ours != OURS_BLOCK:
-        raise SystemExit(f"Unexpected ours shape:\n{ours!r}")
-
-    if "getModelRefreshTimeoutMs" not in theirs:
-        raise SystemExit("Theirs missing getModelRefreshTimeoutMs")
-    if "refreshFailed" not in theirs:
-        raise SystemExit("Theirs missing refreshFailed")
-
-    # Resolution: keep theirs (has --refresh block + configurable timeout)
-    resolved = text[:head_idx] + theirs + text[end_line_end:]
+        if "modelRuntimeTimeoutMs" in ours and "modelRuntimeSignal" in theirs:
+            # Parameter renamed by startup-refresh-barrier; keep timeoutMs with our value
+            if "15_000" not in ours or "getModelRefreshTimeoutMs" not in theirs:
+                raise SystemExit("Unexpected timeout param conflict")
+            resolution = ours.replace(
+                "15_000", "runtimeSettingsManager.getModelRefreshTimeoutMs()"
+            )
+            text = text[:head_idx] + resolution + text[end_pos:]
+        elif "signal: AbortSignal.timeout(15_000)" in ours and "getModelRefreshTimeoutMs" in theirs:
+            # Timeout replacement on a signal-using call
+            resolution = ours.replace(
+                "15_000", "settingsManager.getModelRefreshTimeoutMs()"
+            )
+            text = text[:head_idx] + resolution + text[end_pos:]
+        elif "AbortSignal.timeout(15_000)" in ours and "getModelRefreshTimeoutMs" in theirs:
+            # listModels and similar direct-timeout calls
+            resolution = ours.replace(
+                "15_000", "settingsManager.getModelRefreshTimeoutMs()"
+            )
+            text = text[:head_idx] + resolution + text[end_pos:]
+        elif "refreshFailed" in theirs and "getModelRefreshTimeoutMs" in theirs:
+            # --refresh block exists only in theirs; keep it
+            text = text[:head_idx] + theirs + text[end_pos:]
+        else:
+            raise SystemExit(
+                f"Unknown conflict shape:\nours={ours[:200]!r}\ntheirs={theirs[:200]!r}"
+            )
 
     if any(
         line.startswith(("<<<<<<< ", "=======", ">>>>>>> "))
-        for line in resolved.splitlines()
+        for line in text.splitlines()
     ):
         raise SystemExit("Conflict markers remain in main.ts")
 
-    for required in (
-        "let refreshFailed = false;",
-        "getModelRefreshTimeoutMs()",
-        "process.exit(refreshFailed ? 1 : 0);",
-    ):
-        if resolved.count(required) < 1:
-            raise SystemExit(f"Missing expected content: {required!r}")
+    if "getModelRefreshTimeoutMs()" not in text:
+        raise SystemExit("Missing getModelRefreshTimeoutMs")
 
-    path.write_text(resolved)
+    path.write_text(text)
     subprocess.run(["git", "add", FILENAME], check=True)
 
 
