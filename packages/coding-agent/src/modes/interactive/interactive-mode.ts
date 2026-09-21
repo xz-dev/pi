@@ -1173,7 +1173,7 @@ export class InteractiveMode {
 
 		if (!process.env.PI_OFFLINE) {
 			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 15_000);
+			const timeout = setTimeout(() => controller.abort(), this.session.settingsManager.getModelRefreshTimeoutMs());
 			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
 				.then(() => this.updateAvailableProviderCount())
 				.catch(() => {})
@@ -5362,7 +5362,7 @@ export class InteractiveMode {
 		const timeout = setTimeout(() => {
 			timedOut = true;
 			controller.abort();
-		}, 15_000);
+		}, this.session.settingsManager.getModelRefreshTimeoutMs());
 		try {
 			const result = await refreshModelCatalogs(this.session.modelRuntime, controller.signal);
 			if (result.aborted && timedOut) {
@@ -5557,7 +5557,7 @@ export class InteractiveMode {
 			const timeout = setTimeout(() => {
 				timedOut = true;
 				controller.abort();
-			}, 15_000);
+			}, this.session.settingsManager.getModelRefreshTimeoutMs());
 			const selector = new ScopedModelsSelectorComponent(
 				{
 					allModels: availableModels,
@@ -6268,7 +6268,7 @@ export class InteractiveMode {
 		}
 
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 15_000);
+		const timeout = setTimeout(() => controller.abort(), session.settingsManager.getModelRefreshTimeoutMs());
 		void session.modelRuntime
 			.refresh({ providers: [providerId], signal: controller.signal })
 			.then(async (result) => {
