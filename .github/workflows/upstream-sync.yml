@@ -327,6 +327,12 @@ jobs:
             echo '::error::Empty patch integration for patch/managed-tool-executions'
             exit 1
           fi
+          # Assert managed-tool-executions intrinsic content on the merged tree.
+          agent_loop=packages/agent/src/agent-loop.ts
+          grep -Fq 'await awaitPreparedToolExecution(preparation, execution, config);' "$agent_loop"
+          grep -Fq 'const replayError = getManagedExecutionReplayError(result);' "$agent_loop"
+          test "$(grep -Fc 'const execution = createPreparedToolExecution(' "$agent_loop")" -eq 2
+          test "$(grep -Fc 'const executed = await executePreparedToolCall(preparation, signal, emit);' "$agent_loop")" -eq 0
           git diff --cached --check
           git commit -m "merge patch/managed-tool-executions branch"
 
@@ -371,16 +377,11 @@ jobs:
             echo '::error::patch/esc-abort descendant range is empty'
             exit 1
           fi
+          # Assert only esc-abort intrinsic content; mte semantics were
+          # asserted at the mte step and combined-result coverage lives in the
+          # focused managed-tool-executions-esc-abort regression test.
           agent_loop=packages/agent/src/agent-loop.ts
-          grep -Fq 'const toolController = new AbortController();' "$agent_loop"
-          grep -Fq 'const interruptController = new AbortController();' "$agent_loop"
-          grep -Fq 'controller: toolController,' "$agent_loop"
-          grep -Fq 'await awaitPreparedToolExecution(preparation, execution, config);' "$agent_loop"
           grep -Fq 'await emitToolExecutionEnd(finalized, emit, signal);' "$agent_loop"
-          grep -Fq 'prepared.args as never, toolSignal,' "$agent_loop"
-          grep -Fq 'const replayError = getManagedExecutionReplayError(result);' "$agent_loop"
-          test "$(grep -Fc 'const execution = createPreparedToolExecution(' "$agent_loop")" -eq 2
-          test "$(grep -Fc 'const executed = await executePreparedToolCall(preparation, signal, emit);' "$agent_loop")" -eq 0
           git diff --cached --check
           git commit -m "merge patch/esc-abort branch"
 
