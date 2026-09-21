@@ -522,7 +522,7 @@ try {
 } finally {
 	await new Promise((resolveClose) => server.close(resolveClose));
 	try {
-		rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		rmSync(work, { recursive: true, force: true, maxRetries: 60, retryDelay: 500 });
 	} catch (error) {
 		if (!runError) throw error;
 		console.error(`Self-update E2E cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
