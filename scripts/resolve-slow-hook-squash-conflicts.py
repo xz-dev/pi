@@ -7,13 +7,9 @@ required_conflicts = {
     Path("packages/coding-agent/src/core/extensions/runner.ts"),
 }
 interactive_path = Path("packages/coding-agent/src/modes/interactive/interactive-mode.ts")
-settings_path = Path("packages/coding-agent/docs/settings.md")
-settings_manager_path = Path("packages/coding-agent/src/core/settings-manager.ts")
 allowed_conflicts = {
     frozenset(required_conflicts),
     frozenset({*required_conflicts, interactive_path}),
-    frozenset({*required_conflicts, interactive_path, settings_path, settings_manager_path}),
-    frozenset({*required_conflicts, settings_path, settings_manager_path}),
 }
 conflicts = {
     Path(path)
@@ -320,59 +316,5 @@ if interactive_path in conflicts:
     if interactive.count(interactive_conflict) != 1:
         raise SystemExit("unexpected interactive mode slow-hook conflict shape")
     interactive_path.write_text(interactive.replace(interactive_conflict, interactive_resolution))
-
-# settings.md and settings-manager.ts: resolve by keeping ours (accumulated
-# main already has the other patches' additions) and inserting only the
-# theirs-side lines that are genuinely new (slowHookThresholdMs row/method).
-def union_settings(text: str, new_marker: str) -> str:
-    while True:
-        head_idx = text.find(marker_start + " HEAD\n")
-        if head_idx == -1:
-            break
-        sep_idx = text.find(marker_middle + "\n", head_idx)
-        end_idx = text.find(marker_end, sep_idx)
-        if sep_idx == -1 or end_idx == -1:
-            raise SystemExit("malformed conflict")
-        end_line = text.find("\n", end_idx) + 1
-        ours = text[head_idx + len(marker_start + " HEAD\n") : sep_idx]
-        theirs = text[sep_idx + len(marker_middle + "\n") : end_idx]
-        # Keep ours, plus any theirs lines containing the new marker
-        extra = "".join(
-            line for line in theirs.splitlines(keepends=True) if new_marker in line
-        )
-        text = text[:head_idx] + ours + extra + text[end_line:]
-    return text
-
-if settings_path in conflicts:
-    resolved = union_settings(settings_path.read_text(), "slowHookThresholdMs")
-    settings_path.write_text(resolved)
-if settings_manager_path in conflicts:
-    text = settings_manager_path.read_text()
-    # Resolve by keeping ours and appending the getSlowHookThresholdMs method
-    # block from theirs (it's a contiguous method definition).
-    while True:
-        head_idx = text.find(marker_start + " HEAD\n")
-        if head_idx == -1:
-            break
-        sep_idx = text.find(marker_middle + "\n", head_idx)
-        end_idx = text.find(marker_end, sep_idx)
-        if sep_idx == -1 or end_idx == -1:
-            raise SystemExit("malformed conflict")
-        end_line = text.find("\n", end_idx) + 1
-        ours = text[head_idx + len(marker_start + " HEAD\n") : sep_idx]
-        theirs = text[sep_idx + len(marker_middle + "\n") : end_idx]
-        # If theirs contains the slow-hook method and ours doesn't, keep ours
-        # plus the complete method block from theirs.
-        if "getSlowHookThresholdMs" in theirs and "getSlowHookThresholdMs" not in ours:
-            # theirs is the complete new method block; use it wholesale
-            text = text[:head_idx] + ours + theirs + text[end_line:]
-        else:
-            text = text[:head_idx] + ours + text[end_line:]
-    if any(
-        line.startswith((marker_start, marker_middle, marker_end))
-        for line in text.splitlines()
-    ):
-        raise SystemExit("markers remain in settings-manager.ts")
-    settings_manager_path.write_text(text)
 
 subprocess.run(["git", "add", *map(str, sorted(conflicts))], check=True)
