@@ -102,7 +102,7 @@ jobs:
           scripts/build-binaries.sh "${args[@]}"
           test "$(find "$RUNNER_TEMP/target" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with: { name: "github-release-target-${{ github.sha }}-${{ github.run_attempt }}-${{ matrix.id }}", path: "${{ runner.temp }}/target/pi-*", if-no-files-found: error, retention-days: 14 }
+        with: { name: "github-release-target-${{ github.sha }}-${{ matrix.id }}", path: "${{ runner.temp }}/target/pi-*", if-no-files-found: error, overwrite: true, retention-days: 14 }
 
   aggregate-release-candidate:
     needs: [release-matrix, validate-source, build-target]
@@ -114,12 +114,12 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: "22" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { pattern: "github-release-target-${{ github.sha }}-${{ github.run_attempt }}-*", path: "${{ runner.temp }}/prebuilt", merge-multiple: true }
+        with: { pattern: "github-release-target-${{ github.sha }}-*", path: "${{ runner.temp }}/prebuilt", merge-multiple: true }
       - run: |
           test "$(find "$RUNNER_TEMP/prebuilt" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 12
           node scripts/prepare-github-release.mjs --out "$RUNNER_TEMP/pi-github-release" --prebuilt "$RUNNER_TEMP/prebuilt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with: { name: "github-release-candidate-${{ github.sha }}-${{ github.run_attempt }}", path: "${{ runner.temp }}/pi-github-release", if-no-files-found: error, retention-days: 14 }
+        with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release", if-no-files-found: error, overwrite: true, retention-days: 14 }
 
   accept-release-candidate:
     needs: [release-matrix, aggregate-release-candidate]
@@ -143,7 +143,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb libxcb1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { name: "github-release-candidate-${{ github.sha }}-${{ github.run_attempt }}", path: "${{ runner.temp }}/pi-github-release" }
+        with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
       - name: Execute final native archive
         if: matrix.executor == 'native'
         shell: bash
@@ -205,11 +205,12 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && matrix.target == 'linux-x64-gnu-modern'
         with:
-          name: "embedded-package-manager-${{ github.sha }}-${{ github.run_attempt }}"
+          name: "embedded-package-manager-${{ github.sha }}"
           path: |
             ${{ runner.temp }}/package-manager-evidence/receipt.json
             ${{ runner.temp }}/package-manager-evidence/*.log
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
       - name: Prepare hash-pinned musl XCB test libraries
         if: matrix.executor == 'pinned-musl-container'
@@ -243,7 +244,7 @@ jobs:
           timeout --foreground --signal=TERM --kill-after=10s 20s docker run --name "$container" --rm --network none -e TERM=xterm-256color -e NODE_ENV=production -e PI_OFFLINE=1 -e PI_CODING_AGENT_DIR=/tmp/isolated-agent -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/musl-extracted:/extracted:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-bun-tui.mjs /extracted/pi > "$RUNNER_TEMP/musl-tui/tui.json"
           docker run --rm --network none -e DISPLAY=:99 -e LD_LIBRARY_PATH=/musl-libraries/usr/lib -e PI_XZ_MUSL_LIBRARIES=/musl-libraries -e GITHUB_SHA -v "$RUNNER_TEMP/musl-libraries:/musl-libraries:ro" -e PI_XZ_EXECUTOR=pinned-musl-container -e PI_XZ_CONTAINER_DIGEST='${{ matrix.containerImage }}' -e PI_XZ_TUI_EVIDENCE=/evidence/tui.json -e RUNNER_NAME -e RUNNER_OS -e RUNNER_ARCH -e ImageOS -e ImageVersion -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/repo:ro" -v "$candidate:/release:ro" -v "$RUNNER_TEMP/smoke-record:/record" -v "$RUNNER_TEMP/musl-tui:/evidence:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-binary-release.mjs "/release/$archive" '${{ matrix.target }}' "$version" "/record/${{ matrix.target }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with: { name: "github-release-smoke-${{ github.sha }}-${{ github.run_attempt }}-${{ matrix.target }}", path: "${{ runner.temp }}/smoke-record/${{ matrix.target }}.json", if-no-files-found: error, retention-days: 14 }
+        with: { name: "github-release-smoke-${{ github.sha }}-${{ matrix.target }}", path: "${{ runner.temp }}/smoke-record/${{ matrix.target }}.json", if-no-files-found: error, overwrite: true, retention-days: 14 }
 
   acceptance-record:
     needs: [release-matrix, aggregate-release-candidate, accept-release-candidate]
@@ -255,15 +256,15 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: "22" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { name: "github-release-candidate-${{ github.sha }}-${{ github.run_attempt }}", path: "${{ runner.temp }}/pi-github-release" }
+        with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { pattern: "github-release-smoke-${{ github.sha }}-${{ github.run_attempt }}-*", path: "${{ runner.temp }}/smoke-records" }
+        with: { pattern: "github-release-smoke-${{ github.sha }}-*", path: "${{ runner.temp }}/smoke-records" }
       - run: |
           candidate="$RUNNER_TEMP/pi-github-release"
           node scripts/aggregate-binary-acceptance.mjs "$RUNNER_TEMP/smoke-records" "$candidate/release-manifest.json" "$candidate/binary-acceptance.json"
           PI_XZ_VERIFY_TARGET=linux-x64-gnu-modern node scripts/verify-github-release.mjs all "$candidate/release-manifest.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with: { name: "github-release-accepted-${{ github.sha }}-${{ github.run_attempt }}", path: "${{ runner.temp }}/pi-github-release", if-no-files-found: error, retention-days: 14 }
+        with: { name: "github-release-accepted-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release", if-no-files-found: error, overwrite: true, retention-days: 14 }
 
   update-release-candidate:
     needs: [release-matrix, acceptance-record]
@@ -279,7 +280,7 @@ jobs:
         if: runner.os == 'Windows'
         with: { version: "0.15.2" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { name: "github-release-accepted-${{ github.sha }}-${{ github.run_attempt }}", path: "${{ runner.temp }}/pi-github-release" }
+        with: { name: "github-release-accepted-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
       - name: Update an extracted native bundle
         if: matrix.executor == 'native'
         shell: bash
@@ -320,7 +321,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: "22" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { name: "github-release-accepted-${{ github.sha }}-${{ github.run_attempt }}", path: "${{ runner.temp }}/pi-github-release" }
+        with: { name: "github-release-accepted-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
       - run: node scripts/verify-github-release.mjs all "$RUNNER_TEMP/pi-github-release/release-manifest.json"
       - name: Attest exact Release subjects
         id: attest

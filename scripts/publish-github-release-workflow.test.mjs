@@ -245,7 +245,7 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
   assert.match(workflowText, /--platform '\$\{\{ matrix\.id \}\}'/);
   assert.match(
     workflowText,
-    /github-release-target-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_attempt \}\}-\$\{\{ matrix\.id \}\}/,
+    /github-release-target-\$\{\{ github\.sha \}\}-\$\{\{ matrix\.id \}\}/,
   );
   const releaseArtifactReferences = Object.values(workflow.jobs).flatMap((job) =>
     (job.steps ?? [])
@@ -253,8 +253,19 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
       .filter((value) => typeof value === "string" && value.startsWith("github-release-")),
   );
   assert.ok(releaseArtifactReferences.length > 0);
+  // Attempt-less artifact names plus overwrite:true keep "re-run failed jobs"
+  // working: reused successful jobs keep their attempt-1 artifacts, while
+  // re-run jobs on later attempts must resolve the same names.
   for (const reference of releaseArtifactReferences) {
-    assert.match(reference, /\$\{\{ github\.run_attempt \}\}/);
+    assert.doesNotMatch(reference, /github\.run_attempt/);
+  }
+  for (const job of Object.values(workflow.jobs)) {
+    for (const step of job.steps ?? []) {
+      const isUpload = typeof step.uses === "string" && step.uses.startsWith("actions/upload-artifact@");
+      if (isUpload && typeof step.with?.name === "string" && step.with.name.startsWith("github-release-")) {
+        assert.equal(step.with?.overwrite, true, `upload step must overwrite: ${step.with.name}`);
+      }
+    }
   }
   assert.match(workflowText, /--prebuilt/);
   assert.match(workflowText, /-eq 12/);
@@ -328,7 +339,7 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.match(updateHarness, /escaped the isolated helper probe into a destination bundle/);
   assert.match(updateHarness, /update retry retained no quarantined rejected bundle/);
   assert.match(updateHarness, /assets: \[/);
-  assert.match(updateHarness, /rmSync\(work, \{ recursive: true, force: true, maxRetries: 10, retryDelay: 100 \}\)/);
+  assert.match(updateHarness, /rmSync\(work, \{ recursive: true, force: true, maxRetries: 60, retryDelay: 500 \}\)/);
   assert.deepEqual(workflow.jobs["publish-release"].needs, "update-release-candidate");
 });
 
