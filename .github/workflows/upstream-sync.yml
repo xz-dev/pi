@@ -5,6 +5,15 @@ on:
     - cron: "28 5,17 * * *"
     # scheduled at 13:28 and 01:28 Asia/Shanghai (UTC+8)
   workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: "Optional full upstream commit for a verified fixed-input replay"
+        required: false
+        type: string
+      expected_inputs_sha256:
+        description: "Optional SHA-256 of the approved --print-marker output"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -25,6 +34,9 @@ jobs:
           persist-credentials: false
 
       - name: Rebuild main from upstream and squash branches
+        env:
+          PINNED_UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+          EXPECTED_INPUTS_SHA256: ${{ inputs.expected_inputs_sha256 }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
@@ -32,6 +44,13 @@ jobs:
           echo "EXPECTED_MAIN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git remote add upstream https://github.com/earendil-works/pi.git
           git fetch upstream main
+          upstream_sha="$(git rev-parse upstream/main)"
+          if [[ -n "$PINNED_UPSTREAM_SHA" ]]; then
+            [[ "$PINNED_UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Invalid pinned upstream SHA'; exit 1; }
+            git fetch upstream "$PINNED_UPSTREAM_SHA"
+            git merge-base --is-ancestor "$PINNED_UPSTREAM_SHA" upstream/main
+            upstream_sha="$PINNED_UPSTREAM_SHA"
+          fi
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
             +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
@@ -81,7 +100,7 @@ jobs:
           # integration order; local diagnosis runs the same script). No ref is
           # read after capture, so a mid-run remote move cannot change inputs.
           rebuild_args=(
-            --upstream "$(git rev-parse upstream/main)"
+            --upstream "$upstream_sha"
             --ci "$(git rev-parse origin/ci)"
           )
           for ref in \
@@ -127,7 +146,14 @@ jobs:
           # distinct "record upstream sync inputs (partial through <step>)"
           # subject, so it can never satisfy this complete-vector key.
           scripts/rebuild-from-inputs.sh --check
-          if [[ "$(git show -s --format=%B HEAD)" == "$(scripts/rebuild-from-inputs.sh "${rebuild_args[@]}" --print-marker)" ]]; then
+          marker_file="$RUNNER_TEMP/rebuilt-inputs-marker.txt"
+          scripts/rebuild-from-inputs.sh "${rebuild_args[@]}" --print-marker > "$marker_file"
+          if [[ -n "$EXPECTED_INPUTS_SHA256" ]]; then
+            [[ "$EXPECTED_INPUTS_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo '::error::Invalid input vector digest'; exit 1; }
+            actual_digest="$(sha256sum "$marker_file" | cut -d ' ' -f 1)"
+            [[ "$actual_digest" == "$EXPECTED_INPUTS_SHA256" ]] || { echo '::error::Fetched inputs differ from the approved vector'; exit 1; }
+          fi
+          if [[ "$(git show -s --format=%B HEAD)" == "$(< "$marker_file")" ]]; then
             echo 'Upstream and all enabled overlay tips already match main; skipping rebuild'
             exit 0
           fi
@@ -173,6 +199,11 @@ jobs:
             git diff --stat
             git diff --name-status
             exit 1
+          fi
+          # A formatting commit must not hide the exact complete-vector skip
+          # marker. Re-record it only after the formatted tree passes check.
+          if [[ "$(git show -s --format=%B HEAD)" != "$(< "$RUNNER_TEMP/rebuilt-inputs-marker.txt")" ]]; then
+            git commit --allow-empty -F "$RUNNER_TEMP/rebuilt-inputs-marker.txt"
           fi
 
       - name: Setup Zig for native fixture tests

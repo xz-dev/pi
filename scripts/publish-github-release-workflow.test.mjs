@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
@@ -85,6 +87,58 @@ test("upstream sync requires formatter-stable rebuilt sources", () => {
   assert.match(syncWorkflowText, /git diff --name-status/);
 });
 
+for (const scenario of ["unchanged", "formatted", "check fails"]) {
+  test(`post-merge skip marker: ${scenario}`, () => {
+    const dir = mkdtempSync(join(tmpdir(), "sync-marker-"));
+    const repo = join(dir, "repo");
+    const bin = join(dir, "bin");
+    mkdirSync(repo);
+    mkdirSync(bin);
+    const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, RUNNER_TEMP: dir };
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"]) delete env[key];
+    const git = (...args) => execFileSync("git", args, { cwd: repo, env, encoding: "utf8", stdio: "pipe" }).trim();
+    try {
+      git("init", "-q");
+      git("config", "user.name", "fixture");
+      git("config", "user.email", "fixture@invalid");
+      git("config", "commit.gpgsign", "false");
+      writeFileSync(join(repo, "source.txt"), "original\n");
+      git("add", "source.txt");
+      git("commit", "-qm", "base");
+      const marker = execFileSync("bash", [join(ROOT, "scripts/rebuild-from-inputs.sh"), "--print-marker"], { encoding: "utf8" }).trim();
+      const markerFile = join(dir, "rebuilt-inputs-marker.txt");
+      writeFileSync(markerFile, `${marker}\n`);
+      git("commit", "-q", "--allow-empty", "-F", markerFile);
+      const before = git("rev-parse", "HEAD");
+      writeFileSync(join(bin, "npx"), scenario === "unchanged" ? "#!/bin/sh\nexit 0\n" : "#!/bin/sh\nprintf 'normalized\\n' > source.txt\n", { mode: 0o755 });
+      writeFileSync(join(bin, "npm"), `#!/bin/sh\nexit ${scenario === "check fails" ? 1 : 0}\n`, { mode: 0o755 });
+      const run = syncWorkflow.jobs["sync-main-with-squash-branches"].steps.find((step) => step.name === "Check rebuilt main").run;
+      const check = () => execFileSync("bash", ["-eo", "pipefail", "-c", run], { cwd: repo, env, stdio: "pipe" });
+      if (scenario === "check fails") {
+        assert.throws(check);
+        assert.equal(git("show", "-s", "--format=%s", "HEAD"), "style: apply post-merge formatting");
+      } else {
+        check();
+        assert.equal(git("show", "-s", "--format=%B", "HEAD"), marker, "the exact workflow skip comparison must still match");
+        if (scenario === "unchanged") assert.equal(git("rev-parse", "HEAD"), before);
+        else assert.equal(git("show", "-s", "--format=%s", "HEAD^"), "style: apply post-merge formatting");
+      }
+      assert.equal(git("status", "--porcelain"), "");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("fixed publication can pin upstream and reject a different fetched vector", () => {
+  const step = syncWorkflow.jobs["sync-main-with-squash-branches"].steps.find((step) => step.name === "Rebuild main from upstream and squash branches");
+  assert.equal(syncWorkflow.on.workflow_dispatch.inputs.upstream_sha.type, "string");
+  assert.equal(syncWorkflow.on.workflow_dispatch.inputs.expected_inputs_sha256.type, "string");
+  assert.match(step.run, /--upstream "\$upstream_sha"/);
+  assert.ok(step.run.indexOf("Fetched inputs differ from the approved vector") < step.run.indexOf('scratch_target="$RUNNER_TEMP/rebuilt-main"'));
+  assert.match(step.run, /git merge-base --is-ancestor "\$PINNED_UPSTREAM_SHA" upstream\/main/);
+});
+
 test("upstream sync carries and tests the model catalog list refresh patch", () => {
   assert.match(
     syncWorkflowText,
@@ -163,7 +217,7 @@ test("upstream sync carries the unified TUI-only slow-hook patch", () => {
   const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
   // slow-hook consumes its recorded explicit compat pair, never tip^.
   assert.match(script, /apply_compat_range slow-hook-tui-only "merge patch\/slow-hook-tui-only branch"/);
-  assert.match(script, /slow-hook-tui-only c50e19e8bc47a936db0a37cc3e46f86b754ea633 slow-hook-on-accumulated 6e61746c0fd2f5f2157e52dfa46cb0d6985cb212/);
+  assert.match(script, /slow-hook-tui-only 1551e040801d3c041aa7bdb10b88855fc47f1609 slow-hook-on-accumulated d274cb156fe47522a3ddf385f3ddd7094e719894/);
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
