@@ -150,19 +150,19 @@ describe("AgentSession concurrent prompt guard", () => {
 		// Start first prompt (don't await, it will block until abort)
 		const firstPrompt = session.prompt("First message");
 
-		await waitForStreaming();
+		try {
+			await waitForStreaming();
 
-		// Verify we're streaming
-		expect(session.isStreaming).toBe(true);
-
-		// Second prompt should reject
-		await expect(session.prompt("Second message")).rejects.toThrow(
-			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
-		);
-
-		// Cleanup
-		await session.abort();
-		await firstPrompt.catch(() => {}); // Ignore abort error
+			// Second prompt should reject
+			await expect(session.prompt("Second message")).rejects.toThrow(
+				"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+			);
+		} finally {
+			// Abort and join an active run even if a later assertion fails, before
+			// afterEach removes the temporary auth directory.
+			await session.abort();
+			await firstPrompt.catch(() => {}); // Ignore abort error
+		}
 	});
 
 	it("should abort while an extension agent_start handler is stuck", async () => {
@@ -209,9 +209,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 
 		const promptPromise = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		// Wait until the stuck handler is actually running inside the run instead
+		// of a fixed sleep; prompt() preflight can exceed a fixed sleep under CI load.
+		await expect.poll(() => extensionStarted).toBe(true);
 
-		expect(extensionStarted).toBe(true);
 		expect(providerCalled).toBe(false);
 		expect(session.isStreaming).toBe(true);
 
@@ -368,8 +369,9 @@ describe("AgentSession concurrent prompt guard", () => {
 			});
 
 			const promptPromise = session.prompt("hello");
-			await new Promise((resolve) => setTimeout(resolve, 30));
-			expect(stuckStarted).toBe(true);
+			// Wait for the stuck handler instead of a fixed sleep; prompt()
+			// preflight plus the run's first turn can exceed a fixed sleep under CI load.
+			await expect.poll(() => stuckStarted).toBe(true);
 			expect(session.isStreaming).toBe(true);
 
 			await session.abort();
@@ -446,15 +448,16 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		// Start first prompt
 		const firstPrompt = session.prompt("First message");
-		await waitForStreaming();
 
-		// steer should work while streaming
-		await expect(session.steer("Steering message")).resolves.toBe("queued");
-		expect(session.pendingMessageCount).toBe(1);
-
-		// Cleanup
-		await session.abort();
-		await firstPrompt.catch(() => {});
+		try {
+			// steer should work while streaming
+			await waitForStreaming();
+			await expect(session.steer("Steering message")).resolves.toBe("queued");
+			expect(session.pendingMessageCount).toBe(1);
+		} finally {
+			await session.abort();
+			await firstPrompt.catch(() => {});
+		}
 	});
 
 	it("should allow followUp() while streaming", async () => {
@@ -462,15 +465,16 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		// Start first prompt
 		const firstPrompt = session.prompt("First message");
-		await waitForStreaming();
 
-		// followUp should work while streaming
-		await expect(session.followUp("Follow-up message")).resolves.toBe("queued");
-		expect(session.pendingMessageCount).toBe(1);
-
-		// Cleanup
-		await session.abort();
-		await firstPrompt.catch(() => {});
+		try {
+			// followUp should work while streaming
+			await waitForStreaming();
+			await expect(session.followUp("Follow-up message")).resolves.toBe("queued");
+			expect(session.pendingMessageCount).toBe(1);
+		} finally {
+			await session.abort();
+			await firstPrompt.catch(() => {});
+		}
 	});
 
 	it("should queue extension-origin steering messages while streaming", async () => {
@@ -573,9 +577,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(pi).toBeDefined();
 
 		pi!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		// sendUserMessage runs the full async prompt preflight before queueing;
+		// wait on the observable effect instead of a fixed sleep.
+		await expect.poll(() => session.pendingMessageCount).toBe(1);
 
-		expect(session.pendingMessageCount).toBe(1);
 		expect(session.getSteeringMessages()).toContain("Steer from extension");
 		expect(lastInputSource).toBe("extension");
 		expect(queueEvents.some((event) => event.steering.includes("Steer from extension"))).toBe(true);
