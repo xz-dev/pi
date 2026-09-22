@@ -57,7 +57,7 @@ say() { printf '== %s\n' "$*" >&2; }
 die() { printf '::error::%s\n' "$*" >&2; exit 1; }
 
 # --- recorded default input vector -------------------------------------------
-# Full fixed SHAs of the current remote snapshot. Each entry: <name> <sha>
+# Full fixed SHAs of the recorded input snapshot. Each entry: <name> <sha>
 # where name is a bare patch name ("ci", "patch/<name>") and sha is a full
 # commit object id that must exist in the local object database. The workflow
 # passes its freshly captured SHAs explicitly; these recorded defaults are
@@ -86,8 +86,8 @@ patch/manual-retry eef3791ab8e9c758d4da1f3392f95e0198922404
 patch/changelog-prerelease 3ea1afed328d8cf79cced1854a0a47455f97f0b9
 patch/skill-overrides cd0314ef426c466550984eaba2f70ddec224907c
 patch/retry-non-retryable-patterns 67b899b60d5227eeb7a60bc1b52bb1ff816b3252
-patch/slow-hook-tui-only 0c1b76072bd3c1a82468031d0f80d8c92416881b
-patch/session-tree-splice 5406b60605b46645671dcf72b61cfe667f5a0dc0
+patch/slow-hook-tui-only f088e90d175cfe2304124cc4d38b13abce985dc4
+patch/session-tree-splice a522b4ca863f23e26643fe156215c444760b5612
 patch/ws-cached-empty-delta 29c95ca8c46fa6866061dedc4f6054297d4549ac
 patch/self-update-managed-by 24781b9788d416b8acae965dc37be44548d0857d
 patch/google-toomany-toolcalls 8be79bbe2c647e9540f1eae290187cadc3b19b77
@@ -114,7 +114,7 @@ agent-run-failure-seam 13393639c27b44e1e909f71eb1a1c08f82d8118a agent-run-failur
 managed-tool-executions f565bc3eea39def63c6b5c2540b1eff226ef5e76 managed-tool-executions-on-accumulated e79c3248831c5ca1683281a21ad34b465a336074
 esc-abort e79c3248831c5ca1683281a21ad34b465a336074 esc-abort-on-accumulated 855d78669a79df9ceee616582e63a026c61666e0
 manual-retry 855d78669a79df9ceee616582e63a026c61666e0 manual-retry-on-accumulated a61e96a72bd1e80fda69ff276668ee1390c7a066
-slow-hook-tui-only c50e19e8bc47a936db0a37cc3e46f86b754ea633 slow-hook-on-accumulated 6e61746c0fd2f5f2157e52dfa46cb0d6985cb212
+slow-hook-tui-only 1551e040801d3c041aa7bdb10b88855fc47f1609 slow-hook-on-accumulated d274cb156fe47522a3ddf385f3ddd7094e719894
 EOF
 
 print_inputs() {
@@ -616,6 +616,10 @@ apply_compat_range() {
 	sha_of "$tip" "$msg compat tip"
 	git merge-base --is-ancestor "$base" "$tip" || die "$msg compat tip must descend from its recorded base"
 	case "$name" in
+	slow-hook-tui-only)
+		git merge-base --is-ancestor "${INPUT_SHA[$name]}" "$tip" ||
+			die "$msg compat does not contain selected source patch/$name"
+		;;
 	agent-run-failure-seam|managed-tool-executions|esc-abort|manual-retry)
 		local dependency
 		for dependency in agent-run-failure-seam managed-tool-executions esc-abort manual-retry; do

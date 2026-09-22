@@ -536,6 +536,22 @@ for (const scenario of [
 	});
 }
 
+test("slow-hook compat rejects a selected source missing from its ancestry", () => {
+	const fixture = buildFixture();
+	const { target, out } = replay(fixture, ["--upstream", fixture.upstream, "--ci", fixture.ci,
+		"--patch", `slow-hook-tui-only=${fixture.fixup}`,
+		"--patch", `slow-hook-on-accumulated=${fixture.aaa}`,
+		"--base", `slow-hook-tui-only=${fixture.upstream}`], { expectFail: true });
+	try {
+		assert.match(out, /compat does not contain selected source patch\/slow-hook-tui-only/);
+		assert.ok(!log(target).includes("merge patch/slow-hook-tui-only branch"));
+		assert.equal(HEAD(fixture.dir), fixture.fixup);
+	} finally {
+		rmSync(fixture.dir, { recursive: true, force: true });
+		rmSync(target, { recursive: true, force: true });
+	}
+});
+
 test("Esc marker preview equals the actual marker, including its seam range", () => {
 	const fixture = buildFixture();
 	const args = fixtureInputs(fixture, ["--upstream", fixture.upstream, "--ci", fixture.ci,
@@ -734,6 +750,40 @@ for (const scenario of ["known additions", "unknown incoming edit", "missing ver
 	});
 }
 
+for (const extraConflict of [false, true]) {
+	test(`catalog resolver validates the whole result before writing: extra conflict=${extraConflict}`, () => {
+		const fixture = buildFixture();
+		const path = "packages/coding-agent/README.md";
+		try {
+			fixture.file(path, "base docs\n", "docs base", "docs-base");
+			const source = readFileSync(join(ROOT, "scripts/resolve-model-catalog-squash-conflicts.py"), "utf8");
+			const conflict = source.match(/conflict = f'''([\s\S]*?)'''/)[1]
+				.replaceAll("{start}", "<".repeat(7)).replaceAll("{middle}", "=".repeat(7)).replaceAll("{end}", ">".repeat(7));
+			fixture.file(path, "ours\n", "ours", "ours", "docs-base");
+			fixture.file(path, "theirs\n", "theirs", "origin/patch/model-catalog-extension-refresh", "docs-base");
+			fixture.run("git checkout -q ours");
+			assert.throws(() => fixture.run("git merge --no-commit origin/patch/model-catalog-extension-refresh"));
+			const bytes = conflict + "\n" + (extraConflict ? `${"<".repeat(7)} HEAD\nunknown\n${"=".repeat(7)}\nother\n${">".repeat(7)} theirs\n` : "");
+			writeFileSync(join(fixture.dir, path), bytes);
+			const index = readFileSync(join(fixture.dir, ".git/index"));
+			const resolve = () => execFileSync("python3", [join(ROOT, "scripts/resolve-model-catalog-squash-conflicts.py")], { cwd: fixture.dir, stdio: "pipe" });
+			if (extraConflict) {
+				assert.throws(resolve, /unexpected additional/);
+				assert.equal(readFileSync(join(fixture.dir, path), "utf8"), bytes);
+				assert.deepEqual(readFileSync(join(fixture.dir, ".git/index")), index);
+			} else {
+				resolve();
+				assert.equal(fixture.run("git diff --name-only --diff-filter=U").trim(), "");
+				const result = readFileSync(join(fixture.dir, path), "utf8");
+				assert.ok(result.includes("pi --list-models --refresh"));
+				assert.ok(result.includes("Press Ctrl+S"));
+			}
+		} finally {
+			rmSync(fixture.dir, { recursive: true, force: true });
+		}
+	});
+}
+
 test("recorded compat bases are explicit SHAs, never tip-derived", () => {
 	const out = execFileSync("bash", [SCRIPT, "--print-inputs"], { encoding: "utf8" });
 	const lines = out.trim().split("\n");
@@ -752,7 +802,7 @@ test("recorded compat bases are explicit SHAs, never tip-derived", () => {
 	// The recorded bases are the approved fixed inputs, never tip^ inference.
 	assert.equal(byName.get("model-refresh-session-rebind").base, "4f2a4ff8d111697b22f4cb35519d1075fed432d5");
 	assert.equal(byName.get("model-refresh-timeout").base, "a1d2c1054dc08007b16d40c8156250b2b7985c4e");
-	assert.equal(byName.get("slow-hook-tui-only").base, "c50e19e8bc47a936db0a37cc3e46f86b754ea633");
+	assert.equal(byName.get("slow-hook-tui-only").base, "1551e040801d3c041aa7bdb10b88855fc47f1609");
 	assert.equal(byName.get("manual-retry").base, byName.get("esc-abort").tip);
 	assert.equal(byName.get("esc-abort").base, byName.get("managed-tool-executions").tip);
 	assert.equal(byName.get("managed-tool-executions").base, byName.get("agent-run-failure-seam").tip);
