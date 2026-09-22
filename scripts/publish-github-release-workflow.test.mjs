@@ -30,8 +30,12 @@ test("upstream sync fetches and merges the persistent native wrapper patch", () 
 		syncWorkflowText,
 		/\+refs\/heads\/patch\/native-wrapper-release:refs\/remotes\/origin\/patch\/native-wrapper-release/,
 	);
-	assert.match(syncWorkflowText, /git merge --squash origin\/patch\/native-wrapper-release/);
-	assert.match(syncWorkflowText, /git commit -m "merge patch\/native-wrapper-release branch"/);
+	// The merge itself is owned by the replay script; here we prove the
+	// workflow feeds the patch's frozen SHA into it.
+	assert.match(syncWorkflowText, /native-wrapper-release \\\n/);
+	assert.match(syncWorkflowText, /rebuild_args\+=\(--patch "\$ref=\$\(git rev-parse \"origin\/patch\/\$ref\"\)"\)/);
+	const mergeScript = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+	assert.match(mergeScript, /merge_squash_resolver native-wrapper-release "merge patch\/native-wrapper-release branch"/);
 });
 
 test("upstream sync keeps the unsafe synchronized-cursor patch retired", () => {
@@ -42,11 +46,15 @@ test("upstream sync keeps the unsafe synchronized-cursor patch retired", () => {
 });
 
 test("upstream sync rejects patch branches that touch upstream changelogs", () => {
-  assert.match(syncWorkflowText, /changelog_offenders=\(\)/);
-  assert.match(syncWorkflowText, /git diff --name-only "\$base\.\.\$ref" -- 'packages\/\*\/CHANGELOG\.md'/);
-  assert.match(syncWorkflowText, /modifies an upstream-maintained packages\/\*\/CHANGELOG\.md/);
+  // The changelog guard moved into scripts/rebuild-from-inputs.sh; the workflow
+  // must run that script (which fails before merging anything when a patch
+  // branch touches packages/*/CHANGELOG.md).
+  assert.match(syncWorkflowText, /scripts\/rebuild-from-inputs\.sh "\$\{rebuild_args\[@\]\}"/);
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  assert.match(script, /git diff --name-only "\$base\.\.\$ref" -- 'packages\/\*\/CHANGELOG\.md'/);
+  assert.match(script, /modifies an upstream-maintained packages\/\*\/CHANGELOG\.md/);
   assert.ok(
-    syncWorkflowText.indexOf("changelog_offenders") < syncWorkflowText.indexOf("git merge --squash origin/ci"),
+    script.indexOf("offenders") < script.indexOf("merge_squash ci"),
     "changelog guard must run before any squash merge",
   );
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /never carry `packages\/\*\/CHANGELOG\.md` hunks/);
@@ -58,15 +66,19 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
     syncWorkflowText,
     /\+refs\/heads\/patch\/managed-tool-executions:refs\/remotes\/origin\/patch\/managed-tool-executions/,
   );
-  const seamIndex = syncWorkflowText.indexOf('git commit -m "merge patch/agent-run-failure-seam branch"');
-  const managedIndex = syncWorkflowText.indexOf('git commit -m "merge patch/managed-tool-executions branch"');
-  const escIndex = syncWorkflowText.indexOf('git commit -m "merge patch/esc-abort branch"');
+  // Integration order seam < mte < esc-abort is owned by the replay script's
+  // PATCH_ORDER; the workflow only fetches refs and captures frozen SHAs.
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  const orderBlock = script.slice(script.indexOf("PATCH_ORDER=("), script.indexOf(")\n", script.indexOf("PATCH_ORDER=(")));
+  const seamIndex = orderBlock.indexOf("agent-run-failure-seam");
+  const managedIndex = orderBlock.indexOf("managed-tool-executions");
+  const escIndex = orderBlock.indexOf("esc-abort");
   assert.ok(seamIndex >= 0 && seamIndex < managedIndex && managedIndex < escIndex);
-  assert.match(syncWorkflowText, /git diff --binary "\$terminal_seam" origin\/patch\/esc-abort/);
-  assert.match(syncWorkflowText, /git diff --binary "\$terminal_seam" origin\/patch\/manual-retry/);
-  assert.match(syncWorkflowText, /git apply --3way --index \/tmp\/esc-abort\.patch/);
-  assert.match(syncWorkflowText, /git apply --3way --index \/tmp\/manual-retry\.patch/);
-  assert.match(syncWorkflowText, /python3 scripts\/resolve-managed-tool-esc-conflicts\.py/);
+  assert.match(script, /apply_range esc-abort "merge patch\/esc-abort branch" "\$seam" "\$\{INPUT_SHA\[esc-abort\]\}"/);
+  // Manual retry always uses the selected, ancestry-checked seam input.
+  assert.match(script, /apply_range manual-retry "merge patch\/manual-retry branch" "\$seam" "\$\{INPUT_SHA\[manual-retry\]\}"/);
+  assert.match(script, /require_ancestor agent-run-failure-seam manual-retry/);
+  assert.match(script, /resolve-managed-tool-esc-conflicts\.py/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
   // coding-agent tests run via vitest auto-discovery (see Run focused integration tests step),
@@ -89,9 +101,10 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
     syncWorkflowText,
     /\+refs\/heads\/patch\/model-catalog-extension-refresh:refs\/remotes\/origin\/patch\/model-catalog-extension-refresh/,
   );
-  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/model-catalog-extension-refresh/);
-  assert.match(syncWorkflowText, /python3 scripts\/resolve-model-catalog-squash-conflicts\.py/);
-  assert.match(syncWorkflowText, /Unresolved conflicts remain after applying model-catalog extension refresh/);
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  assert.match(script, /merge_squash_resolver model-catalog-extension-refresh "merge patch\/model-catalog-extension-refresh branch"/);
+  assert.match(script, /resolve-model-catalog-squash-conflicts\.py/);
+  assert.match(script, /Unresolved conflicts remain after \$msg/);
   const resolver = readFileSync(join(ROOT, "scripts", "resolve-model-catalog-squash-conflicts.py"), "utf8");
   assert.match(resolver, /packages\/coding-agent\/README\.md/);
   assert.match(resolver, /unexpected model-catalog README conflict shape/);
@@ -107,14 +120,15 @@ test("upstream sync carries the Bun bytecode entrypoint patch", () => {
     syncWorkflowText,
     /\+refs\/heads\/patch\/bun-bytecode-entrypoint:refs\/remotes\/origin\/patch\/bun-bytecode-entrypoint/,
   );
-  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/bun-bytecode-entrypoint/);
-  assert.match(syncWorkflowText, /git commit -m "merge patch\/bun-bytecode-entrypoint branch"/);
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  assert.match(script, /merge_squash bun-bytecode-entrypoint "merge patch\/bun-bytecode-entrypoint branch"/);
 });
 
 test("upstream sync carries and tests the bounded startup benchmark patch", () => {
   assert.match(syncWorkflowText, /\+refs\/heads\/patch\/startup-benchmark-exit:refs\/remotes\/origin\/patch\/startup-benchmark-exit/);
-  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/startup-benchmark-exit/);
-  assert.match(syncWorkflowText, /git commit -m "merge patch\/startup-benchmark-exit branch"/);
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  assert.match(script, /merge_squash_resolver startup-benchmark-exit "merge patch\/startup-benchmark-exit branch"/);
+  assert.match(script, /resolve-startup-benchmark-squash-conflicts\.sh/);
   // startup-benchmark and tools-manager tests are covered by the coding-agent auto-discovery run.
 });
 
@@ -123,15 +137,13 @@ test("upstream sync retires the obsolete OpenCode completions fixture patch", ()
 });
 
 test("upstream sync requires ci to merge cleanly without source rewriting", () => {
-  assert.match(
-    syncWorkflowText,
-    /if ! git merge --squash origin\/ci; then/,
-  );
-  assert.match(syncWorkflowText, /Unexpected ci squash conflict; ci must merge cleanly onto current upstream/);
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  assert.match(script, /git merge --squash "origin\/\$\(label_of "\$name"\)"/);
+  assert.match(script, /Unexpected .*squash conflict/);
   // README.md is the one allowed conflict: the fork README is a full rewrite on ci,
   // so the sync takes the ci version when README.md is the only conflicted file.
-  assert.match(syncWorkflowText, /git checkout --theirs -- README\.md/);
-  assert.doesNotMatch(syncWorkflowText, /resolve-ci-squash-conflicts/);
+  assert.match(script, /git checkout --theirs -- README\.md/);
+  assert.doesNotMatch(script, /resolve-ci-squash-conflicts/);
 });
 
 test("upstream sync globally retires the runner-sensitive compaction characterization", () => {
@@ -139,9 +151,9 @@ test("upstream sync globally retires the runner-sensitive compaction characteriz
     syncWorkflowText,
     /\+refs\/heads\/patch\/compaction-test-exclusion:refs\/remotes\/origin\/patch\/compaction-test-exclusion/,
   );
-  assert.match(syncWorkflowText, /git merge --squash origin\/patch\/compaction-test-exclusion/);
-  assert.match(syncWorkflowText, /git commit -m "merge patch\/compaction-test-exclusion branch"/);
-  assert.match(syncWorkflowText, /packages\/coding-agent\/vitest\.config\.ts/);
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  assert.match(script, /merge_squash compaction-test-exclusion "merge patch\/compaction-test-exclusion branch"/);
+  assert.match(script, /packages\/coding-agent\/vitest\.config\.ts/);
   assert.doesNotMatch(syncWorkflowText, /--exclude test\/suite\/agent-session-compaction\.test\.ts/);
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /one policy/);
 });
@@ -159,36 +171,24 @@ test("upstream sync carries the unified TUI-only slow-hook patch", () => {
     syncWorkflowText,
     /\+refs\/heads\/patch\/slow-hook-tui-only:refs\/remotes\/origin\/patch\/slow-hook-tui-only/,
   );
-  assert.match(syncWorkflowText, /git diff --binary[\s\\]+'origin\/patch\/slow-hook-on-accumulated\^'[\s\\]+origin\/patch\/slow-hook-on-accumulated -- > \/tmp\/slow-hook-tui-only\.patch/);
-  assert.match(syncWorkflowText, /git apply --3way --index \/tmp\/slow-hook-tui-only\.patch/);
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  // slow-hook consumes its recorded explicit compat pair, never tip^.
+  assert.match(script, /apply_compat_range slow-hook-tui-only "merge patch\/slow-hook-tui-only branch"/);
+  assert.match(script, /slow-hook-tui-only c50e19e8bc47a936db0a37cc3e46f86b754ea633 slow-hook-on-accumulated 6e61746c0fd2f5f2157e52dfa46cb0d6985cb212/);
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
 
 test("upstream sync preserves bounded slow-hook and session-tree compatibility", () => {
-  assert.doesNotMatch(
-    syncWorkflowText,
-    /resolve-slow-hook-squash-conflicts\.py/,
-  );
-  assert.match(
-    syncWorkflowText,
-    /git diff --binary[\s\\]+origin\/patch\/slow-hook-tui-only[\s\\]+origin\/patch\/session-tree-splice -- > \/tmp\/session-tree-splice\.patch/,
-  );
-  assert.match(
-    syncWorkflowText,
-    /git apply --3way --index \/tmp\/session-tree-splice\.patch/,
-  );
-  assert.match(
-    syncWorkflowText,
-    /python3 scripts\/resolve-session-tree-splice-conflicts\.py/,
-  );
-  assert.match(
-    syncWorkflowText,
-    /patch\/session-tree-splice must descend from patch\/slow-hook-tui-only/,
-  );
+  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+  assert.doesNotMatch(script, /resolve-slow-hook-squash-conflicts\.py/);
+  assert.match(script, /git diff --binary "\$\{INPUT_SHA\[slow-hook-tui-only\]\}" "\$\{INPUT_SHA\[session-tree-splice\]}"/);
+  assert.match(script, /git apply --3way --index "\$TMPDIR_WORK\/session-tree-splice\.patch"/);
+  assert.match(script, /python3 "\$HELPER_DIR\/resolve-session-tree-splice-conflicts\.py"/);
+  assert.match(script, /require_ancestor slow-hook-tui-only session-tree-splice/);
+  const orderBlock = script.slice(script.indexOf("PATCH_ORDER=("), script.indexOf(")\n", script.indexOf("PATCH_ORDER=(")));
   assert.ok(
-    syncWorkflowText.indexOf('git commit -m "merge patch/slow-hook-tui-only branch"') <
-      syncWorkflowText.indexOf('git commit -m "merge patch/session-tree-splice branch"'),
+    orderBlock.indexOf("slow-hook-tui-only") < orderBlock.indexOf("session-tree-splice"),
   );
   assert.doesNotMatch(syncWorkflowText, /patch\/provider-transparent-compaction/);
   assert.doesNotMatch(syncWorkflowText, /patch\/pre-provider-compaction/);
