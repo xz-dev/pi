@@ -17,23 +17,23 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 ## Rebuild rules
 
 1. Fetch a specific fresh upstream `main`, `ci`, and every configured patch ref.
-2. Rebuild in the fixed order in `.github/workflows/upstream-sync.yml`.
+2. Rebuild in the fixed order owned by `scripts/rebuild-from-inputs.sh`, which is the single source of truth for the integration sequence; `.github/workflows/upstream-sync.yml` only fetches refs, freezes each tip as a full SHA, and invokes the script with those SHAs. The workflow restores the driver script from `origin/ci` before invoking; the script itself extracts its `scripts/resolve-*`/`union-*` helpers from the immutable ci commit object, never from a worktree overlay, so only recorded ci bytes execute. The replay runs inside a fresh standalone scratch clone the script creates at `--target` (a path that must not already exist); the source repository's refs, index, files, and linked worktrees are never modified. Every input is consumed as a frozen SHA, so a mid-run remote move cannot change the replay. Accumulated compat steps consume recorded `base..tip` pairs — explicit SHAs, never `tip^` inference.
 3. Stop on unexpected conflicts or empty patch integrations.
 4. Run all pre-push build, check, focused integration, packed-release, GitHub Release candidate, audit, and signature gates.
 5. Update `main` only with `--force-with-lease`; a lease failure requires investigation and a fresh rebuild.
 
+For local diagnosis, run `scripts/rebuild-from-inputs.sh --source <repo> --target <fresh-path>` with a committed CI input matching the driver. The script imports objects from the local source into its own clone; it does not fetch network remotes or push. The target must be outside the source, its Git storage, and all linked worktrees. Full runs use the entire recorded vector or an explicitly supplied complete vector; supplying only some `--patch` inputs is rejected unless `--diagnostic` is explicit. Diagnostic subsets and `--stop-before <patch-name>` prefixes always receive non-publishable markers. `--base <patch-name>=<sha>` supplies an explicit accumulated-range base, and marker provenance records each applied base and tip. `--print-marker` predicts the same ordered marker that actual execution produces, including descendant ranges. The running driver and helper bytes must match the selected immutable CI commit; an uncommitted driver cannot be relabeled as an older CI SHA. Unknown input names and incomplete explicit vectors are rejected before target creation; unresolved objects and merge failures stop the owned scratch run without modifying its source.
+
 ## Local commits on `ci`
 
-The pre-commit hook runs repo-wide `npm run check` (including `tsgo`) against the working tree, while `packages/ai/src/providers/data/` is gitignored and hydrated from the latest remote catalog. `ci` freezes product tests at their patch-time upstream revision, so after hydration the local data can contain model ids those frozen tests do not reference (or vice versa) and the hook fails with `TS2345` errors that are unrelated to the staged change. This mismatch is expected local friction, not a defect; the sync workflow never sees it because it rebuilds `main` from a fresh upstream and hydrates before checking.
+The pre-commit hook runs repo-wide `npm run check`, including `tsgo`. Provider model data is gitignored and hydrated from a changing catalog, so fixture model IDs can differ from the IDs represented by that data. Generated `main` uses a different upstream baseline; its check result must be measured separately, not inferred from a check in the `ci` checkout.
 
-Committing a `ci`-only change (workflows, README, this guide, scripts) locally:
+When an explicitly authorized commit touches `ci`-owned files:
 
-1. Verify the staged diff touches only `ci`-owned files. Never edit product test files on `ci` to chase hydrated model ids.
-2. Temporarily align the product worktree with upstream: `git restore --source=review-upstream/main --worktree -- packages/ai/` (adjust the remote name if it differs). This is worktree-only; the index is untouched.
-3. Commit. The hook now type-checks upstream code against upstream-hydrated data and passes.
-4. Immediately restore the `ci` worktree: `git restore --worktree -- packages/ai/`, then `git clean -fd packages/ai/src packages/ai/test` to drop files that exist only upstream. Skipping this step leaves the `ci` checkout silently swapped to upstream sources.
-
-If the hook still fails after alignment, stop and investigate instead of repeating the ritual: the failure is real.
+1. Inspect status and stage only the intended files; preserve other sessions' work.
+2. Run `npm run check` and retain full output and the actual exit code.
+3. If failures are confined to the known stale-model-ID/catalog type mismatch class documented in `AGENTS.md`, the repository policy permits `git commit --no-verify`. Do not edit product fixtures or regenerate catalogs merely to make that hook green.
+4. Any other failure must be fixed or reported as a blocker before committing. Do not swap whole product directories to upstream, clean untracked source files, or alter Git identity/signing to bypass a failure.
 
 ## README synchronization checklist
 
