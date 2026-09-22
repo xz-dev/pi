@@ -784,6 +784,29 @@ for (const extraConflict of [false, true]) {
 	});
 }
 
+test("launcher self-check uses frozen CI workflow instead of the checked-out old main", () => {
+	const fixture = buildFixture();
+	const workflowPath = ".github/workflows/upstream-sync.yml";
+	const workflow = readFileSync(join(ROOT, workflowPath), "utf8");
+	const oldWorkflow = workflow.replace(/^.*\+refs\/heads\/patch\/(?:agent-run-failure-seam|managed-tool-executions|esc-abort|manual-retry)-on-accumulated:.*\n/gm, "");
+	try {
+		const oldMain = fixture.file(workflowPath, oldWorkflow, "old main workflow", "old-main", fixture.ci);
+		const ci = fixture.file(workflowPath, workflow, "frozen CI workflow", "new-ci", oldMain);
+		fixture.run(`git update-ref refs/remotes/origin/ci ${ci}`);
+		fixture.run("git checkout -q old-main");
+		const check = () => execFileSync("bash", ["scripts/rebuild-from-inputs.sh", "--check"], { cwd: fixture.dir, stdio: "pipe" });
+		assert.throws(check, /workflow does not fetch compat ref/);
+		const checkout = workflow.match(/^\s+git checkout origin\/ci -- scripts\/rebuild-from-inputs\.sh.*$/m)?.[0];
+		assert.ok(checkout, "execute the actual workflow launcher checkout");
+		execFileSync("bash", ["-e", "-c", checkout], { cwd: fixture.dir, stdio: "pipe" });
+		check();
+		assert.equal(readFileSync(join(fixture.dir, workflowPath), "utf8"), workflow);
+		assert.equal(HEAD(fixture.dir), oldMain, "launcher preparation must not adopt the candidate early");
+	} finally {
+		rmSync(fixture.dir, { recursive: true, force: true });
+	}
+});
+
 test("recorded compat bases are explicit SHAs, never tip-derived", () => {
 	const out = execFileSync("bash", [SCRIPT, "--print-inputs"], { encoding: "utf8" });
 	const lines = out.trim().split("\n");

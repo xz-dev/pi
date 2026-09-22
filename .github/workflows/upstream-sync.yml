@@ -88,11 +88,11 @@ jobs:
             +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion
 
           # Driver source: the replay script is reviewed ci content, never a
-          # stale generated-main copy. Restore exactly it from the fetched
-          # origin/ci snapshot; resolver helpers are extracted inside the
+          # stale generated-main copy. Restore it and its workflow self-check
+          # input from the same fetched origin/ci snapshot; resolver helpers are extracted inside the
           # script from the immutable ci commit itself (no worktree overlay),
           # so this checkout is only the launcher.
-          git checkout origin/ci -- scripts/rebuild-from-inputs.sh
+          git checkout origin/ci -- scripts/rebuild-from-inputs.sh .github/workflows/upstream-sync.yml
           chmod +x scripts/rebuild-from-inputs.sh
 
           # Freeze the fetched inputs as fixed full SHAs, then hand exactly those
