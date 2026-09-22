@@ -64,516 +64,79 @@ jobs:
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
             +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion
 
-          patch_refs=(
-            origin/patch/contributor-approval
-            origin/patch/model-startup-refresh-barrier
-            origin/patch/model-refresh-session-rebind
-            origin/patch/model-refresh-session-rebind-on-accumulated
-            origin/patch/model-catalog-extension-refresh
-            origin/patch/bun-bytecode-entrypoint
-            origin/patch/startup-benchmark-exit
-            origin/patch/native-wrapper-release
-            origin/patch/update-clean
-            origin/patch/bundle-usage-claims
-            origin/patch/use-embedded-bun-package-manager
-            origin/patch/git-package-storage
-            origin/patch/model-refresh-timeout
-            origin/patch/agent-run-failure-seam
-            origin/patch/managed-tool-executions
-            origin/patch/esc-abort
-            origin/patch/manual-retry
-            origin/patch/changelog-prerelease
-            origin/patch/skill-overrides
-            origin/patch/retry-non-retryable-patterns
-            origin/patch/slow-hook-tui-only
-            origin/patch/slow-hook-on-accumulated
-            origin/patch/session-tree-splice
-            origin/patch/ws-cached-empty-delta
-            origin/patch/self-update-managed-by
-            origin/patch/google-toomany-toolcalls
-            origin/patch/model-selector-refresh-selection
-            origin/patch/ai-drop-empty-messages
-            origin/patch/compaction-test-exclusion
+          # Driver source: the replay script is reviewed ci content, never a
+          # stale generated-main copy. Restore exactly it from the fetched
+          # origin/ci snapshot; resolver helpers are extracted inside the
+          # script from the immutable ci commit itself (no worktree overlay),
+          # so this checkout is only the launcher.
+          git checkout origin/ci -- scripts/rebuild-from-inputs.sh
+          chmod +x scripts/rebuild-from-inputs.sh
+
+          # Freeze the fetched inputs as fixed full SHAs, then hand exactly those
+          # SHAs to the shared replay script (single source of truth for the
+          # integration order; local diagnosis runs the same script). No ref is
+          # read after capture, so a mid-run remote move cannot change inputs.
+          rebuild_args=(
+            --upstream "$(git rev-parse upstream/main)"
+            --ci "$(git rev-parse origin/ci)"
           )
-
-          # Upstream-maintained changelogs move every release cycle, so patch
-          # branches must never carry packages/*/CHANGELOG.md hunks; downstream
-          # notes live in README/MAINTAIN on ci. Fail before merging anything.
-          changelog_offenders=()
-          for ref in "${patch_refs[@]}"; do
-            base=$(git merge-base upstream/main "$ref")
-            if [[ -n "$(git diff --name-only "$base..$ref" -- 'packages/*/CHANGELOG.md')" ]]; then
-              changelog_offenders+=("$ref")
-            fi
+          for ref in \
+            contributor-approval \
+            model-startup-refresh-barrier \
+            model-refresh-session-rebind \
+            model-refresh-session-rebind-on-accumulated \
+            model-catalog-extension-refresh \
+            bun-bytecode-entrypoint \
+            startup-benchmark-exit \
+            native-wrapper-release \
+            update-clean \
+            bundle-usage-claims \
+            use-embedded-bun-package-manager \
+            git-package-storage \
+            model-refresh-timeout \
+            agent-run-failure-seam \
+            managed-tool-executions \
+            esc-abort \
+            manual-retry \
+            changelog-prerelease \
+            skill-overrides \
+            retry-non-retryable-patterns \
+            slow-hook-tui-only \
+            slow-hook-on-accumulated \
+            session-tree-splice \
+            ws-cached-empty-delta \
+            self-update-managed-by \
+            google-toomany-toolcalls \
+            model-selector-refresh-selection \
+            ai-drop-empty-messages \
+            compaction-test-exclusion \
+          ; do
+            rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done
-          if (( ${#changelog_offenders[@]} )); then
-            printf '::error::%s modifies an upstream-maintained packages/*/CHANGELOG.md; keep downstream notes in README/MAINTAIN on ci\n' "${changelog_offenders[@]}"
-            exit 1
-          fi
 
-          # Rebuild whenever upstream, ci, or any enabled overlay tip changes.
-          # The final empty commit records the exact input vector without changing
-          # the generated source tree.
-          sync_input_refs=(upstream/main origin/ci "${patch_refs[@]}")
-          {
-            echo 'record upstream sync inputs'
-            echo
-            for ref in "${sync_input_refs[@]}"; do
-              printf '%s %s\n' "$ref" "$(git rev-parse "$ref")"
-            done
-          } > /tmp/upstream-sync-inputs-message
-          if [[ "$(git show -s --format=%B HEAD)" == "$(cat /tmp/upstream-sync-inputs-message)" ]]; then
+          # Skip the rebuild only when the exact recorded input vector already
+          # matches HEAD's marker commit. A partial/prefixed replay records a
+          # distinct "record upstream sync inputs (partial through <step>)"
+          # subject, so it can never satisfy this complete-vector key.
+          scripts/rebuild-from-inputs.sh --check
+          if [[ "$(git show -s --format=%B HEAD)" == "$(scripts/rebuild-from-inputs.sh "${rebuild_args[@]}" --print-marker)" ]]; then
             echo 'Upstream and all enabled overlay tips already match main; skipping rebuild'
             exit 0
           fi
 
-          git reset --hard upstream/main
+          # The replay runs in a fresh standalone scratch clone this step owns;
+          # the checked-out main stays untouched until the explicit adoption
+          # below. Publication still requires --force-with-lease on
+          # EXPECTED_MAIN_SHA.
+          scratch_target="$RUNNER_TEMP/rebuilt-main"
+          scripts/rebuild-from-inputs.sh --source "$GITHUB_WORKSPACE" --target "$scratch_target" "${rebuild_args[@]}"
 
-          if ! git merge --squash origin/ci; then
-            # The fork README is a full rewrite maintained on ci; upstream README
-            # edits (package tables, badges) conflict with it by construction.
-            # Take the ci version (theirs in a squash merge) when README.md is
-            # the only conflicted file.
-            readme_only=true
-            while IFS= read -r conflicted; do
-              if [[ "$conflicted" != README.md ]]; then readme_only=false; fi
-            done < <(git diff --name-only --diff-filter=U)
-            if [[ "$readme_only" != true ]]; then
-              echo '::error::Unexpected ci squash conflict; ci must merge cleanly onto current upstream'
-              exit 1
-            fi
-            git checkout --theirs -- README.md
-            git add README.md
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying ci'
-            exit 1
-          fi
-          git commit -m "merge ci branch"
-
-          git show upstream/main:.github/APPROVED_CONTRIBUTORS > /tmp/upstream-approved-contributors
-          git show origin/patch/contributor-approval:.github/APPROVED_CONTRIBUTORS > /tmp/patch-approved-contributors
-          python3 scripts/union-contributor-approvals.py \
-            --current /tmp/upstream-approved-contributors \
-            --patch /tmp/patch-approved-contributors \
-            --output .github/APPROVED_CONTRIBUTORS
-          if git diff --quiet -- .github/APPROVED_CONTRIBUTORS; then
-            echo 'contributor approval union already complete'
-          else
-            git add .github/APPROVED_CONTRIBUTORS
-            test "$(git diff --cached --name-only)" = .github/APPROVED_CONTRIBUTORS
-            git diff --cached --check
-            git commit -m "merge patch/contributor-approval branch"
-          fi
-
-          git merge --squash origin/patch/model-startup-refresh-barrier
-          git commit -m "merge patch/model-startup-refresh-barrier branch"
-
-          # Apply only the rebind delta (tip^..tip) — the accumulated pre-image
-          # (upstream + ci + contributor-approval + barrier) already exists in
-          # accumulated main and would conflict if re-applied.
-          git diff --binary \
-            'origin/patch/model-refresh-session-rebind-on-accumulated^' \
-            origin/patch/model-refresh-session-rebind-on-accumulated -- > /tmp/model-refresh-session-rebind.patch
-          if ! git apply --3way --index /tmp/model-refresh-session-rebind.patch; then
-            echo '::error::Failed to apply patch/model-refresh-session-rebind-on-accumulated compat diff'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying model-refresh-session-rebind'
-            exit 1
-          fi
-          agent_session=packages/coding-agent/src/core/agent-session.ts
-          grep -Fq 'private _cacheWarmer?:' "$agent_session"
-          grep -Fq 'private _unsubscribeModelsChanged: () => void;' "$agent_session"
-          grep -Fq 'this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime())' "$agent_session"
-          if grep -Fq '_refreshCurrentModelFromRegistry' "$agent_session"; then
-            echo '::error::Stale _refreshCurrentModelFromRegistry reference remains'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/model-refresh-session-rebind branch"
-
-          if ! git merge --squash origin/patch/model-catalog-extension-refresh; then
-            python3 scripts/resolve-model-catalog-squash-conflicts.py
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying model-catalog extension refresh'
-            exit 1
-          fi
-          git commit -m "merge patch/model-catalog-extension-refresh branch"
-
-          # Apply only the timeout delta (tip^..tip) — the compat base below it
-          # already exists in accumulated main and would conflict if re-applied.
-          git diff --binary origin/patch/model-refresh-timeout^ origin/patch/model-refresh-timeout -- > /tmp/model-refresh-timeout.patch
-          if ! git apply --3way --index /tmp/model-refresh-timeout.patch; then
-            echo '::error::Failed to apply patch/model-refresh-timeout delta'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying model-refresh-timeout'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/model-refresh-timeout'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/model-refresh-timeout branch"
-
-          git merge --squash origin/patch/bun-bytecode-entrypoint
-          git commit -m "merge patch/bun-bytecode-entrypoint branch"
-
-          if ! git merge --squash origin/patch/startup-benchmark-exit; then
-            scripts/resolve-startup-benchmark-squash-conflicts.sh
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying startup-benchmark conflict staging'
-            exit 1
-          fi
-          git commit -m "merge patch/startup-benchmark-exit branch"
-
-          if ! git merge --squash origin/patch/native-wrapper-release; then
-            scripts/resolve-release-self-update-squash-conflicts.sh
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying release-self-update conflict staging'
-            exit 1
-          fi
-          git commit -m "merge patch/native-wrapper-release branch"
-
-          if ! git merge-base --is-ancestor origin/patch/native-wrapper-release origin/patch/update-clean; then
-            echo '::error::patch/update-clean must descend from patch/native-wrapper-release'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/native-wrapper-release..origin/patch/update-clean; then
-            echo '::error::Failed to apply patch/update-clean descendant range'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/update-clean'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::patch/update-clean descendant range is empty'
-            exit 1
-          fi
-          git commit -m "merge patch/update-clean branch"
-
-          if ! git merge-base --is-ancestor origin/patch/update-clean origin/patch/bundle-usage-claims; then
-            echo '::error::patch/bundle-usage-claims must descend from patch/update-clean'
-            exit 1
-          fi
-          if [[ -n "$(git rev-list --min-parents=2 origin/patch/update-clean..origin/patch/bundle-usage-claims)" ]]; then
-            echo '::error::patch/bundle-usage-claims descendant range must be linear'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/update-clean..origin/patch/bundle-usage-claims; then
-            echo '::error::Failed to apply patch/bundle-usage-claims descendant range'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/bundle-usage-claims'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::patch/bundle-usage-claims descendant range is empty'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/bundle-usage-claims branch"
-
-          if ! git merge --squash origin/patch/use-embedded-bun-package-manager; then
-            python3 scripts/resolve-embedded-bun-squash-conflicts.py
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying embedded Bun'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/use-embedded-bun-package-manager'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/use-embedded-bun-package-manager branch"
-
-          if ! git merge-base --is-ancestor origin/patch/use-embedded-bun-package-manager origin/patch/git-package-storage; then
-            echo '::error::patch/git-package-storage must descend from patch/use-embedded-bun-package-manager'
-            exit 1
-          fi
-          if [[ -n "$(git rev-list --min-parents=2 origin/patch/use-embedded-bun-package-manager..origin/patch/git-package-storage)" ]]; then
-            echo '::error::patch/git-package-storage descendant range must be linear'
-            exit 1
-          fi
-          if ! git cherry-pick --no-commit origin/patch/use-embedded-bun-package-manager..origin/patch/git-package-storage; then
-            echo '::error::Failed to apply patch/git-package-storage descendant range'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying git-package-storage'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/git-package-storage'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/git-package-storage branch"
-
-          if ! git merge --squash origin/patch/agent-run-failure-seam; then
-            python3 scripts/resolve-agent-run-failure-seam-squash-conflicts.py
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/agent-run-failure-seam'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/agent-run-failure-seam'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/agent-run-failure-seam branch"
-
-          if ! git merge --squash origin/patch/managed-tool-executions; then
-            python3 scripts/resolve-managed-tool-executions-squash-conflicts.py
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/managed-tool-executions'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/managed-tool-executions'
-            exit 1
-          fi
-          # Assert managed-tool-executions intrinsic content on the merged tree.
-          agent_loop=packages/agent/src/agent-loop.ts
-          grep -Fq 'await awaitPreparedToolExecution(preparation, execution, config);' "$agent_loop"
-          grep -Fq 'const replayError = getManagedExecutionReplayError(result);' "$agent_loop"
-          test "$(grep -Fc 'const execution = createPreparedToolExecution(' "$agent_loop")" -eq 2
-          test "$(grep -Fc 'const executed = await executePreparedToolCall(preparation, signal, emit);' "$agent_loop")" -eq 0
-          git diff --cached --check
-          git commit -m "merge patch/managed-tool-executions branch"
-
-          terminal_seam=origin/patch/agent-run-failure-seam
-          for child in origin/patch/esc-abort origin/patch/manual-retry; do
-            if ! git merge-base --is-ancestor "$terminal_seam" "$child"; then
-              echo "::error::$child must descend from patch/agent-run-failure-seam"
-              exit 1
-            fi
-          done
-          if ! git diff --quiet "$terminal_seam..origin/patch/esc-abort" -- packages/agent/src/types.ts; then
-            echo '::error::patch/esc-abort must not redefine the shared run_failure event type'
-            exit 1
-          fi
-          if ! git diff --quiet "$terminal_seam..origin/patch/manual-retry" -- packages/agent; then
-            echo '::error::patch/manual-retry must not modify packages/agent after the shared seam'
-            exit 1
-          fi
-          mapfile -t terminal_child_overlap < <(
-            comm -12 \
-              <(git diff --name-only "$terminal_seam..origin/patch/esc-abort" | sort) \
-              <(git diff --name-only "$terminal_seam..origin/patch/manual-retry" | sort)
-          )
-          expected_terminal_child_overlap=(packages/coding-agent/src/core/agent-session.ts)
-          if (( ${#terminal_child_overlap[@]} != ${#expected_terminal_child_overlap[@]} )) ||
-            [[ ${terminal_child_overlap[*]} != "${expected_terminal_child_overlap[*]}" ]]; then
-            printf '::error::Unexpected Esc/manual-retry child overlap:'
-            printf ' %q' "${terminal_child_overlap[@]}"
-            printf '\n'
-            exit 1
-          fi
-
-          git diff --binary "$terminal_seam" origin/patch/esc-abort -- > /tmp/esc-abort.patch
-          if ! git apply --3way --index /tmp/esc-abort.patch; then
-            python3 scripts/resolve-managed-tool-esc-conflicts.py
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/esc-abort'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::patch/esc-abort descendant range is empty'
-            exit 1
-          fi
-          # Assert only esc-abort intrinsic content; mte semantics were
-          # asserted at the mte step and combined-result coverage lives in the
-          # focused managed-tool-executions-esc-abort regression test.
-          agent_loop=packages/agent/src/agent-loop.ts
-          grep -Fq 'await emitToolExecutionEnd(finalized, emit, signal);' "$agent_loop"
-          git diff --cached --check
-          git commit -m "merge patch/esc-abort branch"
-
-          git diff --binary "$terminal_seam" origin/patch/manual-retry -- > /tmp/manual-retry.patch
-          if ! git apply --3way --index /tmp/manual-retry.patch; then
-            python3 scripts/resolve-manual-retry-conflicts.py
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying patch/manual-retry'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::patch/manual-retry descendant range is empty'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/manual-retry branch"
-
-          if ! git merge --squash origin/patch/changelog-prerelease; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} != 1 )) || [[ ${conflicts[0]} != packages/coding-agent/src/config.ts ]]; then
-              printf '::error::Unexpected changelog-prerelease squash conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            git checkout --ours -- packages/coding-agent/src/config.ts
-            python3 - <<'PY'
-          from pathlib import Path
-          path = Path("packages/coding-agent/src/config.ts")
-          text = path.read_text()
-          text = text.replace("\t\tdistribution?: string;\n", "\t\tdistribution?: string;\n\t\tchangelogVersion?: string;\n")
-          text = text.replace(
-              "export const VERSION: string = pkg.version || \"0.0.0\";\n",
-              "export const VERSION: string = pkg.version || \"0.0.0\";\nexport const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;\n",
-          )
-          path.write_text(text)
-          PY
-            git add packages/coding-agent/src/config.ts
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying changelog-prerelease conflict staging'
-            exit 1
-          fi
-          git commit -m "merge patch/changelog-prerelease branch"
-
-          git merge --squash origin/patch/skill-overrides
-          git commit -m "merge patch/skill-overrides branch"
-
-          git merge --squash origin/patch/retry-non-retryable-patterns
-          git commit -m "merge patch/retry-non-retryable-patterns branch"
-
-          git diff --binary \
-            'origin/patch/slow-hook-on-accumulated^' \
-            origin/patch/slow-hook-on-accumulated -- > /tmp/slow-hook-tui-only.patch
-          if ! git apply --3way --index /tmp/slow-hook-tui-only.patch; then
-            echo '::error::Failed to apply patch/slow-hook-on-accumulated compat diff'
-            exit 1
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying TUI-only slow-hook diagnostics'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/slow-hook-tui-only'
-            exit 1
-          fi
-          grep -Fq 'if (ext.uninterruptibleHandlers?.has(handler) === true) continue;' packages/coding-agent/src/core/extensions/runner.ts
-          grep -Fq 'this.runHandler("message_end", ext, handlerIndex' packages/coding-agent/src/core/extensions/runner.ts
-          git diff --cached --check
-          git commit -m "merge patch/slow-hook-tui-only branch"
-
-          if ! git merge-base --is-ancestor origin/patch/slow-hook-tui-only origin/patch/session-tree-splice; then
-            echo '::error::patch/session-tree-splice must descend from patch/slow-hook-tui-only'
-            exit 1
-          fi
-          git diff --binary \
-            origin/patch/slow-hook-tui-only \
-            origin/patch/session-tree-splice -- > /tmp/session-tree-splice.patch
-          if ! git apply --3way --index /tmp/session-tree-splice.patch; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            expected_conflicts=(
-              packages/coding-agent/src/core/session-manager.ts
-              packages/coding-agent/test/suite/harness.ts
-            )
-            if (( ${#conflicts[@]} != ${#expected_conflicts[@]} )) ||
-              [[ ${conflicts[*]} != "${expected_conflicts[*]}" ]]; then
-              printf '::error::Unexpected session-tree splice conflicts:'
-              printf ' %q' "${conflicts[@]}"
-              printf '\n'
-              exit 1
-            fi
-            python3 scripts/resolve-session-tree-splice-conflicts.py || { echo '::group::sts conflict dump'; git diff --diff-filter=U | head -120; echo '::endgroup::'; }
-          fi
-          if ! git diff --quiet --diff-filter=U --; then
-            echo '::error::Unresolved conflicts remain after applying session-tree splice'
-            exit 1
-          fi
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/session-tree-splice'
-            exit 1
-          fi
-          grep -Fq 'rmSync,' packages/coding-agent/src/core/session-manager.ts
-          grep -Fq 'unlinkSync,' packages/coding-agent/src/core/session-manager.ts
-          grep -Fq 'sessionManagerFactory?: (tempDir: string) => SessionManager;' packages/coding-agent/test/suite/harness.ts
-          grep -Fq 'persist?: boolean;' packages/coding-agent/test/suite/harness.ts
-          git diff --cached --check
-          git commit -m "merge patch/session-tree-splice branch"
-
-          git merge --squash origin/patch/ws-cached-empty-delta
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/ws-cached-empty-delta'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/ws-cached-empty-delta branch"
-
-          git merge --squash origin/patch/self-update-managed-by
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/self-update-managed-by'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/self-update-managed-by branch"
-
-          # Temporary upstream-build fix (earendil-works/pi#9502): upstream
-          # 71dca871b removed the TOO_MANY_TOOL_CALLS case that 4a6ed0194 added
-          # with the @google/genai 2.21.0 upgrade, so mapStopReason no longer
-          # compiles. An empty squash means upstream restored the identical case;
-          # retire this patch (and this block) instead of forcing the merge.
-          git merge --squash origin/patch/google-toomany-toolcalls
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/google-toomany-toolcalls; upstream restored the case itself, retire this patch'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/google-toomany-toolcalls branch"
-
-          git merge --squash origin/patch/model-selector-refresh-selection
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/model-selector-refresh-selection'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/model-selector-refresh-selection branch"
-
-          # Independent upstream-based runtime patch; an empty squash means
-          # upstream filters empty messages itself, so retire this patch.
-          git merge --squash origin/patch/ai-drop-empty-messages
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/ai-drop-empty-messages; upstream filters empty messages itself, retire this patch'
-            exit 1
-          fi
-          git diff --cached --check
-          git commit -m "merge patch/ai-drop-empty-messages branch"
-
-          # patch/ai-strict-mode-test-drift retired: upstream fixed the strict-mode
-          # assertions itself (supportsStrictMode emitted in the fireworks fixture,
-          # toBeUndefined in cache-retention), and patch/ai-drop-empty-messages
-          # already removes the cerebras test block the drift touched.
-
-          # Temporary test-policy patch for an upstream characterization whose
-          # threshold/overflow result changes across GitHub-hosted runners.
-          git merge --squash origin/patch/compaction-test-exclusion
-          if git diff --cached --quiet; then
-            echo '::error::Empty patch integration for patch/compaction-test-exclusion; retire the exclusion patch'
-            exit 1
-          fi
-          grep -Fq '"test/suite/agent-session-compaction.test.ts"' packages/coding-agent/vitest.config.ts
-          git diff --cached --check
-          git commit -m "merge patch/compaction-test-exclusion branch"
-
-          git commit --allow-empty -F /tmp/upstream-sync-inputs-message
-
+          # Explicit adoption: the rebuilt tip becomes this job's main. The
+          # scratch clone is a standalone repository; adopting its HEAD cannot
+          # move source refs and the subsequent gates run on the adopted tree.
+          rebuilt_sha="$(git -C "$scratch_target" rev-parse HEAD)"
+          git fetch "$scratch_target" HEAD
+          git reset --hard "$rebuilt_sha"
 
       - name: Install dependencies for pre-push gates
         run: npm ci --ignore-scripts
