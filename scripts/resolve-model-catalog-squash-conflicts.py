@@ -25,5 +25,8 @@ For each built-in provider, pi maintains a list of tool-capable models. Configur
 resolution = '''For each built-in provider, pi maintains a list of tool-capable models. Configured built-in catalogs refresh automatically; run `pi update --models` to force the Pi-managed catalogs available without loading extensions to refresh. To load extension providers, refresh every loaded provider, and print the resulting list, run `pi --list-models --refresh`. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L). Press Ctrl+S in the model picker to save the highlighted model as the startup default.'''
 if text.count(conflict) != 1:
     raise SystemExit("unexpected model-catalog README conflict shape")
-path.write_text(text.replace(conflict, resolution))
+resolved = text.replace(conflict, resolution)
+if any(line.startswith((start, middle, end)) for line in resolved.splitlines()):
+    raise SystemExit("unexpected additional model-catalog README conflict")
+path.write_text(resolved)
 subprocess.run(["git", "add", str(path)], check=True)
