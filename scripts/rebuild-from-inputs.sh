@@ -79,10 +79,10 @@ patch/bundle-usage-claims f0eb0624cd605584558c18edd729bdd6de581989
 patch/use-embedded-bun-package-manager 1a23a65f0d1cc83c77078e5d5c23810fd6c724a2
 patch/git-package-storage 7e29855d43367f0b603fb345b289d84f51d4940e
 patch/model-refresh-timeout 43fd5c94086a3deae7cb4113d6aa8bf08841575e
-patch/agent-run-failure-seam 704f90010366b0f179e3bbf06a95e22278a2f711
+patch/agent-run-failure-seam ef1c9a295629bc786a43eba527f1184e1625d954
 patch/managed-tool-executions eafd556e2b63a542eb381702892d951645f1627c
-patch/esc-abort 31238c83dd906898079dd4cb8dc562dcac8a90ca
-patch/manual-retry c462523421ce12214faadb76d00bbc058b171614
+patch/esc-abort 759462f5b0958b0f365601e4586009f6265cf2b5
+patch/manual-retry eef3791ab8e9c758d4da1f3392f95e0198922404
 patch/changelog-prerelease 3ea1afed328d8cf79cced1854a0a47455f97f0b9
 patch/skill-overrides cd0314ef426c466550984eaba2f70ddec224907c
 patch/retry-non-retryable-patterns 67b899b60d5227eeb7a60bc1b52bb1ff816b3252
@@ -110,6 +110,10 @@ EOF
 read -r -d '' COMPAT_RANGES <<'EOF' || true
 model-refresh-session-rebind 4f2a4ff8d111697b22f4cb35519d1075fed432d5 model-refresh-session-rebind-on-accumulated d8776ddaccd494d73fd42d8984225f8feb553eb5
 model-refresh-timeout a1d2c1054dc08007b16d40c8156250b2b7985c4e model-refresh-timeout 43fd5c94086a3deae7cb4113d6aa8bf08841575e
+agent-run-failure-seam 13393639c27b44e1e909f71eb1a1c08f82d8118a agent-run-failure-seam-on-accumulated f565bc3eea39def63c6b5c2540b1eff226ef5e76
+managed-tool-executions f565bc3eea39def63c6b5c2540b1eff226ef5e76 managed-tool-executions-on-accumulated e79c3248831c5ca1683281a21ad34b465a336074
+esc-abort e79c3248831c5ca1683281a21ad34b465a336074 esc-abort-on-accumulated 855d78669a79df9ceee616582e63a026c61666e0
+manual-retry 855d78669a79df9ceee616582e63a026c61666e0 manual-retry-on-accumulated a61e96a72bd1e80fda69ff276668ee1390c7a066
 slow-hook-tui-only c50e19e8bc47a936db0a37cc3e46f86b754ea633 slow-hook-on-accumulated 6e61746c0fd2f5f2157e52dfa46cb0d6985cb212
 EOF
 
@@ -471,13 +475,7 @@ HELPERS=(
 	rebuild-from-inputs.sh
 	union-contributor-approvals.py
 	resolve-model-catalog-squash-conflicts.py
-	resolve-startup-benchmark-squash-conflicts.sh
-	resolve-release-self-update-squash-conflicts.sh
 	resolve-embedded-bun-squash-conflicts.py
-	resolve-agent-run-failure-seam-squash-conflicts.py
-	resolve-managed-tool-executions-squash-conflicts.py
-	resolve-managed-tool-esc-conflicts.py
-	resolve-manual-retry-conflicts.py
 	resolve-session-tree-splice-conflicts.py
 )
 
@@ -616,6 +614,19 @@ apply_compat_range() {
 	[[ -n "$base" && -n "$tip" ]] || die "$msg requires a recorded base..tip compat pair"
 	sha_of "$base" "$msg compat base"
 	sha_of "$tip" "$msg compat tip"
+	git merge-base --is-ancestor "$base" "$tip" || die "$msg compat tip must descend from its recorded base"
+	case "$name" in
+	agent-run-failure-seam|managed-tool-executions|esc-abort|manual-retry)
+		local dependency
+		for dependency in agent-run-failure-seam managed-tool-executions esc-abort manual-retry; do
+			if active "$dependency"; then
+				git merge-base --is-ancestor "${INPUT_SHA[$dependency]}" "$tip" ||
+					die "$msg compat does not contain selected source patch/$dependency"
+			fi
+			[[ "$dependency" == "$name" ]] && break
+		done
+		;;
+	esac
 	# The compat tip is the accumulated pre-image commit carrying the patch's
 	# semantics on top of the accumulated tree; the patch's own tip is recorded
 	# in the marker for provenance but is not itself applied.
@@ -855,17 +866,13 @@ run_replay() {
 	# 8 startup-benchmark-exit
 	if active startup-benchmark-exit; then
 		CURRENT_STEP=startup-benchmark-exit
-		merge_squash_resolver startup-benchmark-exit "merge patch/startup-benchmark-exit branch" \
-			resolve-startup-benchmark-squash-conflicts.sh \
-			packages/coding-agent/src/modes/interactive/interactive-mode.ts \
-			packages/coding-agent/test/tools-manager.test.ts
+		merge_squash startup-benchmark-exit "merge patch/startup-benchmark-exit branch"
 	fi
 
 	# 9 native-wrapper-release
 	if active native-wrapper-release; then
 		CURRENT_STEP=native-wrapper-release
-		merge_squash_resolver native-wrapper-release "merge patch/native-wrapper-release branch" \
-			resolve-release-self-update-squash-conflicts.sh
+		merge_squash native-wrapper-release "merge patch/native-wrapper-release branch"
 	fi
 
 	# 10-11 linear descendant ranges
@@ -892,24 +899,15 @@ run_replay() {
 		cherry_pick_range git-package-storage "merge patch/git-package-storage branch" use-embedded-bun-package-manager
 	fi
 
-	# 14 agent-run-failure-seam — the shared terminal seam for its children.
+	# 14-15 reviewed accumulated ranges; no runtime rewriting in CI.
 	if active agent-run-failure-seam; then
-		CURRENT_STEP=agent-run-failure-seam
-		merge_squash_resolver agent-run-failure-seam "merge patch/agent-run-failure-seam branch" \
-			resolve-agent-run-failure-seam-squash-conflicts.py \
-			packages/agent/src/agent.ts
+		apply_compat_range agent-run-failure-seam "merge patch/agent-run-failure-seam branch"
 	fi
 
-	# 15 managed-tool-executions — independent patch (not seam-descended).
+	# MTE's source remains independent: the compat base describes application
+	# order, not invented ancestry between its source branch and the seam.
 	if active managed-tool-executions; then
-		CURRENT_STEP=managed-tool-executions
-		merge_squash_resolver managed-tool-executions "merge patch/managed-tool-executions branch" \
-			resolve-managed-tool-executions-squash-conflicts.py
-		agent_loop=packages/agent/src/agent-loop.ts
-		grep -Fq 'await awaitPreparedToolExecution(preparation, execution, config);' "$agent_loop"
-		grep -Fq 'const replayError = getManagedExecutionReplayError(result);' "$agent_loop"
-		test "$(grep -Fc 'const execution = createPreparedToolExecution(' "$agent_loop")" -eq 2
-		test "$(grep -Fc 'const executed = await executePreparedToolCall(preparation, signal, emit);' "$agent_loop")" -eq 0
+		apply_compat_range managed-tool-executions "merge patch/managed-tool-executions branch"
 	fi
 
 	# 16-17 esc-abort and manual-retry must descend from the recorded seam and
@@ -944,20 +942,10 @@ run_replay() {
 			fi
 		fi
 		if active esc-abort; then
-			apply_range esc-abort "merge patch/esc-abort branch" "$seam" "${INPUT_SHA[esc-abort]}" \
-				resolve-managed-tool-esc-conflicts.py
-			# esc-abort applies seam..esc; the marker records that exact range.
-			if active managed-tool-executions; then
-				# Assert only esc-abort intrinsic content; mte semantics were
-				# asserted at the mte step and combined coverage lives in the
-				# focused managed-tool-executions-esc-abort regression test.
-				agent_loop=packages/agent/src/agent-loop.ts
-				grep -Fq 'await emitToolExecutionEnd(finalized, emit, signal);' "$agent_loop"
-			fi
+			apply_compat_range esc-abort "merge patch/esc-abort branch"
 		fi
 		if active manual-retry; then
-			apply_range manual-retry "merge patch/manual-retry branch" "$seam" "${INPUT_SHA[manual-retry]}" \
-				resolve-manual-retry-conflicts.py
+			apply_compat_range manual-retry "merge patch/manual-retry branch"
 		fi
 	fi
 
@@ -968,17 +956,33 @@ run_replay() {
 		if ! git merge --squash "origin/patch/changelog-prerelease"; then
 			ensure_conflicts_are patch/changelog-prerelease \
 				packages/coding-agent/src/config.ts
-			git checkout --ours -- packages/coding-agent/src/config.ts
 			python3 - <<'PY'
 from pathlib import Path
+import subprocess
+
 path = Path("packages/coding-agent/src/config.ts")
-text = path.read_text()
-text = text.replace("\t\tdistribution?: string;\n", "\t\tdistribution?: string;\n\t\tchangelogVersion?: string;\n")
-text = text.replace(
-    "export const VERSION: string = pkg.version || \"0.0.0\";\n",
-    "export const VERSION: string = pkg.version || \"0.0.0\";\nexport const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;\n",
+base, ours, theirs = (
+    subprocess.check_output(["git", "show", f":{stage}:{path}"], text=True)
+    for stage in (1, 2, 3)
 )
-path.write_text(text)
+
+def add_changelog_settings(text: str) -> str:
+    for anchor, addition in (
+        ("\t\tconfigDir?: string;\n", "\t\tchangelogVersion?: string;\n"),
+        ('export const VERSION: string = pkg.version || "0.0.0";\n',
+         'export const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;\n'),
+    ):
+        if text.count(anchor) != 1 or addition in text:
+            raise SystemExit("Unexpected changelog config anchor or duplicate declaration")
+        text = text.replace(anchor, anchor + addition, 1)
+    return text
+
+# Only the two source-patch additions are mechanical. Reject any other
+# incoming edit before replacing conflict markers or staging the file.
+if add_changelog_settings(base) != theirs:
+    raise SystemExit("Unexpected changelog patch config delta")
+resolved = add_changelog_settings(ours)
+path.write_text(resolved)
 PY
 			git add packages/coding-agent/src/config.ts
 		fi

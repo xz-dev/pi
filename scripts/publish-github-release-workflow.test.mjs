@@ -35,7 +35,8 @@ test("upstream sync fetches and merges the persistent native wrapper patch", () 
 	assert.match(syncWorkflowText, /native-wrapper-release \\\n/);
 	assert.match(syncWorkflowText, /rebuild_args\+=\(--patch "\$ref=\$\(git rev-parse \"origin\/patch\/\$ref\"\)"\)/);
 	const mergeScript = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-	assert.match(mergeScript, /merge_squash_resolver native-wrapper-release "merge patch\/native-wrapper-release branch"/);
+	assert.match(mergeScript, /merge_squash native-wrapper-release "merge patch\/native-wrapper-release branch"/);
+	assert.doesNotMatch(mergeScript, /resolve-release-self-update-squash-conflicts/);
 });
 
 test("upstream sync keeps the unsafe synchronized-cursor patch retired", () => {
@@ -61,31 +62,19 @@ test("upstream sync rejects patch branches that touch upstream changelogs", () =
 });
 
 test("upstream sync integrates and tests managed tool execution compatibility", () => {
-  const resolver = readFileSync(join(ROOT, "scripts", "resolve-managed-tool-esc-conflicts.py"), "utf8");
-  assert.match(
-    syncWorkflowText,
-    /\+refs\/heads\/patch\/managed-tool-executions:refs\/remotes\/origin\/patch\/managed-tool-executions/,
-  );
-  // Integration order seam < mte < esc-abort is owned by the replay script's
-  // PATCH_ORDER; the workflow only fetches refs and captures frozen SHAs.
   const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
   const orderBlock = script.slice(script.indexOf("PATCH_ORDER=("), script.indexOf(")\n", script.indexOf("PATCH_ORDER=(")));
-  const seamIndex = orderBlock.indexOf("agent-run-failure-seam");
-  const managedIndex = orderBlock.indexOf("managed-tool-executions");
-  const escIndex = orderBlock.indexOf("esc-abort");
-  assert.ok(seamIndex >= 0 && seamIndex < managedIndex && managedIndex < escIndex);
-  assert.match(script, /apply_range esc-abort "merge patch\/esc-abort branch" "\$seam" "\$\{INPUT_SHA\[esc-abort\]\}"/);
-  // Manual retry always uses the selected, ancestry-checked seam input.
-  assert.match(script, /apply_range manual-retry "merge patch\/manual-retry branch" "\$seam" "\$\{INPUT_SHA\[manual-retry\]\}"/);
+  const names = ["agent-run-failure-seam", "managed-tool-executions", "esc-abort", "manual-retry"];
+  for (const [index, name] of names.entries()) {
+    if (index) assert.ok(orderBlock.indexOf(names[index - 1]) < orderBlock.indexOf(name));
+    assert.ok(script.includes(`apply_compat_range ${name} "merge patch/${name} branch"`));
+    assert.ok(syncWorkflowText.includes(`+refs/heads/patch/${name}-on-accumulated:refs/remotes/origin/patch/${name}-on-accumulated`));
+    assert.ok(syncWorkflowText.includes(`${name}-on-accumulated \\\n`));
+  }
   assert.match(script, /require_ancestor agent-run-failure-seam manual-retry/);
-  assert.match(script, /resolve-managed-tool-esc-conflicts\.py/);
+  assert.doesNotMatch(script, /resolve-(?:agent-run-failure-seam|managed-tool-executions|managed-tool-esc|manual-retry)/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
-  // coding-agent tests run via vitest auto-discovery (see Run focused integration tests step),
-  // which covers test/suite/managed-tool-executions.test.ts, system-prompt-updates and config.
-  assert.match(resolver, /const toolController = new AbortController\(\);/);
-  assert.match(resolver, /const interruptController = new AbortController\(\);/);
-  assert.match(resolver, /controller: toolController,/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /patch\/managed-tool-executions/);
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /tool cancellation signal from the current-run interrupt signal/);
 });
@@ -127,8 +116,8 @@ test("upstream sync carries the Bun bytecode entrypoint patch", () => {
 test("upstream sync carries and tests the bounded startup benchmark patch", () => {
   assert.match(syncWorkflowText, /\+refs\/heads\/patch\/startup-benchmark-exit:refs\/remotes\/origin\/patch\/startup-benchmark-exit/);
   const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-  assert.match(script, /merge_squash_resolver startup-benchmark-exit "merge patch\/startup-benchmark-exit branch"/);
-  assert.match(script, /resolve-startup-benchmark-squash-conflicts\.sh/);
+  assert.match(script, /merge_squash startup-benchmark-exit "merge patch\/startup-benchmark-exit branch"/);
+  assert.doesNotMatch(script, /resolve-startup-benchmark-squash-conflicts/);
   // startup-benchmark and tools-manager tests are covered by the coding-agent auto-discovery run.
 });
 

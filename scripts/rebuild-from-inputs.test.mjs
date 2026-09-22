@@ -39,13 +39,7 @@ function buildFixture() {
 		"rebuild-from-inputs.sh",
 		"union-contributor-approvals.py",
 		"resolve-model-catalog-squash-conflicts.py",
-		"resolve-startup-benchmark-squash-conflicts.sh",
-		"resolve-release-self-update-squash-conflicts.sh",
 		"resolve-embedded-bun-squash-conflicts.py",
-		"resolve-agent-run-failure-seam-squash-conflicts.py",
-		"resolve-managed-tool-executions-squash-conflicts.py",
-		"resolve-managed-tool-esc-conflicts.py",
-		"resolve-manual-retry-conflicts.py",
 		"resolve-session-tree-splice-conflicts.py",
 	]) {
 		writeFileSync(join(dir, "scripts", helper), helper === "rebuild-from-inputs.sh" ? readFileSync(SCRIPT) : `fixture helper ${helper}\n`);
@@ -68,7 +62,22 @@ function buildFixture() {
 	return { dir, run, file, upstream, ci: ciSha, aaa, empty, conf, seam, esc, fixup };
 }
 
+function fixtureInputs(fixture, input) {
+	const args = [...input];
+	for (const [name, base] of [["agent-run-failure-seam", fixture.upstream], ["esc-abort", fixture.seam]]) {
+		const source = args.find((arg) => arg.startsWith(`${name}=`));
+		if (!source) continue;
+		const tip = source.slice(name.length + 1);
+		if (!args.some((arg) => arg.startsWith(`${name}-on-accumulated=`))) args.push("--patch", `${name}-on-accumulated=${tip}`);
+		if (!args.some((arg, index) => args[index - 1] === "--base" && arg.startsWith(`${name}=`))) {
+			args.push("--base", `${name}=${base}`);
+		}
+	}
+	return args;
+}
+
 function replay(fixture, args, { expectFail = false, target, diagnostic = args.includes("--patch") } = {}) {
+	args = fixtureInputs(fixture, args);
 	// Invoke the script with --source <fixture> --target <fresh-path>; the
 	// script clones the fixture itself, so the fixture is the read-only
 	// source and the returned target is the owned scratch clone.
@@ -529,8 +538,8 @@ for (const scenario of [
 
 test("Esc marker preview equals the actual marker, including its seam range", () => {
 	const fixture = buildFixture();
-	const args = ["--upstream", fixture.upstream, "--ci", fixture.ci,
-		"--patch", `agent-run-failure-seam=${fixture.seam}`, "--patch", `esc-abort=${fixture.esc}`];
+	const args = fixtureInputs(fixture, ["--upstream", fixture.upstream, "--ci", fixture.ci,
+		"--patch", `agent-run-failure-seam=${fixture.seam}`, "--patch", `esc-abort=${fixture.esc}`]);
 	const { target } = replay(fixture, args);
 	try {
 		const actual = execFileSync("git", ["show", "-s", "--format=%B", "HEAD"], { cwd: target, encoding: "utf8" }).trim();
@@ -658,17 +667,17 @@ test("the running driver must match the selected immutable CI commit", () => {
 
 test("a conflict executes the pinned helper, not newer committed or dirty source copies", () => {
 	const fixture = buildFixture();
-	fixture.file("packages/agent/src/agent.ts", "ci side\n", "ci-conflict", "ci-conflict", fixture.ci);
-	const resolver = "resolve-agent-run-failure-seam-squash-conflicts.py";
-	const helper = `from pathlib import Path\nimport subprocess\np = 'packages/agent/src/agent.ts'\nPath(p).write_text('frozen helper result\\n')\nsubprocess.run(['git', 'add', p], check=True)\n`;
+	const resolver = "resolve-model-catalog-squash-conflicts.py";
+	fixture.file("packages/coding-agent/README.md", "ci side\n", "ci-conflict", "ci-conflict", fixture.ci);
+	const helper = `from pathlib import Path\nimport subprocess\np = 'packages/coding-agent/README.md'\nPath(p).write_text('frozen helper result\\n')\nsubprocess.run(['git', 'add', p], check=True)\n`;
 	const ci = fixture.file(`scripts/${resolver}`, helper, "frozen-helper");
-	const seam = fixture.file("packages/agent/src/agent.ts", "patch side\n", "seam-conflict", "conflicting-seam");
+	const catalog = fixture.file("packages/coding-agent/README.md", "patch side\n", "catalog-conflict", "conflicting-catalog");
 	const newer = fixture.file(`scripts/${resolver}`, "raise SystemExit('wrong newer helper')\n", "newer-helper", "newer-ci", ci);
 	writeFileSync(join(fixture.dir, "scripts", resolver), "raise SystemExit('dirty helper')\n");
 	const { target } = replay(fixture, ["--upstream", fixture.upstream, "--ci", ci,
-		"--patch", `agent-run-failure-seam=${seam}`]);
+		"--patch", `model-catalog-extension-refresh=${catalog}`]);
 	try {
-		assert.equal(readFileSync(join(target, "packages/agent/src/agent.ts"), "utf8"), "frozen helper result\n");
+		assert.equal(readFileSync(join(target, "packages/coding-agent/README.md"), "utf8"), "frozen helper result\n");
 		assert.equal(HEAD(fixture.dir), newer);
 		assert.equal(readFileSync(join(fixture.dir, "scripts", resolver), "utf8"), "raise SystemExit('dirty helper')\n");
 	} finally {
@@ -677,13 +686,61 @@ test("a conflict executes the pinned helper, not newer committed or dirty source
 	}
 });
 
+for (const scenario of ["known additions", "unknown incoming edit", "missing version anchor"]) {
+	test(`changelog conflict handling: ${scenario}`, () => {
+		const fixture = buildFixture();
+		const target = `${fixture.dir}-changelog-target`;
+		const path = "packages/coding-agent/src/config.ts";
+		const field = "\t\tconfigDir?: string;\n";
+		const version = 'export const VERSION: string = pkg.version || "0.0.0";\n';
+		const base = `interface PackageJson {\n\tpiConfig?: {\n${field}\t};\n}\n${version}`;
+		try {
+			const upstream = fixture.file(path, base, "base config", "config-base");
+			fixture.run(`git checkout -q -B config-ci ${fixture.ci}`);
+			fixture.run("git merge -q --no-edit config-base");
+			let ours = base.replace(field, `${field}\t\tdistribution?: string;\n`);
+			if (scenario === "missing version anchor") {
+				ours = ours.replace(version, 'export const VERSION: string = pkg.version ?? "0.0.0";\n');
+			}
+			const ci = fixture.file(path, ours, "native metadata");
+			const fieldAddition = "\t\tchangelogVersion?: string;\n";
+			const versionAddition = "export const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;\n";
+			let theirs = base.replace(field, field + fieldAddition).replace(version, version + versionAddition);
+			if (scenario === "unknown incoming edit") theirs += "export const unrelated = true;\n";
+			const patch = fixture.file(path, theirs, "changelog metadata", "changelog", upstream);
+			const fails = scenario !== "known additions";
+			const { out } = replay(fixture, ["--upstream", upstream, "--ci", ci,
+				"--patch", `changelog-prerelease=${patch}`], { target, expectFail: fails });
+			if (fails) {
+				assert.match(out, /Unexpected changelog (patch config delta|config anchor)/);
+				assert.match(readFileSync(join(target, path), "utf8"), /<<<<<<< HEAD/);
+				assert.equal(execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], {
+					cwd: target, encoding: "utf8",
+				}).trim(), path, "rejection must preserve the unresolved index");
+				assert.ok(!log(target).includes("merge patch/changelog-prerelease branch"));
+			} else {
+				const resolved = readFileSync(join(target, path), "utf8");
+				assert.equal(resolved.split(fieldAddition).length - 1, 1);
+				assert.equal(resolved.split(versionAddition).length - 1, 1);
+				assert.equal(resolved.replace(fieldAddition, "").replace(versionAddition, ""), ours,
+					"both additions must survive without dropping existing native metadata");
+				assert.ok(log(target).includes("merge patch/changelog-prerelease branch"));
+			}
+			assert.equal(HEAD(fixture.dir), patch, "source remains untouched");
+		} finally {
+			rmSync(fixture.dir, { recursive: true, force: true });
+			rmSync(target, { recursive: true, force: true });
+		}
+	});
+}
+
 test("recorded compat bases are explicit SHAs, never tip-derived", () => {
 	const out = execFileSync("bash", [SCRIPT, "--print-inputs"], { encoding: "utf8" });
 	const lines = out.trim().split("\n");
 	const compatStart = lines.indexOf("# compat ranges (explicit base..tip)");
 	assert.ok(compatStart >= 0, "print-inputs must expose the compat range block");
 	const compat = lines.slice(compatStart + 1);
-	assert.equal(compat.length, 3, "three accumulated compat pairs must be recorded");
+	assert.equal(compat.length, 7, "all accumulated compat pairs must be recorded");
 	const byName = new Map();
 	for (const line of compat) {
 		const [name, base, ref, tip] = line.split(" ");
@@ -696,7 +753,9 @@ test("recorded compat bases are explicit SHAs, never tip-derived", () => {
 	assert.equal(byName.get("model-refresh-session-rebind").base, "4f2a4ff8d111697b22f4cb35519d1075fed432d5");
 	assert.equal(byName.get("model-refresh-timeout").base, "a1d2c1054dc08007b16d40c8156250b2b7985c4e");
 	assert.equal(byName.get("slow-hook-tui-only").base, "c50e19e8bc47a936db0a37cc3e46f86b754ea633");
-	assert.ok(!byName.has("manual-retry"), "manual retry uses the selected seam, not a stale literal base");
+	assert.equal(byName.get("manual-retry").base, byName.get("esc-abort").tip);
+	assert.equal(byName.get("esc-abort").base, byName.get("managed-tool-executions").tip);
+	assert.equal(byName.get("managed-tool-executions").base, byName.get("agent-run-failure-seam").tip);
 });
 
 test("recorded defaults: every entry is a full SHA and the names are unique", () => {
