@@ -1,112 +1,139 @@
 #!/usr/bin/env python3
-"""Resolve session-tree-splice squash conflicts.
+"""Resolve session-tree-splice apply conflicts.
 
-Upstream #9630 snapshot loops (ours) must survive; the splice patch's
-per-extension loops and its pre-#9630 shapes do not. Keep ours for runner,
-session imports, and session-manager rmSync; adopt the splice-only additions
-(SpliceEntryHandler export, lifecycle stub) and union both harness options.
+The workflow applies the recorded slow-hook-tui-only..session-tree-splice
+delta with git apply --3way. That apply conflicts only in session-manager.ts
+(the patch's import hunk lands next to the pre-image's rmSync line) and
+suite/harness.ts (the patch's persist option collides with the pre-image's
+sessionManagerFactory option). Resolve only these fixed import and test-harness
+additions; validate both complete files before writing either result.
 """
 from pathlib import Path
-import re
 import subprocess
 
-runner_path = Path("packages/coding-agent/src/core/extensions/runner.ts")
-session_path = Path("packages/coding-agent/src/core/agent-session.ts")
-index_path = Path("packages/coding-agent/src/core/extensions/index.ts")
-manager_path = Path("packages/coding-agent/src/core/session-manager.ts")
-lifecycle_path = Path("packages/coding-agent/test/lifecycle-diagnostics.test.ts")
-harness_path = Path("packages/coding-agent/test/suite/harness.ts")
-expected_full = {
-    runner_path,
-    session_path,
-    index_path,
-    manager_path,
-    lifecycle_path,
-    harness_path,
-}
-# The workflow applies the splice range with git apply --3way on top of the
-# slow-hook merge; that shape conflicts only in session-manager and harness.
-expected_apply = {manager_path, harness_path}
-allowed = {frozenset(expected_full), frozenset(expected_apply)}
-conflicts = {
-    Path(path)
-    for path in subprocess.check_output(
-        ["git", "diff", "--name-only", "--diff-filter=U"], text=True
-    ).splitlines()
-}
-if conflicts not in allowed:
-    raise SystemExit(f"unexpected conflicts: {sorted(map(str, conflicts))}")
+MANAGER_PATH = "packages/coding-agent/src/core/session-manager.ts"
+HARNESS_PATH = "packages/coding-agent/test/suite/harness.ts"
+EXPECTED = frozenset({MANAGER_PATH, HARNESS_PATH})
 
 
-def check_markers(text: str, label: str) -> None:
-    if any(line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")) for line in text.splitlines()):
-        raise SystemExit(f"conflict markers remain in {label}")
-
-
-def resolve_side(path: Path, label: str, side: int) -> None:
-    text = path.read_text()
-    resolved, count = re.subn(
-        r"<<<<<<< (?:HEAD|ours)\n(.*?)=======\n(.*?)>>>[^\n]*\n",
-        lambda m: m.group(side),
-        text,
-        flags=re.DOTALL,
+def list_conflicts() -> frozenset:
+    return frozenset(
+        subprocess.check_output(
+            ["git", "diff", "--name-only", "--diff-filter=U"], text=True
+        ).splitlines()
     )
-    if count == 0:
-        raise SystemExit(f"no {label} conflicts found")
-    check_markers(resolved, label)
-    path.write_text(resolved)
 
 
-# runner: upstream snapshotEventHandlers infra stays (merge shape only)
-if runner_path in conflicts:
-    resolve_side(runner_path, "runner", 1)
-# session imports: manual-retry additions are the superset (merge shape only)
-if session_path in conflicts:
-    resolve_side(session_path, "agent session imports", 1)
-# session-manager: rmSync import stays
-resolve_side(manager_path, "session manager rmSync", 1)
-# index.ts: splice-only SpliceEntryHandler export (merge shape only)
-if index_path in conflicts:
-    resolve_side(index_path, "extensions index SpliceEntryHandler", 2)
-# lifecycle test: splice-only spliceEntry stub (merge shape only)
-if lifecycle_path in conflicts:
-    resolve_side(lifecycle_path, "lifecycle spliceEntry stub", 2)
+def blocks(text: str, path: str) -> list[list[list[str]]]:
+    """Split text into conflict blocks; fail on stray markers or bad structure."""
+    lines = text.splitlines(keepends=True)
+    parsed, i = [], 0
+    while i < len(lines):
+        if lines[i].startswith("<<<<<<< "):
+            j = i + 1
+            while j < len(lines) and lines[j] != "=======\n":
+                j += 1
+            if j == len(lines):
+                raise SystemExit(f"unterminated ours section in {path}")
+            k = j + 1
+            while k < len(lines) and not lines[k].startswith(">>>>>>> "):
+                k += 1
+            if k == len(lines):
+                raise SystemExit(f"unterminated conflict block in {path}")
+            parsed.append([lines[i + 1 : j], lines[j + 1 : k]])
+            i = k + 1
+        elif lines[i].startswith(("=======", ">>>>>>> ")):
+            raise SystemExit(f"stray conflict marker in {path}")
+        else:
+            i += 1
+    return parsed
 
-# harness: union both options and prefer the factory
-harness = harness_path.read_text()
-options_pattern = re.compile(
-    r"<<<<<<< (?:HEAD|ours)\n"
-    + re.escape("\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n")
-    + r"=======\n"
-    + re.escape("\tpersist?: boolean;\n")
-    + r">>>[^\n]*\n"
-)
-harness, count = options_pattern.subn(
-    "\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n\tpersist?: boolean;\n",
-    harness,
-)
-if count != 1:
-    raise SystemExit("unexpected harness options conflict shape")
 
-construct_pattern = re.compile(
-    r"<<<<<<< (?:HEAD|ours)\n"
-    + re.escape(
-        "\tconst sessionManager = options.sessionManagerFactory?.(tempDir) ?? SessionManager.inMemory();\n"
+def resolve(text: str, path: str, resolutions: list[list[str]]) -> str:
+    """Replace each conflict block with its exact accepted resolution."""
+    out, bi, i = [], 0, 0
+    lines = text.splitlines(keepends=True)
+    while i < len(lines):
+        if lines[i].startswith("<<<<<<< "):
+            j = i + 1
+            while lines[j] != "=======\n":
+                j += 1
+            k = j + 1
+            while not lines[k].startswith(">>>>>>> "):
+                k += 1
+            out.extend(resolutions[bi])
+            bi += 1
+            i = k + 1
+        else:
+            out.append(lines[i])
+            i += 1
+    return "".join(out)
+
+
+# Exact conflict shapes produced by applying slow-hook-tui-only..
+# session-tree-splice (5406b6060) onto the recorded pre-image.
+MANAGER_OURS = ["\trmSync,\n"]
+MANAGER_THEIRS = []
+
+HARNESS_OPTION_OURS = ["\tsessionManagerFactory?: (tempDir: string) => SessionManager;\n"]
+HARNESS_OPTION_THEIRS = ["\tpersist?: boolean;\n"]
+HARNESS_OPTION_MERGED = HARNESS_OPTION_OURS + HARNESS_OPTION_THEIRS
+
+HARNESS_CONSTRUCT_OURS = [
+    "\tconst sessionManager = options.sessionManagerFactory?.(tempDir) ?? SessionManager.inMemory();\n"
+]
+HARNESS_CONSTRUCT_THEIRS = [
+    "\tconst sessionManager = options.persist\n",
+    '\t\t? SessionManager.create(tempDir, join(tempDir, "sessions"))\n',
+    "\t\t: SessionManager.inMemory();\n",
+]
+HARNESS_CONSTRUCT_MERGED = [
+    "\tconst sessionManager =\n",
+    "\t\toptions.sessionManagerFactory?.(tempDir) ??\n",
+    '\t\t(options.persist ? SessionManager.create(tempDir, join(tempDir, "sessions")) : SessionManager.inMemory());\n',
+]
+
+
+def expect(block: list[list[str]], ours: list[str], theirs: list[str], label: str) -> None:
+    if block[0] != ours or block[1] != theirs:
+        raise SystemExit(f"unexpected {label} conflict shape")
+
+
+def main() -> None:
+    conflicts = list_conflicts()
+    if conflicts != EXPECTED:
+        raise SystemExit(f"unexpected session-tree-splice conflicts: {sorted(conflicts)}")
+
+    manager_text = Path(MANAGER_PATH).read_text()
+    manager_blocks = blocks(manager_text, MANAGER_PATH)
+    if len(manager_blocks) != 1:
+        raise SystemExit(f"unexpected session-manager conflict count: {len(manager_blocks)}")
+    expect(manager_blocks[0], MANAGER_OURS, MANAGER_THEIRS, "session-manager import")
+    manager_resolved = resolve(manager_text, MANAGER_PATH, [MANAGER_OURS])
+
+    harness_text = Path(HARNESS_PATH).read_text()
+    harness_blocks = blocks(harness_text, HARNESS_PATH)
+    if len(harness_blocks) != 2:
+        raise SystemExit(f"unexpected harness conflict count: {len(harness_blocks)}")
+    expect(
+        harness_blocks[0], HARNESS_OPTION_OURS, HARNESS_OPTION_THEIRS, "harness options"
     )
-    + r"=======\n(.*?)>>>[^\n]*\n",
-    re.DOTALL,
-)
-m2 = construct_pattern.search(harness)
-if not m2:
-    raise SystemExit("unexpected harness construction conflict shape")
-replacement2 = (
-    "\tconst sessionManager =\n"
-    "\t\toptions.sessionManagerFactory?.(tempDir) ??\n"
-    "\t\t(options.persist ? SessionManager.create(tempDir, join(tempDir, \"sessions\")) : SessionManager.inMemory());\n"
-)
-harness = harness[: m2.start()] + replacement2 + harness[m2.end():]
-check_markers(harness, "harness")
-harness_path.write_text(harness)
+    expect(
+        harness_blocks[1],
+        HARNESS_CONSTRUCT_OURS,
+        HARNESS_CONSTRUCT_THEIRS,
+        "harness construction",
+    )
+    harness_resolved = resolve(
+        harness_text,
+        HARNESS_PATH,
+        [HARNESS_OPTION_MERGED, HARNESS_CONSTRUCT_MERGED],
+    )
 
-staged = conflicts if conflicts == frozenset(expected_apply) else expected_full
-subprocess.run(["git", "add", *map(str, sorted(staged))], check=True)
+    Path(MANAGER_PATH).write_text(manager_resolved)
+    Path(HARNESS_PATH).write_text(harness_resolved)
+    subprocess.run(["git", "add", MANAGER_PATH, HARNESS_PATH], check=True)
+
+
+if __name__ == "__main__":
+    main()
