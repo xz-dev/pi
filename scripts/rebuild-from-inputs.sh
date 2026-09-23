@@ -924,8 +924,9 @@ run_replay() {
 			ensure_conflicts_are "merge patch/git-package-storage branch" packages/coding-agent/docs/packages.md
 			# Upstream's packages.md was rewritten wholesale; the patch range's
 			# doc version predates that rewrite, so taking --theirs would revert
-			# upstream's doc refresh. Re-apply only the storage-specific git
-			# source notes onto upstream's structure instead.
+			# upstream's doc refresh. Restore upstream's file, then re-append
+			# only the storage-specific git source notes.
+			git checkout --ours -- packages/coding-agent/docs/packages.md
 			python3 - <<'PY'
 from pathlib import Path
 
