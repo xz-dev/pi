@@ -39,7 +39,11 @@ function buildFixture() {
 		"rebuild-from-inputs.sh",
 		"union-contributor-approvals.py",
 		"resolve-model-catalog-squash-conflicts.py",
+		"resolve-model-refresh-timeout-conflicts.py",
 		"resolve-embedded-bun-squash-conflicts.py",
+		"resolve-managed-tool-executions-conflicts.py",
+		"resolve-esc-abort-conflicts.py",
+		"resolve-slow-hook-conflicts.py",
 		"resolve-session-tree-splice-conflicts.py",
 	]) {
 		writeFileSync(join(dir, "scripts", helper), helper === "rebuild-from-inputs.sh" ? readFileSync(SCRIPT) : `fixture helper ${helper}\n`);
@@ -684,10 +688,34 @@ test("the running driver must match the selected immutable CI commit", () => {
 test("a conflict executes the pinned helper, not newer committed or dirty source copies", () => {
 	const fixture = buildFixture();
 	const resolver = "resolve-model-catalog-squash-conflicts.py";
-	fixture.file("packages/coding-agent/README.md", "ci side\n", "ci-conflict", "ci-conflict", fixture.ci);
-	const helper = `from pathlib import Path\nimport subprocess\np = 'packages/coding-agent/README.md'\nPath(p).write_text('frozen helper result\\n')\nsubprocess.run(['git', 'add', p], check=True)\n`;
-	const ci = fixture.file(`scripts/${resolver}`, helper, "frozen-helper");
-	const catalog = fixture.file("packages/coding-agent/README.md", "patch side\n", "catalog-conflict", "conflicting-catalog");
+	// The driver's expected conflict set covers all three doc files the
+	// upstream doc refresh rewrote; stage each so the frozen helper runs.
+	// ci tip carries the ci-side doc content AND the frozen resolver, on top
+	// of the recorded fixture ci (which the driver requires for its helpers).
+	const docs3 = [
+		"packages/coding-agent/README.md",
+		"packages/coding-agent/docs/packages.md",
+		"packages/coding-agent/docs/usage.md",
+	];
+	fixture.run(`git checkout -q -B ci-docs ${fixture.ci}`);
+	for (const path of docs3) {
+		mkdirSync(dirname(join(fixture.dir, path)), { recursive: true });
+		writeFileSync(join(fixture.dir, path), "ci side\n");
+	}
+	execFileSync("git", ["add", "--", ...docs3], { cwd: fixture.dir });
+	fixture.run("git commit -qm ci-docs");
+	const helper = `from pathlib import Path\nimport subprocess\nfor p in ['packages/coding-agent/README.md', 'packages/coding-agent/docs/packages.md', 'packages/coding-agent/docs/usage.md']:\n    Path(p).write_text('frozen helper result\\n')\nsubprocess.run(['git', 'add', 'packages/coding-agent/README.md', 'packages/coding-agent/docs/packages.md', 'packages/coding-agent/docs/usage.md'], check=True)\n`;
+	const ci = fixture.file(`scripts/${resolver}`, helper, "frozen-helper", "ci", "ci-docs");
+	// The patch rewrites all three docs against upstream, so every one
+	// conflicts with the ci side in the squash merge.
+	fixture.run(`git checkout -q -B conflicting-catalog ${fixture.upstream}`);
+	for (const path of docs3) {
+		mkdirSync(dirname(join(fixture.dir, path)), { recursive: true });
+		writeFileSync(join(fixture.dir, path), "patch side\n");
+	}
+	execFileSync("git", ["add", "--", ...docs3], { cwd: fixture.dir });
+	fixture.run("git commit -qm catalog-conflict");
+	const catalog = fixture.run("git rev-parse HEAD").trim();
 	const newer = fixture.file(`scripts/${resolver}`, "raise SystemExit('wrong newer helper')\n", "newer-helper", "newer-ci", ci);
 	writeFileSync(join(fixture.dir, "scripts", resolver), "raise SystemExit('dirty helper')\n");
 	const { target } = replay(fixture, ["--upstream", fixture.upstream, "--ci", ci,
@@ -751,32 +779,51 @@ for (const scenario of ["known additions", "unknown incoming edit", "missing ver
 }
 
 for (const extraConflict of [false, true]) {
-	test(`catalog resolver validates the whole result before writing: extra conflict=${extraConflict}`, () => {
+	test(`catalog resolver keeps upstream doc sides and fails on extras: extra conflict=${extraConflict}`, () => {
 		const fixture = buildFixture();
-		const path = "packages/coding-agent/README.md";
+		const docs = [
+			"packages/coding-agent/README.md",
+			"packages/coding-agent/docs/packages.md",
+			"packages/coding-agent/docs/usage.md",
+		];
 		try {
-			fixture.file(path, "base docs\n", "docs base", "docs-base");
-			const source = readFileSync(join(ROOT, "scripts/resolve-model-catalog-squash-conflicts.py"), "utf8");
-			const conflict = source.match(/conflict = f'''([\s\S]*?)'''/)[1]
-				.replaceAll("{start}", "<".repeat(7)).replaceAll("{middle}", "=".repeat(7)).replaceAll("{end}", ">".repeat(7));
-			fixture.file(path, "ours\n", "ours", "ours", "docs-base");
-			fixture.file(path, "theirs\n", "theirs", "origin/patch/model-catalog-extension-refresh", "docs-base");
-			fixture.run("git checkout -q ours");
-			assert.throws(() => fixture.run("git merge --no-commit origin/patch/model-catalog-extension-refresh"));
-			const bytes = conflict + "\n" + (extraConflict ? `${"<".repeat(7)} HEAD\nunknown\n${"=".repeat(7)}\nother\n${">".repeat(7)} theirs\n` : "");
-			writeFileSync(join(fixture.dir, path), bytes);
+			// One shared base commit, then two sibling branches that each rewrite
+			// every doc, so the merge conflicts in all three.
+			fixture.run("git checkout -q -B docs-base upstream-main");
+			for (const path of docs) {
+				mkdirSync(dirname(join(fixture.dir, path)), { recursive: true });
+				writeFileSync(join(fixture.dir, path), `base ${path}\n`);
+			}
+			execFileSync("git", ["add", "--", ...docs], { cwd: fixture.dir });
+			fixture.run("git commit -qm base-docs");
+			fixture.run("git checkout -q -B upstream-docs docs-base");
+			for (const path of docs) writeFileSync(join(fixture.dir, path), `upstream ${path}\n`);
+			execFileSync("git", ["add", "--", ...docs], { cwd: fixture.dir });
+			fixture.run("git commit -qm upstream-docs");
+			fixture.run("git checkout -q -B patch-catalog docs-base");
+			for (const path of docs) writeFileSync(join(fixture.dir, path), `patch ${path}\n`);
+			execFileSync("git", ["add", "--", ...docs], { cwd: fixture.dir });
+			fixture.run("git commit -qm patch-catalog");
+			fixture.run("git checkout -q -B merge-test upstream-docs");
+			assert.throws(() => fixture.run("git merge --no-commit patch-catalog"));
 			const index = readFileSync(join(fixture.dir, ".git/index"));
+			if (extraConflict) {
+				writeFileSync(join(fixture.dir, "stray.txt"), "unmerged stray\n");
+				execFileSync("git", ["update-index", "--index-info"], {
+					cwd: fixture.dir,
+					input: `100644 ${execFileSync("git", ["hash-object", "-w", "stray.txt"], { cwd: fixture.dir, encoding: "utf8" }).trim()} 1\tstray.txt\n`,
+				});
+			}
 			const resolve = () => execFileSync("python3", [join(ROOT, "scripts/resolve-model-catalog-squash-conflicts.py")], { cwd: fixture.dir, stdio: "pipe" });
 			if (extraConflict) {
-				assert.throws(resolve, /unexpected additional/);
-				assert.equal(readFileSync(join(fixture.dir, path), "utf8"), bytes);
-				assert.deepEqual(readFileSync(join(fixture.dir, ".git/index")), index);
+				assert.throws(resolve, /unexpected model-catalog conflicts/);
+				assert.notEqual(fixture.run("git diff --name-only --diff-filter=U").trim(), "");
 			} else {
 				resolve();
 				assert.equal(fixture.run("git diff --name-only --diff-filter=U").trim(), "");
-				const result = readFileSync(join(fixture.dir, path), "utf8");
-				assert.ok(result.includes("pi --list-models --refresh"));
-				assert.ok(result.includes("Press Ctrl+S"));
+				for (const path of docs) {
+					assert.equal(readFileSync(join(fixture.dir, path), "utf8"), `upstream ${path}\n`);
+				}
 			}
 		} finally {
 			rmSync(fixture.dir, { recursive: true, force: true });

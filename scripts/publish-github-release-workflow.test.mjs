@@ -74,7 +74,8 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
     assert.ok(syncWorkflowText.includes(`${name}-on-accumulated \\\n`));
   }
   assert.match(script, /require_ancestor agent-run-failure-seam manual-retry/);
-  assert.doesNotMatch(script, /resolve-(?:agent-run-failure-seam|managed-tool-executions|managed-tool-esc|manual-retry)/);
+  assert.doesNotMatch(script, /resolve-(?:agent-run-failure-seam|managed-tool-esc|manual-retry)/);
+  assert.match(script, /resolve-managed-tool-executions-conflicts\.py/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /patch\/managed-tool-executions/);
@@ -150,9 +151,8 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
   assert.match(script, /Unresolved conflicts remain after \$msg/);
   const resolver = readFileSync(join(ROOT, "scripts", "resolve-model-catalog-squash-conflicts.py"), "utf8");
   assert.match(resolver, /packages\/coding-agent\/README\.md/);
-  assert.match(resolver, /unexpected model-catalog README conflict shape/);
-  assert.match(resolver, /Press Ctrl\+S in the model picker to save the highlighted model as the startup default/);
-  assert.match(resolver, /pi --list-models --refresh/);
+  assert.match(resolver, /unexpected model-catalog conflicts/);
+  assert.match(resolver, /packages\/coding-agent\/docs\/usage\.md/);
   // list-models-refresh and args tests are covered by the coding-agent auto-discovery run.
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi --list-models`/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
