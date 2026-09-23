@@ -13,7 +13,11 @@ import subprocess
 
 MANAGER_PATH = "packages/coding-agent/src/core/session-manager.ts"
 HARNESS_PATH = "packages/coding-agent/test/suite/harness.ts"
-EXPECTED = frozenset({MANAGER_PATH, HARNESS_PATH})
+EXTENSIONS_PATH = "packages/coding-agent/docs/extensions.md"
+SESSION_FORMAT_PATH = "packages/coding-agent/docs/session-format.md"
+EXPECTED = frozenset(
+    {MANAGER_PATH, HARNESS_PATH, EXTENSIONS_PATH, SESSION_FORMAT_PATH}
+)
 
 
 def list_conflicts() -> frozenset:
@@ -99,6 +103,26 @@ def expect(block: list[list[str]], ours: list[str], theirs: list[str], label: st
         raise SystemExit(f"unexpected {label} conflict shape")
 
 
+def resolve_docs() -> None:
+    """Re-append spliceEntry docs onto upstream's rewritten doc structure."""
+    subprocess.run(["git", "checkout", "--ours", "--", EXTENSIONS_PATH], check=True)
+    text = Path(EXTENSIONS_PATH).read_text()
+    anchor = "Reconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.\n"
+    addition = """`pi.spliceEntry(entryId)` deletes exactly one existing non-root session entry and reparents its direct children to that entry's parent. Descendants stay. If the deleted entry is the current leaf, the parent becomes the leaf. Persisted JSONL is rewritten so a later reload keeps the same topology, and the live agent context is rebuilt. Call this only while the agent is idle; root, missing, and unsafe metadata references (label targets, compaction `firstKeptEntryId`, branch-summary `fromId`, missing parent) throw.
+"""
+    if text.count(anchor) != 1:
+        raise SystemExit("unexpected extensions.md session-state anchor")
+    Path(EXTENSIONS_PATH).write_text(text.replace(anchor, anchor + addition, 1))
+
+    subprocess.run(["git", "checkout", "--ours", "--", SESSION_FORMAT_PATH], check=True)
+    text = Path(SESSION_FORMAT_PATH).read_text()
+    fmt_anchor = "- Calling `resetLeaf()` or `branchWithSummary(null, ...)` allows a later entry to become another root\n"
+    fmt_addition = "- `spliceEntry(entryId)` removes one non-root entry and reparents its children\n"
+    if text.count(fmt_anchor) != 1:
+        raise SystemExit("unexpected session-format.md tree anchor")
+    Path(SESSION_FORMAT_PATH).write_text(text.replace(fmt_anchor, fmt_anchor + fmt_addition, 1))
+
+
 def main() -> None:
     conflicts = list_conflicts()
     if conflicts != EXPECTED:
@@ -130,9 +154,14 @@ def main() -> None:
         [HARNESS_OPTION_MERGED, HARNESS_CONSTRUCT_MERGED],
     )
 
+    resolve_docs()
+
     Path(MANAGER_PATH).write_text(manager_resolved)
     Path(HARNESS_PATH).write_text(harness_resolved)
-    subprocess.run(["git", "add", MANAGER_PATH, HARNESS_PATH], check=True)
+    subprocess.run(
+        ["git", "add", MANAGER_PATH, HARNESS_PATH, EXTENSIONS_PATH, SESSION_FORMAT_PATH],
+        check=True,
+    )
 
 
 if __name__ == "__main__":
