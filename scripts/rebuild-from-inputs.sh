@@ -1085,7 +1085,30 @@ PY
 	fi
 	if active retry-non-retryable-patterns; then
 		CURRENT_STEP=retry-non-retryable-patterns
-		merge_squash retry-non-retryable-patterns "merge patch/retry-non-retryable-patterns branch"
+		stop_before retry-non-retryable-patterns
+		if ! git merge --squash "origin/patch/retry-non-retryable-patterns"; then
+			ensure_conflicts_are "merge patch/retry-non-retryable-patterns branch" packages/coding-agent/docs/settings.md
+			# Re-append the nonRetryableErrorPatterns row into upstream's new
+			# Network-and-retries table.
+			git checkout --ours -- packages/coding-agent/docs/settings.md
+			python3 - <<'PY'
+from pathlib import Path
+
+path = Path("packages/coding-agent/docs/settings.md")
+text = path.read_text()
+anchor = "| `retry.maxAgentDelayMs` | number | `60000` | Maximum agent-level retry delay in milliseconds. |\n"
+addition = "| `retry.nonRetryableErrorPatterns` | `string[]` | None | Extra case-insensitive `errorMessage` substrings that skip automatic retry (in addition to the built-in quota and billing patterns). Useful when a gateway returns a terminal quota/limit error that still looks retryable, for example a plain HTTP 429. |\n"
+if text.count(anchor) != 1:
+    raise SystemExit("unexpected settings.md retry anchor")
+text = text.replace(anchor, anchor + addition, 1)
+path.write_text(text)
+PY
+			git add packages/coding-agent/docs/settings.md
+		fi
+		ensure_no_conflicts "merge patch/retry-non-retryable-patterns branch"
+		ensure_not_empty "merge patch/retry-non-retryable-patterns branch"
+		verify_staged
+		commit_step "merge patch/retry-non-retryable-patterns branch"
 	fi
 
 	# 21 slow-hook-tui-only — explicit recorded compat base..tip.
