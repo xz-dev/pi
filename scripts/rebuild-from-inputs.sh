@@ -475,6 +475,7 @@ HELPERS=(
 	rebuild-from-inputs.sh
 	union-contributor-approvals.py
 	resolve-model-catalog-squash-conflicts.py
+	resolve-model-refresh-timeout-conflicts.py
 	resolve-embedded-bun-squash-conflicts.py
 	resolve-session-tree-splice-conflicts.py
 )
@@ -861,9 +862,13 @@ run_replay() {
 	fi
 
 	# 6 model-refresh-timeout — explicit recorded compat base..tip, kept
-	# immediately after the model-catalog refresh it builds on.
+	# immediately after the model-catalog refresh it builds on. Upstream's doc
+	# refresh moved its settings.md anchor; resolver re-appends the row to the
+	# new Network-and-retries table.
 	if active model-refresh-timeout; then
-		apply_compat_range model-refresh-timeout "merge patch/model-refresh-timeout branch"
+		apply_compat_range model-refresh-timeout "merge patch/model-refresh-timeout branch" \
+			resolve-model-refresh-timeout-conflicts.py \
+			packages/coding-agent/docs/settings.md
 	fi
 
 	# 7 bun-bytecode-entrypoint
