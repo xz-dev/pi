@@ -1134,6 +1134,8 @@ PY
 			-- >"$TMPDIR_WORK/session-tree-splice.patch"
 		if ! git apply --3way --index "$TMPDIR_WORK/session-tree-splice.patch"; then
 			ensure_conflicts_are patch/session-tree-splice \
+				packages/coding-agent/docs/extensions.md \
+				packages/coding-agent/docs/session-format.md \
 				packages/coding-agent/src/core/session-manager.ts \
 				packages/coding-agent/test/suite/harness.ts
 			python3 "$HELPER_DIR/resolve-session-tree-splice-conflicts.py" ||
