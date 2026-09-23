@@ -478,6 +478,7 @@ HELPERS=(
 	resolve-model-refresh-timeout-conflicts.py
 	resolve-embedded-bun-squash-conflicts.py
 	resolve-managed-tool-executions-conflicts.py
+	resolve-esc-abort-conflicts.py
 	resolve-session-tree-splice-conflicts.py
 )
 
@@ -1002,7 +1003,9 @@ PY
 			fi
 		fi
 		if active esc-abort; then
-			apply_compat_range esc-abort "merge patch/esc-abort branch"
+			apply_compat_range esc-abort "merge patch/esc-abort branch" \
+				resolve-esc-abort-conflicts.py \
+				packages/coding-agent/docs/extensions.md
 		fi
 		if active manual-retry; then
 			apply_compat_range manual-retry "merge patch/manual-retry branch"
