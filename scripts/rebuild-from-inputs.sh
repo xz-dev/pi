@@ -1058,7 +1058,30 @@ PY
 	# 19-20
 	if active skill-overrides; then
 		CURRENT_STEP=skill-overrides
-		merge_squash skill-overrides "merge patch/skill-overrides branch"
+		stop_before skill-overrides
+		if ! git merge --squash "origin/patch/skill-overrides"; then
+			ensure_conflicts_are "merge patch/skill-overrides branch" packages/coding-agent/docs/packages.md
+			# Upstream rewrote packages.md; re-append the skillOverrides note
+			# under its new resource-selection section.
+			git checkout --ours -- packages/coding-agent/docs/packages.md
+			python3 - <<'PY'
+from pathlib import Path
+
+path = Path("packages/coding-agent/docs/packages.md")
+text = path.read_text()
+anchor = "Filters narrow the package manifest. They do not expose resources that the package itself did not declare.\n"
+addition = "\nA package may also set `skillOverrides` keyed by each skill's resolved `name`. Setting `disableModelInvocation` to `true` hides that skill from the model prompt while keeping `/skill:name` available; `false` overrides the skill's frontmatter. Unknown skill names are ignored, and overrides apply only to skills from that package. For an `autoload: false` project delta, same-name overrides replace global entries while unspecified skill overrides are inherited.\n"
+if text.count(anchor) != 1:
+    raise SystemExit("unexpected packages.md filter anchor")
+text = text.replace(anchor, anchor + addition, 1)
+path.write_text(text)
+PY
+			git add packages/coding-agent/docs/packages.md
+		fi
+		ensure_no_conflicts "merge patch/skill-overrides branch"
+		ensure_not_empty "merge patch/skill-overrides branch"
+		verify_staged
+		commit_step "merge patch/skill-overrides branch"
 	fi
 	if active retry-non-retryable-patterns; then
 		CURRENT_STEP=retry-non-retryable-patterns
