@@ -711,6 +711,7 @@ prepare_target() {
 	cd "$TARGET_PATH"
 	git fetch --quiet "$SOURCE_REPO" \
 		'+refs/remotes/origin/*:refs/remotes/source/*' \
+		'+refs/remotes/upstream/*:refs/remotes/upstream/*' \
 		'+refs/heads/*:refs/remotes/src/*' 2>/dev/null || true
 	git config user.name "${GIT_AUTHOR_NAME:-github-actions[bot]}"
 	git config user.email "${GIT_AUTHOR_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
