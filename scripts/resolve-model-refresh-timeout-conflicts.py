@@ -5,9 +5,9 @@ import subprocess
 # The model-refresh-timeout compat range carries a single docs/settings.md row
 # anchored under `websocketConnectTimeoutMs`. Upstream's doc refresh rewrote
 # settings.md wholesale and moved network knobs into a "Network and retries"
-# table, so git apply --3way leaves a conflicted hunk. Resolution: append the
-# models.refreshTimeoutMs row to upstream's Network-and-retries table (after
-# websocketConnectTimeoutMs), preserving upstream wording.
+# table, so git apply --3way leaves a conflicted file — but it may also have
+# partially applied the hunk. Resolve deterministically: restore upstream's
+# file, then insert the row after upstream's websocketConnectTimeoutMs row.
 expected = {Path("packages/coding-agent/docs/settings.md")}
 conflicts = {
     Path(path)
@@ -19,6 +19,7 @@ if conflicts != expected:
     raise SystemExit(f"unexpected model-refresh-timeout conflicts: {sorted(map(str, conflicts))}")
 
 path = next(iter(expected))
+subprocess.run(["git", "checkout", "--ours", "--", str(path)], check=True)
 text = path.read_text()
 row = "| `models.refreshTimeoutMs` | number | `60000` | Timeout in milliseconds for model-catalog refresh operations (startup, `--refresh`, `/model`, post-login, `pi update --models`). Set to `0` to disable. |"
 anchor = "| `websocketConnectTimeoutMs` | number | `15000` | WebSocket connection timeout in milliseconds. Set to `0` to disable. |"
