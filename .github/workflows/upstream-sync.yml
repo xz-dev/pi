@@ -53,7 +53,6 @@ jobs:
           fi
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
-            +refs/remotes/upstream/*:refs/remotes/upstream/* \
             +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
             +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
