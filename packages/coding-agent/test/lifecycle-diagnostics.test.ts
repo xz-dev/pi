@@ -22,6 +22,7 @@ const extensionActions: ExtensionActions = {
 	sendMessage: () => {},
 	sendUserMessage: () => {},
 	appendEntry: () => {},
+	spliceEntry: () => {},
 	setSessionName: () => {},
 	getSessionName: () => undefined,
 	setLabel: () => {},

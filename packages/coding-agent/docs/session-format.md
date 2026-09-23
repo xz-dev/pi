@@ -210,6 +210,7 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 - Branching creates new children from an earlier entry
 - The "leaf" is the current position in the tree
 - Calling `resetLeaf()` or `branchWithSummary(null, ...)` allows a later entry to become another root
+- `spliceEntry(entryId)` removes one non-root entry and reparents its children
 
 ```
 [user msg] ─── [assistant] ─── [user msg] ─── [assistant] ─┬─ [user msg] ← current leaf
