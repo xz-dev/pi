@@ -910,10 +910,47 @@ run_replay() {
 			packages/coding-agent/src/config.ts
 	fi
 
-	# 13 git-package-storage
+	# 13 git-package-storage — descendant range. Its docs/packages.md hunk
+	# conflicts against the embedded-Bun section we just appended; resolve
+	# that file by taking the accumulated side, keeping the new source
+	# unchanged (upstream's rewritten doc does not cover these behaviors).
 	if active git-package-storage; then
 		CURRENT_STEP=git-package-storage
-		cherry_pick_range git-package-storage "merge patch/git-package-storage branch" use-embedded-bun-package-manager
+		stop_before git-package-storage
+		local base="${INPUT_SHA[use-embedded-bun-package-manager]}" tip="${INPUT_SHA[git-package-storage]}"
+		git merge-base --is-ancestor "$base" "$tip" || die "merge patch/git-package-storage branch must descend from patch/use-embedded-bun-package-manager"
+		[[ -z "$(git rev-list --min-parents=2 "$base..$tip")" ]] || die "merge patch/git-package-storage branch range must be linear"
+		if ! git cherry-pick --no-commit "origin/patch/use-embedded-bun-package-manager..origin/patch/git-package-storage"; then
+			ensure_conflicts_are "merge patch/git-package-storage branch" packages/coding-agent/docs/packages.md
+			# Upstream's packages.md was rewritten wholesale; the patch range's
+			# doc version predates that rewrite, so taking --theirs would revert
+			# upstream's doc refresh. Re-apply only the storage-specific git
+			# source notes onto upstream's structure instead.
+			python3 - <<'PY'
+from pathlib import Path
+
+path = Path("packages/coding-agent/docs/packages.md")
+text = path.read_text()
+anchor = "Versioned npm specifications are pinned. Git tags and commits are also pinned; package updates reconcile the checkout but do not move a configured ref.\n"
+addition = """
+New git installs use depth-one, single-branch clones without unrelated tags. Branches and tags are selected during cloning; full commit IDs are fetched directly without cloning another branch. Abbreviated commit IDs require a full clone for local resolution; use a full commit ID to avoid downloading history.
+
+Git updates fetch only the selected ref at depth one and discard stale commit-graph caches. Existing refs, reflogs, and stored objects are not automatically deleted; making an old clone shallow does not by itself reclaim all of its history.
+
+When reconciliation changes the checkout, Pi resets and cleans the clone, then installs dependencies if `package.json` exists. Default npm uses `install --omit=dev --legacy-peer-deps`; embedded Bun uses `install --omit=dev --omit=peer`. This avoids installing Pi-provided host APIs again through peer dependencies. Explicit `npmCommand` commands use plain `install`. A current checkout with missing runtime dependencies is repaired without cleaning it; existing extra dependencies are not automatically pruned.
+"""
+if text.count(anchor) != 1:
+    raise SystemExit("unexpected packages.md git-source anchor")
+text = text.replace(anchor, anchor + addition, 1)
+path.write_text(text)
+PY
+			git add packages/coding-agent/docs/packages.md
+		fi
+		ensure_no_conflicts "merge patch/git-package-storage branch"
+		ensure_not_empty "merge patch/git-package-storage branch"
+		verify_staged
+		commit_step "merge patch/git-package-storage branch"
+		APPLIED_RANGE[git-package-storage]="$base..$tip"
 	fi
 
 	# 14-15 reviewed accumulated ranges; no runtime rewriting in CI.
