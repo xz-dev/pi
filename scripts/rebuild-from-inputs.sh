@@ -848,12 +848,16 @@ run_replay() {
 		fi
 	fi
 
-	# 5 model-catalog-extension-refresh
+	# 5 model-catalog-extension-refresh — upstream v0.87.1 doc refresh makes
+	# README + packages.md + usage.md conflict; resolver takes upstream's side
+	# (patch code still applies cleanly and owns the feature).
 	if active model-catalog-extension-refresh; then
 		CURRENT_STEP=model-catalog-extension-refresh
 		merge_squash_resolver model-catalog-extension-refresh "merge patch/model-catalog-extension-refresh branch" \
 			resolve-model-catalog-squash-conflicts.py \
-			packages/coding-agent/README.md
+			packages/coding-agent/README.md \
+			packages/coding-agent/docs/packages.md \
+			packages/coding-agent/docs/usage.md
 	fi
 
 	# 6 model-refresh-timeout — explicit recorded compat base..tip, kept
