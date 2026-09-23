@@ -38,8 +38,13 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `defaultTools` | `string[]` | `read`, `bash`, `edit`, `write` | Built-in tools enabled at startup. An empty array disables all built-in tools but not extension or SDK tools. |
+| `backgroundToolCalls` | object | `{}` | Per-tool managed background rules for third-party tools. An empty rule uses a 600-second detach threshold. |
 
 Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools).
+
+`tool_task` remains enabled with `defaultTools`, including an empty array. `--tools` is a strict allowlist for all tools, so include `tool_task` when managed execution controls are needed. `--no-tools` disables all tools; `--no-builtin-tools` disables the built-in defaults while retaining `tool_task` and extension/custom tools. `--exclude-tools` filters the resulting list.
+
+`backgroundToolCalls` opts named extension, SDK, or other third-party tools into managed execution. `{}` uses the default 600-second detach threshold; `detachAfterSeconds` must be a positive finite number. Invalid rule shapes or non-positive thresholds are diagnosed and not applied; reload keeps the last valid managed policy. Project rules merge with global rules by tool name. Unlisted third-party tools remain foreground-only. When no explicit `bash` or `powershell` rule exists, AI-called shell tools use the built-in 600-second detach policy when their `timeout` is omitted or strictly greater than 1200 seconds. Their original timeout continues after detach. User-entered `!` and `!!` shell commands are not managed. `tool_task` is never auto-backgrounded, and any `backgroundToolCalls.tool_task` rule is ignored.
 
 ## Sessions and context
 
