@@ -28,7 +28,8 @@ if row in text:
 if text.count(anchor) != 1:
     raise SystemExit("unexpected settings.md anchor count")
 text = text.replace(anchor, anchor + "\n" + row, 1)
-if any(line.startswith(("<", "=", ">")) for line in text.splitlines()):
+markers = ("<" * 7, "=" * 7, ">" * 7)
+if any(line.startswith(markers) for line in text.splitlines()):
     raise SystemExit("unexpected residual conflict markers in settings.md")
 path.write_text(text)
 subprocess.run(["git", "add", str(path)], check=True)
