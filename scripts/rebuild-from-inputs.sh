@@ -477,6 +477,7 @@ HELPERS=(
 	resolve-model-catalog-squash-conflicts.py
 	resolve-model-refresh-timeout-conflicts.py
 	resolve-embedded-bun-squash-conflicts.py
+	resolve-managed-tool-executions-conflicts.py
 	resolve-session-tree-splice-conflicts.py
 )
 
@@ -962,7 +963,11 @@ PY
 	# MTE's source remains independent: the compat base describes application
 	# order, not invented ancestry between its source branch and the seam.
 	if active managed-tool-executions; then
-		apply_compat_range managed-tool-executions "merge patch/managed-tool-executions branch"
+		apply_compat_range managed-tool-executions "merge patch/managed-tool-executions branch" \
+			resolve-managed-tool-executions-conflicts.py \
+			packages/coding-agent/README.md \
+			packages/coding-agent/docs/settings.md \
+			packages/coding-agent/docs/usage.md
 	fi
 
 	# 16-17 esc-abort and manual-retry must descend from the recorded seam and
