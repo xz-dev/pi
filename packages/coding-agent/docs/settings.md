@@ -122,7 +122,9 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are requir
 |---|---|---|---|
 | `shellPath` | string | Platform default | Custom shell executable path. Supports a leading `~`. |
 | `shellCommandPrefix` | string | None | Prefix prepended to every shell command. |
-| `npmCommand` | `string[]` | `npm` | Command and arguments used for npm package lookup and installation. |
+| `npmCommand` | `string[]` | `npm` (distribution default) | Command argv for extension package-manager operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`); takes precedence over the embedded Bun default in xz-dev Bun-compiled standalone builds. |
+With `npmCommand` unset or `[]`, only xz-dev Bun-compiled standalone Pi defaults to embedded Bun via public `pi` on `PATH`, even if npm is available. `BUN_BE_BUN=1` is added only to those package-manager children, never to explicit overrides. Other installations default to npm. Set `"npmCommand": ["npm"]` to use external npm; `[""]` is invalid. This does not change Pi self-update. See [Pi Packages](packages.md) for PATH requirements and Bun's registry, lockfile, script, and native-dependency compatibility limits.
+
 
 See [Shell aliases](shell-aliases.md) for shell setup and [Pi Packages](packages.md) for package-manager behavior.
 
