@@ -479,6 +479,7 @@ HELPERS=(
 	resolve-embedded-bun-squash-conflicts.py
 	resolve-managed-tool-executions-conflicts.py
 	resolve-esc-abort-conflicts.py
+	resolve-slow-hook-conflicts.py
 	resolve-session-tree-splice-conflicts.py
 )
 
@@ -1111,9 +1112,13 @@ PY
 		commit_step "merge patch/retry-non-retryable-patterns branch"
 	fi
 
-	# 21 slow-hook-tui-only — explicit recorded compat base..tip.
+	# 21 slow-hook-tui-only — explicit recorded compat base..tip. Upstream's
+	# doc refresh moved its docs anchors; resolver re-appends onto new docs.
 	if active slow-hook-tui-only; then
-		apply_compat_range slow-hook-tui-only "merge patch/slow-hook-tui-only branch"
+		apply_compat_range slow-hook-tui-only "merge patch/slow-hook-tui-only branch" \
+			resolve-slow-hook-conflicts.py \
+			packages/coding-agent/docs/extensions.md \
+			packages/coding-agent/docs/settings.md
 		grep -Fq 'if (ext.uninterruptibleHandlers?.has(handler) === true) continue;' \
 			packages/coding-agent/src/core/extensions/runner.ts
 		grep -Fq 'this.runHandler("message_end", ext, handlerIndex' \
