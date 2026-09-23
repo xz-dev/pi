@@ -815,8 +815,8 @@ export async function main(args: string[], options?: MainOptions) {
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0
 				? await resolveModelScope(modelPatterns, modelRuntime, {
-					signal: AbortSignal.timeout(settingsManager.getModelRefreshTimeoutMs()),
-				})
+						signal: AbortSignal.timeout(settingsManager.getModelRefreshTimeoutMs()),
+					})
 				: [];
 		const {
 			options: sessionOptions,
