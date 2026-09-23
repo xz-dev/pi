@@ -2,7 +2,17 @@
 from pathlib import Path
 import subprocess
 
-expected = {Path("packages/coding-agent/README.md")}
+# Upstream's documentation refresh (25cc5c7bf, v0.87.1) rewrote README.md,
+# docs/packages.md, and docs/usage.md wholesale, so all three conflict against
+# this patch's doc hunks. The patch only carried wording tweaks whose intent
+# upstream now expresses elsewhere (docs/models.md, docs/cli.md); keeping
+# upstream's side preserves the new doc structure without losing the feature,
+# which lives in code (src/cli/args.ts, src/main.ts, package-manager-cli.ts).
+expected = {
+    Path("packages/coding-agent/README.md"),
+    Path("packages/coding-agent/docs/packages.md"),
+    Path("packages/coding-agent/docs/usage.md"),
+}
 conflicts = {
     Path(path)
     for path in subprocess.check_output(
@@ -12,21 +22,6 @@ conflicts = {
 if conflicts != expected:
     raise SystemExit(f"unexpected model-catalog conflicts: {sorted(map(str, conflicts))}")
 
-path = next(iter(expected))
-text = path.read_text()
-start = "<" * 7
-middle = "=" * 7
-end = ">" * 7
-conflict = f'''{start} HEAD
-For each built-in provider, pi maintains a list of tool-capable models. Configured provider catalogs refresh automatically; run `pi update --models` to force an immediate refresh. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L). Press Ctrl+S in the model picker to save the highlighted model as the startup default.
-{middle}
-For each built-in provider, pi maintains a list of tool-capable models. Configured built-in catalogs refresh automatically; run `pi update --models` to force the Pi-managed catalogs available without loading extensions to refresh. To load extension providers, refresh every loaded provider, and print the resulting list, run `pi --list-models --refresh`. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L).
-{end} origin/patch/model-catalog-extension-refresh'''
-resolution = '''For each built-in provider, pi maintains a list of tool-capable models. Configured built-in catalogs refresh automatically; run `pi update --models` to force the Pi-managed catalogs available without loading extensions to refresh. To load extension providers, refresh every loaded provider, and print the resulting list, run `pi --list-models --refresh`. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L). Press Ctrl+S in the model picker to save the highlighted model as the startup default.'''
-if text.count(conflict) != 1:
-    raise SystemExit("unexpected model-catalog README conflict shape")
-resolved = text.replace(conflict, resolution)
-if any(line.startswith((start, middle, end)) for line in resolved.splitlines()):
-    raise SystemExit("unexpected additional model-catalog README conflict")
-path.write_text(resolved)
-subprocess.run(["git", "add", str(path)], check=True)
+for doc in sorted(expected):
+    subprocess.run(["git", "checkout", "--ours", "--", str(doc)], check=True)
+    subprocess.run(["git", "add", str(doc)], check=True)
