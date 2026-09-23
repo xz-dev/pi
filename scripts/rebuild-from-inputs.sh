@@ -899,11 +899,14 @@ run_replay() {
 		cherry_pick_range bundle-usage-claims "merge patch/bundle-usage-claims branch" update-clean
 	fi
 
-	# 12 use-embedded-bun-package-manager
+	# 12 use-embedded-bun-package-manager — config.ts metadata + upstream's
+	# doc refresh moved the patch's packages.md/settings.md sections.
 	if active use-embedded-bun-package-manager; then
 		CURRENT_STEP=use-embedded-bun-package-manager
 		merge_squash_resolver use-embedded-bun-package-manager "merge patch/use-embedded-bun-package-manager branch" \
 			resolve-embedded-bun-squash-conflicts.py \
+			packages/coding-agent/docs/packages.md \
+			packages/coding-agent/docs/settings.md \
 			packages/coding-agent/src/config.ts
 	fi
 
