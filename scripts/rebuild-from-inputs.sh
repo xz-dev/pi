@@ -1010,23 +1010,10 @@ path.write_text(text)
 PY
 			git add packages/coding-agent/src/core/package-manager.ts
 			# package-manager.test.ts: the patch re-adds getNpmCommand next to the
-			# copy the embedded-bun resolver already merged in. Keep HEAD.
-			python3 - <<'PY'
-from pathlib import Path
-
-path = Path("packages/coding-agent/test/package-manager.test.ts")
-text = path.read_text()
-block = (
-    "<<<<<<< HEAD\n"
-    "\tgetNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };\n"
-    "=======\n"
-    ">>>>>>> 72abe9a79 (Reapply \"fix(coding-agent): reduce Git package installation storage (#7)\")\n"
-)
-if text.count(block) != 1:
-    raise SystemExit("unexpected package-manager.test.ts conflict shape")
-text = text.replace(block, "\tgetNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };\n", 1)
-path.write_text(text)
-PY
+			# copy the embedded-bun resolver already merged in, and now also
+			# carries the corrected pnpm-wrapper install-args expectation. Keep
+			# the patch's version for both hunks.
+			git checkout --theirs -- packages/coding-agent/test/package-manager.test.ts
 			git add packages/coding-agent/test/package-manager.test.ts
 		fi
 		ensure_no_conflicts "merge patch/git-package-storage branch"
