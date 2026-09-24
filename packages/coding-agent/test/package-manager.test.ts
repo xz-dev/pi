@@ -763,7 +763,13 @@ Content`,
 					!command?.length || command[0] === "bun"
 						? ["install", "--omit=dev", "--omit=peer"]
 						: command[0] === "pnpm"
-							? ["install", "--prod", "--config.auto-install-peers=false", "--config.strict-peer-dependencies=false", "--config.strict-dep-builds=false"]
+							? [
+									"install",
+									"--prod",
+									"--config.auto-install-peers=false",
+									"--config.strict-peer-dependencies=false",
+									"--config.strict-dep-builds=false",
+								]
 							: command[0] === "npm"
 								? ["install", "--omit=dev", "--legacy-peer-deps"]
 								: ["install"];
