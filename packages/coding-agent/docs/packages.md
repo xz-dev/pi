@@ -146,6 +146,8 @@ For each resource type:
 
 Filters narrow the package manifest. They do not expose resources that the package itself did not declare.
 
+A package may also set `skillOverrides` keyed by each skill's resolved `name`. Setting `disableModelInvocation` to `true` hides that skill from the model prompt while keeping `/skill:name` available; `false` overrides the skill's frontmatter. Unknown skill names are ignored, and overrides apply only to skills from that package. For an `autoload: false` project delta, same-name overrides replace global entries while unspecified skill overrides are inherited.
+
 Run `pi config` to enable or disable discovered resources. It starts with personal configuration; press Tab to switch scope, or run `pi config --local` to start with project overrides.
 
 ## Understand scope and identity
