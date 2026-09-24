@@ -1123,7 +1123,10 @@ PY
 		CURRENT_STEP=skill-overrides
 		stop_before skill-overrides
 		if ! git merge --squash "origin/patch/skill-overrides"; then
-			ensure_conflicts_are "merge patch/skill-overrides branch" packages/coding-agent/docs/packages.md
+			ensure_conflicts_are "merge patch/skill-overrides branch" \
+				packages/coding-agent/docs/packages.md \
+				packages/coding-agent/src/core/package-manager.ts \
+				packages/coding-agent/test/resource-loader.test.ts
 			# Upstream rewrote packages.md; re-append the skillOverrides note
 			# under its new resource-selection section.
 			git checkout --ours -- packages/coding-agent/docs/packages.md
@@ -1140,6 +1143,43 @@ text = text.replace(anchor, anchor + addition, 1)
 path.write_text(text)
 PY
 			git add packages/coding-agent/docs/packages.md
+			# package-manager.ts: PathMetadata gains packageRoot (ours, from
+			# upstream 8d897edaa) and skillOverrides (theirs). Keep both fields.
+			python3 - <<'PY'
+from pathlib import Path
+
+path = Path("packages/coding-agent/src/core/package-manager.ts")
+text = path.read_text()
+block = (
+    "<<<<<<< HEAD\n"
+    "\tpackageRoot?: string;\n"
+    "=======\n"
+    "\tskillOverrides?: SkillOverrides;\n"
+    ">>>>>>> origin/patch/skill-overrides\n"
+)
+if text.count(block) != 1:
+    raise SystemExit("unexpected package-manager.ts metadata conflict shape")
+text = text.replace(block, "\tpackageRoot?: string;\n\tskillOverrides?: SkillOverrides;\n", 1)
+path.write_text(text)
+PY
+			git add packages/coding-agent/src/core/package-manager.ts
+			# resource-loader.test.ts: ours carries upstream's #9863 regression
+			# tests, theirs carries the skillOverrides tests. Both run; merge
+			# them into the same describe block.
+			python3 - <<'PY'
+from pathlib import Path
+
+path = Path("packages/coding-agent/test/resource-loader.test.ts")
+text = path.read_text()
+start = text.index("<<<<<<< HEAD\n")
+mid = text.index("=======\n", start)
+end = text.index(">>>>>>> origin/patch/skill-overrides\n", mid)
+ours = text[start + len("<<<<<<< HEAD\n") : mid]
+theirs = text[mid + len("=======\n") : end]
+text = text[:start] + ours + theirs + text[end + len(">>>>>>> origin/patch/skill-overrides\n"):]
+path.write_text(text)
+PY
+			git add packages/coding-agent/test/resource-loader.test.ts
 		fi
 		ensure_no_conflicts "merge patch/skill-overrides branch"
 		ensure_not_empty "merge patch/skill-overrides branch"
