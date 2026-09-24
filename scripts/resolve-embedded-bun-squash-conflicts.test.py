@@ -13,7 +13,9 @@ spec.loader.exec_module(resolver)
 CONFIG = "packages/coding-agent/src/config.ts"
 SETTINGS = "packages/coding-agent/docs/settings.md"
 PACKAGES = "packages/coding-agent/docs/packages.md"
-ALL = f"{PACKAGES}\n{SETTINGS}\n{CONFIG}\n"
+PM = "packages/coding-agent/src/core/package-manager.ts"
+PM_TEST = "packages/coding-agent/test/package-manager.test.ts"
+ALL = f"{PACKAGES}\n{SETTINGS}\n{CONFIG}\n{PM}\n{PM_TEST}\n"
 
 SETTINGS_TEXT = (
     "| `shellPath` | string | - | custom |\n"
@@ -51,10 +53,26 @@ class ResolverTests(unittest.TestCase):
                 SETTINGS: Path(directory) / "settings.md",
                 PACKAGES: Path(directory) / "packages.md",
                 CONFIG: Path(directory) / "config.ts",
+                PM: Path(directory) / "package-manager.ts",
+                PM_TEST: Path(directory) / "package-manager.test.ts",
             }
             files[SETTINGS].write_text(SETTINGS_TEXT)
             files[PACKAGES].write_text(PACKAGES_TEXT)
             files[CONFIG].write_text(CONFIG_TEXT)
+            files[PM].write_text(
+                "<<<<<<< HEAD\n"
+                "\t\tif (npmCommand.embeddedBun) return \"bun\";\n"
+                "=======\n"
+                "\t\treturn \"bun\";\n"
+                ">>>>>>> origin/patch/use-embedded-bun-package-manager\n"
+            )
+            files[PM_TEST].write_text(
+                "<<<<<<< HEAD\n"
+                "\tgetPackageManagerName(): string;\n"
+                "=======\n"
+                "\tgetNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };\n"
+                ">>>>>>> origin/patch/use-embedded-bun-package-manager\n"
+            )
 
             staged = []
 
@@ -83,7 +101,7 @@ class ResolverTests(unittest.TestCase):
             checkouts = [c for c in staged if c[:3] == ["git", "checkout", "--ours"]]
             self.assertEqual(len(checkouts), 2)
             adds = [c for c in staged if c[:2] == ["git", "add"]]
-            self.assertEqual(len(adds), 3)
+            self.assertEqual(len(adds), 5)
 
     def test_rejects_unexpected_conflict_files(self):
         with patch.object(resolver.subprocess, "check_output", return_value="other.ts\n"):
@@ -96,10 +114,14 @@ class ResolverTests(unittest.TestCase):
                 SETTINGS: Path(directory) / "settings.md",
                 PACKAGES: Path(directory) / "packages.md",
                 CONFIG: Path(directory) / "config.ts",
+                PM: Path(directory) / "package-manager.ts",
+                PM_TEST: Path(directory) / "package-manager.test.ts",
             }
             files[SETTINGS].write_text(SETTINGS_TEXT)
             files[PACKAGES].write_text(PACKAGES_TEXT)
             files[CONFIG].write_text("unexpected content\n")
+            files[PM].write_text("pm\n")
+            files[PM_TEST].write_text("pmtest\n")
 
             with patch.object(resolver, "Path", side_effect=fake_resolver_path(files)), patch.object(
                 resolver.subprocess, "check_output", return_value=ALL
