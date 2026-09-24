@@ -77,7 +77,7 @@ patch/native-wrapper-release 405ccb72af50b1359a37d91231b7d6c07796b29e
 patch/update-clean 2c14802c404849da1d308c9175edcd7413275633
 patch/bundle-usage-claims f0eb0624cd605584558c18edd729bdd6de581989
 patch/use-embedded-bun-package-manager 1a23a65f0d1cc83c77078e5d5c23810fd6c724a2
-patch/git-package-storage 79f85e86f39ba1e3557318e39cccf9ae1d0ee046
+patch/git-package-storage 18b5764c05ddb8eaf5859b5e2a170f63a41e32ca
 patch/model-refresh-timeout 43fd5c94086a3deae7cb4113d6aa8bf08841575e
 patch/agent-run-failure-seam ef1c9a295629bc786a43eba527f1184e1625d954
 patch/managed-tool-executions eafd556e2b63a542eb381702892d951645f1627c
