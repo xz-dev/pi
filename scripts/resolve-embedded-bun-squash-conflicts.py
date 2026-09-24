@@ -16,6 +16,8 @@ def main():
         Path("packages/coding-agent/docs/packages.md"),
         Path("packages/coding-agent/docs/settings.md"),
         Path("packages/coding-agent/src/config.ts"),
+        Path("packages/coding-agent/src/core/package-manager.ts"),
+        Path("packages/coding-agent/test/package-manager.test.ts"),
     }
     if conflicts != expected:
         raise SystemExit(f"Unexpected embedded-Bun conflicts: {sorted(map(str, conflicts))}")
@@ -92,6 +94,68 @@ Official Bun 1.4.2 rejects metadata queries from a working directory without `pa
             raise SystemExit("Distribution metadata must exist exactly once")
     path.write_text(text)
     subprocess.run(["git", "add", str(path)], check=True)
+
+    # package-manager.ts: upstream 8d897edaa rewrote getPackageManagerName
+    # with wrapper-aware detection; the patch adds the embeddedBun
+    # short-circuit. Merge: upstream body + patch's early return.
+    pm = Path("packages/coding-agent/src/core/package-manager.ts")
+    pm_text = pm.read_text()
+    marker = "<<<<<<< HEAD\n"
+    end_marker = ">>>>>>> origin/patch/use-embedded-bun-package-manager\n"
+    start = pm_text.index(marker)
+    end = pm_text.index(end_marker, start) + len(end_marker)
+    upstream_body = (
+        "\t\tif (npmCommand.embeddedBun) return \"bun\";\n"
+        "\t\tconst normalizeCommandName = (command: string): string => basename(command).replace(/\\.(cmd|exe)$/i, \"\");\n"
+        "\t\tconst supportedPackageManagers = new Set([\"npm\", \"pnpm\", \"bun\"]);\n"
+        "\t\tconst directCommand = normalizeCommandName(npmCommand.command);\n"
+        "\t\tconst separatorIndex = npmCommand.args.lastIndexOf(\"--\");\n"
+        "\t\tif (separatorIndex >= 0) {\n"
+        "\t\t\tconst wrappedCommand = npmCommand.args[separatorIndex + 1];\n"
+        "\t\t\treturn wrappedCommand ? normalizeCommandName(wrappedCommand) : directCommand;\n"
+        "\t\t}\n"
+        "\t\tif (supportedPackageManagers.has(directCommand)) return directCommand;\n"
+        "\n"
+        "\t\tconst wrappedPackageManagers = [\n"
+        "\t\t\t...new Set(\n"
+        "\t\t\t\tnpmCommand.args.map(normalizeCommandName).filter((command) => supportedPackageManagers.has(command)),\n"
+        "\t\t\t),\n"
+        "\t\t];\n"
+        "\t\tif (wrappedPackageManagers.length > 1) {\n"
+        "\t\t\tthrow new Error(`Ambiguous npmCommand package managers: ${wrappedPackageManagers.join(\", \")}`);\n"
+        "\t\t}\n"
+        "\t\treturn wrappedPackageManagers[0] ?? directCommand;\n"
+    )
+    pm_text = pm_text[:start] + upstream_body + pm_text[end:]
+    if pm_text.count(marker) or pm_text.count(end_marker):
+        raise SystemExit("package-manager.ts conflict markers remain")
+    pm.write_text(pm_text)
+    subprocess.run(["git", "add", str(pm)], check=True)
+
+    # package-manager.test.ts: the test-side interface declares the package
+    # manager surface twice over — upstream added helpers (getGitDependency
+    # InstallArgs, getPackageManagerName), the patch added embedded-Bun
+    # plumbing (getNpmCommand/runNpmCommand/runCommandSync). Keep both.
+    test_path = Path("packages/coding-agent/test/package-manager.test.ts")
+    test_text = test_path.read_text()
+    start = test_text.index(marker)
+    end = test_text.index(end_marker, start) + len(end_marker)
+    merged_iface = (
+        "\tgetPackageManagerName(): string;\n"
+        "\tgetGitDependencyInstallArgs(): string[];\n"
+        "\tgetNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };\n"
+        "\tgetGlobalNpmRoot(): string;\n"
+        "\tgetLatestNpmVersion(packageSpec: string, range?: string): Promise<string>;\n"
+        "\trunNpmCommand(args: string[], options?: { cwd?: string }): Promise<void>;\n"
+        "\trunNpmCommandSync(args: string[]): string;\n"
+        "\trunCommandSync(command: string, args: string[], env?: Record<string, string>): string;\n"
+        "\trunCommand(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string> }): Promise<void>;\n"
+    )
+    test_text = test_text[:start] + merged_iface + test_text[end:]
+    if test_text.count(marker) or test_text.count(end_marker):
+        raise SystemExit("package-manager.test.ts conflict markers remain")
+    test_path.write_text(test_text)
+    subprocess.run(["git", "add", str(test_path)], check=True)
 
 
 if __name__ == "__main__":
