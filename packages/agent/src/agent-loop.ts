@@ -314,7 +314,8 @@ async function runLoop(
 				context: currentContext,
 				newMessages,
 			};
-			const decision = await callAbortable(() => config.finishTurn?.(lastCompletedTurn, signal), signal);
+			const completedTurn = lastCompletedTurn;
+			const decision = await callAbortable(() => config.finishTurn?.(completedTurn, signal), signal);
 			await emitAbortable(emit, { type: "turn_end", message, toolResults }, signal);
 
 			if (decision?.action === "end") {
