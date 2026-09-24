@@ -8,8 +8,9 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { Agent } from "../src/agent.ts";
 import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.ts";
-import { setDefaultStreamFn } from "../src/index.ts";
+import { setDefaultStreamFn } from "../src/stream-fn.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 
 // Mock stream for testing - mimics MockAssistantStream
@@ -114,6 +115,171 @@ describe("default stream function compatibility", () => {
 		} finally {
 			setDefaultStreamFn(undefined);
 		}
+	});
+});
+
+describe("abortable turn hooks", () => {
+	it("aborts a stuck prepareRequest before the provider request", async () => {
+		let prepareStarted = false;
+		let providerCalled = false;
+		const agent = new Agent({
+			prepareRequest: () => {
+				prepareStarted = true;
+				return new Promise<void>(() => {});
+			},
+			streamFn: () => {
+				providerCalled = true;
+				return new MockAssistantStream();
+			},
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await expect.poll(() => prepareStarted).toBe(true);
+
+		agent.abort();
+		await promptPromise;
+
+		expect(providerCalled).toBe(false);
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("aborts a stuck finishTurn and ignores its late continuation", async () => {
+		let markFinishStarted = () => {};
+		const finishStarted = new Promise<void>((resolve) => {
+			markFinishStarted = resolve;
+		});
+		let releaseFinish: ((decision: { action: "continue" }) => void) | undefined;
+		const finishResult = new Promise<{ action: "continue" }>((resolve) => {
+			releaseFinish = resolve;
+		});
+		let providerCalls = 0;
+		const events: AgentEvent[] = [];
+		const agent = new Agent({
+			finishTurn: () => {
+				markFinishStarted();
+				return finishResult;
+			},
+			streamFn: () => {
+				providerCalls++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return stream;
+			},
+		});
+		agent.subscribe((event) => {
+			events.push(event);
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await finishStarted;
+		agent.abort();
+		await promptPromise;
+
+		releaseFinish?.({ action: "continue" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(providerCalls).toBe(1);
+		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("swallows a late finishTurn rejection after abort", async () => {
+		let markFinishStarted = () => {};
+		const finishStarted = new Promise<void>((resolve) => {
+			markFinishStarted = resolve;
+		});
+		let rejectFinish: ((error: Error) => void) | undefined;
+		const finishResult = new Promise<void>((_resolve, reject) => {
+			rejectFinish = reject;
+		});
+		const unhandledRejections: unknown[] = [];
+		const onUnhandledRejection = (error: unknown) => {
+			unhandledRejections.push(error);
+		};
+		const agent = new Agent({
+			finishTurn: () => {
+				markFinishStarted();
+				return finishResult;
+			},
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return stream;
+			},
+		});
+
+		process.on("unhandledRejection", onUnhandledRejection);
+		try {
+			const promptPromise = agent.prompt("hello");
+			await finishStarted;
+			agent.abort();
+			await promptPromise;
+
+			rejectFinish?.(new Error("late finish failure"));
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			expect(unhandledRejections).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandledRejection);
+		}
+	});
+
+	it("invokes finishTurn when tool finalization observes an already-aborted signal", async () => {
+		const schema = Type.Object({});
+		const tool: AgentTool<typeof schema> = {
+			name: "noop",
+			label: "Noop",
+			description: "Noop tool",
+			parameters: schema,
+			execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+		};
+		let finishCalls = 0;
+		let providerCalls = 0;
+		let agent: Agent;
+		agent = new Agent({
+			initialState: { tools: [tool] },
+			afterToolCall: async () => {
+				agent.abort();
+				return undefined;
+			},
+			finishTurn: () => {
+				finishCalls++;
+			},
+			streamFn: () => {
+				providerCalls++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[{ type: "toolCall", id: "tool-1", name: "noop", arguments: {} }],
+							"toolUse",
+						),
+					});
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("start");
+
+		expect(finishCalls).toBe(1);
+		expect(providerCalls).toBe(1);
+		expect(agent.state.isStreaming).toBe(false);
 	});
 });
 
@@ -475,6 +641,67 @@ describe("agentLoop with AgentMessage", () => {
 		expect(callIndex).toBe(2);
 		const messages = await stream.result();
 		expect(messages[messages.length - 1].role).toBe("assistant");
+	});
+
+	// Regression: #8935
+	it.each([
+		{ name: "aborted", abort: true, expected: "Operation aborted" },
+		{ name: "non-abort", abort: false, expected: "preflight rejected" },
+	] as const)("should report a $name beforeToolCall failure with canonical text", async ({ abort, expected }) => {
+		const controller = new AbortController();
+		let executions = 0;
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "unexpected" }], details: {} };
+			},
+		};
+		const context: AgentContext = {
+			messages: [],
+			tools: [tool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => {
+				if (abort) controller.abort();
+				throw new Error("preflight rejected");
+			},
+		};
+
+		let streamCalls = 0;
+		const stream = agentLoop([createUserMessage("run echo")], context, config, controller.signal, () => {
+			const call = streamCalls++;
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message =
+					call === 0
+						? createAssistantMessage([{ type: "toolCall", id: "tool-1", name: "echo", arguments: {} }], "toolUse")
+						: createAssistantMessage([{ type: "text", text: "done" }]);
+				mockStream.push({ type: "done", reason: call === 0 ? "toolUse" : "stop", message });
+			});
+			return mockStream;
+		});
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+		);
+		expect(executions).toBe(0);
+		expect(streamCalls).toBe(abort ? 1 : 2);
+		expect(toolEnd).toMatchObject({
+			isError: true,
+			result: { content: [{ type: "text", text: expected }] },
+		});
 	});
 
 	it("should execute mutated beforeToolCall args without revalidation", async () => {

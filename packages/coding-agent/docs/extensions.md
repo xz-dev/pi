@@ -102,6 +102,15 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
 
 `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
 
+Register a `message_end` handler with `{ uninterruptible: true }` only for bounded synchronous terminal cleanup that must still run after abort, such as redacting private finalized content. These handlers run separately from ordinary `message_end` handlers; TypeScript rejects async handlers for this registration.
+
+```typescript
+pi.on("message_end", (event) => {
+  if (event.message.role !== "assistant" || !isPrivateRun(event.message)) return;
+  return { message: { ...event.message, content: [] } };
+}, { uninterruptible: true });
+```
+
 <a id="provider_stream_event"></a>
 
 `provider_stream_event` fires for each parsed provider stream event before Pi normalizes it. The event identifies the provider, API, and model; `event.data` is the earliest structured value available to Pi, not necessarily the original HTTP bytes or SSE frame. Treat it as read-only because mutation can affect normalization. The event is notification-only and is not persisted.
