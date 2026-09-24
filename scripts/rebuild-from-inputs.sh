@@ -993,10 +993,15 @@ path.write_text(text)
 PY
 			git add packages/coding-agent/src/core/package-manager.ts
 			# package-manager.test.ts: the patch re-adds getNpmCommand next to the
-			# copy the embedded-bun resolver already merged in, and now also
-			# carries the corrected pnpm-wrapper install-args expectation. Keep
-			# the patch's version for both hunks.
+			# copy the embedded-bun resolver already merged in, and the cherry-pick
+			# stops at the FIRST commit's conflict — its --theirs is that commit's
+			# stale version, not the tip's. Take --theirs here to clear the
+			# conflict, then after the range finishes apply the tip's version.
 			git checkout --theirs -- packages/coding-agent/test/package-manager.test.ts
+			git add packages/coding-agent/test/package-manager.test.ts
+			git cherry-pick --no-commit --continue 2>/dev/null || true
+			# Apply the patch tip's test file (it carries the merged expectations).
+			git checkout "origin/patch/git-package-storage" -- packages/coding-agent/test/package-manager.test.ts
 			git add packages/coding-agent/test/package-manager.test.ts
 		fi
 		ensure_no_conflicts "merge patch/git-package-storage branch"
