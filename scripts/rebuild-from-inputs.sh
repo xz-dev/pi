@@ -925,7 +925,9 @@ run_replay() {
 			resolve-embedded-bun-squash-conflicts.py \
 			packages/coding-agent/docs/packages.md \
 			packages/coding-agent/docs/settings.md \
-			packages/coding-agent/src/config.ts
+			packages/coding-agent/src/config.ts \
+			packages/coding-agent/src/core/package-manager.ts \
+			packages/coding-agent/test/package-manager.test.ts
 	fi
 
 	# 13 git-package-storage — descendant range. Its docs/packages.md hunk
