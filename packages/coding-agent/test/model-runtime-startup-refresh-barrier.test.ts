@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type AnyModel,
+	type Api,
 	InMemoryModelsStore,
+	isModelType,
 	type Model,
 	type ModelsStoreEntry,
 	type ModelsStoreOperationOptions,
@@ -69,7 +71,7 @@ function makeNativeProvider(models: { current: readonly AnyModel[] }, onPublishe
 		id: storedModel.provider,
 		name: "Startup native",
 		auth: {},
-		getModels: () => models.current,
+		getModels: () => models.current.filter((model): model is Model<Api> => isModelType(model, "chat")),
 		refreshModels: async ({ stored, publish }) => {
 			if (!stored) return;
 			await publish({
