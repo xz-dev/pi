@@ -130,27 +130,10 @@ Official Bun 1.4.2 rejects metadata queries from a working directory without `pa
     if pm_text.count(marker) or pm_text.count(end_marker):
         raise SystemExit("package-manager.ts conflict markers remain")
 
-    # The same merge also reshapes getGitDependencyInstallArgs: upstream
-    # switched it to a per-manager switch, but the patch's semantic — an
-    # explicit npm/bun npmCommand always gets a plain `install` — must still
-    # win. Wrapper commands that resolve to pnpm keep upstream's pnpm flags
-    # (they are not the npm/bun default path the patch overrides).
-    old_args = (
-        "\tprivate getGitDependencyInstallArgs(): string[] {\n"
-        "\t\tswitch (this.getPackageManagerName()) {\n"
-    )
-    new_args = (
-        "\tprivate getGitDependencyInstallArgs(): string[] {\n"
-        "\t\tconst configuredCommand = this.settingsManager.getNpmCommand();\n"
-        "\t\tconst resolvedName = this.getPackageManagerName();\n"
-        "\t\tif (configuredCommand && configuredCommand.length > 0 && (resolvedName === \"npm\" || resolvedName === \"bun\")) {\n"
-        "\t\t\treturn [\"install\"];\n"
-        "\t\t}\n"
-        "\t\tswitch (resolvedName) {\n"
-    )
-    if pm_text.count(old_args) != 1:
-        raise SystemExit("unexpected getGitDependencyInstallArgs anchor")
-    pm_text = pm_text.replace(old_args, new_args, 1)
+    # getGitDependencyInstallArgs is upstream's per-manager switch
+    # verbatim; the patch's configured-command gate was superseded by
+    # upstream's 8d897edaa model (explicit commands resolve through
+    # getPackageManagerName into the same switch).
     pm.write_text(pm_text)
     subprocess.run(["git", "add", str(pm)], check=True)
 
