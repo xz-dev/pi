@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type AnyModel,
-	type Api,
 	InMemoryModelsStore,
 	type Model,
 	type ModelsStoreEntry,
