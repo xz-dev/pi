@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	type AnyModel,
 	type Api,
 	InMemoryModelsStore,
 	type Model,
@@ -64,7 +65,7 @@ class BarrierModelsStore extends InMemoryModelsStore {
 	}
 }
 
-function makeNativeProvider(models: { current: readonly Model<Api>[] }, onPublished?: () => void): Provider {
+function makeNativeProvider(models: { current: readonly AnyModel[] }, onPublished?: () => void): Provider {
 	return {
 		id: storedModel.provider,
 		name: "Startup native",
@@ -271,7 +272,7 @@ it("makes a stored native model visible before the startup-awaited refresh resol
 		return originalLoad.call(ModelConfig, modelsPath);
 	});
 
-	const models = { current: [] as readonly Model<Api>[] };
+	const models = { current: [] as readonly AnyModel[] };
 	const provider = makeNativeProvider(models, () => detachedModelPublished.resolve());
 
 	try {
@@ -338,7 +339,7 @@ it("makes session services wait for cached native models and forward startup can
 		return originalLoad.call(ModelConfig, modelsPath);
 	});
 
-	const models = { current: [] as readonly Model<Api>[] };
+	const models = { current: [] as readonly AnyModel[] };
 	const provider = makeNativeProvider(models, () => published.resolve());
 	const extensions = extensionResultWithNativeProvider(provider);
 	const controller = new AbortController();
@@ -395,7 +396,7 @@ it("does not let a failed registration convergence poison a later registration",
 		return originalLoad.call(ModelConfig, modelsPath);
 	});
 
-	const models = { current: [] as readonly Model<Api>[] };
+	const models = { current: [] as readonly AnyModel[] };
 	const published = deferred();
 	const provider = makeNativeProvider(models, () => published.resolve());
 
@@ -443,7 +444,7 @@ it("aborts the startup barrier promptly while registration convergence continues
 		return originalLoad.call(ModelConfig, modelsPath);
 	});
 
-	const models = { current: [] as readonly Model<Api>[] };
+	const models = { current: [] as readonly AnyModel[] };
 	const provider = makeNativeProvider(models, () => detachedModelPublished.resolve());
 
 	try {
@@ -494,7 +495,7 @@ it("applies register then unregister in order so the final state is unregistered
 		return originalLoad.call(ModelConfig, modelsPath);
 	});
 
-	const models = { current: [] as readonly Model<Api>[] };
+	const models = { current: [] as readonly AnyModel[] };
 	const provider = makeNativeProvider(models);
 
 	try {
