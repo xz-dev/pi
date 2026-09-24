@@ -4,7 +4,6 @@ import {
 	createInitialSystemMessage,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
-	type AssistantMessage,
 	type ImageContent,
 	type Message,
 	type Model,
