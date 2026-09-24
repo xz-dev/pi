@@ -308,24 +308,25 @@ async function runLoop(
 				}
 			}
 
-			await emitAbortable(emit, { type: "turn_end", message, toolResults }, signal);
-
 			lastCompletedTurn = {
 				message,
 				toolResults,
 				context: currentContext,
 				newMessages,
 			};
-			const decision = await config.finishTurn?.(lastCompletedTurn, signal);
-			await emit({ type: "turn_end", message, toolResults });
+			const decision = await callAbortable(() => config.finishTurn?.(lastCompletedTurn, signal), signal);
+			await emitAbortable(emit, { type: "turn_end", message, toolResults }, signal);
 
-			const completedTurn = lastCompletedTurn;
-			if (await callAbortable(() => config.shouldStopAfterTurn?.(completedTurn), signal)) {
+			if (decision?.action === "end") {
 				await emitAbortable(emit, { type: "agent_end", messages: newMessages }, signal);
 				return;
 			}
 
+			explicitContinuation = decision?.action === "continue";
 			pendingMessages = (await callAbortable(() => config.getSteeringMessages?.(), signal)) || [];
+			if (hasMoreToolCalls || pendingMessages.length > 0) {
+				explicitContinuation = false;
+			}
 		}
 
 		// Agent would stop here. Check for follow-up messages.
