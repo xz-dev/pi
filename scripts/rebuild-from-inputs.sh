@@ -65,35 +65,35 @@ die() { printf '::error::%s\n' "$*" >&2; exit 1; }
 # ponytail: SHAs recorded as literal defaults; the workflow re-captures per run
 # after fetch, so these go stale only between syncs.
 read -r -d '' DEFAULT_INPUTS <<'EOF' || true
-upstream/main 1a584a7a56eb5e7b4ff8ccbd46430f1533282eed
-ci 5ce32cc3c61e33e233d359b0627ca0aa51709545
-patch/contributor-approval e005a344660c3ad8b3aa86192c3a10f18a53a10d
-patch/model-startup-refresh-barrier 9df4360c66f053219d93072fda108743b22913d5
-patch/model-refresh-session-rebind 5db5e814a7f010800b40d1a7142682e59c0be6d7
-patch/model-catalog-extension-refresh 465671288cfc16f8adb58e891f44964facd0e6c4
-patch/bun-bytecode-entrypoint 72f9732aa2dacc279a225c00661566c000be92a4
-patch/startup-benchmark-exit 97a37c792e125823f1111babef76d803aabd4b1c
-patch/native-wrapper-release 405ccb72af50b1359a37d91231b7d6c07796b29e
-patch/update-clean 2c14802c404849da1d308c9175edcd7413275633
-patch/bundle-usage-claims f0eb0624cd605584558c18edd729bdd6de581989
-patch/use-embedded-bun-package-manager 1a23a65f0d1cc83c77078e5d5c23810fd6c724a2
-patch/git-package-storage 18b5764c05ddb8eaf5859b5e2a170f63a41e32ca
-patch/model-refresh-timeout 43fd5c94086a3deae7cb4113d6aa8bf08841575e
-patch/agent-run-failure-seam ef1c9a295629bc786a43eba527f1184e1625d954
-patch/managed-tool-executions eafd556e2b63a542eb381702892d951645f1627c
-patch/esc-abort de575ef58ae9a97e3cda6104fbfb5bcd5b61fb58
-patch/manual-retry eef3791ab8e9c758d4da1f3392f95e0198922404
-patch/changelog-prerelease 3ea1afed328d8cf79cced1854a0a47455f97f0b9
-patch/skill-overrides cd0314ef426c466550984eaba2f70ddec224907c
-patch/retry-non-retryable-patterns 67b899b60d5227eeb7a60bc1b52bb1ff816b3252
-patch/slow-hook-tui-only f088e90d175cfe2304124cc4d38b13abce985dc4
-patch/session-tree-splice a522b4ca863f23e26643fe156215c444760b5612
-patch/ws-cached-empty-delta 29c95ca8c46fa6866061dedc4f6054297d4549ac
-patch/self-update-managed-by 24781b9788d416b8acae965dc37be44548d0857d
-patch/google-toomany-toolcalls 8be79bbe2c647e9540f1eae290187cadc3b19b77
-patch/model-selector-refresh-selection a2db8aa087910c08bd4fea83b75ec97fb7c2f3a5
-patch/ai-drop-empty-messages 355b16c9522b30906562c7d7ca2813ed728e874d
-patch/compaction-test-exclusion d9a0c2a0402ff83a6882b6ccceb9f6a6e11e5d59
+upstream/main b45597504eeaba1f11a9920a1d1048c361ed4b8e
+ci c7a07061c496cb2b26fbfc70513d502aa5ecd8ad
+patch/contributor-approval 57928a38185ca3e73d26d5fde1cbd7184f676fef
+patch/model-startup-refresh-barrier 4e3b3636da9353ab52753b5435192d35d565efe9
+patch/model-refresh-session-rebind 3794c35463fef7530976f3616deaa749753b4732
+patch/model-catalog-extension-refresh e3e2b9dccc426af364fa17cb4645427ec0d6b40e
+patch/bun-bytecode-entrypoint a199f54b1c9f13cb1b2455d20bf3923201020d97
+patch/startup-benchmark-exit 42b103738f77bb4c709caa1d4c8df7110264c39e
+patch/native-wrapper-release 65281278ed2bdd966bec63e5406b3fb4948a99d7
+patch/update-clean c66b86b5677da578a25be1914125aa6720a8ccbf
+patch/bundle-usage-claims c2786bd512d2f78fb99e80940c88489f628e7acf
+patch/use-embedded-bun-package-manager d7e6891863f2a4c3e6b214c7fd57acf17142fc26
+patch/git-package-storage cabab546289a57f0831966f2b81b88db3881f14f
+patch/model-refresh-timeout e97c44ecfcd801e69f93fd88085dd89e83a0886e
+patch/agent-run-failure-seam 849fc34c0b5a9c0ef68f7b4b7896f6c45a2f880d
+patch/managed-tool-executions fd7bc3de418811265927473f2b435c33a79b1267
+patch/esc-abort 036dc1cbf858452805ea23df2926c15eee684b36
+patch/manual-retry 5ff4039ad5b2cb74c5cd534da84bc547b7cf1a75
+patch/changelog-prerelease a17b2c217e14053405647c9c7eeadc003e0d5dfb
+patch/skill-overrides 6e27082000e6e3437a8868c842e64b69436bf32f
+patch/retry-non-retryable-patterns b80622fae70adc5b880a8e06e59606148a469b11
+patch/slow-hook-tui-only d0bb1af8e36a7f75a22ec74c980484e3c9ec923c
+patch/session-tree-splice 4b5d0546c19a657be2788a99168900b70ec872ca
+patch/ws-cached-empty-delta 6eb1779b7ef737284aa862ca8cc31ea512cd1125
+patch/self-update-managed-by 992af1524a99c1b5c8f6d4b434c85341141619cc
+patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
+patch/model-selector-refresh-selection 8f582eb8df619f3d32899d0d78433cb841e26573
+patch/ai-drop-empty-messages 37f145b54ec4cd4b1f1d2b0066fedd3b1c7713de
+patch/compaction-test-exclusion cfa24a33672f03d5e88888123ead7d4cdc636bda
 EOF
 
 # Explicit accumulated compat bases. These steps consume a recorded
@@ -108,13 +108,13 @@ EOF
 # itself. Later rebases/base changes require a new recorded vector here, not
 # inference.
 read -r -d '' COMPAT_RANGES <<'EOF' || true
-model-refresh-session-rebind 4f2a4ff8d111697b22f4cb35519d1075fed432d5 model-refresh-session-rebind-on-accumulated d8776ddaccd494d73fd42d8984225f8feb553eb5
-model-refresh-timeout a1d2c1054dc08007b16d40c8156250b2b7985c4e model-refresh-timeout 43fd5c94086a3deae7cb4113d6aa8bf08841575e
-agent-run-failure-seam 13393639c27b44e1e909f71eb1a1c08f82d8118a agent-run-failure-seam-on-accumulated f565bc3eea39def63c6b5c2540b1eff226ef5e76
-managed-tool-executions f565bc3eea39def63c6b5c2540b1eff226ef5e76 managed-tool-executions-on-accumulated e79c3248831c5ca1683281a21ad34b465a336074
-esc-abort e79c3248831c5ca1683281a21ad34b465a336074 esc-abort-on-accumulated 2dd9c7188c899e28b6915f22d15a4bceeb936980
-manual-retry 2dd9c7188c899e28b6915f22d15a4bceeb936980 manual-retry-on-accumulated de85ff1c46692b2891635a79f8f07f73fc143cf3
-slow-hook-tui-only 1551e040801d3c041aa7bdb10b88855fc47f1609 slow-hook-on-accumulated d274cb156fe47522a3ddf385f3ddd7094e719894
+model-refresh-session-rebind dc8b262eab67744b6df3fc80e838d28eb50f1efe model-refresh-session-rebind-on-accumulated 881542f8dbb6fbfb43d5b24b45ec6f6889c181ac
+model-refresh-timeout f5e6c740ea5bd12677d409ae84d8a30949e01e69 model-refresh-timeout e97c44ecfcd801e69f93fd88085dd89e83a0886e
+agent-run-failure-seam 033a8c9690c43c4180d001325f7d9225e54ede8b agent-run-failure-seam-on-accumulated 623d695a704c1939e636dc099765b4fbc64eea84
+managed-tool-executions 623d695a704c1939e636dc099765b4fbc64eea84 managed-tool-executions-on-accumulated d781f7cd8c631572be6b46bbb7a642f0c2712921
+esc-abort d781f7cd8c631572be6b46bbb7a642f0c2712921 esc-abort-on-accumulated e951ee1776bf5550fc143e3be2f9193b5af7cdbc
+manual-retry e951ee1776bf5550fc143e3be2f9193b5af7cdbc manual-retry-on-accumulated 3c7431710da0ce88dbe13abecc4e86ab072c2e5a
+slow-hook-tui-only 2ce3add28e0e7e6f714bbb07c60e0314ba8358bc slow-hook-on-accumulated b51f3a38ba1eb07617ac889c52449a9dd1913f86
 EOF
 
 print_inputs() {
@@ -925,9 +925,7 @@ run_replay() {
 			resolve-embedded-bun-squash-conflicts.py \
 			packages/coding-agent/docs/packages.md \
 			packages/coding-agent/docs/settings.md \
-			packages/coding-agent/src/config.ts \
-			packages/coding-agent/src/core/package-manager.ts \
-			packages/coding-agent/test/package-manager.test.ts
+			packages/coding-agent/src/config.ts
 	fi
 
 	# 13 git-package-storage — descendant range. Its docs/packages.md hunk
@@ -1116,65 +1114,14 @@ PY
 		stop_before skill-overrides
 		if ! git merge --squash "origin/patch/skill-overrides"; then
 			ensure_conflicts_are "merge patch/skill-overrides branch" \
-				packages/coding-agent/docs/packages.md \
-				packages/coding-agent/src/core/package-manager.ts \
-				packages/coding-agent/test/resource-loader.test.ts
-			# Upstream rewrote packages.md; re-append the skillOverrides note
-			# under its new resource-selection section.
+				packages/coding-agent/docs/packages.md
+			# The patch branch was rebased onto upstream's rewritten docs and
+			# already carries the skillOverrides paragraph; the accumulated side
+			# additionally carries the embedded-Bun section, so keep ours.
 			git checkout --ours -- packages/coding-agent/docs/packages.md
-			python3 - <<'PY'
-from pathlib import Path
-
-path = Path("packages/coding-agent/docs/packages.md")
-text = path.read_text()
-anchor = "Filters narrow the package manifest. They do not expose resources that the package itself did not declare.\n"
-addition = "\nA package may also set `skillOverrides` keyed by each skill's resolved `name`. Setting `disableModelInvocation` to `true` hides that skill from the model prompt while keeping `/skill:name` available; `false` overrides the skill's frontmatter. Unknown skill names are ignored, and overrides apply only to skills from that package. For an `autoload: false` project delta, same-name overrides replace global entries while unspecified skill overrides are inherited.\n"
-if text.count(anchor) != 1:
-    raise SystemExit("unexpected packages.md filter anchor")
-text = text.replace(anchor, anchor + addition, 1)
-path.write_text(text)
-PY
+			grep -Fq 'skillOverrides' packages/coding-agent/docs/packages.md ||
+				die "merge patch/skill-overrides branch: packages.md lost skillOverrides docs"
 			git add packages/coding-agent/docs/packages.md
-			# package-manager.ts: PathMetadata gains packageRoot (ours, from
-			# upstream 8d897edaa) and skillOverrides (theirs). Keep both fields.
-			python3 - <<'PY'
-from pathlib import Path
-
-path = Path("packages/coding-agent/src/core/package-manager.ts")
-text = path.read_text()
-block = (
-    "<<<<<<< HEAD\n"
-    "\tpackageRoot?: string;\n"
-    "=======\n"
-    "\tskillOverrides?: SkillOverrides;\n"
-    ">>>>>>> origin/patch/skill-overrides\n"
-)
-if text.count(block) != 1:
-    raise SystemExit("unexpected package-manager.ts metadata conflict shape")
-text = text.replace(block, "\tpackageRoot?: string;\n\tskillOverrides?: SkillOverrides;\n", 1)
-path.write_text(text)
-PY
-			git add packages/coding-agent/src/core/package-manager.ts
-			# resource-loader.test.ts: ours carries upstream's #9863 regression
-			# tests, theirs carries the skillOverrides tests. Both run; merge
-			# them into the same describe block.
-			python3 - <<'PY'
-from pathlib import Path
-
-path = Path("packages/coding-agent/test/resource-loader.test.ts")
-text = path.read_text()
-start = text.index("<<<<<<< HEAD\n")
-mid = text.index("=======\n", start)
-end = text.index(">>>>>>> origin/patch/skill-overrides\n", mid)
-ours = text[start + len("<<<<<<< HEAD\n") : mid]
-theirs = text[mid + len("=======\n") : end]
-# ours ends mid-it() — the marker cut its closing `});`. Restore it.
-if not ours.rstrip().endswith("});"):
-    ours = ours.rstrip() + "\n\t\t});\n\n"
-text = text[:start] + ours + theirs + text[end + len(">>>>>>> origin/patch/skill-overrides\n"):]
-path.write_text(text)
-PY
-			git add packages/coding-agent/test/resource-loader.test.ts
 		fi
 		ensure_no_conflicts "merge patch/skill-overrides branch"
 		ensure_not_empty "merge patch/skill-overrides branch"
@@ -1186,20 +1133,38 @@ PY
 		stop_before retry-non-retryable-patterns
 		if ! git merge --squash "origin/patch/retry-non-retryable-patterns"; then
 			ensure_conflicts_are "merge patch/retry-non-retryable-patterns branch" packages/coding-agent/docs/settings.md
-			# Re-append the nonRetryableErrorPatterns row into upstream's new
-			# Network-and-retries table.
-			git checkout --ours -- packages/coding-agent/docs/settings.md
+			# Ours carries the accumulated docs (embedded-Bun, tool_task); theirs
+			# carries the nonRetryableErrorPatterns row + paragraph on upstream's
+			# table. Graft theirs' additions into ours.
 			python3 - <<'PY'
+import subprocess
 from pathlib import Path
 
-path = Path("packages/coding-agent/docs/settings.md")
-text = path.read_text()
-anchor = "| `retry.maxAgentDelayMs` | number | `60000` | Maximum agent-level retry delay in milliseconds. |\n"
-addition = "| `retry.nonRetryableErrorPatterns` | `string[]` | None | Extra case-insensitive `errorMessage` substrings that skip automatic retry (in addition to the built-in quota and billing patterns). Useful when a gateway returns a terminal quota/limit error that still looks retryable, for example a plain HTTP 429. |\n"
-if text.count(anchor) != 1:
-    raise SystemExit("unexpected settings.md retry anchor")
-text = text.replace(anchor, anchor + addition, 1)
-path.write_text(text)
+ours = subprocess.check_output(["git", "show", ":2:packages/coding-agent/docs/settings.md"], text=True)
+theirs = subprocess.check_output(["git", "show", ":3:packages/coding-agent/docs/settings.md"], text=True)
+
+# row after retry.maxAgentDelayMs
+row_anchor = "| `retry.maxAgentDelayMs` | number | `60000` | Max agent-level retry delay (60s) |"
+row_addition = "\n| `retry.nonRetryableErrorPatterns` | string[] | - | Extra case-insensitive `errorMessage` substrings that skip auto-retry (in addition to built-in quota/billing patterns) |"
+assert ours.count(row_anchor) == 1, f"row anchor count={ours.count(row_anchor)}"
+assert row_addition.strip() in theirs, "theirs lacks nonRetryableErrorPatterns row"
+s = ours.replace(row_anchor, row_anchor + row_addition, 1)
+
+# paragraph: insert theirs' nonRetryable sentence after ours'
+# "Keep retry.provider.maxRetries ..." paragraph, before the JSON block.
+para_anchor = "Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed. Setting it above `0` can make SDK/provider retries handle out-of-usage-limit errors before Pi sees them, which may block the agent until the provider quota resets in some circumstances."
+assert s.count(para_anchor) == 1, "para anchor"
+para_line = "`retry.nonRetryableErrorPatterns` is useful when a gateway returns a terminal quota/limit error that still looks retryable (for example a plain HTTP 429 whose body is not covered by the built-in patterns)."
+assert para_line in theirs, "theirs lacks paragraph"
+s = s.replace(para_anchor, para_anchor + "\n\n" + para_line, 1)
+
+# JSON example: add the nonRetryableErrorPatterns field after maxAgentDelayMs
+json_anchor = '    "maxAgentDelayMs": 60000,'
+json_addition = '\n    "nonRetryableErrorPatterns": [\n      "quota threshold"\n    ],'
+assert s.count(json_anchor) == 1, "json anchor"
+s = s.replace(json_anchor, json_anchor + json_addition, 1)
+
+Path("packages/coding-agent/docs/settings.md").write_text(s)
 PY
 			git add packages/coding-agent/docs/settings.md
 		fi
@@ -1231,8 +1196,6 @@ PY
 			-- >"$TMPDIR_WORK/session-tree-splice.patch"
 		if ! git apply --3way --index "$TMPDIR_WORK/session-tree-splice.patch"; then
 			ensure_conflicts_are patch/session-tree-splice \
-				packages/coding-agent/docs/extensions.md \
-				packages/coding-agent/docs/session-format.md \
 				packages/coding-agent/src/core/session-manager.ts \
 				packages/coding-agent/test/suite/harness.ts
 			python3 "$HELPER_DIR/resolve-session-tree-splice-conflicts.py" ||
