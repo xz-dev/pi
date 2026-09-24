@@ -15,7 +15,8 @@ SETTINGS = "packages/coding-agent/docs/settings.md"
 PACKAGES = "packages/coding-agent/docs/packages.md"
 PM = "packages/coding-agent/src/core/package-manager.ts"
 PM_TEST = "packages/coding-agent/test/package-manager.test.ts"
-ALL = f"{PACKAGES}\n{SETTINGS}\n{CONFIG}\n{PM}\n{PM_TEST}\n"
+ALL = f"{PACKAGES}\n{SETTINGS}\n{CONFIG}\n"
+ALL_WITH_PM = f"{ALL}{PM}\n{PM_TEST}\n"
 
 SETTINGS_TEXT = (
     "| `shellPath` | string | - | custom |\n"
@@ -59,6 +60,48 @@ class ResolverTests(unittest.TestCase):
             files[SETTINGS].write_text(SETTINGS_TEXT)
             files[PACKAGES].write_text(PACKAGES_TEXT)
             files[CONFIG].write_text(CONFIG_TEXT)
+            files[PM].write_text("pm already merged\n")
+            files[PM_TEST].write_text("pm test already merged\n")
+
+            staged = []
+
+            def fake_run(cmd, check=False):
+                staged.append(cmd)
+                return None
+
+            with patch.object(resolver, "Path", side_effect=fake_resolver_path(files)), patch.object(
+                resolver.subprocess, "check_output", return_value=ALL
+            ), patch.object(resolver.subprocess, "run", side_effect=fake_run):
+                resolver.main()
+
+            settings = files[SETTINGS].read_text()
+            self.assertIn("npmCommand", settings)
+
+            packages = files[PACKAGES].read_text()
+            self.assertIn("Choose a source", packages)
+
+            config = files[CONFIG].read_text()
+            self.assertNotIn("<<<<<<<", config)
+            self.assertIn("releaseTarget?: string;", config)
+            self.assertEqual(config.count("export const DISTRIBUTION:"), 1)
+
+            checkouts = [c for c in staged if c[:3] == ["git", "checkout", "--theirs"]]
+            self.assertEqual(len(checkouts), 2)
+            adds = [c for c in staged if c[:2] == ["git", "add"]]
+            self.assertEqual(len(adds), 3)
+
+    def test_resolves_pm_markers_when_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = {
+                SETTINGS: Path(directory) / "settings.md",
+                PACKAGES: Path(directory) / "packages.md",
+                CONFIG: Path(directory) / "config.ts",
+                PM: Path(directory) / "package-manager.ts",
+                PM_TEST: Path(directory) / "package-manager.test.ts",
+            }
+            files[SETTINGS].write_text(SETTINGS_TEXT)
+            files[PACKAGES].write_text(PACKAGES_TEXT)
+            files[CONFIG].write_text(CONFIG_TEXT)
             files[PM].write_text(
                 "<<<<<<< HEAD\n"
                 "\t\tif (npmCommand.embeddedBun) return \"bun\";\n"
@@ -85,23 +128,15 @@ class ResolverTests(unittest.TestCase):
             ), patch.object(resolver.subprocess, "run", side_effect=fake_run):
                 resolver.main()
 
-            settings = files[SETTINGS].read_text()
-            self.assertIn("embedded Bun default", settings)
-            self.assertIn("BUN_BE_BUN=1", settings)
+            pm = files[PM].read_text()
+            self.assertNotIn("<<<<<<<", pm)
+            self.assertIn('if (npmCommand.embeddedBun) return "bun";', pm)
+            self.assertIn("normalizeCommandName", pm)
 
-            packages = files[PACKAGES].read_text()
-            self.assertIn("## Package-manager selection", packages)
-            self.assertLess(packages.index("Package-manager selection"), packages.index("Choose a source"))
-
-            config = files[CONFIG].read_text()
-            self.assertNotIn("<<<<<<<", config)
-            self.assertIn("releaseTarget?: string;", config)
-            self.assertEqual(config.count("export const DISTRIBUTION:"), 1)
-
-            checkouts = [c for c in staged if c[:3] == ["git", "checkout", "--ours"]]
-            self.assertEqual(len(checkouts), 2)
-            adds = [c for c in staged if c[:2] == ["git", "add"]]
-            self.assertEqual(len(adds), 5)
+            pm_test = files[PM_TEST].read_text()
+            self.assertNotIn("<<<<<<<", pm_test)
+            self.assertIn("getPackageManagerName(): string;", pm_test)
+            self.assertIn("embeddedBun?: boolean", pm_test)
 
     def test_rejects_unexpected_conflict_files(self):
         with patch.object(resolver.subprocess, "check_output", return_value="other.ts\n"):

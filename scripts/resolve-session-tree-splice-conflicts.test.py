@@ -8,16 +8,6 @@ SCRIPT = Path(__file__).with_name("resolve-session-tree-splice-conflicts.py")
 
 MANAGER_REL = "packages/coding-agent/src/core/session-manager.ts"
 HARNESS_REL = "packages/coding-agent/test/suite/harness.ts"
-EXTENSIONS_REL = "packages/coding-agent/docs/extensions.md"
-SESSION_FORMAT_REL = "packages/coding-agent/docs/session-format.md"
-
-EXTENSIONS_TEXT = (
-    "intro\n\nReconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.\n\nrest\n"
-)
-SESSION_FORMAT_TEXT = (
-    "## Tree Structure\n\n- Calling `resetLeaf()` or `branchWithSummary(null, ...)` allows a later entry to become another root\n"
-)
-
 # git apply --3way emits "ours"/"theirs" labels.
 MANAGER_BLOCK = (
     "<<<<<<< ours\n"
@@ -124,16 +114,9 @@ class SpliceResolverTests(unittest.TestCase):
             {
                 MANAGER_REL: manager_source(),
                 HARNESS_REL: harness_source(),
-                EXTENSIONS_REL: EXTENSIONS_TEXT,
-                SESSION_FORMAT_REL: SESSION_FORMAT_TEXT,
             }
         ):
             self.assertEqual(result.returncode, 0, result.stderr)
-
-            ext_out = (directory / EXTENSIONS_REL).read_text()
-            self.assertIn("pi.spliceEntry(entryId)", ext_out)
-            fmt_out = (directory / SESSION_FORMAT_REL).read_text()
-            self.assertIn("spliceEntry(entryId)` removes one non-root", fmt_out)
 
             manager_out = (directory / MANAGER_REL).read_text()
             self.assertIn("\trenameSync,\n\trmSync,\n\ttype Stats,", manager_out)
@@ -164,8 +147,6 @@ class SpliceResolverTests(unittest.TestCase):
             {
                 MANAGER_REL: manager_source(),
                 HARNESS_REL: harness_source(),
-                EXTENSIONS_REL: EXTENSIONS_TEXT,
-                SESSION_FORMAT_REL: SESSION_FORMAT_TEXT,
                 stray: "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n",
             }
         ):
@@ -183,8 +164,6 @@ class SpliceResolverTests(unittest.TestCase):
             {
                 MANAGER_REL: manager_source(),
                 HARNESS_REL: harness_source(option_block=altered_option),
-                EXTENSIONS_REL: EXTENSIONS_TEXT,
-                SESSION_FORMAT_REL: SESSION_FORMAT_TEXT,
             }
         ):
             self.assertNotEqual(result.returncode, 0)
@@ -203,8 +182,6 @@ class SpliceResolverTests(unittest.TestCase):
             {
                 MANAGER_REL: manager_source(),
                 HARNESS_REL: harness_source(construct_block=sneaky),
-                EXTENSIONS_REL: EXTENSIONS_TEXT,
-                SESSION_FORMAT_REL: SESSION_FORMAT_TEXT,
             }
         ):
             self.assertNotEqual(result.returncode, 0)
@@ -218,8 +195,6 @@ class SpliceResolverTests(unittest.TestCase):
             {
                 MANAGER_REL: manager_source(),
                 HARNESS_REL: harness_source() + extra,
-                EXTENSIONS_REL: EXTENSIONS_TEXT,
-                SESSION_FORMAT_REL: SESSION_FORMAT_TEXT,
             }
         ):
             self.assertNotEqual(result.returncode, 0)
@@ -234,8 +209,6 @@ class SpliceResolverTests(unittest.TestCase):
                     block=MANAGER_BLOCK + "\tbarSync,\n" + extra
                 ),
                 HARNESS_REL: harness_source(),
-                EXTENSIONS_REL: EXTENSIONS_TEXT,
-                SESSION_FORMAT_REL: SESSION_FORMAT_TEXT,
             }
         ):
             self.assertNotEqual(result.returncode, 0)
@@ -249,8 +222,6 @@ class SpliceResolverTests(unittest.TestCase):
             {
                 MANAGER_REL: manager_source(block=wrong),
                 HARNESS_REL: harness_source(),
-                EXTENSIONS_REL: EXTENSIONS_TEXT,
-                SESSION_FORMAT_REL: SESSION_FORMAT_TEXT,
             }
         ):
             self.assertNotEqual(result.returncode, 0)
@@ -266,8 +237,6 @@ class SpliceResolverTests(unittest.TestCase):
             {
                 MANAGER_REL: manager_source(block=sneaky_manager),
                 HARNESS_REL: harness_source(),
-                EXTENSIONS_REL: EXTENSIONS_TEXT,
-                SESSION_FORMAT_REL: SESSION_FORMAT_TEXT,
             }
         ):
             self.assertNotEqual(result.returncode, 0)

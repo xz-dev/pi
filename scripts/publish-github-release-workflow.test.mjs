@@ -217,7 +217,7 @@ test("upstream sync carries the unified TUI-only slow-hook patch", () => {
   const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
   // slow-hook consumes its recorded explicit compat pair, never tip^.
   assert.match(script, /apply_compat_range slow-hook-tui-only "merge patch\/slow-hook-tui-only branch"/);
-  assert.match(script, /slow-hook-tui-only 1551e040801d3c041aa7bdb10b88855fc47f1609 slow-hook-on-accumulated d274cb156fe47522a3ddf385f3ddd7094e719894/);
+  assert.match(script, /slow-hook-tui-only 2ce3add28e0e7e6f714bbb07c60e0314ba8358bc slow-hook-on-accumulated b51f3a38ba1eb07617ac889c52449a9dd1913f86/);
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
