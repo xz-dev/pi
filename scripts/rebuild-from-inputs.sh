@@ -535,9 +535,24 @@ merge_squash() {
 	stop_before "$name"
 	if ! git merge --squash "origin/$(label_of "$name")"; then
 		if [[ "$flags" == *"readme-ok"* ]]; then
-			ensure_conflicts_are "$msg" README.md
-			git checkout --theirs -- README.md
-			git add README.md
+			# ci's overlay deletes publish-model-catalog.yml (the fork ships its own
+			# publish-github-release.yml); when upstream touches that file it
+			# resurfaces as a modify/delete conflict — keep ci's deletion.
+			local ci_conflicts
+			mapfile -t ci_conflicts < <(git diff --name-only --diff-filter=U)
+			for f in "${ci_conflicts[@]}"; do
+				case "$f" in
+				README.md|.github/workflows/publish-model-catalog.yml) ;;
+				*) die "Unexpected $msg squash conflict: $f" ;;
+				esac
+			done
+			if git diff --name-only --diff-filter=U | grep -qx 'README.md'; then
+				git checkout --theirs -- README.md
+				git add README.md
+			fi
+			if git diff --name-only --diff-filter=U | grep -qx '.github/workflows/publish-model-catalog.yml'; then
+				git rm -f .github/workflows/publish-model-catalog.yml
+			fi
 		else
 			die "Unexpected $msg squash conflict"
 		fi
