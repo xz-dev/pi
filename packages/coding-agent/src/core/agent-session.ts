@@ -702,7 +702,9 @@ export class AgentSession {
 		this.agent.prepareRequest = async (request, signal) => {
 			const canonicalContext = {
 				...request.context,
-				messages: this.sessionManager.buildSessionProjection().messages,
+				messages: this._manualRetryActive
+					? this.agent.state.messages.slice()
+					: this.sessionManager.buildSessionProjection().messages,
 				// Messages declare the provider-visible loadout; context.tools keeps executable implementations.
 				tools: this.agent.state.tools.slice(),
 			};
