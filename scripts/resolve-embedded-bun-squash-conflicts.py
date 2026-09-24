@@ -132,8 +132,9 @@ Official Bun 1.4.2 rejects metadata queries from a working directory without `pa
 
     # The same merge also reshapes getGitDependencyInstallArgs: upstream
     # switched it to a per-manager switch, but the patch's semantic — an
-    # explicit npmCommand always gets a plain `install` — must still win.
-    # Insert the configured-command gate before upstream's switch.
+    # explicit npm/bun npmCommand always gets a plain `install` — must still
+    # win. Wrapper commands that resolve to pnpm keep upstream's pnpm flags
+    # (they are not the npm/bun default path the patch overrides).
     old_args = (
         "\tprivate getGitDependencyInstallArgs(): string[] {\n"
         "\t\tswitch (this.getPackageManagerName()) {\n"
@@ -141,10 +142,11 @@ Official Bun 1.4.2 rejects metadata queries from a working directory without `pa
     new_args = (
         "\tprivate getGitDependencyInstallArgs(): string[] {\n"
         "\t\tconst configuredCommand = this.settingsManager.getNpmCommand();\n"
-        "\t\tif (configuredCommand && configuredCommand.length > 0) {\n"
+        "\t\tconst resolvedName = this.getPackageManagerName();\n"
+        "\t\tif (configuredCommand && configuredCommand.length > 0 && (resolvedName === \"npm\" || resolvedName === \"bun\")) {\n"
         "\t\t\treturn [\"install\"];\n"
         "\t\t}\n"
-        "\t\tswitch (this.getPackageManagerName()) {\n"
+        "\t\tswitch (resolvedName) {\n"
     )
     if pm_text.count(old_args) != 1:
         raise SystemExit("unexpected getGitDependencyInstallArgs anchor")
