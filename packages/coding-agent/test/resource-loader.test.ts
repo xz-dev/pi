@@ -182,6 +182,8 @@ describe("DefaultResourceLoader", () => {
 			});
 
 			await expect(loader.reload()).rejects.toThrow(SyntaxError);
+		});
+
 		it("keeps package-overridden skills available while excluding them from the model prompt", async () => {
 			const packageA = join(tempDir, "package-a");
 			const packageB = join(tempDir, "package-b");
