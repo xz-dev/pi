@@ -187,6 +187,7 @@ Choose storage based on how state participates in the conversation:
 | Data outside one session | External storage |
 
 Reconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.
+`pi.spliceEntry(entryId)` deletes exactly one existing non-root session entry and reparents its direct children to that entry's parent. Descendants stay. If the deleted entry is the current leaf, the parent becomes the leaf. Persisted JSONL is rewritten so a later reload keeps the same topology, and the live agent context is rebuilt. Call this only while the agent is idle; root, missing, and unsafe metadata references (label targets, compaction `firstKeptEntryId`, branch-summary `fromId`, missing parent) throw.
 Do not rebuild it from every file entry because abandoned branches represent alternative histories.
 Register an entry or message renderer when custom stored content should appear in the transcript.
 
