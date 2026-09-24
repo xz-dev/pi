@@ -1176,6 +1176,9 @@ mid = text.index("=======\n", start)
 end = text.index(">>>>>>> origin/patch/skill-overrides\n", mid)
 ours = text[start + len("<<<<<<< HEAD\n") : mid]
 theirs = text[mid + len("=======\n") : end]
+# ours ends mid-it() — the marker cut its closing `});`. Restore it.
+if not ours.rstrip().endswith("});"):
+    ours = ours.rstrip() + "\n\t\t});\n\n"
 text = text[:start] + ours + theirs + text[end + len(">>>>>>> origin/patch/skill-overrides\n"):]
 path.write_text(text)
 PY
