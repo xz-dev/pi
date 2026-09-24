@@ -216,6 +216,8 @@ Keep tool and event behavior independent from rendering so non-interactive modes
 Pi reports handler errors and continues where possible. A `tool_call` handler failure blocks the tool as a fail-safe; a tool execution failure becomes an error result for the model.
 
 Release resources in `session_shutdown` even when normal operation attempted cleanup.
+
+In interactive TUI, Pi shows slow extension handlers as transient notices. Timing diagnostics are not saved to the session, model context, RPC/print events, or disk. During shutdown, the current handler is shown while Pi waits; fast handlers are cleared and only slow handlers remain on the terminal. Outside interactive TUI, these diagnostics are dropped.
 Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
 Use `ctx.shutdown()` to request an orderly process shutdown.
 
