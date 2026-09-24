@@ -129,6 +129,26 @@ Official Bun 1.4.2 rejects metadata queries from a working directory without `pa
     pm_text = pm_text[:start] + upstream_body + pm_text[end:]
     if pm_text.count(marker) or pm_text.count(end_marker):
         raise SystemExit("package-manager.ts conflict markers remain")
+
+    # The same merge also reshapes getGitDependencyInstallArgs: upstream
+    # switched it to a per-manager switch, but the patch's semantic — an
+    # explicit npmCommand always gets a plain `install` — must still win.
+    # Insert the configured-command gate before upstream's switch.
+    old_args = (
+        "\tprivate getGitDependencyInstallArgs(): string[] {\n"
+        "\t\tswitch (this.getPackageManagerName()) {\n"
+    )
+    new_args = (
+        "\tprivate getGitDependencyInstallArgs(): string[] {\n"
+        "\t\tconst configuredCommand = this.settingsManager.getNpmCommand();\n"
+        "\t\tif (configuredCommand && configuredCommand.length > 0) {\n"
+        "\t\t\treturn [\"install\"];\n"
+        "\t\t}\n"
+        "\t\tswitch (this.getPackageManagerName()) {\n"
+    )
+    if pm_text.count(old_args) != 1:
+        raise SystemExit("unexpected getGitDependencyInstallArgs anchor")
+    pm_text = pm_text.replace(old_args, new_args, 1)
     pm.write_text(pm_text)
     subprocess.run(["git", "add", str(pm)], check=True)
 
