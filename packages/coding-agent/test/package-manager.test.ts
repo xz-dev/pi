@@ -759,8 +759,13 @@ Content`,
 			({ command }) => {
 				settingsManager.setNpmCommand(command);
 				// A host package can be both a dev and peer dependency; omitting dev alone installs it again.
+				// npm/bun explicit commands get plain install; pnpm wrappers keep upstream's pnpm flags.
 				expect(internals.getGitDependencyInstallArgs()).toEqual(
-					command?.length ? ["install"] : ["install", "--omit=dev", "--omit=peer"],
+					!command?.length
+						? ["install", "--omit=dev", "--omit=peer"]
+						: command[0] === "pnpm" || command.includes("pnpm")
+							? ["install", "--prod", "--config.auto-install-peers=false", "--config.strict-peer-dependencies=false", "--config.strict-dep-builds=false"]
+							: ["install"],
 				);
 			},
 		);
