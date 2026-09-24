@@ -28,8 +28,11 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 - Allow `settings.retry.nonRetryableErrorPatterns` to fail-fast on gateway-specific terminal quota/limit error messages without expanding the built-in retry classifier.
   - Use case: Stop retrying when a gateway returns a known terminal quota or limit message.
   - Patch branch: [`patch/retry-non-retryable-patterns`](https://github.com/xz-dev/pi/tree/patch/retry-non-retryable-patterns)
-- Show awaited extension handlers exceeding `slowHookThresholdMs` only in interactive TUI, with synchronous handlers in warning yellow and asynchronous handlers in default gray. During shutdown, show the current handler while waiting, clear fast handlers, and keep slow handlers on the terminal without writing timing diagnostics to session history, model context, RPC/print events, or disk.
+- Show awaited extension handlers exceeding `slowHookThresholdMs` only in interactive TUI, with synchronous handlers in warning yellow and asynchronous handlers in default gray. During shutdown, show the current handler while waiting, clear fast handlers, and keep slow handlers on the terminal without writing timing diagnostics to session history, model context, RPC/print events, or disk. `slowHookThresholdMs` defaults to `0` (disabled); set a positive value in `settings.json` to opt in.
   - Use case: Diagnose slow extension hooks without persisting diagnostic records.
+  - Patch branch: [`patch/slow-hook-tui-only`](https://github.com/xz-dev/pi/tree/patch/slow-hook-tui-only)
+- Hide `[Skill conflicts]` / `[Prompt conflicts]` / `[Extension issues]` / `[Theme conflicts]` startup diagnostic blocks by default; enable them with `showStartupDiagnostics: true` in `settings.json`.
+  - Use case: Keep the startup screen clean unless actively debugging resource conflicts or extension loading issues.
   - Patch branch: [`patch/slow-hook-tui-only`](https://github.com/xz-dev/pi/tree/patch/slow-hook-tui-only)
 - Expose public `pi.spliceEntry(entryId)` so an extension can delete one non-root session-tree node and reparent its children, preserving descendants.
   - Use case: Remove a hidden watchdog decision node from session history without deleting later conversation descendants.
