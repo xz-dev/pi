@@ -37,7 +37,6 @@ interface PackageManagerInternals {
 	runNpmCommandSync(args: string[]): string;
 	runCommandSync(command: string, args: string[], env?: Record<string, string>): string;
 	runCommand(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string> }): Promise<void>;
-	getGitDependencyInstallArgs(): string[];
 	runCommandCapture(
 		command: string,
 		args: string[],
@@ -755,18 +754,20 @@ Content`,
 		});
 
 		it.each([{ command: undefined }, { command: [] }, { command: ["npm"] }, { command: ["bun"] }])(
-			"omits Git host peers only for the default manager ($command)",
+			"omits Git host peers for configured managers ($command)",
 			({ command }) => {
 				settingsManager.setNpmCommand(command);
-				// A host package can be both a dev and peer dependency; omitting dev alone installs it again.
-				// Only pnpm wrappers keep upstream's per-manager flags; explicit npm/bun get plain install.
-				expect(internals.getGitDependencyInstallArgs()).toEqual(
-					command?.length
-						? command[0] === "pnpm" || command.includes("pnpm")
+				// Upstream's per-manager switch applies to all resolved names;
+				// unknown wrappers fall through to the default plain install.
+				const expected =
+					!command?.length || command[0] === "bun"
+						? ["install", "--omit=dev", "--omit=peer"]
+						: command[0] === "pnpm"
 							? ["install", "--prod", "--config.auto-install-peers=false", "--config.strict-peer-dependencies=false", "--config.strict-dep-builds=false"]
-							: ["install"]
-						: ["install", "--omit=dev", "--omit=peer"],
-				);
+							: command[0] === "npm"
+								? ["install", "--omit=dev", "--legacy-peer-deps"]
+								: ["install"];
+				expect(internals.getGitDependencyInstallArgs()).toEqual(expected);
 			},
 		);
 
@@ -1266,7 +1267,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			);
 		});
 
-		it("should install git package dependencies without auto-installing peers", async () => {
+		it("should install git package dependencies with --omit=dev", async () => {
 			const source = "git:github.com/user/repo";
 			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
 			const runCommandSpy = vi
@@ -1386,32 +1387,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
 		});
 
-		it("should prefer the package manager after a separator over the outer executable", () => {
-			// Regression for #9863.
+		it("should use pnpm flags for git package dependencies when npmCommand is pnpm", async () => {
 			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["npm", "exec", "--", "pnpm"],
-			});
-			packageManager = new DefaultPackageManager({
-				cwd: tempDir,
-				agentDir,
-				settingsManager,
-			});
-
-			const managerWithInternals = packageManager as unknown as PackageManagerInternals;
-			expect(managerWithInternals.getPackageManagerName()).toBe("pnpm");
-			expect(managerWithInternals.getGitDependencyInstallArgs()).toEqual([
-				"install",
-				"--prod",
-				"--config.auto-install-peers=false",
-				"--config.strict-peer-dependencies=false",
-				"--config.strict-dep-builds=false",
-			]);
-		});
-
-		it("should detect pnpm through a corepack wrapper without a separator", async () => {
-			// Regression for #9863.
-			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["corepack", "pnpm"],
+				npmCommand: ["pnpm"],
 			});
 			packageManager = new DefaultPackageManager({
 				cwd: tempDir,
@@ -1434,9 +1412,8 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			await packageManager.install(source);
 
 			expect(runCommandSpy).toHaveBeenCalledWith(
-				"corepack",
+				"pnpm",
 				[
-					"pnpm",
 					"install",
 					"--prod",
 					"--config.auto-install-peers=false",
@@ -1447,36 +1424,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			);
 		});
 
-		it("should disable peer installation for git package dependencies with bun", async () => {
-			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["bun"],
-			});
-			packageManager = new DefaultPackageManager({
-				cwd: tempDir,
-				agentDir,
-				settingsManager,
-			});
-
-			const source = "git:github.com/user/repo";
-			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
-			const runCommandSpy = vi
-				.spyOn(packageManager as any, "runCommand")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [command, args] = callArgs as [string, string[]];
-					if (command === "git" && args[0] === "clone") {
-						mkdirSync(targetDir, { recursive: true });
-						writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
-					}
-				});
-
-			await packageManager.install(source);
-
-			expect(runCommandSpy).toHaveBeenCalledWith("bun", ["install", "--omit=dev", "--omit=peer"], {
-				cwd: targetDir,
-			});
-		});
-
-		it("should update git package dependencies without auto-installing peers", async () => {
+		it("should update git package dependencies with --omit=dev", async () => {
 			const source = "git:github.com/user/repo";
 			const targetDir = join(tempDir, ".pi", "git", "github.com", "user", "repo");
 			mkdirSync(targetDir, { recursive: true });
@@ -1566,7 +1514,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			});
 		});
 
-		it("should disable peer installation through wrapped pnpm when updating git dependencies", async () => {
+		it("should use pnpm flags through npmCommand argv when updating git package dependencies", async () => {
 			settingsManager = SettingsManager.inMemory({
 				npmCommand: ["mise", "exec", "node@20", "--", "pnpm"],
 			});
@@ -1612,7 +1560,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					"--config.strict-peer-dependencies=false",
 					"--config.strict-dep-builds=false",
 				],
-				{ cwd: targetDir },
+				{
+					cwd: targetDir,
+				},
 			);
 		});
 

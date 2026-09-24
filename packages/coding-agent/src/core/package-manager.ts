@@ -70,11 +70,8 @@ export interface PathMetadata {
 	scope: SourceScope;
 	origin: "package" | "top-level";
 	baseDir?: string;
-<<<<<<< HEAD
 	packageRoot?: string;
-=======
 	skillOverrides?: SkillOverrides;
->>>>>>> 7e29855d4 (fix(coding-agent): reduce Git package installation storage)
 }
 
 export interface ResolvedResource {
