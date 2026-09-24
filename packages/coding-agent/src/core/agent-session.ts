@@ -109,7 +109,12 @@ import {
 } from "./extensions/index.ts";
 import { type ExtensionShutdownProgressListener, emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { planContinuation } from "./manual-retry.ts";
-import { type BashExecutionMessage, type CustomMessage, type ManualRetryRecoveryMessage, convertToLlm } from "./messages.ts";
+import {
+	type BashExecutionMessage,
+	type CustomMessage,
+	convertToLlm,
+	type ManualRetryRecoveryMessage,
+} from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
