@@ -979,22 +979,6 @@ path = Path("packages/coding-agent/src/core/package-manager.ts")
 text = path.read_text()
 block = (
     "<<<<<<< HEAD\n"
-    "\t\tswitch (resolvedName) {\n"
-    "\t\t\tcase \"bun\":\n"
-    "\t\t\t\treturn [\"install\", \"--omit=dev\", \"--omit=peer\"];\n"
-    "\t\t\tcase \"pnpm\":\n"
-    "\t\t\t\treturn [\n"
-    "\t\t\t\t\t\"install\",\n"
-    "\t\t\t\t\t\"--prod\",\n"
-    "\t\t\t\t\t\"--config.auto-install-peers=false\",\n"
-    "\t\t\t\t\t\"--config.strict-peer-dependencies=false\",\n"
-    "\t\t\t\t\t\"--config.strict-dep-builds=false\",\n"
-    "\t\t\t\t];\n"
-    "\t\t\tcase \"npm\":\n"
-    "\t\t\t\treturn [\"install\", \"--omit=dev\", \"--legacy-peer-deps\"];\n"
-    "\t\t\tdefault:\n"
-    "\t\t\t\treturn [\"install\"];\n"
-    "\t\t}\n"
     "=======\n"
     "\t\t// Pi supplies host APIs. Omitting dev alone can reinstall them through peerDependencies.\n"
     "\t\treturn this.getPackageManagerName() === \"bun\"\n"
@@ -1004,8 +988,7 @@ block = (
 )
 if text.count(block) != 1:
     raise SystemExit("unexpected package-manager.ts install-args conflict shape")
-ours = block.split("=======\n")[0].replace("<<<<<<< HEAD\n", "")
-text = text.replace(block, ours, 1)
+text = text.replace(block, "", 1)
 path.write_text(text)
 PY
 			git add packages/coding-agent/src/core/package-manager.ts
