@@ -68,7 +68,7 @@ read -r -d '' DEFAULT_INPUTS <<'EOF' || true
 upstream/main 1a584a7a56eb5e7b4ff8ccbd46430f1533282eed
 ci 5ce32cc3c61e33e233d359b0627ca0aa51709545
 patch/contributor-approval e005a344660c3ad8b3aa86192c3a10f18a53a10d
-patch/model-startup-refresh-barrier 96d88aee1da0e706e2adf0b0b274daccf9b48217
+patch/model-startup-refresh-barrier 6effa0d3ea34753c94612bb07e25b87ba032f0ed
 patch/model-refresh-session-rebind 5db5e814a7f010800b40d1a7142682e59c0be6d7
 patch/model-catalog-extension-refresh 465671288cfc16f8adb58e891f44964facd0e6c4
 patch/bun-bytecode-entrypoint 72f9732aa2dacc279a225c00661566c000be92a4
