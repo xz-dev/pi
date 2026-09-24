@@ -979,7 +979,7 @@ path = Path("packages/coding-agent/src/core/package-manager.ts")
 text = path.read_text()
 block = (
     "<<<<<<< HEAD\n"
-    "\t\tswitch (this.getPackageManagerName()) {\n"
+    "\t\tswitch (resolvedName) {\n"
     "\t\t\tcase \"bun\":\n"
     "\t\t\t\treturn [\"install\", \"--omit=dev\", \"--omit=peer\"];\n"
     "\t\t\tcase \"pnpm\":\n"
