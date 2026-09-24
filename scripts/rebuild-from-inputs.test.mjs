@@ -870,9 +870,9 @@ test("recorded compat bases are explicit SHAs, never tip-derived", () => {
 		byName.set(name, { base, tip });
 	}
 	// The recorded bases are the approved fixed inputs, never tip^ inference.
-	assert.equal(byName.get("model-refresh-session-rebind").base, "4f2a4ff8d111697b22f4cb35519d1075fed432d5");
-	assert.equal(byName.get("model-refresh-timeout").base, "a1d2c1054dc08007b16d40c8156250b2b7985c4e");
-	assert.equal(byName.get("slow-hook-tui-only").base, "1551e040801d3c041aa7bdb10b88855fc47f1609");
+	assert.equal(byName.get("model-refresh-session-rebind").base, "dc8b262eab67744b6df3fc80e838d28eb50f1efe");
+	assert.equal(byName.get("model-refresh-timeout").base, "f5e6c740ea5bd12677d409ae84d8a30949e01e69");
+	assert.equal(byName.get("slow-hook-tui-only").base, "2ce3add28e0e7e6f714bbb07c60e0314ba8358bc");
 	assert.equal(byName.get("manual-retry").base, byName.get("esc-abort").tip);
 	assert.equal(byName.get("esc-abort").base, byName.get("managed-tool-executions").tip);
 	assert.equal(byName.get("managed-tool-executions").base, byName.get("agent-run-failure-seam").tip);
