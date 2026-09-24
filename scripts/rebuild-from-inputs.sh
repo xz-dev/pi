@@ -941,7 +941,10 @@ run_replay() {
 		git merge-base --is-ancestor "$base" "$tip" || die "merge patch/git-package-storage branch must descend from patch/use-embedded-bun-package-manager"
 		[[ -z "$(git rev-list --min-parents=2 "$base..$tip")" ]] || die "merge patch/git-package-storage branch range must be linear"
 		if ! git cherry-pick --no-commit "origin/patch/use-embedded-bun-package-manager..origin/patch/git-package-storage"; then
-			ensure_conflicts_are "merge patch/git-package-storage branch" packages/coding-agent/docs/packages.md
+			ensure_conflicts_are "merge patch/git-package-storage branch" \
+				packages/coding-agent/docs/packages.md \
+				packages/coding-agent/src/core/package-manager.ts \
+				packages/coding-agent/test/package-manager.test.ts
 			# Upstream's packages.md was rewritten wholesale; the patch range's
 			# doc version predates that rewrite, so taking --theirs would revert
 			# upstream's doc refresh. Restore upstream's file, then re-append
@@ -966,6 +969,48 @@ text = text.replace(anchor, anchor + addition, 1)
 path.write_text(text)
 PY
 			git add packages/coding-agent/docs/packages.md
+			# package-manager.ts: upstream refactored getGitDependencyInstallArgs
+			# into a switch; the cherry-picked tail duplicates the bun case. Keep
+			# upstream's switch, drop the patch's trailing ternary.
+			python3 - <<'PY'
+from pathlib import Path
+
+path = Path("packages/coding-agent/src/core/package-manager.ts")
+text = path.read_text()
+block = (
+    "<<<<<<< HEAD\n"
+    "=======\n"
+    "\t\t// Pi supplies host APIs. Omitting dev alone can reinstall them through peerDependencies.\n"
+    "\t\treturn this.getPackageManagerName() === \"bun\"\n"
+    "\t\t\t? [\"install\", \"--omit=dev\", \"--omit=peer\"]\n"
+    "\t\t\t: [\"install\", \"--omit=dev\", \"--legacy-peer-deps\"];\n"
+    ">>>>>>> 72abe9a79 (Reapply \"fix(coding-agent): reduce Git package installation storage (#7)\")\n"
+)
+if text.count(block) != 1:
+    raise SystemExit("unexpected package-manager.ts install-args conflict shape")
+text = text.replace(block, "", 1)
+path.write_text(text)
+PY
+			git add packages/coding-agent/src/core/package-manager.ts
+			# package-manager.test.ts: the patch re-adds getNpmCommand next to the
+			# copy the embedded-bun resolver already merged in. Keep HEAD.
+			python3 - <<'PY'
+from pathlib import Path
+
+path = Path("packages/coding-agent/test/package-manager.test.ts")
+text = path.read_text()
+block = (
+    "<<<<<<< HEAD\n"
+    "\tgetNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };\n"
+    "=======\n"
+    ">>>>>>> 72abe9a79 (Reapply \"fix(coding-agent): reduce Git package installation storage (#7)\")\n"
+)
+if text.count(block) != 1:
+    raise SystemExit("unexpected package-manager.test.ts conflict shape")
+text = text.replace(block, "\tgetNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };\n", 1)
+path.write_text(text)
+PY
+			git add packages/coding-agent/test/package-manager.test.ts
 		fi
 		ensure_no_conflicts "merge patch/git-package-storage branch"
 		ensure_not_empty "merge patch/git-package-storage branch"
