@@ -37,11 +37,12 @@ import type { Readable } from "node:stream";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { gt, maxSatisfying, rcompare, satisfies, valid, validRange } from "semver";
-import { CONFIG_DIR_NAME } from "../config.ts";
+import { CONFIG_DIR_NAME, DISTRIBUTION, isBunBinary } from "../config.ts";
 import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
+import { withBunGitIntegrityCompatibility } from "./bun-git-integrity.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { type PiManifest, readPiManifest } from "./pi-manifest.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
@@ -1156,10 +1157,21 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		try {
-			const targetVersion = await this.getLatestNpmVersion(source.version ? source.spec : source.name, source.range);
+			const targetVersion = await this.getLatestNpmVersion(
+				source.version ? source.spec : source.name,
+				source.range,
+				scope,
+			);
 			return gt(targetVersion, installedVersion);
-		} catch {
-			// Preserve existing update behavior when version lookup fails.
+		} catch (cause) {
+			if (this.getNpmCommand().embeddedBun) {
+				const reason = cause instanceof Error ? cause.message : String(cause);
+				console.warn(
+					`Warning: Cannot verify update for ${source.spec}: ${reason}\n` +
+						`Continuing with Bun; installed version ${installedVersion} may be downgraded.`,
+				);
+			}
+			// Preserve the existing lookup-error policy for explicitly configured managers and other installations.
 			return true;
 		}
 	}
@@ -1174,7 +1186,33 @@ export class DefaultPackageManager implements PackageManager {
 		const specs = sources.map((entry) => (entry.parsed.version ? entry.parsed.spec : `${entry.parsed.name}@latest`));
 
 		await this.withProgress("update", sourceLabel, message, async () => {
-			await this.installNpmBatch(specs, scope);
+			if (this.getNpmCommand().embeddedBun) {
+				const installRoot = this.getNpmInstallRoot(scope, false);
+				this.ensureNpmProject(installRoot);
+				// Bun update requires manifest declarations, not just Pi settings or installed files (#6).
+				const manifest = JSON.parse(stripBom(readFileSync(join(installRoot, "package.json"), "utf-8"))) as {
+					dependencies?: Record<string, unknown>;
+					devDependencies?: Record<string, unknown>;
+					optionalDependencies?: Record<string, unknown>;
+				};
+				const missing = sources.filter(
+					({ parsed }) =>
+						![manifest.dependencies, manifest.devDependencies, manifest.optionalDependencies].some(
+							(dependencies) => typeof dependencies?.[parsed.name] === "string",
+						),
+				);
+				if (missing.length > 0) {
+					await this.runNpmCommand(
+						this.getNpmInstallArgs(
+							missing.map(({ parsed }) => (parsed.version ? parsed.spec : `${parsed.name}@latest`)),
+							installRoot,
+						),
+					);
+				}
+				await this.runNpmCommand(["update", ...specs, "--cwd", installRoot, "--omit=peer"]);
+			} else {
+				await this.installNpmBatch(specs, scope);
+			}
 		});
 	}
 
@@ -1217,7 +1255,7 @@ export class DefaultPackageManager implements PackageManager {
 					if (!existsSync(installedPath)) {
 						return undefined;
 					}
-					const hasUpdate = await this.npmHasAvailableUpdate(parsed, installedPath);
+					const hasUpdate = await this.npmHasAvailableUpdate(parsed, installedPath, entry.scope);
 					if (!hasUpdate) {
 						return undefined;
 					}
@@ -1482,7 +1520,11 @@ export class DefaultPackageManager implements PackageManager {
 		return source.range ? satisfies(installedVersion, source.range) : true;
 	}
 
-	private async npmHasAvailableUpdate(source: NpmSource, installedPath: string): Promise<boolean> {
+	private async npmHasAvailableUpdate(
+		source: NpmSource,
+		installedPath: string,
+		scope: InstalledSourceScope,
+	): Promise<boolean> {
 		if (isOfflineModeEnabled()) {
 			return false;
 		}
@@ -1493,7 +1535,11 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		try {
-			const targetVersion = await this.getLatestNpmVersion(source.version ? source.spec : source.name, source.range);
+			const targetVersion = await this.getLatestNpmVersion(
+				source.version ? source.spec : source.name,
+				source.range,
+				scope,
+			);
 			return gt(targetVersion, installedVersion);
 		} catch {
 			return false;
@@ -1512,25 +1558,42 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async getLatestNpmVersion(packageSpec: string, range?: string): Promise<string> {
+	private async getLatestNpmVersion(
+		packageSpec: string,
+		range?: string,
+		scope: InstalledSourceScope = "user",
+	): Promise<string> {
 		const npmCommand = this.getNpmCommand();
+		const verb = this.getPackageManagerName() === "bun" ? "info" : "view";
+		// Bun `info` requires a package.json in cwd; run it inside the managed
+		// install root so version checks don't depend on the user's cwd.
+		let cwd = this.cwd;
+		if (npmCommand.embeddedBun) {
+			const installRoot = this.getNpmInstallRoot(scope, false);
+			this.ensureNpmProject(installRoot);
+			cwd = installRoot;
+		}
 		const stdout = await this.runCommandCapture(
 			npmCommand.command,
-			[...npmCommand.args, "view", packageSpec, "version", "--json"],
-			{ cwd: this.cwd, timeoutMs: NETWORK_TIMEOUT_MS },
+			[...npmCommand.args, verb, packageSpec, "version", "--json"],
+			{
+				cwd,
+				timeoutMs: NETWORK_TIMEOUT_MS,
+				...(npmCommand.embeddedBun ? { env: { BUN_BE_BUN: "1" } } : {}),
+			},
 		);
 		const raw = stdout.trim();
-		if (!raw) throw new Error("Empty response from npm view");
+		if (!raw) throw new Error(`Empty response from ${npmCommand.command} ${verb}`);
 		const parsed = JSON.parse(raw) as unknown;
-		if (typeof parsed === "string") {
+		if (typeof parsed === "string" && valid(parsed) && (!range || satisfies(parsed, range))) {
 			return parsed;
 		}
 		if (Array.isArray(parsed)) {
-			const versions = parsed.filter((value): value is string => typeof value === "string" && value.length > 0);
+			const versions = parsed.filter((value): value is string => typeof value === "string" && valid(value) !== null);
 			const latest = range ? maxSatisfying(versions, range) : [...versions].sort(rcompare)[0];
 			if (latest) return latest;
 		}
-		throw new Error("Unexpected response from npm view");
+		throw new Error(`Unexpected response from ${npmCommand.command} ${verb}`);
 	}
 
 	private async gitHasAvailableUpdate(installedPath: string): Promise<boolean> {
@@ -1748,10 +1811,12 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private getNpmCommand(): { command: string; args: string[] } {
+	private getNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean } {
 		const configuredCommand = this.settingsManager.getNpmCommand();
 		if (!configuredCommand || configuredCommand.length === 0) {
-			return { command: "npm", args: [] };
+			return isBunBinary && DISTRIBUTION === "xz-dev"
+				? { command: "pi", args: [], embeddedBun: true }
+				: { command: "npm", args: [] };
 		}
 		const [command, ...args] = configuredCommand;
 		if (!command) {
@@ -1762,30 +1827,28 @@ export class DefaultPackageManager implements PackageManager {
 
 	private getPackageManagerName(): string {
 		const npmCommand = this.getNpmCommand();
-		const normalizeCommandName = (command: string): string => basename(command).replace(/\.(cmd|exe)$/i, "");
-		const supportedPackageManagers = new Set(["npm", "pnpm", "bun"]);
-		const directCommand = normalizeCommandName(npmCommand.command);
-		const separatorIndex = npmCommand.args.lastIndexOf("--");
-		if (separatorIndex >= 0) {
-			const wrappedCommand = npmCommand.args[separatorIndex + 1];
-			return wrappedCommand ? normalizeCommandName(wrappedCommand) : directCommand;
-		}
-		if (supportedPackageManagers.has(directCommand)) return directCommand;
-
-		const wrappedPackageManagers = [
-			...new Set(
-				npmCommand.args.map(normalizeCommandName).filter((command) => supportedPackageManagers.has(command)),
-			),
-		];
-		if (wrappedPackageManagers.length > 1) {
-			throw new Error(`Ambiguous npmCommand package managers: ${wrappedPackageManagers.join(", ")}`);
-		}
-		return wrappedPackageManagers[0] ?? directCommand;
+		if (npmCommand.embeddedBun) return "bun";
+		const commandParts = [npmCommand.command, ...npmCommand.args];
+		const separatorIndex = commandParts.lastIndexOf("--");
+		const packageManagerCommand = separatorIndex >= 0 ? commandParts[separatorIndex + 1] : npmCommand.command;
+		return packageManagerCommand ? basename(packageManagerCommand).replace(/\.(cmd|exe)$/i, "") : "";
 	}
 
 	private async runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void> {
 		const npmCommand = this.getNpmCommand();
-		await this.runCommand(npmCommand.command, [...npmCommand.args, ...args], options);
+		const run = () =>
+			this.runCommand(
+				npmCommand.command,
+				[...npmCommand.args, ...args],
+				npmCommand.embeddedBun ? { ...options, env: { BUN_BE_BUN: "1" } } : options,
+			);
+		if (npmCommand.embeddedBun && (args[0] === "install" || args[0] === "update")) {
+			const cwdIndex = args.indexOf("--cwd");
+			const cwd = cwdIndex >= 0 ? args[cwdIndex + 1] : options?.cwd;
+			await withBunGitIntegrityCompatibility(cwd ?? process.cwd(), run);
+		} else {
+			await run();
+		}
 	}
 
 	private getGitDependencyInstallArgs(): string[] {
@@ -1805,11 +1868,16 @@ export class DefaultPackageManager implements PackageManager {
 			default:
 				return ["install"];
 		}
+
 	}
 
 	private runNpmCommandSync(args: string[]): string {
 		const npmCommand = this.getNpmCommand();
-		return this.runCommandSync(npmCommand.command, [...npmCommand.args, ...args]);
+		return this.runCommandSync(
+			npmCommand.command,
+			[...npmCommand.args, ...args],
+			npmCommand.embeddedBun ? { BUN_BE_BUN: "1" } : undefined,
+		);
 	}
 
 	private getNpmInstallArgs(specs: string[], installRoot: string): string[] {
@@ -2065,7 +2133,7 @@ export class DefaultPackageManager implements PackageManager {
 
 	private getGlobalNpmRoot(): string {
 		const npmCommand = this.getNpmCommand();
-		const commandKey = [npmCommand.command, ...npmCommand.args].join("\0");
+		const commandKey = JSON.stringify(npmCommand);
 		if (this.globalNpmRoot && this.globalNpmRootCommandKey === commandKey) {
 			return this.globalNpmRoot;
 		}
@@ -2631,8 +2699,13 @@ export class DefaultPackageManager implements PackageManager {
 		};
 	}
 
-	private spawnCommand(command: string, args: string[], options?: { cwd?: string }): ChildProcess {
-		const env = getEnv();
+	private spawnCommand(
+		command: string,
+		args: string[],
+		options?: { cwd?: string; env?: Record<string, string> },
+	): ChildProcess {
+		const baseEnv = getEnv();
+		const env = options?.env ? { ...baseEnv, ...options.env } : baseEnv;
 		return spawnProcess(command, args, {
 			cwd: options?.cwd,
 			stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
@@ -2698,7 +2771,11 @@ export class DefaultPackageManager implements PackageManager {
 		});
 	}
 
-	private runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void> {
+	private runCommand(
+		command: string,
+		args: string[],
+		options?: { cwd?: string; env?: Record<string, string> },
+	): Promise<void> {
 		return new Promise((resolvePromise, reject) => {
 			const child = this.spawnCommand(command, args, options);
 			child.on("error", reject);
@@ -2712,8 +2789,9 @@ export class DefaultPackageManager implements PackageManager {
 		});
 	}
 
-	private runCommandSync(command: string, args: string[]): string {
-		const env = getEnv();
+	private runCommandSync(command: string, args: string[], additions?: Record<string, string>): string {
+		const baseEnv = getEnv();
+		const env = additions ? { ...baseEnv, ...additions } : baseEnv;
 		const result = spawnProcessSync(command, args, {
 			stdio: ["ignore", "pipe", "pipe"],
 			encoding: "utf-8",
