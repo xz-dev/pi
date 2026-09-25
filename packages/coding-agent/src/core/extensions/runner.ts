@@ -1390,7 +1390,9 @@ export class ExtensionRunner {
 					const visibleMessages = currentMessages.filter((message) => message.role !== "system");
 					const visibleSnapshot = visibleMessages.slice();
 					const event: ContextEvent = { type: "context", messages: visibleMessages };
-					const handlerResult = (await this.runHandler("context", ext, handlerIndex, () => handler(event, ctx))) as ContextEventResult | undefined;
+					const handlerResult = (await this.runHandler("context", ext, handlerIndex, () => handler(event, ctx))) as
+						| ContextEventResult
+						| undefined;
 
 					// Handlers may return a new list or edit event.messages in place.
 					const returned =
