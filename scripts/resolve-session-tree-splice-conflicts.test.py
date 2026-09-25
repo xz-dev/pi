@@ -8,6 +8,7 @@ SCRIPT = Path(__file__).with_name("resolve-session-tree-splice-conflicts.py")
 
 MANAGER_REL = "packages/coding-agent/src/core/session-manager.ts"
 HARNESS_REL = "packages/coding-agent/test/suite/harness.ts"
+TEST_REL = "packages/coding-agent/test/session-manager/tree-traversal.test.ts"
 # git apply --3way emits "ours"/"theirs" labels.
 MANAGER_BLOCK = (
     "<<<<<<< ours\n"
@@ -33,6 +34,38 @@ HARNESS_CONSTRUCT_BLOCK = (
     "\t\t: SessionManager.inMemory();\n"
     ">>>>>>> theirs\n"
 )
+
+TEST_BLOCK = (
+    "<<<<<<< ours\n"
+    'import { existsSync, mkdirSync, rmSync } from "fs";\n'
+    "=======\n"
+    'import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";\n'
+    ">>>>>>> theirs\n"
+)
+
+
+def test_source(block: str = TEST_BLOCK) -> str:
+    return (
+        block
+        + 'import { tmpdir } from "os";\n'
+        + 'import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.ts";\n\n'
+        + 'describe("spliceEntry", () => {\n'
+        + "\tit(\"persists\", () => { writeFileSync(\"x\", \"y\"); });\n"
+        + "});\n"
+    )
+
+
+def full_fixture(
+    manager_block: str = MANAGER_BLOCK,
+    option_block: str = HARNESS_OPTION_BLOCK,
+    construct_block: str = HARNESS_CONSTRUCT_BLOCK,
+    test_block: str = TEST_BLOCK,
+) -> dict[str, str]:
+    return {
+        MANAGER_REL: manager_source(manager_block),
+        HARNESS_REL: harness_source(option_block, construct_block),
+        TEST_REL: test_source(test_block),
+    }
 
 
 def manager_source(block: str = MANAGER_BLOCK) -> str:
@@ -110,12 +143,7 @@ class SpliceResolverTests(unittest.TestCase):
             yield directory, result, index_before
 
     def test_resolves_apply_conflict_set(self):
-        for directory, result, _ in self.run_with_conflicts(
-            {
-                MANAGER_REL: manager_source(),
-                HARNESS_REL: harness_source(),
-            }
-        ):
+        for directory, result, _ in self.run_with_conflicts(full_fixture()):
             self.assertEqual(result.returncode, 0, result.stderr)
 
             manager_out = (directory / MANAGER_REL).read_text()
@@ -134,19 +162,32 @@ class SpliceResolverTests(unittest.TestCase):
                 harness_out,
             )
             self.assertNotIn("<<<<<<<", harness_out)
+
+            test_out = (directory / TEST_REL).read_text()
+            self.assertIn(
+                'import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";',
+                test_out,
+            )
+            self.assertIn("readSessionFileRoles", test_out)
+            self.assertIn('describe("spliceEntry"', test_out)
+            self.assertNotIn("<<<<<<<", test_out)
             # Both files staged; no unmerged entries remain.
             self.assertNotIn(" U ", index_state(directory))
             ls = index_state(directory)
             self.assertNotIn("\t1\t", ls.replace(" 1\t", "\t1\t"))
             for line in ls.splitlines():
-                self.assertTrue(line.endswith(f" 0\t{MANAGER_REL}") or line.endswith(f" 0\t{HARNESS_REL}") or " 0\t" in line)
+                self.assertTrue(
+                    line.endswith(f" 0\t{MANAGER_REL}")
+                    or line.endswith(f" 0\t{HARNESS_REL}")
+                    or line.endswith(f" 0\t{TEST_REL}")
+                    or " 0\t" in line
+                )
 
     def test_rejects_extra_conflict_file(self):
         stray = "packages/coding-agent/src/core/agent-session.ts"
         for directory, result, index_before in self.run_with_conflicts(
             {
-                MANAGER_REL: manager_source(),
-                HARNESS_REL: harness_source(),
+                **full_fixture(),
                 stray: "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n",
             }
         ):
@@ -161,10 +202,7 @@ class SpliceResolverTests(unittest.TestCase):
             "sessionManagerFactory?: (dir: string) => SessionManager;",
         )
         for directory, result, index_before in self.run_with_conflicts(
-            {
-                MANAGER_REL: manager_source(),
-                HARNESS_REL: harness_source(option_block=altered_option),
-            }
+            full_fixture(option_block=altered_option)
         ):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("unexpected harness options conflict shape", result.stderr)
@@ -179,10 +217,7 @@ class SpliceResolverTests(unittest.TestCase):
             "\t\t: SessionManager.inMemory();\n\texfiltrate();\n",
         )
         for directory, result, index_before in self.run_with_conflicts(
-            {
-                MANAGER_REL: manager_source(),
-                HARNESS_REL: harness_source(construct_block=sneaky),
-            }
+            full_fixture(construct_block=sneaky)
         ):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("unexpected harness construction conflict shape", result.stderr)
@@ -191,12 +226,9 @@ class SpliceResolverTests(unittest.TestCase):
 
     def test_rejects_extra_block_in_harness(self):
         extra = "<<<<<<< ours\n\tx?: number;\n=======\n\ty?: number;\n>>>>>>> theirs\n"
-        for directory, result, index_before in self.run_with_conflicts(
-            {
-                MANAGER_REL: manager_source(),
-                HARNESS_REL: harness_source() + extra,
-            }
-        ):
+        fixture = full_fixture()
+        fixture[HARNESS_REL] += extra
+        for directory, result, index_before in self.run_with_conflicts(fixture):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("unexpected harness conflict count", result.stderr)
             self.assertIn(f"3\t{HARNESS_REL}", index_state(directory))
@@ -204,12 +236,7 @@ class SpliceResolverTests(unittest.TestCase):
     def test_rejects_extra_block_in_manager(self):
         extra = "<<<<<<< ours\n\tfooSync,\n=======\n>>>>>>> theirs\n"
         for directory, result, index_before in self.run_with_conflicts(
-            {
-                MANAGER_REL: manager_source(
-                    block=MANAGER_BLOCK + "\tbarSync,\n" + extra
-                ),
-                HARNESS_REL: harness_source(),
-            }
+            full_fixture(manager_block=MANAGER_BLOCK + "\tbarSync,\n" + extra)
         ):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("unexpected session-manager conflict count", result.stderr)
@@ -219,10 +246,7 @@ class SpliceResolverTests(unittest.TestCase):
     def test_rejects_missing_rmSync(self):
         wrong = MANAGER_BLOCK.replace("\trmSync,\n", "\tfooSync,\n")
         for directory, result, index_before in self.run_with_conflicts(
-            {
-                MANAGER_REL: manager_source(block=wrong),
-                HARNESS_REL: harness_source(),
-            }
+            full_fixture(manager_block=wrong)
         ):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("unexpected session-manager import conflict shape", result.stderr)
@@ -234,10 +258,7 @@ class SpliceResolverTests(unittest.TestCase):
             "\trmSync,\n", "\trmSync,\n\tbackdoorSync,\n"
         )
         for directory, result, index_before in self.run_with_conflicts(
-            {
-                MANAGER_REL: manager_source(block=sneaky_manager),
-                HARNESS_REL: harness_source(),
-            }
+            full_fixture(manager_block=sneaky_manager)
         ):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("unexpected session-manager import conflict shape", result.stderr)
@@ -245,10 +266,18 @@ class SpliceResolverTests(unittest.TestCase):
 
     def test_rejects_malformed_separator(self):
         malformed = MANAGER_BLOCK.replace("=======\n", "======= unknown content\n")
-        for _, result, _ in self.run_with_conflicts(
-            {MANAGER_REL: manager_source(block=malformed), HARNESS_REL: harness_source()}
+        for _, result, _ in self.run_with_conflicts(full_fixture(manager_block=malformed)):
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_rejects_altered_test_import(self):
+        altered = TEST_BLOCK.replace("readFileSync, ", "")
+        for directory, result, index_before in self.run_with_conflicts(
+            full_fixture(test_block=altered)
         ):
             self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unexpected tree-traversal fs import conflict shape", result.stderr)
+            self.assertIn("<<<<<<<", (directory / TEST_REL).read_text())
+            self.assertEqual(index_state(directory), index_before)
 
 
 if __name__ == "__main__":
