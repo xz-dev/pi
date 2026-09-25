@@ -1,6 +1,17 @@
 禁止向上游（earendil-works/pi）发送任何信息，包括但不限于 issues、PR、评论、review。
 
-作为下游发行版，changelog 审阅步骤 `/cl` 对我们永远不需要执行 — 我们维护 downstream CHANGELOG/文档在自己的分支上，上游 changelog 已在上游发版时审阅过。发版直接进入 `npm run release:patch|minor` 步骤，不要停下来问 /cl 状态。
+作为下游发行版，changelog 审阅步骤 `/cl` 对我们永远不需要执行 — 我们维护 downstream CHANGELOG/文档在自己的分支上，上游 changelog 已在上游发版时审阅过。
+
+## 禁止本地发版/版本 bump — 版本号永远跟随上游
+
+下游**绝不**运行 `npm run release:patch|minor|major`、`npm version`，也不在 main 上 commit 版本 bump 或 `Release vX.Y.Z` 提交。原因：
+
+- 基础版本号（`0.87.x`）唯一来源是 `packages/*/package.json` 的 `version` 字段，由**上游 release** bump，经 upstream-sync squash 流入我们的 main。
+- 下游发布是 **CI 自动的**：每次 main push，`publish-github-release.yml` 用 `package.json.version + "-xz." + GITHUB_RUN_NUMBER + "." + ATTEMPT + ".g" + SHA` 生成 tag 并发布。run number 单调递增，无需人工发版。
+- main 由 sync workflow 重建（upstream + patch 分支 squash），main-only 的 `Release vX.Y.Z` commit 会在下次重建时被丢弃 → package.json 版本回退 → 后续 publish 产出更低 semver 的更新构建 → GitHub 将其标为 Latest → `pi update self` 因 `latest < current` 拒绝安装 → 用户永久卡在旧版。
+- 若误发了一个高 semver 的下游 release（如 `0.87.2-xz.210` 在上游仍是 `0.87.1` 时），必须删除该 GitHub Release + 其 `xz-v*` tag + 对应本地/远端 `v*` tag，否则版本链断裂后所有用户无法 update。
+
+下游需要"发版"时的正确动作：直接触发 sync（`gh workflow run "Upstream Sync" --ref ci`），或等下一次 upstream sync。修复随 sync 后的 publish workflow 自动上线，不需要任何版本号操作。
 
 # Known Pre-existing Failures — Always Ignore
 
