@@ -1200,6 +1200,7 @@ PY
 		if ! git apply --3way --index "$TMPDIR_WORK/session-tree-splice.patch"; then
 			ensure_conflicts_are patch/session-tree-splice \
 				packages/coding-agent/src/core/session-manager.ts \
+				packages/coding-agent/test/session-manager/tree-traversal.test.ts \
 				packages/coding-agent/test/suite/harness.ts
 			python3 "$HELPER_DIR/resolve-session-tree-splice-conflicts.py" ||
 				{ echo '::group::sts conflict dump' >&2; git diff --diff-filter=U | head -120 >&2; echo '::endgroup::' >&2; die "session-tree-splice resolver failed"; }
