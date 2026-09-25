@@ -71,7 +71,7 @@ patch/contributor-approval 57928a38185ca3e73d26d5fde1cbd7184f676fef
 patch/model-startup-refresh-barrier 4e3b3636da9353ab52753b5435192d35d565efe9
 patch/model-refresh-session-rebind 3794c35463fef7530976f3616deaa749753b4732
 patch/model-catalog-extension-refresh e3e2b9dccc426af364fa17cb4645427ec0d6b40e
-patch/bun-bytecode-entrypoint a199f54b1c9f13cb1b2455d20bf3923201020d97
+patch/bun-bytecode-entrypoint bee6bbca6c
 patch/startup-benchmark-exit 42b103738f77bb4c709caa1d4c8df7110264c39e
 patch/native-wrapper-release 65281278ed2bdd966bec63e5406b3fb4948a99d7
 patch/update-clean c66b86b5677da578a25be1914125aa6720a8ccbf
