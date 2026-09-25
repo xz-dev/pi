@@ -178,6 +178,8 @@ export interface Settings {
 	cacheWarming?: CacheWarmingMode; // default: "streaming"; global only because each refresh costs money
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 	models?: ModelCatalogSettings;
+	slowHookThresholdMs?: number; // Extension hook duration warning threshold in milliseconds; default: 0 (disabled); >0 enables slow-hook notices in interactive TUI
+	showStartupDiagnostics?: boolean; // Show [Skill conflicts]/[Extension issues]/[Prompt conflicts]/[Theme conflicts] blocks at startup; default: false
 	tuiMode?: TuiMode; // default: "regular"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular TUI mode
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
@@ -1100,6 +1102,18 @@ export class SettingsManager {
 		this.globalSettings.models.refreshTimeoutMs = Math.floor(timeoutMs);
 		this.markModified("models", "refreshTimeoutMs");
 		this.save();
+	}
+
+	getSlowHookThresholdMs(): number {
+		try {
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? 0;
+		} catch {
+			return 0;
+		}
+	}
+
+	getShowStartupDiagnostics(): boolean {
+		return this.settings.showStartupDiagnostics ?? false;
 	}
 
 	getHideThinkingBlock(): boolean {
