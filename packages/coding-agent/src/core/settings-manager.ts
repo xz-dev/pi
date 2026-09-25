@@ -165,7 +165,8 @@ export interface Settings {
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	cacheWarming?: CacheWarmingMode; // default: "streaming"; global only because each refresh costs money
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
-	slowHookThresholdMs?: number; // Extension hook duration warning threshold in milliseconds; default: 100
+	slowHookThresholdMs?: number; // Extension hook duration warning threshold in milliseconds; default: 0 (disabled); >0 enables slow-hook notices in interactive TUI
+	showStartupDiagnostics?: boolean; // Show [Skill conflicts]/[Extension issues]/[Prompt conflicts]/[Theme conflicts] blocks at startup; default: false
 	tuiMode?: TuiMode; // default: "regular"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular TUI mode
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
@@ -1076,10 +1077,14 @@ export class SettingsManager {
 
 	getSlowHookThresholdMs(): number {
 		try {
-			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? 100;
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? 0;
 		} catch {
-			return 100;
+			return 0;
 		}
+	}
+
+	getShowStartupDiagnostics(): boolean {
+		return this.settings.showStartupDiagnostics ?? false;
 	}
 
 	getHideThinkingBlock(): boolean {
