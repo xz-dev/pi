@@ -1,5 +1,7 @@
 禁止向上游（earendil-works/pi）发送任何信息，包括但不限于 issues、PR、评论、review。
 
+作为下游发行版，changelog 审阅步骤 `/cl` 对我们永远不需要执行 — 我们维护 downstream CHANGELOG/文档在自己的分支上，上游 changelog 已在上游发版时审阅过。发版直接进入 `npm run release:patch|minor` 步骤，不要停下来问 /cl 状态。
+
 # Known Pre-existing Failures — Always Ignore
 
 The pre-commit hook (`npm run check` → `tsgo --noEmit`) fails with model-catalog type errors in `packages/ai/test/*` (e.g. `"..." is not assignable to parameter of type ...`). Cause: test fixtures reference model IDs from models.dev's live catalog, which renames/retires models faster than the branch baseline tracks. These errors:
