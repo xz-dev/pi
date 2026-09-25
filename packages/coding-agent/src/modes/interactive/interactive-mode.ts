@@ -1957,7 +1957,9 @@ export class InteractiveMode {
 		this.loadedResourcesContainer.clear();
 
 		const showListing = options?.force || this.shouldShowStartupDetails();
-		const showDiagnostics = showListing || options?.showDiagnosticsWhenQuiet === true;
+		const showDiagnostics =
+			(showListing || options?.showDiagnosticsWhenQuiet === true) &&
+			(this.settingsManager.getShowStartupDiagnostics?.() ?? false);
 		if (!showListing && !showDiagnostics) {
 			return;
 		}
@@ -2269,11 +2271,14 @@ export class InteractiveMode {
 	}
 
 	private showRuntimeDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void {
+		const showStartupDiagnostics = this.settingsManager?.getShowStartupDiagnostics?.() ?? false;
 		for (const diagnostic of diagnostics) {
 			if (diagnostic.type === "error") {
 				this.showError(diagnostic.message);
 			} else if (diagnostic.type === "warning") {
-				this.showWarning(diagnostic.message);
+				if (showStartupDiagnostics || !diagnostic.message.startsWith("Extension package ")) {
+					this.showWarning(diagnostic.message);
+				}
 			} else {
 				this.showStatus(diagnostic.message);
 			}
