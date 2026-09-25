@@ -32,31 +32,8 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 | `defaultThinkingLevel` | string | - | Startup thinking level (saved with Ctrl+S in `/thinking`, or edited manually): `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `modelThinkingLevels` | object | - | Per-model startup thinking levels keyed by `"provider/modelId"`; configure from `/settings` → Default thinking level per model or edit manually |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
-| `showCacheMissNotices` | boolean | `false` | Show transcript notices for significant prompt-cache misses, successful cache-warming usage, compaction or branch-summary usage, and provider recovery diagnostics such as dropped Anthropic thinking blocks |
+| `showCacheMissNotices` | boolean | `false` | Show transcript notices for significant prompt-cache misses, compaction or branch-summary usage, and provider recovery diagnostics such as dropped Anthropic thinking blocks |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level. Anthropic, Google, and Bedrock use these natively. OpenAI-compatible models use them when `compat.thinkingTokenBudgetField` (or `supportsThinkingTokenBudget`) is set. |
-| `cacheWarming` | string | `"streaming"` | Prompt cache-warming mode: `"off"`, `"streaming"`, or `"idle"`. Global setting only. |
-
-#### Cache Warming
-
-Providers drop a prompt cache entry after a period of inactivity, so the first request after a pause pays full input price again. Cache warming re-sends the last request with a one-token output budget shortly before expiry:
-
-- `"off"` disables warming.
-- `"streaming"` protects expensive prefixes during long tool executions and stops as soon as the agent settles.
-- `"idle"` also considers refreshes while waiting for your next prompt, using a fixed 15% continuation probability measured from real usage.
-
-```json
-{
-  "cacheWarming": "idle"
-}
-```
-
-A refresh is sent only when the expected avoided cache-miss cost, minus the cost of the refresh, leaves at least $0.05 of expected savings. Active agent runs use 100% continuation probability. `/session` shows the next decision, continuation probability, expected savings, threshold, and estimated costs. When cache miss notices are enabled, each successful refresh appears in the transcript with its cost; notices identify extension overrides.
-
-Warming stops when the context changes (model switch, compaction, branch navigation). Idle warming stops no later than 30 minutes after the last real provider request; warming during an active agent run stops after 60 minutes. Extensions can override each decision through the [`cache_warming_decision`](extensions.md#cache_warming_decision) event.
-
-Each refresh is billed as a cache read of the full context plus one output token. Usage and cost show up in session totals but never enter model context. Pi schedules candidates at 90% of the cache lifetime while leaving at least ten seconds before expiry.
-
-Warming needs a known cache lifetime for the model and the retention tier the request used (`short`, or `long` with `PI_CACHE_RETENTION=long`). The built-in catalog carries lifetimes for direct Anthropic; custom models and other providers can declare theirs with `promptCache` in `models.json` (see [Prompt Cache Lifetimes](models.md#prompt-cache-lifetimes)). Claude models that use budget-based rather than adaptive thinking are skipped while thinking is on, because Anthropic derives the thinking budget from `max_tokens` and keys the message cache on it, so a one-token request cannot reproduce the entry.
 
 #### thinkingBudgets
 
@@ -141,7 +118,6 @@ Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--off
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
-| `compaction.modelOverrides` | object | - | Per-model `reserveTokens` and `keepRecentTokens` overrides keyed by exact `"provider/modelId"` |
 
 ```json
 {
@@ -152,37 +128,6 @@ Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--off
   }
 }
 ```
-
-#### Per-model compaction overrides
-
-```json
-{
-  "compaction": {
-    "enabled": true,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000,
-    "modelOverrides": {
-      "some-provider/big-model": {
-        "reserveTokens": 400000
-      },
-      "local/small-model": {
-        "reserveTokens": 2048,
-        "keepRecentTokens": 4096
-      }
-    }
-  }
-}
-```
-
-Keys match exact, case-sensitive `provider/modelId` values, not names or glob patterns. Model IDs may contain slashes (for example, `openrouter/anthropic/claude-sonnet-4`).
-
-Each token setting resolves independently: matching model override → ordinary `compaction` setting → built-in default. In the example, `some-provider/big-model` keeps the ordinary 20000 recent tokens. Token values must be non-negative safe integers. Invalid values in the matching model override produce an error when read; only omitted fields fall back to the ordinary setting. Model override entries must be objects. Invalid ordinary token settings produce an error when read, even if the active model has a valid override. Only omitted ordinary values use built-in defaults. Zero is accepted, but `reserveTokens: 0` leaves no response margin and also sets the summarization output budget to zero.
-
-Global and project settings merge recursively **before** model lookup. A project can override one field for a model without replacing its other fields or other models. A global model-specific value takes precedence over a project-wide fallback; override the same model entry in the project to change it.
-
-`enabled` is not model-specific. The active model's token settings apply to manual compaction, automatic threshold checks (including between assistant turns), and overflow recovery. Switching models takes effect on the next check or compaction. Configure overrides in JSON; `/settings` retains the ordinary auto-compaction toggle.
-
-See [compaction.md](compaction.md) for trigger and summarization behavior.
 
 ### Branch Summary
 
@@ -234,7 +179,6 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
 | `httpIdleTimeoutMs` | number | `300000` | HTTP header/body idle timeout in milliseconds, also used by providers with explicit stream idle timeouts. Set to `0` to disable. |
 | `websocketConnectTimeoutMs` | number | `15000` | WebSocket connect/open handshake timeout in milliseconds for providers that support WebSocket transports. Set to `0` to disable. |
-| `models.refreshTimeoutMs` | number | `60000` | Timeout in milliseconds for model-catalog refresh operations (startup, `--refresh`, `/model`, post-login, `pi update --models`). Set to `0` to disable. |
 
 ### Terminal & Images
 
@@ -255,7 +199,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 |---------|------|---------|-------------|
 | `shellPath` | string | - | Custom shell path (e.g., for Cygwin on Windows); supports a leading `~` for the home directory |
 | `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
-| `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
+| `npmCommand` | string[] | Distribution default | Explicit command argv for extension package-manager operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`); takes precedence over embedded Bun |
 
 Windows paths in JSON must use forward slashes or escaped backslashes:
 
@@ -278,6 +222,8 @@ Windows paths in JSON must use forward slashes or escaped backslashes:
 ```
 
 `npmCommand` is used for all npm package-manager operations, including installs, uninstalls, and dependency installs inside git packages. User-scoped npm packages install under `~/.pi/agent/npm/`; project-scoped npm packages install under `.pi/npm/`. Use argv-style entries exactly as the process should be launched. When `npmCommand` is configured, git package dependency installs use plain `install` to avoid npm-specific flags in wrappers or alternate package managers.
+
+With `npmCommand` unset or `[]`, only xz-dev Bun-compiled standalone Pi defaults to embedded Bun via public `pi` on `PATH`, even if npm is available. `BUN_BE_BUN=1` is added only to those package-manager children, never to explicit overrides. Other installations default to npm. Set `"npmCommand": ["npm"]` to use external npm; `[""]` is invalid. This does not change Pi self-update. See [package-manager selection](packages.md#package-manager-selection) for PATH requirements and Bun's registry, lockfile, script, and native-dependency compatibility limits.
 
 ### Tools
 
