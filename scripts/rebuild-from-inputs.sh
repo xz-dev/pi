@@ -216,6 +216,7 @@ PATCH_ORDER=(
 	model-selector-refresh-selection
 	ai-drop-empty-messages
 	compaction-test-exclusion
+	quarantine-auth-storage-flake
 )
 
 # --- argument parsing ---------------------------------------------------------
