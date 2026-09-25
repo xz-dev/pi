@@ -1010,10 +1010,14 @@ export class SettingsManager {
 
 	getSlowHookThresholdMs(): number {
 		try {
-			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? 100;
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? 0;
 		} catch {
-			return 100;
+			return 0;
 		}
+	}
+
+	getShowStartupDiagnostics(): boolean {
+		return this.settings.showStartupDiagnostics ?? false;
 	}
 
 	getHideThinkingBlock(): boolean {
