@@ -741,7 +741,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
-			modelRuntimeTimeoutMs: 15_000,
+			modelRuntimeTimeoutMs: runtimeSettingsManager.getModelRefreshTimeoutMs(),
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
 				? {
@@ -800,7 +800,9 @@ export async function main(args: string[], options?: MainOptions) {
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0
-				? await resolveModelScope(modelPatterns, modelRuntime, { signal: AbortSignal.timeout(15_000) })
+				? await resolveModelScope(modelPatterns, modelRuntime, {
+					signal: AbortSignal.timeout(settingsManager.getModelRefreshTimeoutMs()),
+				})
 				: [];
 		const {
 			options: sessionOptions,
@@ -886,7 +888,7 @@ export async function main(args: string[], options?: MainOptions) {
 				const result = await modelRuntime.refresh({
 					allowNetwork: true,
 					force: true,
-					signal: AbortSignal.timeout(15_000),
+					signal: AbortSignal.timeout(settingsManager.getModelRefreshTimeoutMs()),
 				});
 				if (result.aborted) {
 					console.error(chalk.red("Error: Model catalog refresh timed out; showing cached models."));
@@ -903,7 +905,7 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 		}
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
-		await listModels(modelRuntime, searchPattern, AbortSignal.timeout(15_000));
+		await listModels(modelRuntime, searchPattern, AbortSignal.timeout(settingsManager.getModelRefreshTimeoutMs()));
 		process.exit(refreshFailed ? 1 : 0);
 	}
 
@@ -957,7 +959,7 @@ export async function main(args: string[], options?: MainOptions) {
 	// RPC refreshes catalogs here in the background; interactive mode starts its refresh after TUI initialization.
 	if (!offlineMode && appMode === "rpc") {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 15_000);
+		const timeout = setTimeout(() => controller.abort(), settingsManager.getModelRefreshTimeoutMs());
 		void modelRuntime
 			.refresh({ signal: controller.signal })
 			.catch(() => {})
