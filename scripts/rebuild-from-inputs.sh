@@ -95,6 +95,7 @@ patch/model-selector-refresh-selection 8f582eb8df619f3d32899d0d78433cb841e26573
 patch/ai-drop-empty-messages 37f145b54ec4cd4b1f1d2b0066fedd3b1c7713de
 patch/compaction-test-exclusion cfa24a33672f03d5e88888123ead7d4cdc636bda
 patch/quarantine-auth-storage-flake b9ab213dc9676f1f527b6ea709284c3350907378
+patch/vitest-audit-fix 559232f68ef83ac305bd775a31b5dc0d42aa5ee9
 EOF
 
 # Explicit accumulated compat bases. These steps consume a recorded
@@ -217,6 +218,7 @@ PATCH_ORDER=(
 	ai-drop-empty-messages
 	compaction-test-exclusion
 	quarantine-auth-storage-flake
+	vitest-audit-fix
 )
 
 # --- argument parsing ---------------------------------------------------------
@@ -1250,6 +1252,16 @@ PY
 		merge_squash quarantine-auth-storage-flake "merge patch/quarantine-auth-storage-flake branch"
 		grep -Fq 'test.skip("keeps a coalesced reload alive while another credential reader is waiting"' \
 			packages/coding-agent/test/auth-storage.test.ts
+	fi
+
+	# 30 vitest-audit-fix — devDependency bump only (vitest/@vitest/coverage-v8
+	# 4.1.9 -> 4.1.11, GHSA-82fw-gwwq-j7x9). Carries package-lock.json +
+	# coding-agent npm-shrinkwrap.json; must merge last so no later patch's
+	# lockfile delta conflicts with it.
+	if active vitest-audit-fix; then
+		CURRENT_STEP=vitest-audit-fix
+		merge_squash vitest-audit-fix "merge patch/vitest-audit-fix branch"
+		grep -Fq '"vitest": "4.1.11"' packages/coding-agent/package.json
 	fi
 
 	commit_input_marker
