@@ -16,7 +16,8 @@ import subprocess
 
 MANAGER_PATH = "packages/coding-agent/src/core/session-manager.ts"
 HARNESS_PATH = "packages/coding-agent/test/suite/harness.ts"
-EXPECTED = frozenset({MANAGER_PATH, HARNESS_PATH})
+TEST_PATH = "packages/coding-agent/test/session-manager/tree-traversal.test.ts"
+EXPECTED = frozenset({MANAGER_PATH, HARNESS_PATH, TEST_PATH})
 
 
 def list_conflicts() -> frozenset:
@@ -96,6 +97,14 @@ HARNESS_CONSTRUCT_MERGED = [
     '\t\t(options.persist ? SessionManager.create(tempDir, join(tempDir, "sessions")) : SessionManager.inMemory());\n',
 ]
 
+# Upstream removed readFileSync from the fs import after rewriting the fork
+# tests; the spliceEntry tests still need it plus chmodSync/writeFileSync, so
+# the postimage line is the union and resolves the single import conflict.
+TEST_IMPORT_OURS = ['import { existsSync, mkdirSync, rmSync } from "fs";\n']
+TEST_IMPORT_THEIRS = [
+    'import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";\n'
+]
+
 
 def expect(block: list[list[str]], ours: list[str], theirs: list[str], label: str) -> None:
     if block[0] != ours or block[1] != theirs:
@@ -135,7 +144,19 @@ def main() -> None:
 
     Path(MANAGER_PATH).write_text(manager_resolved)
     Path(HARNESS_PATH).write_text(harness_resolved)
-    subprocess.run(["git", "add", MANAGER_PATH, HARNESS_PATH], check=True)
+
+    test_text = Path(TEST_PATH).read_text()
+    test_blocks = blocks(test_text, TEST_PATH)
+    if len(test_blocks) != 1:
+        raise SystemExit(f"unexpected tree-traversal conflict count: {len(test_blocks)}")
+    expect(test_blocks[0], TEST_IMPORT_OURS, TEST_IMPORT_THEIRS, "tree-traversal fs import")
+    test_resolved = resolve(test_text, TEST_PATH, [TEST_IMPORT_THEIRS])
+    for required in ('describe("spliceEntry"', "readSessionFileRoles", "writeFileSync"):
+        if required not in test_resolved:
+            raise SystemExit(f"tree-traversal resolved content missing {required!r}")
+    Path(TEST_PATH).write_text(test_resolved)
+
+    subprocess.run(["git", "add", MANAGER_PATH, HARNESS_PATH, TEST_PATH], check=True)
 
 
 if __name__ == "__main__":
