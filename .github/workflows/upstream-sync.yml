@@ -1,0 +1,357 @@
+name: "Upstream Sync"
+
+on:
+  schedule:
+    - cron: "28 5,17 * * *"
+    # scheduled at 13:28 and 01:28 Asia/Shanghai (UTC+8)
+  workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: "Optional full upstream commit for a verified fixed-input replay"
+        required: false
+        type: string
+      expected_inputs_sha256:
+        description: "Optional SHA-256 of the approved --print-marker output"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync-main-with-squash-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebuild main from upstream and squash branches
+        env:
+          PINNED_UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+          EXPECTED_INPUTS_SHA256: ${{ inputs.expected_inputs_sha256 }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          echo "EXPECTED_MAIN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git remote add upstream https://github.com/earendil-works/pi.git
+          git fetch upstream main
+          upstream_sha="$(git rev-parse upstream/main)"
+          if [[ -n "$PINNED_UPSTREAM_SHA" ]]; then
+            [[ "$PINNED_UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Invalid pinned upstream SHA'; exit 1; }
+            git fetch upstream "$PINNED_UPSTREAM_SHA"
+            git merge-base --is-ancestor "$PINNED_UPSTREAM_SHA" upstream/main
+            upstream_sha="$PINNED_UPSTREAM_SHA"
+          fi
+          git fetch origin \
+            +refs/heads/ci:refs/remotes/origin/ci \
+            +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
+            +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
+            +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
+            +refs/heads/patch/model-refresh-session-rebind-on-accumulated:refs/remotes/origin/patch/model-refresh-session-rebind-on-accumulated \
+            +refs/heads/patch/model-catalog-extension-refresh:refs/remotes/origin/patch/model-catalog-extension-refresh \
+            +refs/heads/patch/bun-bytecode-entrypoint:refs/remotes/origin/patch/bun-bytecode-entrypoint \
+            +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
+            +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
+            +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
+            +refs/heads/patch/bundle-usage-claims:refs/remotes/origin/patch/bundle-usage-claims \
+            +refs/heads/patch/use-embedded-bun-package-manager:refs/remotes/origin/patch/use-embedded-bun-package-manager \
+            +refs/heads/patch/git-package-storage:refs/remotes/origin/patch/git-package-storage \
+            +refs/heads/patch/model-refresh-timeout:refs/remotes/origin/patch/model-refresh-timeout \
+            +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
+            +refs/heads/patch/agent-run-failure-seam-on-accumulated:refs/remotes/origin/patch/agent-run-failure-seam-on-accumulated \
+            +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
+            +refs/heads/patch/managed-tool-executions-on-accumulated:refs/remotes/origin/patch/managed-tool-executions-on-accumulated \
+            +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
+            +refs/heads/patch/esc-abort-on-accumulated:refs/remotes/origin/patch/esc-abort-on-accumulated \
+            +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
+            +refs/heads/patch/manual-retry-on-accumulated:refs/remotes/origin/patch/manual-retry-on-accumulated \
+            +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
+            +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
+            +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
+            +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
+            +refs/heads/patch/slow-hook-on-accumulated:refs/remotes/origin/patch/slow-hook-on-accumulated \
+            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
+            +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
+            +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
+            +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
+            +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
+            +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
+            +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion \
+            +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake
+
+          # Driver source: the replay script is reviewed ci content, never a
+          # stale generated-main copy. Restore it and its workflow self-check
+          # input from the same fetched origin/ci snapshot; resolver helpers are extracted inside the
+          # script from the immutable ci commit itself (no worktree overlay),
+          # so this checkout is only the launcher.
+          git checkout origin/ci -- scripts/rebuild-from-inputs.sh .github/workflows/upstream-sync.yml
+          chmod +x scripts/rebuild-from-inputs.sh
+
+          # Freeze the fetched inputs as fixed full SHAs, then hand exactly those
+          # SHAs to the shared replay script (single source of truth for the
+          # integration order; local diagnosis runs the same script). No ref is
+          # read after capture, so a mid-run remote move cannot change inputs.
+          rebuild_args=(
+            --upstream "$upstream_sha"
+            --ci "$(git rev-parse origin/ci)"
+          )
+          for ref in \
+            contributor-approval \
+            model-startup-refresh-barrier \
+            model-refresh-session-rebind \
+            model-refresh-session-rebind-on-accumulated \
+            model-catalog-extension-refresh \
+            bun-bytecode-entrypoint \
+            startup-benchmark-exit \
+            native-wrapper-release \
+            update-clean \
+            bundle-usage-claims \
+            use-embedded-bun-package-manager \
+            git-package-storage \
+            model-refresh-timeout \
+            agent-run-failure-seam \
+            agent-run-failure-seam-on-accumulated \
+            managed-tool-executions \
+            managed-tool-executions-on-accumulated \
+            esc-abort \
+            esc-abort-on-accumulated \
+            manual-retry \
+            manual-retry-on-accumulated \
+            changelog-prerelease \
+            skill-overrides \
+            retry-non-retryable-patterns \
+            slow-hook-tui-only \
+            slow-hook-on-accumulated \
+            session-tree-splice \
+            ws-cached-empty-delta \
+            self-update-managed-by \
+            google-toomany-toolcalls \
+            model-selector-refresh-selection \
+            ai-drop-empty-messages \
+            compaction-test-exclusion \
+            quarantine-auth-storage-flake \
+          ; do
+            rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
+          done
+
+          # Skip the rebuild only when the exact recorded input vector already
+          # matches HEAD's marker commit. A partial/prefixed replay records a
+          # distinct "record upstream sync inputs (partial through <step>)"
+          # subject, so it can never satisfy this complete-vector key.
+          scripts/rebuild-from-inputs.sh --check
+          marker_file="$RUNNER_TEMP/rebuilt-inputs-marker.txt"
+          scripts/rebuild-from-inputs.sh "${rebuild_args[@]}" --print-marker > "$marker_file"
+          if [[ -n "$EXPECTED_INPUTS_SHA256" ]]; then
+            [[ "$EXPECTED_INPUTS_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo '::error::Invalid input vector digest'; exit 1; }
+            actual_digest="$(sha256sum "$marker_file" | cut -d ' ' -f 1)"
+            [[ "$actual_digest" == "$EXPECTED_INPUTS_SHA256" ]] || { echo '::error::Fetched inputs differ from the approved vector'; exit 1; }
+          fi
+          if [[ "$(git show -s --format=%B HEAD)" == "$(< "$marker_file")" ]]; then
+            echo 'Upstream and all enabled overlay tips already match main; skipping rebuild'
+            exit 0
+          fi
+
+          # The replay runs in a fresh standalone scratch clone this step owns;
+          # the checked-out main stays untouched until the explicit adoption
+          # below. Publication still requires --force-with-lease on
+          # EXPECTED_MAIN_SHA.
+          scratch_target="$RUNNER_TEMP/rebuilt-main"
+          scripts/rebuild-from-inputs.sh --source "$GITHUB_WORKSPACE" --target "$scratch_target" "${rebuild_args[@]}"
+
+          # Explicit adoption: the rebuilt tip becomes this job's main. The
+          # scratch clone is a standalone repository; adopting its HEAD cannot
+          # move source refs and the subsequent gates run on the adopted tree.
+          rebuilt_sha="$(git -C "$scratch_target" rev-parse HEAD)"
+          git fetch "$scratch_target" HEAD
+          git reset --hard "$rebuilt_sha"
+
+      - name: Install dependencies for pre-push gates
+        run: npm ci --ignore-scripts
+
+      - name: Hydrate model data for pre-push gates
+        run: npm run hydrate:model-data
+
+      - name: Build rebuilt main
+        run: npm run build
+
+      - name: Check rebuilt main
+        run: |
+          # biome check --write may apply formatting fixes to merged files
+          # (union resolutions can produce non-canonical layout). Apply them
+          # first as a formatting commit; npm run check then verifies the
+          # tree stays clean.
+          npx biome check --write --error-on-warnings . >/dev/null 2>&1 || true
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "style: apply post-merge formatting"
+          fi
+          npm run check
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf '::error::Check mutated rebuilt main\n%s\n' "$status"
+            git diff --stat
+            git diff --name-status
+            exit 1
+          fi
+          # A formatting commit must not hide the exact complete-vector skip
+          # marker. Re-record it only after the formatted tree passes check.
+          if [[ "$(git show -s --format=%B HEAD)" != "$(< "$RUNNER_TEMP/rebuilt-inputs-marker.txt")" ]]; then
+            git commit --allow-empty -F "$RUNNER_TEMP/rebuilt-inputs-marker.txt"
+          fi
+
+      - name: Setup Zig for native fixture tests
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.15.2
+
+      - name: Install test system dependencies
+        # Upstream ci.yml installs these before npm test; grep/find tool tests need them.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fd-find ripgrep
+          sudo ln -sf $(which fdfind) /usr/local/bin/fd
+
+      - name: Run focused integration tests
+        run: |
+          npx vitest run \
+            packages/coding-agent/test/extensions-discovery.test.ts \
+            --testNamePattern 'loads the coding-agent entrypoint without rewriting pi-ai provider subpaths' \
+            --testTimeout 15000
+          (
+            cd packages/ai
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/event-stream.test.ts \
+              test/openai-responses-compat.test.ts \
+              test/google-stop-reason-exhaustive.test.ts \
+              test/providers.test.ts \
+              test/retry.test.ts
+          )
+          (
+            cd packages/agent
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/agent-loop.test.ts \
+              test/agent.test.ts \
+              test/managed-tool-executions.test.ts \
+              test/managed-tool-executions-esc-abort.test.ts
+          )
+          # Run the full coding-agent suite with vitest auto-discovery, matching
+          # upstream CI (npm test -> vitest --run). The integrated
+          # patch/compaction-test-exclusion config owns the runner-sensitive
+          # exclusion so sync, normal CI, and release validation share one policy.
+          (
+            cd packages/coding-agent
+            node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts
+          )
+          node --test --test-reporter=dot \
+            packages/tui/test/tui-render.test.ts
+
+      - name: Smoke test packed npm release
+        run: |
+          release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-packed-release.XXXXXX")
+          trap 'rm -rf -- "$release_dir"' EXIT
+          node scripts/local-release.mjs \
+            --out "$release_dir" \
+            --force \
+            --skip-check \
+            --skip-test \
+            --skip-binary \
+            --skip-bun-install
+          (
+            cd "$RUNNER_TEMP"
+            "$release_dir/node/pi" --version
+          )
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Test release packaging scripts
+        run: npm run test:scripts
+
+      - name: Test squash conflict resolvers
+        run: |
+          python3 scripts/resolve-embedded-bun-squash-conflicts.test.py
+          python3 scripts/resolve-session-tree-splice-conflicts.test.py
+
+      - name: Install Linux smoke display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxcb1
+
+      - name: Smoke test host binary packaging path
+        run: |
+          set -euo pipefail
+          release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-host-binary.XXXXXX")
+          xvfb_pid=""
+          cleanup() {
+            if [[ -n "$xvfb_pid" ]]; then
+              kill "$xvfb_pid" >/dev/null 2>&1 || true
+              wait "$xvfb_pid" >/dev/null 2>&1 || true
+            fi
+            rm -rf -- "$release_dir"
+          }
+          trap cleanup EXIT
+          rebuilt_sha=$(git rev-parse HEAD)
+          version=$(REBUILT_SHA="$rebuilt_sha" node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.REBUILT_SHA.slice(0, 8)')
+          scripts/build-binaries.sh \
+            --skip-install \
+            --skip-deps \
+            --skip-build \
+            --platform linux-x64-gnu-modern \
+            --out "$release_dir" \
+            --distribution-version "$version"
+          archive="$release_dir/pi-linux-x64-gnu-modern.zip"
+          test -s "$archive"
+          Xvfb :99 -screen 0 1024x768x24 -nolisten tcp -ac >"$RUNNER_TEMP/pi-host-xvfb.log" 2>&1 &
+          xvfb_pid=$!
+          for _ in {1..50}; do
+            [[ -S /tmp/.X11-unix/X99 ]] && break
+            sleep 0.1
+          done
+          test -S /tmp/.X11-unix/X99
+          DISPLAY=:99 node scripts/smoke-binary-release.mjs \
+            "$archive" \
+            linux-x64-gnu-modern \
+            "$version" \
+            "$release_dir/linux-x64-gnu-modern-smoke.json"
+
+      # Temporary soft gate: current upstream transitive advisories (brace-expansion,
+      # undici) fail --audit-level=moderate and would block every main rebuild.
+      # Re-harden after a dependency remediation patch or upstream lockfile fix lands.
+      - name: Audit production dependencies
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Audit all dependencies
+        continue-on-error: true
+        run: npm audit --audit-level=moderate
+
+      - name: Verify production dependency signatures
+        continue-on-error: true
+        run: npm audit signatures --omit=dev
+
+      - name: Require sync workflow token
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          test -n "${PUSH_TOKEN}" || {
+            echo "::error::SYNC_WORKFLOW_TOKEN is required because GITHUB_TOKEN pushes do not trigger downstream workflows"
+            exit 1
+          }
+
+      - name: Push rebuilt main
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN }}
+        run: |
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease="refs/heads/main:${EXPECTED_MAIN_SHA}" origin HEAD:main

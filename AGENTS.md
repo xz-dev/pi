@@ -1,4 +1,52 @@
+禁止向上游（earendil-works/pi）发送任何信息，包括但不限于 issues、PR、评论、review。
+
+作为下游发行版，changelog 审阅步骤 `/cl` 对我们永远不需要执行 — 我们维护 downstream CHANGELOG/文档在自己的分支上，上游 changelog 已在上游发版时审阅过。
+
+## 禁止本地发版/版本 bump — 版本号永远跟随上游
+
+下游**绝不**运行 `npm run release:patch|minor|major`、`npm version`，也不在 main 上 commit 版本 bump 或 `Release vX.Y.Z` 提交。原因：
+
+- 基础版本号（`0.87.x`）唯一来源是 `packages/*/package.json` 的 `version` 字段，由**上游 release** bump，经 upstream-sync squash 流入我们的 main。
+- 下游发布是 **CI 自动的**：每次 main push，`publish-github-release.yml` 用 `package.json.version + "-xz." + GITHUB_RUN_NUMBER + "." + ATTEMPT + ".g" + SHA` 生成 tag 并发布。run number 单调递增，无需人工发版。
+- main 由 sync workflow 重建（upstream + patch 分支 squash），main-only 的 `Release vX.Y.Z` commit 会在下次重建时被丢弃 → package.json 版本回退 → 后续 publish 产出更低 semver 的更新构建 → GitHub 将其标为 Latest → `pi update self` 因 `latest < current` 拒绝安装 → 用户永久卡在旧版。
+- 若误发了一个高 semver 的下游 release（如 `0.87.2-xz.210` 在上游仍是 `0.87.1` 时），必须删除该 GitHub Release + 其 `xz-v*` tag + 对应本地/远端 `v*` tag，否则版本链断裂后所有用户无法 update。
+
+下游需要"发版"时的正确动作：直接触发 sync（`gh workflow run "Upstream Sync" --ref ci`），或等下一次 upstream sync。修复随 sync 后的 publish workflow 自动上线，不需要任何版本号操作。
+
+# Known Pre-existing Failures — Always Ignore
+
+The pre-commit hook (`npm run check` → `tsgo --noEmit`) fails with model-catalog type errors in `packages/ai/test/*` (e.g. `"..." is not assignable to parameter of type ...`). Cause: test fixtures reference model IDs from models.dev's live catalog, which renames/retires models faster than the branch baseline tracks. These errors:
+
+- Never relate to the change being committed (they live in upstream-maintained test files).
+- Self-heal on the next upstream sync.
+- Have been hit hundreds of times.
+
+Rule: when `tsgo` failures are confined to model-ID/catalog type mismatches in `packages/ai/test/` (and equivalents such as stale model IDs in `packages/coding-agent/test/`), commit with `git commit --no-verify` without asking. Do not fix those test files, do not regenerate model data to satisfy the hook, and do not treat this as a blocker. Any other hook failure still requires fixing before commit.
+
 # Development Rules
+
+## Downstream Distribution Workflow
+
+This repository is the `xz-dev/pi` downstream distribution fork of `earendil-works/pi`. Do not treat `main` as a normal long-lived development branch.
+
+`main` is automatically rebuilt from upstream and downstream branches by `.github/workflows/upstream-sync.yml`. Direct downstream-only changes committed only to `main` are temporary and can disappear on the next sync. Every downstream change that must persist must live on an appropriate downstream branch, then be brought back to `main` through the sync workflow's squash-merge process.
+
+Branch placement rules:
+
+- Put fork CI, publishing, packaging, release automation, GitHub Actions, and sync workflow changes on `ci`.
+- Put downstream code fixes or behavior patches on a dedicated patch branch such as `patch/esc-abort-and-manual-retry`.
+- If a new downstream branch is introduced, update `.github/workflows/upstream-sync.yml` in the persistent workflow branch (`ci`) so the sync job fetches that branch, squash-merges it in the correct order, and uses an explicit commit message such as `merge <branch> branch`.
+- After changing any persistent downstream branch that participates in sync, rebuild `main` from the upstream sync base and recreate the squash merge commits. Do not leave the only copy of the change as a standalone `main` commit.
+- When reviewing or resolving conflicts, preserve the correct development history of each downstream branch. A patch branch should include the upstream/mainline commits it was developed on before its downstream patch commits, not just the patch commits cherry-picked onto an older base.
+- Before saying a downstream change is complete, verify both the persistent branch and the rebuilt `main` contain the intended result.
+
+Operational checklist for downstream sync work:
+
+- Create downstream code patch branches from the latest `upstream/main`, not from the rebuilt downstream `main`, unless preserving an existing downstream patch branch history.
+- Keep workflow/packaging changes on `ci`; keep runtime behavior changes on a named patch branch. When a fix spans both, split it across branches instead of mixing branch responsibilities.
+- When adding a new patch branch, update `.github/workflows/upstream-sync.yml` on `ci` to fetch and squash-merge the branch, push both `ci` and the patch branch to `origin`, then trigger the sync workflow from the updated `ci` ref if an immediate remote `main` rebuild is needed.
+- After the sync workflow succeeds, fetch `origin/main` and force-sync the local `main` to it before reporting final status. Do not trust a locally rebuilt `main` as the final remote state.
+- For fork package versions, remember that SemVer prerelease versions such as `0.80.6-xz.29.1.g<sha>` are valid. Do not remove release assets such as `CHANGELOG.md` to hide downstream packaging symptoms. Preserve the real fork package version and add explicit package metadata or parser handling when a stable upstream changelog baseline is needed.
 
 ## Conversational Style
 
