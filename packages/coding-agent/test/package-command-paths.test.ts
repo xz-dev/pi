@@ -569,6 +569,29 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it("refuses self-update for a channel-managed install before any release lookup", async () => {
+		const lockDir = join(tempDir, "channel-install");
+		mkdirSync(lockDir, { recursive: true });
+		writeFileSync(join(lockDir, ".scoop.managed.lock"), "");
+		process.env.PI_PACKAGE_DIR = lockDir;
+		const fetchMock = vi.fn(async () => Response.json({ version: VERSION }));
+		vi.stubGlobal("fetch", fetchMock);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
+
+			// The refusal must happen offline, before any release/version lookup.
+			expect(fetchMock).not.toHaveBeenCalled();
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("managed by scoop");
+			expect(stderr).toContain("self-update is disabled");
+			expect(process.exitCode).toBe(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("allows explicit self-update checks when automatic version checks are disabled", async () => {
 		const previousSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
 		process.env.PI_SKIP_VERSION_CHECK = "1";
