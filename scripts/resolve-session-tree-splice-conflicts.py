@@ -142,9 +142,6 @@ def main() -> None:
         [HARNESS_OPTION_MERGED, HARNESS_CONSTRUCT_MERGED],
     )
 
-    Path(MANAGER_PATH).write_text(manager_resolved)
-    Path(HARNESS_PATH).write_text(harness_resolved)
-
     test_text = Path(TEST_PATH).read_text()
     test_blocks = blocks(test_text, TEST_PATH)
     if len(test_blocks) != 1:
@@ -154,8 +151,12 @@ def main() -> None:
     for required in ('describe("spliceEntry"', "readSessionFileRoles", "writeFileSync"):
         if required not in test_resolved:
             raise SystemExit(f"tree-traversal resolved content missing {required!r}")
-    Path(TEST_PATH).write_text(test_resolved)
 
+    # Validate everything before writing anything: a rejection must leave all
+    # files and the index untouched.
+    Path(MANAGER_PATH).write_text(manager_resolved)
+    Path(HARNESS_PATH).write_text(harness_resolved)
+    Path(TEST_PATH).write_text(test_resolved)
     subprocess.run(["git", "add", MANAGER_PATH, HARNESS_PATH, TEST_PATH], check=True)
 
 
