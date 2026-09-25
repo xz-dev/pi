@@ -86,8 +86,8 @@ patch/manual-retry 5ff4039ad5b2cb74c5cd534da84bc547b7cf1a75
 patch/changelog-prerelease a17b2c217e14053405647c9c7eeadc003e0d5dfb
 patch/skill-overrides 6e27082000e6e3437a8868c842e64b69436bf32f
 patch/retry-non-retryable-patterns b80622fae70adc5b880a8e06e59606148a469b11
-patch/slow-hook-tui-only d0bb1af8e36a7f75a22ec74c980484e3c9ec923c
-patch/session-tree-splice 4b5d0546c19a657be2788a99168900b70ec872ca
+patch/slow-hook-tui-only cd17bd55a61a24aff4e27c96723231b1ed7c758f
+patch/session-tree-splice aa4f9ac4452912e23f93ad389f9814c534c66aa3
 patch/ws-cached-empty-delta 6eb1779b7ef737284aa862ca8cc31ea512cd1125
 patch/self-update-managed-by 992af1524a99c1b5c8f6d4b434c85341141619cc
 patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
@@ -115,7 +115,7 @@ agent-run-failure-seam 033a8c9690c43c4180d001325f7d9225e54ede8b agent-run-failur
 managed-tool-executions 623d695a704c1939e636dc099765b4fbc64eea84 managed-tool-executions-on-accumulated d781f7cd8c631572be6b46bbb7a642f0c2712921
 esc-abort d781f7cd8c631572be6b46bbb7a642f0c2712921 esc-abort-on-accumulated c24a0340617993e014a8e3fc39e0a81258e42f44
 manual-retry c24a0340617993e014a8e3fc39e0a81258e42f44 manual-retry-on-accumulated e96003aaa58f4b5155179939e595a21a02addb42
-slow-hook-tui-only 2ce3add28e0e7e6f714bbb07c60e0314ba8358bc slow-hook-on-accumulated b51f3a38ba1eb07617ac889c52449a9dd1913f86
+slow-hook-tui-only 2ce3add28e0e7e6f714bbb07c60e0314ba8358bc slow-hook-on-accumulated 1cc782c7ae1087e4cfffb83c573819ef5e6c8c69
 EOF
 
 print_inputs() {
