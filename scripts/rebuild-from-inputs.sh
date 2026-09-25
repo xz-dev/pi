@@ -94,6 +94,7 @@ patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
 patch/model-selector-refresh-selection 8f582eb8df619f3d32899d0d78433cb841e26573
 patch/ai-drop-empty-messages 37f145b54ec4cd4b1f1d2b0066fedd3b1c7713de
 patch/compaction-test-exclusion cfa24a33672f03d5e88888123ead7d4cdc636bda
+patch/quarantine-auth-storage-flake b9ab213dc9676f1f527b6ea709284c3350907378
 EOF
 
 # Explicit accumulated compat bases. These steps consume a recorded
@@ -1239,6 +1240,16 @@ PY
 		CURRENT_STEP=compaction-test-exclusion
 		merge_squash compaction-test-exclusion "merge patch/compaction-test-exclusion branch"
 		grep -Fq '"test/suite/agent-session-compaction.test.ts"' packages/coding-agent/vitest.config.ts
+	fi
+
+	# 29 quarantine-auth-storage-flake — downstream-only test quarantine. The
+	# upstream auth-storage test is timing-flaky (same-size writes produce
+	# identical file revisions, defeating the coalesced-reload fast path).
+	if active quarantine-auth-storage-flake; then
+		CURRENT_STEP=quarantine-auth-storage-flake
+		merge_squash quarantine-auth-storage-flake "merge patch/quarantine-auth-storage-flake branch"
+		grep -Fq 'test.skip("keeps a coalesced reload alive while another credential reader is waiting"' \
+			packages/coding-agent/test/auth-storage.test.ts
 	fi
 
 	commit_input_marker

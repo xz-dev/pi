@@ -85,7 +85,8 @@ jobs:
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
-            +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion
+            +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion \
+            +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake
 
           # Driver source: the replay script is reviewed ci content, never a
           # stale generated-main copy. Restore it and its workflow self-check
@@ -137,6 +138,7 @@ jobs:
             model-selector-refresh-selection \
             ai-drop-empty-messages \
             compaction-test-exclusion \
+            quarantine-auth-storage-flake \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done
