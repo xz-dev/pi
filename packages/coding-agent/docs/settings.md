@@ -55,6 +55,7 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 | `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
 | `externalEditor` | string | `$VISUAL`, then `$EDITOR`, then Notepad on Windows or `nano` elsewhere | Command for Ctrl+G external editor; takes precedence over environment variables |
 | `quietStartup` | boolean | `false` | Hide startup header |
+| `showStartupDiagnostics` | boolean | `false` | Show `[Skill conflicts]` / `[Prompt conflicts]` / `[Extension issues]` / `[Theme conflicts]` blocks at startup and on `/reload`. Requires the corresponding sections to be rendered (not suppressed by `quietStartup`). |
 | `defaultProjectTrust` | string | `"ask"` | Fallback project trust behavior: `"ask"`, `"always"`, or `"never"`. Global setting only |
 | `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
 | `enableInstallTelemetry` | boolean | `true` | Send the anonymous install/update ping and selected provider attribution headers. This does not control update checks |
@@ -185,6 +186,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
 | `httpIdleTimeoutMs` | number | `300000` | HTTP header/body idle timeout in milliseconds, also used by providers with explicit stream idle timeouts. Set to `0` to disable. |
 | `websocketConnectTimeoutMs` | number | `15000` | WebSocket connect/open handshake timeout in milliseconds for providers that support WebSocket transports. Set to `0` to disable. |
+| `slowHookThresholdMs` | number | `0` | In interactive TUI, show a transient reminder for each registered extension hook taking longer than this many milliseconds. `0` disables the reminder entirely. Timing diagnostics are not persisted. |
 
 ### Terminal & Images
 
