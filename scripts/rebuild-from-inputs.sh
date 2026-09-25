@@ -1059,8 +1059,7 @@ PY
 		fi
 		if active esc-abort; then
 			apply_compat_range esc-abort "merge patch/esc-abort branch" \
-				resolve-esc-abort-conflicts.py \
-				packages/coding-agent/docs/extensions.md
+				resolve-esc-abort-conflicts.py
 		fi
 		if active manual-retry; then
 			apply_compat_range manual-retry "merge patch/manual-retry branch"
