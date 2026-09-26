@@ -1884,7 +1884,6 @@ export class DefaultPackageManager implements PackageManager {
 			default:
 				return ["install"];
 		}
-
 	}
 
 	private runNpmCommandSync(args: string[]): string {
