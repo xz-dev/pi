@@ -90,6 +90,7 @@ patch/git-package-storage ce3d8adb016a3d8405bddae52d14656c7bf505ff
 patch/agent-run-failure-seam 4a4c25394d3788b0161cf12bfc894131229897b9
 patch/managed-tool-executions 3d373a522eeeb886c39328c41681a2c0bd8f128c
 patch/esc-abort 698f1c46faa364bb6739ed38cf42c4cef8fa226a
+patch/managed-tool-abort-drain 839973ff5c0064b0778145ca5a7a062a37bb6245
 patch/manual-retry 83720db4ae485873d8fa2c2e2876c63fa42effb0
 patch/changelog-prerelease d4fed01fb03513eb25f0c6a2395e14074ded7fc4
 patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
@@ -128,6 +129,7 @@ PATCH_ORDER=(
 	agent-run-failure-seam
 	managed-tool-executions
 	esc-abort
+	managed-tool-abort-drain
 	manual-retry
 	changelog-prerelease
 	skill-overrides
@@ -161,6 +163,7 @@ CHAIN_EDGES=(
 	git-package-storage:changelog-prerelease
 	agent-run-failure-seam:managed-tool-executions
 	managed-tool-executions:esc-abort
+	esc-abort:managed-tool-abort-drain
 	esc-abort:manual-retry
 	manual-retry:retry-non-retryable-patterns
 	retry-non-retryable-patterns:slow-hook-tui-only

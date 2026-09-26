@@ -68,6 +68,7 @@ jobs:
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
             +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
+            +refs/heads/patch/managed-tool-abort-drain:refs/remotes/origin/patch/managed-tool-abort-drain \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
@@ -115,6 +116,7 @@ jobs:
             agent-run-failure-seam \
             managed-tool-executions \
             esc-abort \
+            managed-tool-abort-drain \
             manual-retry \
             changelog-prerelease \
             skill-overrides \
