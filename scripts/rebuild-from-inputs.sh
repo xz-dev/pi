@@ -93,9 +93,9 @@ patch/esc-abort 817cfc75a816772c183f832ca094792b6d84bc39
 patch/manual-retry 68eefec76b01a9d7e7ef509558720ffe99fc5a82
 patch/changelog-prerelease d4fed01fb03513eb25f0c6a2395e14074ded7fc4
 patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
-patch/retry-non-retryable-patterns 003331a02a9efa6348dbf0bf9e41a1ec4e02d01e
-patch/slow-hook-tui-only 03a16346361830f97944d6e72587fd6827a6bca5
-patch/session-tree-splice 71eb9f1634cc2ce36bce4a2f98412ee6b5f7840d
+patch/retry-non-retryable-patterns e1505f53269dd19917b04bfba5a84e45b078bba2
+patch/slow-hook-tui-only fe3ac43730132803b660675bae5b627b1ebefddb
+patch/session-tree-splice 961fe9bbe40990bb2bff838e394398c916cc6028
 patch/ws-cached-empty-delta 6eb1779b7ef737284aa862ca8cc31ea512cd1125
 patch/self-update-managed-by 992af1524a99c1b5c8f6d4b434c85341141619cc
 patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
@@ -162,7 +162,8 @@ CHAIN_EDGES=(
 	agent-run-failure-seam:managed-tool-executions
 	managed-tool-executions:esc-abort
 	esc-abort:manual-retry
-	manual-retry:slow-hook-tui-only
+	manual-retry:retry-non-retryable-patterns
+	retry-non-retryable-patterns:slow-hook-tui-only
 	slow-hook-tui-only:session-tree-splice
 )
 
