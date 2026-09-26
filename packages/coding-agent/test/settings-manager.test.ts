@@ -457,6 +457,21 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("slowHookThresholdMs", () => {
+		it("defaults to -1 (disabled) and accepts a non-negative override", () => {
+			expect(SettingsManager.inMemory().getSlowHookThresholdMs()).toBe(-1);
+			expect(SettingsManager.inMemory({ slowHookThresholdMs: 250 }).getSlowHookThresholdMs()).toBe(250);
+			expect(SettingsManager.inMemory({ slowHookThresholdMs: 0 }).getSlowHookThresholdMs()).toBe(0);
+		});
+
+		it("keeps negative values as disabled and falls back to -1 for invalid thresholds", () => {
+			expect(SettingsManager.inMemory({ slowHookThresholdMs: -1 }).getSlowHookThresholdMs()).toBe(-1);
+			expect(
+				SettingsManager.inMemory({ slowHookThresholdMs: "bogus" as unknown as number }).getSlowHookThresholdMs(),
+			).toBe(-1);
+		});
+	});
+
 	describe("externalEditor", () => {
 		const originalVisual = process.env.VISUAL;
 		const originalEditor = process.env.EDITOR;

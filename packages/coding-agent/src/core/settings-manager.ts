@@ -145,6 +145,8 @@ export interface Settings {
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
 	quietStartup?: boolean;
+	slowHookThresholdMs?: number; // Extension hook duration warning threshold in milliseconds; default: -1 (disabled); >=0 enables slow-hook notices in interactive TUI
+	showStartupDiagnostics?: boolean; // Show [Skill conflicts]/[Extension issues]/[Prompt conflicts]/[Theme conflicts] blocks at startup; default: false
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
@@ -1147,6 +1149,18 @@ export class SettingsManager {
 
 	getQuietStartup(): boolean {
 		return this.settings.quietStartup ?? false;
+	}
+
+	getSlowHookThresholdMs(): number {
+		try {
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? -1;
+		} catch {
+			return -1;
+		}
+	}
+
+	getShowStartupDiagnostics(): boolean {
+		return this.settings.showStartupDiagnostics ?? false;
 	}
 
 	setQuietStartup(quiet: boolean): void {
