@@ -95,8 +95,8 @@ patch/manual-retry 83720db4ae485873d8fa2c2e2876c63fa42effb0
 patch/changelog-prerelease d4fed01fb03513eb25f0c6a2395e14074ded7fc4
 patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
 patch/retry-non-retryable-patterns 2a81ed62e2455058ce0e0cc072bd887fa3b116c9
-patch/slow-hook-tui-only 35c1a18a685f927995ae945a8b81409484093fbe
-patch/session-tree-splice e1f60520bfe94130e975b1e43e2e99b7a31d2a0d
+patch/slow-hook-tui-only 5c6dae87a97edf846ee1348980b2278a8c9f6524
+patch/session-tree-splice 1900373de8fb96ff051bdec8bfc9684b4fbb1799
 patch/ws-cached-empty-delta 6eb1779b7ef737284aa862ca8cc31ea512cd1125
 patch/self-update-managed-by 992af1524a99c1b5c8f6d4b434c85341141619cc
 patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
