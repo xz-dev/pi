@@ -1039,7 +1039,6 @@ export class InteractiveMode {
 
 		// Enable the remaining input handlers only after managed-tool setup completes.
 		this.setupKeyHandlers();
-		this.setupEditorSubmitHandler();
 		this.ui.requestRender();
 
 		// Initialize extensions first so resources are shown before messages
@@ -1065,6 +1064,7 @@ export class InteractiveMode {
 
 		// Flush the completed startup state before loading the remaining syntax grammars.
 		this.ui.renderNow();
+		this.setupEditorSubmitHandler();
 		void loadAllHighlightLanguages().then(() => {
 			if (!this.isInitialized) return;
 			this.ui.invalidate();
@@ -3267,6 +3267,9 @@ export class InteractiveMode {
 			}
 			this.editor.addToHistory?.(text);
 		};
+		if (this.editor !== this.defaultEditor) {
+			this.editor.onSubmit = this.defaultEditor.onSubmit;
+		}
 	}
 
 	private subscribeToAgent(): void {
