@@ -73,8 +73,8 @@ die() { printf '::error::%s\n' "$*" >&2; exit 1; }
 # fetch, so these go stale only between syncs. Never hand-expand a short SHA:
 # resolve with git rev-parse / git ls-remote.
 read -r -d '' DEFAULT_INPUTS <<'EOF' || true
-upstream/main ff72faba28d10c86611863d0aaa5d3122f2d8cb0
-ci c7a07061c496cb2b26fbfc70513d502aa5ecd8ad
+upstream/main 2b0a123de98318c2ff8069661721ce0c3794c34e
+ci 7c44f701e0ba3e86e19b9427cb8e27a73894b259
 patch/contributor-approval 57928a38185ca3e73d26d5fde1cbd7184f676fef
 patch/model-startup-refresh-barrier 5e074cee683c0412ff08a6828cf43f4555115a1d
 patch/model-refresh-session-rebind d9341253b4d04c2e631102f3dddedd66af43bbe1
@@ -92,6 +92,7 @@ patch/managed-tool-executions 3d373a522eeeb886c39328c41681a2c0bd8f128c
 patch/esc-abort 698f1c46faa364bb6739ed38cf42c4cef8fa226a
 patch/managed-tool-abort-drain 839973ff5c0064b0778145ca5a7a062a37bb6245
 patch/manual-retry 83720db4ae485873d8fa2c2e2876c63fa42effb0
+patch/startup-submit-readiness 21a32757521472cc8ba627dda5d8ca11d406edb2
 patch/changelog-prerelease d4fed01fb03513eb25f0c6a2395e14074ded7fc4
 patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
 patch/retry-non-retryable-patterns 2a81ed62e2455058ce0e0cc072bd887fa3b116c9
@@ -132,6 +133,7 @@ PATCH_ORDER=(
 	esc-abort
 	managed-tool-abort-drain
 	manual-retry
+	startup-submit-readiness
 	changelog-prerelease
 	skill-overrides
 	retry-non-retryable-patterns
