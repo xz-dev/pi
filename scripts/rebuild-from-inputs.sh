@@ -102,6 +102,7 @@ patch/self-update-managed-by 992af1524a99c1b5c8f6d4b434c85341141619cc
 patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
 patch/model-selector-refresh-selection 8f582eb8df619f3d32899d0d78433cb841e26573
 patch/ai-drop-empty-messages 37f145b54ec4cd4b1f1d2b0066fedd3b1c7713de
+patch/openrouter-live-fixture c72e289c3e8fae7a67632a9362b9bf03d827a2d8
 patch/compaction-test-exclusion cfa24a33672f03d5e88888123ead7d4cdc636bda
 patch/quarantine-auth-storage-flake b9ab213dc9676f1f527b6ea709284c3350907378
 patch/vitest-audit-fix 559232f68ef83ac305bd775a31b5dc0d42aa5ee9
@@ -141,6 +142,7 @@ PATCH_ORDER=(
 	google-toomany-toolcalls
 	model-selector-refresh-selection
 	ai-drop-empty-messages
+	openrouter-live-fixture
 	compaction-test-exclusion
 	quarantine-auth-storage-flake
 	vitest-audit-fix
