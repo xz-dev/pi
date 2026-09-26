@@ -30,13 +30,13 @@ class MockSpawnedProcess extends EventEmitter {
 interface PackageManagerInternals {
 	getNpmCommand(): { command: string; args: string[]; embeddedBun?: boolean };
 	getPackageManagerName(): string;
+	getGitDependencyInstallArgs(): string[];
 	getGlobalNpmRoot(): string;
 	getLatestNpmVersion(packageSpec: string, range?: string): Promise<string>;
 	runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void>;
 	runNpmCommandSync(args: string[]): string;
 	runCommandSync(command: string, args: string[], env?: Record<string, string>): string;
 	runCommand(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string> }): Promise<void>;
-	getGitDependencyInstallArgs(): string[];
 	runCommandCapture(
 		command: string,
 		args: string[],
@@ -753,6 +753,24 @@ Content`,
 			expect(internals.getNpmCommand()).toEqual({ command: command[0], args: command.slice(1) });
 		});
 
+		it.each([{ command: undefined }, { command: [] }, { command: ["npm"] }, { command: ["bun"] }])(
+			"omits Git host peers for configured managers ($command)",
+			({ command }) => {
+				settingsManager.setNpmCommand(command);
+				// Upstream's per-manager switch applies to all resolved names;
+				// unknown wrappers fall through to the default plain install.
+				const expected =
+					!command?.length || command[0] === "bun"
+						? ["install", "--omit=dev", "--omit=peer"]
+						: command[0] === "pnpm"
+							? ["install", "--prod", "--config.auto-install-peers=false", "--config.strict-peer-dependencies=false", "--config.strict-dep-builds=false"]
+							: command[0] === "npm"
+								? ["install", "--omit=dev", "--legacy-peer-deps"]
+								: ["install"];
+				expect(internals.getGitDependencyInstallArgs()).toEqual(expected);
+			},
+		);
+
 		it("rejects an explicitly empty executable", () => {
 			settingsManager.setNpmCommand([""]);
 			expect(() => internals.getNpmCommand()).toThrow("Invalid npmCommand");
@@ -1073,7 +1091,14 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					const originalRun = internals.runCommand.bind(internals);
 					vi.spyOn(internals, "runCommand").mockImplementation(async (command, args, options) => {
 						if (command !== "git") return originalRun(command, args, options);
-						expect(args).toEqual(["clone", "https://github.com/example/fixture", target]);
+						expect(args).toEqual([
+							"clone",
+							"--depth=1",
+							"--single-branch",
+							"--no-tags",
+							"https://github.com/example/fixture",
+							target,
+						]);
 						expect(options?.env?.BUN_BE_BUN).toBeUndefined();
 						mkdirSync(target, { recursive: true });
 						writeFileSync(join(target, "package.json"), JSON.stringify({ dependencies: { fixture: "1.0.0" } }));
@@ -1084,7 +1109,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
 						readFileSync(logPath, "utf8").trim(),
 					);
-					expect(call.args).toEqual(["install", "--omit=dev"]);
+					expect(call.args).toEqual(["install", "--omit=dev", "--omit=peer"]);
 					expect(call.cwd).toBe(target);
 					expect(call.mode).toBe("1");
 					expect(existsSync(target)).toBe(!fail);
@@ -1124,7 +1149,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 				const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
 					readFileSync(logPath, "utf8").trim(),
 				);
-				expect(call.args).toEqual(["install", "--omit=dev"]);
+				expect(call.args).toEqual(["install", "--omit=dev", "--omit=peer"]);
 				expect(call.cwd).toBe(target);
 				expect(call.mode).toBe("1");
 				expect(existsSync(markerPath)).toBe(cleanFails);
@@ -1242,7 +1267,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			);
 		});
 
-		it("should install git package dependencies without auto-installing peers", async () => {
+		it("should install git package dependencies with --omit=dev", async () => {
 			const source = "git:github.com/user/repo";
 			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
 			const runCommandSpy = vi
@@ -1257,7 +1282,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.install(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should remove a newly created checkout when git clone fails", async () => {
@@ -1316,12 +1343,16 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.install(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("git", ["fetch", "origin", "v2"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("git", ["fetch", "--depth=1", "--no-tags", "origin", "v2"], {
+				cwd: targetDir,
+			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["reset", "--hard", "FETCH_HEAD^{commit}"], {
 				cwd: targetDir,
 			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should reconcile an existing git checkout to its update target when installing without a ref", async () => {
@@ -1356,32 +1387,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
 		});
 
-		it("should prefer the package manager after a separator over the outer executable", () => {
-			// Regression for #9863.
+		it("should use pnpm flags for git package dependencies when npmCommand is pnpm", async () => {
 			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["npm", "exec", "--", "pnpm"],
-			});
-			packageManager = new DefaultPackageManager({
-				cwd: tempDir,
-				agentDir,
-				settingsManager,
-			});
-
-			const managerWithInternals = packageManager as unknown as PackageManagerInternals;
-			expect(managerWithInternals.getPackageManagerName()).toBe("pnpm");
-			expect(managerWithInternals.getGitDependencyInstallArgs()).toEqual([
-				"install",
-				"--prod",
-				"--config.auto-install-peers=false",
-				"--config.strict-peer-dependencies=false",
-				"--config.strict-dep-builds=false",
-			]);
-		});
-
-		it("should detect pnpm through a corepack wrapper without a separator", async () => {
-			// Regression for #9863.
-			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["corepack", "pnpm"],
+				npmCommand: ["pnpm"],
 			});
 			packageManager = new DefaultPackageManager({
 				cwd: tempDir,
@@ -1404,9 +1412,8 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			await packageManager.install(source);
 
 			expect(runCommandSpy).toHaveBeenCalledWith(
-				"corepack",
+				"pnpm",
 				[
-					"pnpm",
 					"install",
 					"--prod",
 					"--config.auto-install-peers=false",
@@ -1417,36 +1424,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			);
 		});
 
-		it("should disable peer installation for git package dependencies with bun", async () => {
-			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["bun"],
-			});
-			packageManager = new DefaultPackageManager({
-				cwd: tempDir,
-				agentDir,
-				settingsManager,
-			});
-
-			const source = "git:github.com/user/repo";
-			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
-			const runCommandSpy = vi
-				.spyOn(packageManager as any, "runCommand")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [command, args] = callArgs as [string, string[]];
-					if (command === "git" && args[0] === "clone") {
-						mkdirSync(targetDir, { recursive: true });
-						writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
-					}
-				});
-
-			await packageManager.install(source);
-
-			expect(runCommandSpy).toHaveBeenCalledWith("bun", ["install", "--omit=dev", "--omit=peer"], {
-				cwd: targetDir,
-			});
-		});
-
-		it("should update git package dependencies without auto-installing peers", async () => {
+		it("should update git package dependencies with --omit=dev", async () => {
 			const source = "git:github.com/user/repo";
 			const targetDir = join(tempDir, ".pi", "git", "github.com", "user", "repo");
 			mkdirSync(targetDir, { recursive: true });
@@ -1470,7 +1448,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should repair missing git package dependencies when the checkout is already current", async () => {
@@ -1495,7 +1475,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 			expect(runCommandSpy).not.toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
 		});
 
@@ -1527,10 +1509,12 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await expect(packageManager.update(source)).rejects.toThrow("simulated clean failure");
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
-		it("should disable peer installation through wrapped pnpm when updating git dependencies", async () => {
+		it("should use pnpm flags through npmCommand argv when updating git package dependencies", async () => {
 			settingsManager = SettingsManager.inMemory({
 				npmCommand: ["mise", "exec", "node@20", "--", "pnpm"],
 			});
@@ -1576,7 +1560,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					"--config.strict-peer-dependencies=false",
 					"--config.strict-dep-builds=false",
 				],
-				{ cwd: targetDir },
+				{
+					cwd: targetDir,
+				},
 			);
 		});
 
@@ -1787,7 +1773,14 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await expect(packageManager.install(source)).rejects.toThrow("simulated git clone failure");
 
-			expect(runCommand).toHaveBeenCalledWith("git", ["clone", source, expect.any(String)]);
+			expect(runCommand).toHaveBeenCalledWith("git", [
+				"clone",
+				"--depth=1",
+				"--single-branch",
+				"--no-tags",
+				source,
+				expect.any(String),
+			]);
 			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
 		});
 
@@ -2396,12 +2389,29 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 		it("should resolve autoload-disabled project package entries as deltas over global packages", async () => {
 			const pkgDir = join(agentDir, "npm", "node_modules", "pi-tools");
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
+			mkdirSync(join(pkgDir, "skills", "alpha"), { recursive: true });
+			mkdirSync(join(pkgDir, "skills", "beta"), { recursive: true });
 			writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "pi-tools", version: "1.0.0" }));
 			writeFileSync(join(pkgDir, "extensions", "foo.ts"), "export default function() {}");
 			writeFileSync(join(pkgDir, "extensions", "bar.ts"), "export default function() {}");
-			settingsManager.setPackages(["npm:pi-tools"]);
+			writeFileSync(join(pkgDir, "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: Alpha\n---\n");
+			writeFileSync(join(pkgDir, "skills", "beta", "SKILL.md"), "---\nname: beta\ndescription: Beta\n---\n");
+			settingsManager.setPackages([
+				{
+					source: "npm:pi-tools",
+					skillOverrides: {
+						alpha: { disableModelInvocation: true },
+						beta: { disableModelInvocation: true },
+					},
+				},
+			]);
 			settingsManager.setProjectPackages([
-				{ source: "npm:pi-tools", autoload: false, extensions: ["-extensions/foo.ts"] },
+				{
+					source: "npm:pi-tools",
+					autoload: false,
+					extensions: ["-extensions/foo.ts"],
+					skillOverrides: { alpha: { disableModelInvocation: false } },
+				},
 			]);
 			const runCommandSpy = vi
 				.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
@@ -2414,9 +2424,17 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					{ enabled: resource.enabled, scope: resource.metadata.scope },
 				]),
 			);
+			const skillOverrides = Object.assign(
+				{},
+				...result.skills.map((resource) => resource.metadata.skillOverrides ?? {}),
+			);
 			expect(runCommandSpy).not.toHaveBeenCalled();
 			expect(states[join(pkgDir, "extensions", "foo.ts")]).toEqual({ enabled: false, scope: "project" });
 			expect(states[join(pkgDir, "extensions", "bar.ts")]).toEqual({ enabled: true, scope: "user" });
+			expect(skillOverrides).toEqual({
+				alpha: { disableModelInvocation: false },
+				beta: { disableModelInvocation: true },
+			});
 		});
 
 		it("should resolve autoload-disabled package entries as positive-only without a global package", async () => {
@@ -2434,7 +2452,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			const result = await packageManager.resolve();
 
 			expect(result.extensions.map((resource) => resource.path)).toEqual([join(pkgDir, "extensions", "foo.ts")]);
-			expect(result.skills).toEqual([]);
+			expect(result.skills.some((resource) => resource.path.startsWith(join(pkgDir, "skills")))).toBe(false);
 		});
 	});
 
