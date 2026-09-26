@@ -21,6 +21,31 @@ const escWorkflow = parse(
   readFileSync(join(ROOT, ".github", "workflows", "esc-abort-integration.yml"), "utf8"),
 );
 
+const syncScript = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
+
+function orderBlock(script) {
+	return script.slice(script.indexOf("PATCH_ORDER=("), script.indexOf(")\n", script.indexOf("PATCH_ORDER=(")));
+}
+
+function assertPatchIntegrated(script, name) {
+	assert.ok(
+		orderBlock(script).includes(`\n\t${name}\n`),
+		`PATCH_ORDER must list ${name}`,
+	);
+	// Integration happens through the generic loop: squash merge for
+	// independent patches, predecessor-relative range apply for chain
+	// descendants. There are no per-patch merge call sites anymore.
+	assert.match(script, /merge_squash "\$p" "merge patch\/\$p branch"/);
+	assert.match(script, /apply_range "\$p" "merge patch\/\$p branch" "\$local_pred"/);
+}
+
+function assertChainEdge(script, predecessor, descendant) {
+	assert.ok(
+		script.includes(`\t${predecessor}:${descendant}\n`),
+		`CHAIN_EDGES must list ${predecessor}:${descendant}`,
+	);
+}
+
 function pinnedUses() {
   return Object.values(workflow.jobs).flatMap((job) =>
     (job.steps ?? []).flatMap((step) => (step.uses ? [step.uses] : [])),
@@ -36,9 +61,8 @@ test("upstream sync fetches and merges the persistent native wrapper patch", () 
 	// workflow feeds the patch's frozen SHA into it.
 	assert.match(syncWorkflowText, /native-wrapper-release \\\n/);
 	assert.match(syncWorkflowText, /rebuild_args\+=\(--patch "\$ref=\$\(git rev-parse \"origin\/patch\/\$ref\"\)"\)/);
-	const mergeScript = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-	assert.match(mergeScript, /merge_squash native-wrapper-release "merge patch\/native-wrapper-release branch"/);
-	assert.doesNotMatch(mergeScript, /resolve-release-self-update-squash-conflicts/);
+	assertPatchIntegrated(syncScript, "native-wrapper-release");
+	assert.doesNotMatch(syncScript, /resolve-release-self-update-squash-conflicts/);
 });
 
 test("upstream sync keeps the unsafe synchronized-cursor patch retired", () => {
@@ -64,18 +88,19 @@ test("upstream sync rejects patch branches that touch upstream changelogs", () =
 });
 
 test("upstream sync integrates and tests managed tool execution compatibility", () => {
-  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-  const orderBlock = script.slice(script.indexOf("PATCH_ORDER=("), script.indexOf(")\n", script.indexOf("PATCH_ORDER=(")));
+  const script = syncScript;
   const names = ["agent-run-failure-seam", "managed-tool-executions", "esc-abort", "manual-retry"];
   for (const [index, name] of names.entries()) {
-    if (index) assert.ok(orderBlock.indexOf(names[index - 1]) < orderBlock.indexOf(name));
-    assert.ok(script.includes(`apply_compat_range ${name} "merge patch/${name} branch"`));
-    assert.ok(syncWorkflowText.includes(`+refs/heads/patch/${name}-on-accumulated:refs/remotes/origin/patch/${name}-on-accumulated`));
-    assert.ok(syncWorkflowText.includes(`${name}-on-accumulated \\\n`));
+    if (index) assert.ok(orderBlock(script).indexOf(names[index - 1]) < orderBlock(script).indexOf(name));
+    assertPatchIntegrated(script, name);
   }
-  assert.match(script, /require_ancestor agent-run-failure-seam manual-retry/);
-  assert.doesNotMatch(script, /resolve-(?:agent-run-failure-seam|managed-tool-esc|manual-retry)/);
-  assert.match(script, /resolve-managed-tool-executions-conflicts\.py/);
+  // The chain is integrated as predecessor-relative range diffs; each
+  // descendant keeps the predecessor patch tip in its ancestry.
+  assertChainEdge(script, "agent-run-failure-seam", "managed-tool-executions");
+  assertChainEdge(script, "managed-tool-executions", "esc-abort");
+  assertChainEdge(script, "esc-abort", "manual-retry");
+  assert.match(script, /require_ancestor "\$pred" "\$name"/);
+  assert.doesNotMatch(script, /resolve-(?:agent-run-failure-seam|managed-tool|esc-abort|manual-retry)/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /patch\/managed-tool-executions/);
@@ -145,14 +170,8 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
     syncWorkflowText,
     /\+refs\/heads\/patch\/model-catalog-extension-refresh:refs\/remotes\/origin\/patch\/model-catalog-extension-refresh/,
   );
-  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-  assert.match(script, /merge_squash_resolver model-catalog-extension-refresh "merge patch\/model-catalog-extension-refresh branch"/);
-  assert.match(script, /resolve-model-catalog-squash-conflicts\.py/);
-  assert.match(script, /Unresolved conflicts remain after \$msg/);
-  const resolver = readFileSync(join(ROOT, "scripts", "resolve-model-catalog-squash-conflicts.py"), "utf8");
-  assert.match(resolver, /packages\/coding-agent\/README\.md/);
-  assert.match(resolver, /unexpected model-catalog conflicts/);
-  assert.match(resolver, /packages\/coding-agent\/docs\/usage\.md/);
+  assertPatchIntegrated(syncScript, "model-catalog-extension-refresh");
+  assertChainEdge(syncScript, "model-startup-refresh-barrier", "model-catalog-extension-refresh");
   // list-models-refresh and args tests are covered by the coding-agent auto-discovery run.
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi --list-models`/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
@@ -163,15 +182,13 @@ test("upstream sync carries the Bun bytecode entrypoint patch", () => {
     syncWorkflowText,
     /\+refs\/heads\/patch\/bun-bytecode-entrypoint:refs\/remotes\/origin\/patch\/bun-bytecode-entrypoint/,
   );
-  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-  assert.match(script, /merge_squash bun-bytecode-entrypoint "merge patch\/bun-bytecode-entrypoint branch"/);
+  assertPatchIntegrated(syncScript, "bun-bytecode-entrypoint");
 });
 
 test("upstream sync carries and tests the bounded startup benchmark patch", () => {
   assert.match(syncWorkflowText, /\+refs\/heads\/patch\/startup-benchmark-exit:refs\/remotes\/origin\/patch\/startup-benchmark-exit/);
-  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-  assert.match(script, /merge_squash startup-benchmark-exit "merge patch\/startup-benchmark-exit branch"/);
-  assert.doesNotMatch(script, /resolve-startup-benchmark-squash-conflicts/);
+  assertPatchIntegrated(syncScript, "startup-benchmark-exit");
+  assert.doesNotMatch(syncScript, /resolve-startup-benchmark-squash-conflicts/);
   // startup-benchmark and tools-manager tests are covered by the coding-agent auto-discovery run.
 });
 
@@ -194,9 +211,7 @@ test("upstream sync globally retires the runner-sensitive compaction characteriz
     syncWorkflowText,
     /\+refs\/heads\/patch\/compaction-test-exclusion:refs\/remotes\/origin\/patch\/compaction-test-exclusion/,
   );
-  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-  assert.match(script, /merge_squash compaction-test-exclusion "merge patch\/compaction-test-exclusion branch"/);
-  assert.match(script, /packages\/coding-agent\/vitest\.config\.ts/);
+  assertPatchIntegrated(syncScript, "compaction-test-exclusion");
   assert.doesNotMatch(syncWorkflowText, /--exclude test\/suite\/agent-session-compaction\.test\.ts/);
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /one policy/);
 });
@@ -214,24 +229,17 @@ test("upstream sync carries the unified TUI-only slow-hook patch", () => {
     syncWorkflowText,
     /\+refs\/heads\/patch\/slow-hook-tui-only:refs\/remotes\/origin\/patch\/slow-hook-tui-only/,
   );
-  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-  // slow-hook consumes its recorded explicit compat pair, never tip^.
-  assert.match(script, /apply_compat_range slow-hook-tui-only "merge patch\/slow-hook-tui-only branch"/);
-  assert.match(script, /slow-hook-tui-only 2ce3add28e0e7e6f714bbb07c60e0314ba8358bc slow-hook-on-accumulated 02c4681890d4e01a948872dd58136b13d9b0af26/);
+  assertPatchIntegrated(syncScript, "slow-hook-tui-only");
+  assertChainEdge(syncScript, "retry-non-retryable-patterns", "slow-hook-tui-only");
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
 
 test("upstream sync preserves bounded slow-hook and session-tree compatibility", () => {
-  const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
-  assert.doesNotMatch(script, /resolve-slow-hook-squash-conflicts\.py/);
-  assert.match(script, /git diff --binary "\$\{INPUT_SHA\[slow-hook-tui-only\]\}" "\$\{INPUT_SHA\[session-tree-splice\]}"/);
-  assert.match(script, /git apply --3way --index "\$TMPDIR_WORK\/session-tree-splice\.patch"/);
-  assert.match(script, /python3 "\$HELPER_DIR\/resolve-session-tree-splice-conflicts\.py"/);
-  assert.match(script, /require_ancestor slow-hook-tui-only session-tree-splice/);
-  const orderBlock = script.slice(script.indexOf("PATCH_ORDER=("), script.indexOf(")\n", script.indexOf("PATCH_ORDER=(")));
+  assert.doesNotMatch(syncScript, /resolve-(?:slow-hook|session-tree-splice)-squash-conflicts\.py/);
+  assertChainEdge(syncScript, "slow-hook-tui-only", "session-tree-splice");
   assert.ok(
-    orderBlock.indexOf("slow-hook-tui-only") < orderBlock.indexOf("session-tree-splice"),
+    orderBlock(syncScript).indexOf("slow-hook-tui-only") < orderBlock(syncScript).indexOf("session-tree-splice"),
   );
   assert.doesNotMatch(syncWorkflowText, /patch\/provider-transparent-compaction/);
   assert.doesNotMatch(syncWorkflowText, /patch\/pre-provider-compaction/);
