@@ -133,6 +133,8 @@ export interface Settings {
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
 	quietStartup?: boolean;
+	slowHookThresholdMs?: number; // Extension hook duration warning threshold in milliseconds; default: -1 (disabled); >=0 enables slow-hook notices in interactive TUI
+	showStartupDiagnostics?: boolean; // Show [Skill conflicts]/[Extension issues]/[Prompt conflicts]/[Theme conflicts] blocks at startup; default: false
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
@@ -165,8 +167,6 @@ export interface Settings {
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	cacheWarming?: CacheWarmingMode; // default: "streaming"; global only because each refresh costs money
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
-	slowHookThresholdMs?: number; // Extension hook duration warning threshold in milliseconds; default: -1 (disabled); >=0 enables slow-hook notices in interactive TUI
-	showStartupDiagnostics?: boolean; // Show [Skill conflicts]/[Extension issues]/[Prompt conflicts]/[Theme conflicts] blocks at startup; default: false
 	tuiMode?: TuiMode; // default: "regular"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular TUI mode
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
@@ -1075,18 +1075,6 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
-	getSlowHookThresholdMs(): number {
-		try {
-			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? -1;
-		} catch {
-			return -1;
-		}
-	}
-
-	getShowStartupDiagnostics(): boolean {
-		return this.settings.showStartupDiagnostics ?? false;
-	}
-
 	getHideThinkingBlock(): boolean {
 		return this.settings.hideThinkingBlock ?? false;
 	}
@@ -1132,6 +1120,18 @@ export class SettingsManager {
 
 	getQuietStartup(): boolean {
 		return this.settings.quietStartup ?? false;
+	}
+
+	getSlowHookThresholdMs(): number {
+		try {
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? -1;
+		} catch {
+			return -1;
+		}
+	}
+
+	getShowStartupDiagnostics(): boolean {
+		return this.settings.showStartupDiagnostics ?? false;
 	}
 
 	setQuietStartup(quiet: boolean): void {
