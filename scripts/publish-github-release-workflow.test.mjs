@@ -113,6 +113,16 @@ test("upstream sync requires formatter-stable rebuilt sources", () => {
   assert.match(syncWorkflowText, /git diff --name-status/);
 });
 
+test("upstream sync check tolerates only the known model-catalog drift class", () => {
+  // AGENTS.md "Known Pre-existing Failures": model-ID/catalog TS2345/TS7053
+  // errors in packages/*/test are always-ignore noise; anything else fails.
+  assert.match(syncWorkflowText, /check-ts-errors\.log/);
+  assert.match(syncWorkflowText, /error TS\(2345\|7053\)/);
+  assert.match(syncWorkflowText, /packages\/\(ai\|agent\|coding-agent\)\/\(test\|examples\)/);
+  assert.match(syncWorkflowText, /failed outside tsc/);
+  assert.match(syncWorkflowText, /outside the known model-catalog drift class/);
+});
+
 for (const scenario of ["unchanged", "formatted", "check fails"]) {
   test(`post-merge skip marker: ${scenario}`, () => {
     const dir = mkdtempSync(join(tmpdir(), "sync-marker-"));
