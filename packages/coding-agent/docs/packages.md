@@ -9,9 +9,22 @@ A package is an ordinary directory or npm package. It can expose conventional re
 Install from npm, git, or a local path:
 
 ```bash
-pi install npm:@example/pi-tools@1.0.0
-pi install git:github.com/example/pi-tools@v1
-pi install ./local-package
+pi install npm:@foo/bar@1.0.0
+pi install git:github.com/user/repo@v1
+pi install https://github.com/user/repo  # raw URLs work too
+pi install /absolute/path/to/package
+pi install ./relative/path/to/package
+
+pi remove npm:@foo/bar
+pi list                     # show installed packages from settings
+pi update                   # update pi only
+pi update --all             # update pi, update packages, and reconcile pinned git refs
+pi update --extensions      # update packages and reconcile pinned git refs only
+pi update --models          # refresh Pi-managed catalogs without loading extensions
+pi update --self            # update pi only
+pi update --self --force    # reinstall pi even if current
+pi update npm:@foo/bar      # update one package
+pi update --extension npm:@foo/bar
 ```
 
 `pi list` shows configured packages. Use `pi remove <source>` to remove one and `pi update --extensions` to reconcile package installations. See [Command Line](cli.md#package-commands) for every package command and option.
@@ -40,6 +53,11 @@ Versioned npm specifications are pinned. Git tags and commits are also pinned; p
 Only the **xz-dev Bun-compiled standalone distribution** defaults to its embedded Bun for package operations. It invokes public `pi` through inherited `PATH`, adding `BUN_BE_BUN=1` only to package-manager child processes. This default applies even when npm is installed. Other distributions and source/npm installations retain npm, including source runs under Bun. This selection does not change Pi self-update.
 
 Bun compatibility is not npm equivalence: registry/`.npmrc` handling, lockfiles, lifecycle scripts, and native dependencies can differ. Pi does not add blanket script trust or install missing native build tools. Use an explicit compatible `npmCommand` when needed; switching managers does not undo lockfile or dependency changes.
+New git installs use depth-one, single-branch clones without unrelated tags. Branches and tags are selected during cloning; full commit IDs are fetched directly without cloning another branch. Abbreviated commit IDs require a full clone for local resolution; use a full commit ID to avoid downloading history.
+
+Git updates fetch only the selected ref at depth one and discard stale commit-graph caches. Existing refs, reflogs, and stored objects are not automatically deleted; making an old clone shallow does not by itself reclaim all of its history.
+
+When reconciliation changes the checkout, Pi resets and cleans the clone, then installs dependencies if `package.json` exists. Default npm uses `install --omit=dev --legacy-peer-deps`; embedded Bun uses `install --omit=dev --omit=peer`. This avoids installing Pi-provided host APIs again through peer dependencies. Explicit `npmCommand` commands use plain `install`. A current checkout with missing runtime dependencies is repaired without cleaning it; existing extra dependencies are not automatically pruned.
 
 Relative local paths resolve from the settings file that contains them. A file path loads one extension. A directory follows normal package discovery rules.
 
@@ -120,7 +138,9 @@ For each resource type:
 - Use `+path` to include one exact allowed path.
 - Use `-path` to exclude one exact path.
 
-Filters narrow the package manifest. They do not expose resources that the package itself did not declare.
+A package may also set `skillOverrides` keyed by each skill's resolved `name`. Setting `disableModelInvocation` to `true` hides that skill from the model prompt while keeping `/skill:name` available; `false` overrides the skill's frontmatter. Unknown skill names are ignored, and overrides apply only to skills from that package. For an `autoload: false` project delta, same-name overrides replace global entries while unspecified skill overrides are inherited.
+
+## Enable and Disable Resources
 
 Run `pi config` to enable or disable discovered resources. It starts with personal configuration; press Tab to switch scope, or run `pi config --local` to start with project overrides.
 
