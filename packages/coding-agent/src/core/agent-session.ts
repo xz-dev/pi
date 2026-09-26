@@ -117,7 +117,12 @@ import {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { planContinuation } from "./manual-retry.ts";
-import { type BashExecutionMessage, type CustomMessage, type ManualRetryRecoveryMessage, convertToLlm } from "./messages.ts";
+import {
+	type BashExecutionMessage,
+	type CustomMessage,
+	convertToLlm,
+	type ManualRetryRecoveryMessage,
+} from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { NestedToolCallRunner } from "./nested-tool-calls.ts";
@@ -854,9 +859,7 @@ export class AgentSession {
 				const projection = this.sessionManager.buildSessionProjection();
 				const canonicalContext = {
 					...request.context,
-					messages: this._manualRetryActive
-						? this.agent.state.messages.slice()
-						: projection.messages,
+					messages: this._manualRetryActive ? this.agent.state.messages.slice() : projection.messages,
 					// Messages declare the provider-visible loadout; context.tools keeps executable implementations.
 					tools: this.agent.state.tools.slice(),
 				};
