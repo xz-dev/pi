@@ -145,8 +145,12 @@ PATCH_ORDER=(
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip
-# in its ancestry so its squash-merge applies on top of the predecessor's
-# content. Rebase cascades down the chain when the predecessor is rebased.
+# in its ancestry so its delta applies on top of the predecessor's content.
+# Descendants are integrated as range diffs (predecessor_tip..descendant_tip),
+# not squash merges: the rebuilt tree never contains the predecessor's branch
+# commits, so a squash merge of a descendant would re-conflict on every region
+# the two patches share. Rebase cascades down the chain when the predecessor
+# is rebased.
 CHAIN_EDGES=(
 	model-catalog-extension-refresh:model-refresh-timeout
 	native-wrapper-release:update-clean
@@ -482,6 +486,31 @@ merge_squash() {
 	commit_step "$msg"
 }
 
+apply_range() {
+	# apply_range <name> <msg> <predecessor-patch-name>
+	# 3-way apply of the predecessor_tip..tip delta for chain descendants.
+	# No resolvers: any conflict fails closed with a rebase instruction.
+	local name="$1" msg="$2" pred="$3"
+	stop_before "$name"
+	require_ancestor "$pred" "$name"
+	git merge-base --is-ancestor "${INPUT_SHA[$pred]}" "${INPUT_SHA[$name]}" ||
+		die "$msg must descend from patch/$pred — rebase patch/$name onto the new patch/$pred tip"
+	[[ -z "$(git rev-list --min-parents=2 "${INPUT_SHA[$pred]}..${INPUT_SHA[$name]}")" ]] ||
+		die "$msg range must be linear (no merge commits between patch/$pred and patch/$name)"
+	git diff --binary "${INPUT_SHA[$pred]}" "${INPUT_SHA[$name]}" -- >"$TMPDIR_WORK/$name.patch"
+	if ! git apply --3way --index "$TMPDIR_WORK/$name.patch"; then
+		local conflicts
+		mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+		printf '::error::%s conflicts: %s — rebase patch/%s onto patch/%s and rerun\n' \
+			"$msg" "${conflicts[*]}" "$name" "$pred" >&2
+		exit 1
+	fi
+	ensure_no_conflicts "$msg"
+	ensure_not_empty "$msg"
+	verify_staged
+	commit_step "$msg"
+}
+
 prepare_target() {
 	# Fresh standalone scratch target owned by this script. The source repo is
 	# opened read-only (object donor only); the target must be a path that
@@ -652,12 +681,24 @@ run_replay() {
 		fi
 	fi
 
-	# 3+ patches — plain squash merges in PATCH_ORDER. Any conflict fails
-	# closed with the patch name; the fix is a rebase of that patch branch.
+	# 3+ patches — plain squash merges in PATCH_ORDER; chain descendants apply
+	# their predecessor-relative range instead. Any conflict fails closed with
+	# the patch name; the fix is a rebase of that patch branch.
 	for p in "${ACTIVE_ORDER[@]}"; do
 		[[ "$p" == contributor-approval ]] && continue
 		CURRENT_STEP="$p"
-		merge_squash "$p" "merge patch/$p branch"
+		local_pred=""
+		for edge in "${CHAIN_EDGES[@]}"; do
+			if [[ "${edge##*:}" == "$p" ]] && active "${edge%%:*}"; then
+				local_pred="${edge%%:*}"
+				break
+			fi
+		done
+		if [[ -n "$local_pred" ]]; then
+			apply_range "$p" "merge patch/$p branch" "$local_pred"
+		else
+			merge_squash "$p" "merge patch/$p branch"
+		fi
 	done
 
 	commit_input_marker
