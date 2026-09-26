@@ -96,8 +96,8 @@ patch/startup-submit-readiness 21a32757521472cc8ba627dda5d8ca11d406edb2
 patch/changelog-prerelease d4fed01fb03513eb25f0c6a2395e14074ded7fc4
 patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
 patch/retry-non-retryable-patterns 0c431dd6a2d0741be5a269dfb2fd87a211aa5e6c
-patch/slow-hook-tui-only 5789ad7849f713573594681ecdc66637c6b27dd8
-patch/session-tree-splice 3bc32455585d472c3dc38f88cf3c93103230b2ce
+patch/slow-hook-tui-only 341e04df00840bfc833b286b9e0ad53525588014
+patch/session-tree-splice 4f4a61d9ba82e80b1d00bf6167c7d102d10156fc
 patch/ws-cached-empty-delta 6eb1779b7ef737284aa862ca8cc31ea512cd1125
 patch/self-update-managed-by 992af1524a99c1b5c8f6d4b434c85341141619cc
 patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
