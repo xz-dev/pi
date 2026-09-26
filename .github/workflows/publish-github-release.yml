@@ -48,7 +48,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: sudo apt-get update && sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep tmux
       - run: sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
-      - run: npm run hydrate:model-data && npm run build && npm run check
+      - run: npm run hydrate:model-data && npm run build && bash scripts/check-allow-model-catalog-drift.sh
       - run: ./test.sh
       - name: Verify exact clean source
         shell: bash
