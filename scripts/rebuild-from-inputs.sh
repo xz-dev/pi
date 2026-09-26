@@ -89,8 +89,8 @@ patch/use-embedded-bun-package-manager e083b951142014d0c0e986b58c4cfcc275ace771
 patch/git-package-storage ce3d8adb016a3d8405bddae52d14656c7bf505ff
 patch/agent-run-failure-seam 8b5be9676535c90b58fbf73d829afbbb486d5440
 patch/managed-tool-executions a5b45dbcdb3355721e4de830a8151dc7a132b0ba
-patch/esc-abort 2a481771849cf68aa323094cd8b9cbbab73e748d
-patch/manual-retry a3267affd6ba82d6a6a662a35193934e3b0c4329
+patch/esc-abort 817cfc75a816772c183f832ca094792b6d84bc39
+patch/manual-retry 68eefec76b01a9d7e7ef509558720ffe99fc5a82
 patch/changelog-prerelease 5530b29703a3c11fcae5c9e189605622d1c1199b
 patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
 patch/retry-non-retryable-patterns 003331a02a9efa6348dbf0bf9e41a1ec4e02d01e
@@ -159,7 +159,7 @@ CHAIN_EDGES=(
 	update-clean:bundle-usage-claims
 	use-embedded-bun-package-manager:git-package-storage
 	agent-run-failure-seam:managed-tool-executions
-	agent-run-failure-seam:esc-abort
+	managed-tool-executions:esc-abort
 	esc-abort:manual-retry
 	slow-hook-tui-only:session-tree-splice
 )
