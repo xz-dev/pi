@@ -1010,9 +1010,9 @@ export class SettingsManager {
 
 	getSlowHookThresholdMs(): number {
 		try {
-			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? 0;
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? -1;
 		} catch {
-			return 0;
+			return -1;
 		}
 	}
 
