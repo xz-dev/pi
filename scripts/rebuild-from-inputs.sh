@@ -81,7 +81,7 @@ patch/model-refresh-session-rebind d9341253b4d04c2e631102f3dddedd66af43bbe1
 patch/model-catalog-extension-refresh a47e894e6fed7bfa7d72aef973f045096109923f
 patch/model-refresh-timeout 0a305565340654e159d66bacf781990c3fbc20e9
 patch/bun-bytecode-entrypoint 5a70e570b18555712901fa64374af7e67c10da1d
-patch/startup-benchmark-exit 42b103738f77bb4c709caa1d4c8df7110264c39e
+patch/startup-benchmark-exit 944a3079d9b7a93df4bd3e92974337aa7feee2a4
 patch/native-wrapper-release 65281278ed2bdd966bec63e5406b3fb4948a99d7
 patch/update-clean c66b86b5677da578a25be1914125aa6720a8ccbf
 patch/bundle-usage-claims c2786bd512d2f78fb99e80940c88489f628e7acf
