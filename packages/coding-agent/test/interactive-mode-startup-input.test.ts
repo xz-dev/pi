@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.ts";
+import { createHarness } from "./suite/harness.ts";
 
 type SubmitContext = {
 	defaultEditor: { onSubmit?: (text: string) => void };
@@ -55,6 +60,65 @@ function createSubmitContext(): SubmitContext {
 }
 
 describe("InteractiveMode startup input", () => {
+	it.each(["/retry", "continue"])(
+		"retains %s until session startup finishes, including custom editors",
+		async (text) => {
+			let allowSessionStart: () => void = () => {};
+			let sessionStartEntered: () => void = () => {};
+			const sessionStartReady = new Promise<void>((resolve) => {
+				sessionStartEntered = resolve;
+			});
+			const sessionStartGate = new Promise<void>((resolve) => {
+				allowSessionStart = resolve;
+			});
+			const harness = await createHarness({
+				settings: { theme: "dark", quietStartup: true },
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_start", async (_event, ctx) => {
+							ctx.ui.setEditorComponent((tui, theme, keybindings) => new CustomEditor(tui, theme, keybindings));
+							sessionStartEntered();
+							await sessionStartGate;
+						});
+					},
+				],
+			});
+			const terminal = new VirtualTerminal(100, 30);
+			const runtime = {
+				session: harness.session,
+				setBeforeSessionInvalidate: () => {},
+				setRebindSession: () => {},
+			} as unknown as AgentSessionRuntime;
+			const mode = new InteractiveMode(runtime, { terminal, tuiMode: "regular", initialThemeSetting: "dark" });
+			let initializing: Promise<void> | undefined;
+			try {
+				initializing = mode.init();
+				await sessionStartReady;
+				terminal.sendInput(text);
+				terminal.sendInput("\r");
+				const editor = Reflect.get(mode, "editor") as CustomEditor;
+				expect(editor.getText()).toBe(text);
+				expect(harness.faux.state.callCount).toBe(0);
+				expect(Reflect.get(mode, "unsubscribe")).toBeUndefined();
+				allowSessionStart();
+				await initializing;
+				expect(editor.getText()).toBe(text);
+				expect(editor.onSubmit).toBe((Reflect.get(mode, "defaultEditor") as CustomEditor).onSubmit);
+				if (text === "continue") {
+					terminal.sendInput("\r");
+					expect(await mode.getUserInput()).toBe(text);
+				}
+				expect(harness.faux.state.callCount).toBe(0);
+			} finally {
+				allowSessionStart();
+				await initializing?.catch(() => {});
+				mode.stop();
+				stopThemeWatcher();
+				harness.cleanup();
+			}
+		},
+	);
+
 	it("restores a prompt submitted while managed-tool setup is running", () => {
 		const context: StartupSubmitContext = {
 			editor: { setText: vi.fn() },
