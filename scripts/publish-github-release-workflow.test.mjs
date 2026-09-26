@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -116,11 +116,48 @@ test("upstream sync requires formatter-stable rebuilt sources", () => {
 test("upstream sync check tolerates only the known model-catalog drift class", () => {
   // AGENTS.md "Known Pre-existing Failures": model-ID/catalog TS2345/TS7053
   // errors in packages/*/test are always-ignore noise; anything else fails.
-  assert.match(syncWorkflowText, /check-ts-errors\.log/);
-  assert.match(syncWorkflowText, /error TS\(2345\|7053\)/);
-  assert.match(syncWorkflowText, /packages\/\(ai\|agent\|coding-agent\)\/\(test\|examples\)/);
-  assert.match(syncWorkflowText, /failed outside tsc/);
-  assert.match(syncWorkflowText, /outside the known model-catalog drift class/);
+  assert.match(syncWorkflowText, /bash scripts\/check-allow-model-catalog-drift\.sh/);
+  assert.match(workflowText, /bash scripts\/check-allow-model-catalog-drift\.sh/);
+  const helper = readFileSync(join(ROOT, "scripts", "check-allow-model-catalog-drift.sh"), "utf8");
+  assert.match(helper, /error TS\(2345\|7053\)/);
+  assert.match(helper, /packages\/\(ai\|agent\|coding-agent\)\/\(test\|examples\)/);
+  assert.match(helper, /failed outside tsc/);
+  assert.match(helper, /outside the known model-catalog drift class/);
+});
+
+test("model-catalog drift helper discriminates filtered vs real errors", () => {
+  const dir = mkdtempSync(join(tmpdir(), "drift-check-"));
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  const script = readFileSync(join(ROOT, "scripts", "check-allow-model-catalog-drift.sh"), "utf8");
+  const writeNpm = (body) => {
+    writeFileSync(join(bin, "npm"), `#!/usr/bin/env bash\n${body}\n`);
+    execFileSync("chmod", ["+x", join(bin, "npm")]);
+  };
+  const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` };
+  const runHelper = () =>
+	  spawnSync("bash", [join(dir, "helper.sh")], { cwd: dir, env, encoding: "utf8" });
+  writeFileSync(join(dir, "helper.sh"), script);
+  try {
+    // 1. check passes -> exit 0
+    writeNpm('echo ok; exit 0');
+    assert.equal(runHelper().status, 0);
+    // 2. only drift-class errors -> exit 0 with warning
+    writeNpm(`cat <<'EOF'\npackages/ai/test/x.test.ts(285,4): error TS2345: Argument of type 'Model<"anthropic-messages" | "openai-completions">' is not assignable to parameter of type 'Model<"anthropic-messages">'.\npackages/ai/test/x.test.ts(285,27): error TS2345: Argument of type '"anthropic/claude-3-haiku"' is not assignable to parameter of type '"aion-labs/aion-2.0" | "~z-ai/glm-latest"'.\nEOF\nexit 1`);
+    const drift = runHelper();
+    assert.equal(drift.status, 0, drift.stderr);
+    assert.match(drift.stderr, /Ignoring known model-catalog drift/);
+    // 3. a src error survives the filter -> exit 1
+    writeNpm(`cat <<'EOF'\npackages/ai/test/x.test.ts(1,1): error TS2345: Argument of type '"retired-model"' is not assignable to parameter of type '"a" | "b"'.\npackages/ai/src/providers/openrouter.ts(9,2): error TS2322: Type 'Provider<"openai-completions" | "x">' is not assignable to type 'Provider<"openai-completions">'.\nEOF\nexit 1`);
+    const real = runHelper();
+    assert.equal(real.status, 1);
+    assert.match(real.stderr, /outside the known model-catalog drift class/);
+    // 4. no TS error lines at all (a different stage failed) -> exit 1
+    writeNpm('echo "biome failed"; exit 1');
+    assert.equal(runHelper().status, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 for (const scenario of ["unchanged", "formatted", "check fails"]) {
@@ -139,7 +176,12 @@ for (const scenario of ["unchanged", "formatted", "check fails"]) {
       git("config", "user.email", "fixture@invalid");
       git("config", "commit.gpgsign", "false");
       writeFileSync(join(repo, "source.txt"), "original\n");
-      git("add", "source.txt");
+      // The Check step delegates npm run check to the drift-filter helper;
+      // commit a stub into the fixture so it is not untracked and so the
+      // stubbed npm decides the outcome.
+      mkdirSync(join(repo, "scripts"));
+      writeFileSync(join(repo, "scripts", "check-allow-model-catalog-drift.sh"), "#!/usr/bin/env bash\nnpm run check\n", { mode: 0o755 });
+      git("add", "source.txt", "scripts/check-allow-model-catalog-drift.sh");
       git("commit", "-qm", "base");
       const marker = execFileSync("bash", [join(ROOT, "scripts/rebuild-from-inputs.sh"), "--print-marker"], { encoding: "utf8" }).trim();
       const markerFile = join(dir, "rebuilt-inputs-marker.txt");
