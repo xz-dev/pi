@@ -38,8 +38,11 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `defaultTools` | `string[]` | `read`, `bash`, `edit`, `write` | Built-in tools enabled at startup. An empty array disables all built-in tools but not extension or SDK tools. |
+| `backgroundToolCalls` | object | `{}` | Per-tool managed execution rules. An empty rule uses a 600-second detach threshold. |
 
-Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools).
+Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools). The `tool_task` management tool remains available even with an empty `defaultTools` array; `--tools` is a strict allowlist, so include `tool_task` there explicitly when needed.
+
+`backgroundToolCalls` opts named extension or SDK tools into managed execution. A rule such as `"long_report": { "detachAfterSeconds": 900 }` must use a positive finite threshold; invalid rules are diagnosed and ignored. Unlisted third-party tools stay foreground-only. AI-called `bash` and `powershell` use a 600-second default detach threshold when their timeout is omitted or greater than 1200 seconds. User-entered `!` and `!!` commands are not managed, and `tool_task` itself is never auto-backgrounded. See [Managed tool executions](usage.md#managed-tool-executions) for lifecycle and cancellation details.
 
 ## Sessions and context
 
