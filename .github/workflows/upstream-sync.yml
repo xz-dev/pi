@@ -70,6 +70,7 @@ jobs:
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/managed-tool-abort-drain:refs/remotes/origin/patch/managed-tool-abort-drain \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
+            +refs/heads/patch/startup-submit-readiness:refs/remotes/origin/patch/startup-submit-readiness \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
@@ -119,6 +120,7 @@ jobs:
             esc-abort \
             managed-tool-abort-drain \
             manual-retry \
+            startup-submit-readiness \
             changelog-prerelease \
             skill-overrides \
             retry-non-retryable-patterns \
