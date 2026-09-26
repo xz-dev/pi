@@ -62,7 +62,7 @@ describe("transient extension timing diagnostics", () => {
 		vi.useRealTimers();
 	});
 
-	async function createRunner(source: string, threshold: () => number = () => -1) {
+	async function createRunner(source: string, threshold: () => number = () => 0) {
 		const extensionPath = path.join(tempDir, "extension.ts");
 		fs.writeFileSync(extensionPath, source);
 		const result = await loadExtensions([extensionPath], tempDir);
@@ -238,7 +238,7 @@ describe("transient extension timing diagnostics", () => {
 			["rpc", false, 0],
 		] as const) {
 			const ctx = createProjectTrustContext({ cwd: tempDir, mode, settingsManager, hasUI });
-			await emitProjectTrustEvent(result, { type: "project_trust", cwd: tempDir }, ctx, -1);
+			await emitProjectTrustEvent(result, { type: "project_trust", cwd: tempDir }, ctx, 0);
 			expect(error.mock.calls, mode).toHaveLength(expected);
 			error.mockClear();
 		}
@@ -270,7 +270,7 @@ describe("transient extension timing diagnostics", () => {
 			services,
 			sessionManager: SessionManager.inMemory(tempDir),
 		});
-		session.settingsManager.getSlowHookThresholdMs = () => -1;
+		session.settingsManager.getSlowHookThresholdMs = () => 0;
 		const slowEvents: string[] = [];
 		const shutdownEvents: string[] = [];
 		await session.bindExtensions({
