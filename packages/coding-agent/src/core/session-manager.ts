@@ -25,7 +25,6 @@ import {
 	readSync,
 	renameSync,
 	rmSync,
-
 	type Stats,
 	statSync,
 	unlinkSync,
