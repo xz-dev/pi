@@ -88,7 +88,7 @@ patch/bundle-usage-claims c2786bd512d2f78fb99e80940c88489f628e7acf
 patch/use-embedded-bun-package-manager e083b951142014d0c0e986b58c4cfcc275ace771
 patch/git-package-storage ce3d8adb016a3d8405bddae52d14656c7bf505ff
 patch/agent-run-failure-seam 8b5be9676535c90b58fbf73d829afbbb486d5440
-patch/managed-tool-executions 0f547d214027a8413aa18575ddc2faf85be113aa
+patch/managed-tool-executions a5b45dbcdb3355721e4de830a8151dc7a132b0ba
 patch/esc-abort 2a481771849cf68aa323094cd8b9cbbab73e748d
 patch/manual-retry a3267affd6ba82d6a6a662a35193934e3b0c4329
 patch/changelog-prerelease 5530b29703a3c11fcae5c9e189605622d1c1199b
