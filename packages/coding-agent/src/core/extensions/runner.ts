@@ -12,8 +12,8 @@ import {
 } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
-import type { CacheWarmingAction } from "../cache-warmer.ts";
 import { sanitizeTerminalSingleLine } from "../../utils/ansi.ts";
+import type { CacheWarmingAction } from "../cache-warmer.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -331,14 +331,13 @@ export async function emitProjectTrustEvent(
 	extensionsResult: LoadExtensionsResult,
 	event: ProjectTrustEvent,
 	ctx: ProjectTrustContext,
-	slowHookThresholdMs = 100,
+	slowHookThresholdMs = -1,
 ): Promise<{ result?: ProjectTrustEventResult; errors: ExtensionError[] }> {
 	const errors: ExtensionError[] = [];
 	for (const { ext, handlers } of snapshotEventHandlers(extensionsResult.extensions, "project_trust")) {
 		// A single extension may register multiple handlers for the same event.
 		// The first project_trust handler that returns yes/no wins; undecided falls through.
 		for (const [handlerIndex, handler] of handlers.entries()) {
-
 			const startedAt = performance.now();
 			let executionKind: SlowExtensionHookEntry["executionKind"] = "sync";
 			try {
@@ -358,7 +357,7 @@ export async function emitProjectTrustEvent(
 			} finally {
 				const elapsedMs = performance.now() - startedAt;
 				try {
-					if (ctx.mode === "tui" && ctx.hasUI && elapsedMs > slowHookThresholdMs) {
+					if (slowHookThresholdMs >= 0 && ctx.mode === "tui" && ctx.hasUI && elapsedMs > slowHookThresholdMs) {
 						ctx.onSlowHook?.({
 							event: event.type,
 							extensionPath: ext.resolvedPath,
@@ -457,7 +456,7 @@ export class ExtensionRunner {
 		cwd: string,
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
-		getSlowHookThresholdMs: () => number = () => 100,
+		getSlowHookThresholdMs: () => number = () => -1,
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
@@ -1220,7 +1219,7 @@ export class ExtensionRunner {
 			try {
 				let slow = false;
 				try {
-					slow = elapsedMs > this.getSlowHookThresholdMs();
+					slow = this.getSlowHookThresholdMs() >= 0 && elapsedMs > this.getSlowHookThresholdMs();
 				} catch {
 					// Diagnostics must never alter extension behavior.
 				}
@@ -1254,7 +1253,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				try {
 					const handlerResult = await this.runHandler(event.type, ext, handlerIndex, () => handler(event, ctx));
 
@@ -1397,7 +1395,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "tool_result")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				try {
 					const handlerResult = (await this.runHandler("tool_result", ext, handlerIndex, () =>
 						handler(currentEvent, ctx),
@@ -1458,7 +1455,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				const handlerResult = await this.runHandler("tool_call", ext, handlerIndex, () => handler(event, ctx));
 
 				if (handlerResult) {
@@ -1478,7 +1474,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "user_bash")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				try {
 					const handlerResult = await this.runHandler("user_bash", ext, handlerIndex, () => handler(event, ctx));
 					if (handlerResult === undefined) continue;
@@ -1516,12 +1511,13 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "context")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				try {
 					const visibleMessages = currentMessages.filter((message) => message.role !== "system");
 					const visibleSnapshot = visibleMessages.slice();
 					const event: ContextEvent = { type: "context", messages: visibleMessages };
-					const handlerResult = (await this.runHandler("context", ext, handlerIndex, () => handler(event, ctx))) as ContextEventResult | undefined;
+					const handlerResult = (await this.runHandler("context", ext, handlerIndex, () => handler(event, ctx))) as
+						| ContextEventResult
+						| undefined;
 
 					// Handlers may return a new list or edit event.messages in place.
 					const returned =
@@ -1580,7 +1576,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "before_provider_request")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				try {
 					const event: BeforeProviderRequestEvent = {
 						type: "before_provider_request",
@@ -1613,7 +1608,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "before_provider_headers")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				try {
 					// Handlers mutate `headers` in place; the return value is ignored.
 					const event: BeforeProviderHeadersEvent = {
@@ -1655,7 +1649,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "before_agent_start")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				try {
 					const event: BeforeAgentStartEvent = {
 						...trigger,
@@ -1707,7 +1700,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "resources_discover")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
-
 				try {
 					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
 					const handlerResult = await this.runHandler("resources_discover", ext, handlerIndex, () =>
