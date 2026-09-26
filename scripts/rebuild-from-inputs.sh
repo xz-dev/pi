@@ -12,11 +12,18 @@
 # creates, and it never touches the source repository's refs, index, files, or
 # worktrees.
 #
+# Model: main = upstream + ci + each patch/* squash-merged in PATCH_ORDER.
+# There are no resolver scripts, no accumulated compat branches, and no
+# recorded base..tip ranges. When a merge conflicts, the replay fails and
+# names the patch; the repair is exactly one action: rebase that patch branch
+# onto the latest upstream/main (or onto its predecessor patch tip for
+# dependent chains), force-push it, and rerun. Patch content lives in patch
+# branches, never in this script.
+#
 # Usage:
 #   scripts/rebuild-from-inputs.sh --source <repo> --target <new-path>
 #                                  [--upstream <sha>] [--ci <sha>]
 #                                  [--patch <name>=<sha>]...
-#                                  [--base <name>=<sha>]...
 #                                  [--diagnostic] [--stop-before <name>]
 #   scripts/rebuild-from-inputs.sh --print-inputs          # default SHAs + order
 #   scripts/rebuild-from-inputs.sh --print-marker          # marker commit message
@@ -62,32 +69,33 @@ die() { printf '::error::%s\n' "$*" >&2; exit 1; }
 # commit object id that must exist in the local object database. The workflow
 # passes its freshly captured SHAs explicitly; these recorded defaults are
 # what local diagnosis uses and what --print-inputs exposes.
-# ponytail: SHAs recorded as literal defaults; the workflow re-captures per run
-# after fetch, so these go stale only between syncs.
+# SHAs recorded as literal defaults; the workflow re-captures per run after
+# fetch, so these go stale only between syncs. Never hand-expand a short SHA:
+# resolve with git rev-parse / git ls-remote.
 read -r -d '' DEFAULT_INPUTS <<'EOF' || true
-upstream/main b45597504eeaba1f11a9920a1d1048c361ed4b8e
+upstream/main ff72faba28d10c86611863d0aaa5d3122f2d8cb0
 ci c7a07061c496cb2b26fbfc70513d502aa5ecd8ad
 patch/contributor-approval 57928a38185ca3e73d26d5fde1cbd7184f676fef
 patch/model-startup-refresh-barrier 4e3b3636da9353ab52753b5435192d35d565efe9
-patch/model-refresh-session-rebind 3794c35463fef7530976f3616deaa749753b4732
-patch/model-catalog-extension-refresh e3e2b9dccc426af364fa17cb4645427ec0d6b40e
+patch/model-refresh-session-rebind d9341253b4d04c2e631102f3dddedd66af43bbe1
+patch/model-catalog-extension-refresh 8e24d761d1bfecfd4541514347d1b565789324d5
+patch/model-refresh-timeout 602cb0f1c5af81ee73bcb2637d270e76033160e6
 patch/bun-bytecode-entrypoint 5a70e570b18555712901fa64374af7e67c10da1d
 patch/startup-benchmark-exit 42b103738f77bb4c709caa1d4c8df7110264c39e
 patch/native-wrapper-release 65281278ed2bdd966bec63e5406b3fb4948a99d7
 patch/update-clean c66b86b5677da578a25be1914125aa6720a8ccbf
 patch/bundle-usage-claims c2786bd512d2f78fb99e80940c88489f628e7acf
-patch/use-embedded-bun-package-manager d7e6891863f2a4c3e6b214c7fd57acf17142fc26
-patch/git-package-storage cabab546289a57f0831966f2b81b88db3881f14f
-patch/model-refresh-timeout e97c44ecfcd801e69f93fd88085dd89e83a0886e
-patch/agent-run-failure-seam 849fc34c0b5a9c0ef68f7b4b7896f6c45a2f880d
-patch/managed-tool-executions fd7bc3de418811265927473f2b435c33a79b1267
-patch/esc-abort 036dc1cbf858452805ea23df2926c15eee684b36
-patch/manual-retry 5ff4039ad5b2cb74c5cd534da84bc547b7cf1a75
-patch/changelog-prerelease a17b2c217e14053405647c9c7eeadc003e0d5dfb
-patch/skill-overrides 6e27082000e6e3437a8868c842e64b69436bf32f
-patch/retry-non-retryable-patterns b80622fae70adc5b880a8e06e59606148a469b11
-patch/slow-hook-tui-only 8c09582082a90e528cfb310f9aec8efb8c007597
-patch/session-tree-splice ea07560190e26da97e228100982a2f6b5b2ed383
+patch/use-embedded-bun-package-manager 24af4d28cddf5c7c5c3bcf6da7b30e297188f975
+patch/git-package-storage 3a0353f98f589b27f4714a9d6863f059c6dc9e75
+patch/agent-run-failure-seam 8b5be9676535c90b58fbf73d829afbbb486d5440
+patch/managed-tool-executions 0f547d214027a8413aa18575ddc2faf85be113aa
+patch/esc-abort 2a481771849cf68aa323094cd8b9cbbab73e748d
+patch/manual-retry a3267affd6ba82d6a6a662a35193934e3b0c4329
+patch/changelog-prerelease 5530b29703a3c11fcae5c9e189605622d1c1199b
+patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
+patch/retry-non-retryable-patterns 003331a02a9efa6348dbf0bf9e41a1ec4e02d01e
+patch/slow-hook-tui-only 1f48dbb966ed1800b9d952c450d237f4f3869330
+patch/session-tree-splice 12426b923126dc32dd29be0ba1ec520f68328b66
 patch/ws-cached-empty-delta 6eb1779b7ef737284aa862ca8cc31ea512cd1125
 patch/self-update-managed-by 992af1524a99c1b5c8f6d4b434c85341141619cc
 patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
@@ -98,93 +106,8 @@ patch/quarantine-auth-storage-flake b9ab213dc9676f1f527b6ea709284c3350907378
 patch/vitest-audit-fix 559232f68ef83ac305bd775a31b5dc0d42aa5ee9
 EOF
 
-# Explicit accumulated compat bases. These steps consume a recorded
-# base..accumulated-tip pair instead of inferring tip^: later fixups on a
-# patch tip must not silently shrink the replayed delta. Each entry:
-#   <patch-name> <base-sha> <accumulated-ref-name> <default-tip-sha>
-# The base is immutable recorded provenance. The accumulated tip is captured
-# per run via --patch <accumulated-ref-name>=<sha>. A --base <name>=<sha>
-# override records a different explicit base; no base is inferred from tip^.
-# Recorded defaults are used only as a complete default vector. When the accumulated ref is the patch's own ref (its
-# branch is already a linear accumulated stack), the entry names the patch
-# itself. Later rebases/base changes require a new recorded vector here, not
-# inference.
-read -r -d '' COMPAT_RANGES <<'EOF' || true
-model-refresh-session-rebind dc8b262eab67744b6df3fc80e838d28eb50f1efe model-refresh-session-rebind-on-accumulated 881542f8dbb6fbfb43d5b24b45ec6f6889c181ac
-model-refresh-timeout f5e6c740ea5bd12677d409ae84d8a30949e01e69 model-refresh-timeout e97c44ecfcd801e69f93fd88085dd89e83a0886e
-agent-run-failure-seam 033a8c9690c43c4180d001325f7d9225e54ede8b agent-run-failure-seam-on-accumulated 623d695a704c1939e636dc099765b4fbc64eea84
-managed-tool-executions 623d695a704c1939e636dc099765b4fbc64eea84 managed-tool-executions-on-accumulated d781f7cd8c631572be6b46bbb7a642f0c2712921
-esc-abort d781f7cd8c631572be6b46bbb7a642f0c2712921 esc-abort-on-accumulated 0d65803ca01e8c4a36626b17f79b63fb303fa632
-manual-retry 0d65803ca01e8c4a36626b17f79b63fb303fa632 manual-retry-on-accumulated 72f29c7ad5570389acfb548985b02369407b6493
-slow-hook-tui-only 2ce3add28e0e7e6f714bbb07c60e0314ba8358bc slow-hook-on-accumulated 02c4681890d4e01a948872dd58136b13d9b0af26
-EOF
-
 print_inputs() {
 	printf '%s\n' "$DEFAULT_INPUTS"
-	printf '# compat ranges (explicit base..tip)\n'
-	printf '%s\n' "$COMPAT_RANGES"
-}
-
-print_marker() {
-	local subject="record upstream sync inputs"
-	if [[ -n "$STOP_BEFORE" ]]; then
-		subject="record upstream sync inputs (partial through $STOP_BEFORE)"
-	elif ((DIAGNOSTIC)); then
-		subject="record upstream sync inputs (diagnostic subset)"
-	elif [[ "${APPLIED_ORDER[*]}" != "ci ${PATCH_ORDER[*]}" ]]; then
-		die "complete marker requires the entire recorded application order"
-	fi
-	echo "$subject"
-	echo
-	echo "upstream/main $UPSTREAM_SHA"
-	echo "origin/ci $CI_SHA"
-	echo "applied-order ${APPLIED_ORDER[*]}"
-	local p
-	for p in "${APPLIED_ORDER[@]}"; do
-		[[ "$p" == ci ]] && continue
-		echo "origin/patch/$p ${INPUT_SHA[$p]}"
-	done
-	for p in "${APPLIED_ORDER[@]}"; do
-		[[ -n "${APPLIED_RANGE[$p]:-}" ]] || continue
-		echo "range/patch/$p ${APPLIED_RANGE[$p]}"
-	done
-}
-
-check_mode() {
-	# Workflow self-test: every ref this script consumes must be fetched by
-	# the workflow and vice versa. The workflow's fetch list is the source of
-	# truth; this checks the recorded default names against it.
-	local workflow=".github/workflows/upstream-sync.yml"
-	[[ -f "$workflow" ]] || { say "check: no $workflow (out of repo); skipping"; exit 0; }
-	local missing=0 name ref
-	while read -r name _; do
-		case "$name" in
-		upstream/main) ref=main; source=upstream ;;
-		ci) ref=ci ;;
-		patch/*) ref="patch/${name#patch/}" ;;
-		esac
-		[[ "$name" == upstream/main ]] && { grep -qE 'git fetch upstream main' "$workflow" || { say "check: workflow does not fetch upstream main"; missing=1; }; continue; }
-		grep -qE "refs/heads/${ref}(:|\\\\)" "$workflow" || { say "check: workflow does not fetch $name"; missing=1; }
-	done <<<"$DEFAULT_INPUTS"
-	# Compat entries are well-formed and their accumulated tips are fetched
-	# as patch/<accum-ref>; verify the workflow fetches each recorded ref.
-	while read -r name base accum_ref tip; do
-		[[ "$base" =~ ^[0-9a-f]{40}$ && "$tip" =~ ^[0-9a-f]{40}$ && -n "$accum_ref" ]] || \
-			{ say "check: malformed compat range for $name"; missing=1; continue; }
-		grep -qE "refs/heads/patch/${accum_ref}(:|\\\\)" "$workflow" || { say "check: workflow does not fetch compat ref patch/$accum_ref"; missing=1; }
-	done <<<"$COMPAT_RANGES"
-	# Reverse direction: every patch ref the workflow fetches must appear here
-	# (as a recorded patch input or as a recorded compat accum ref).
-	local fetched
-	fetched="$(grep -o 'refs/heads/patch/[^:]*' "$workflow" | sed 's/refs\/heads\///')"
-	for ref in $fetched; do
-		local short="${ref#patch/}"
-		grep -q "^$ref " <<<"$DEFAULT_INPUTS" && continue
-		grep -q " $short " <<<"$COMPAT_RANGES" || { say "check: script has no recorded input for $ref"; missing=1; }
-	done
-	((missing == 0)) || die "check failed: workflow and script inputs drift"
-	say "check ok: workflow fetch list and script inputs match"
-	exit 0
 }
 
 # Expected application order. run_replay is the shared implementation;
@@ -221,6 +144,69 @@ PATCH_ORDER=(
 	vitest-audit-fix
 )
 
+# Dependent chains: the descendant patch must keep the predecessor patch tip
+# in its ancestry so its squash-merge applies on top of the predecessor's
+# content. Rebase cascades down the chain when the predecessor is rebased.
+CHAIN_EDGES=(
+	native-wrapper-release:update-clean
+	update-clean:bundle-usage-claims
+	use-embedded-bun-package-manager:git-package-storage
+	agent-run-failure-seam:managed-tool-executions
+	agent-run-failure-seam:esc-abort
+	esc-abort:manual-retry
+	slow-hook-tui-only:session-tree-splice
+)
+
+print_marker() {
+	local subject="record upstream sync inputs"
+	if [[ -n "$STOP_BEFORE" ]]; then
+		subject="record upstream sync inputs (partial through $STOP_BEFORE)"
+	elif ((DIAGNOSTIC)); then
+		subject="record upstream sync inputs (diagnostic subset)"
+	elif [[ "${APPLIED_ORDER[*]}" != "ci ${PATCH_ORDER[*]}" ]]; then
+		die "complete marker requires the entire recorded application order"
+	fi
+	echo "$subject"
+	echo
+	echo "upstream/main $UPSTREAM_SHA"
+	echo "origin/ci $CI_SHA"
+	echo "applied-order ${APPLIED_ORDER[*]}"
+	local p
+	for p in "${APPLIED_ORDER[@]}"; do
+		[[ "$p" == ci ]] && continue
+		echo "origin/patch/$p ${INPUT_SHA[$p]}"
+	done
+}
+
+check_mode() {
+	# Workflow self-test: every ref this script consumes must be fetched by
+	# the workflow and vice versa. The workflow's fetch list is the source of
+	# truth; this checks the recorded default names against it.
+	local workflow=".github/workflows/upstream-sync.yml"
+	[[ -f "$workflow" ]] || { say "check: no $workflow (out of repo); skipping"; exit 0; }
+	local missing=0 name ref
+	while read -r name _; do
+		case "$name" in
+		upstream/main)
+			grep -qE 'git fetch upstream main' "$workflow" || { say "check: workflow does not fetch upstream main"; missing=1; }
+			continue
+			;;
+		ci) ref=ci ;;
+		patch/*) ref="$name" ;;
+		esac
+		grep -qE "refs/heads/${ref}(:|\\\\)" "$workflow" || { say "check: workflow does not fetch $name"; missing=1; }
+	done <<<"$DEFAULT_INPUTS"
+	# Reverse direction: every patch ref the workflow fetches must appear here.
+	local fetched
+	fetched="$(grep -o 'refs/heads/patch/[^:]*' "$workflow" | sed 's/refs\/heads\///')"
+	for ref in $fetched; do
+		grep -q "^$ref " <<<"$DEFAULT_INPUTS" || { say "check: script has no recorded input for $ref"; missing=1; }
+	done
+	((missing == 0)) || die "check failed: workflow and script inputs drift"
+	say "check ok: workflow fetch list and script inputs match"
+	exit 0
+}
+
 # --- argument parsing ---------------------------------------------------------
 
 MODE="replay"
@@ -229,30 +215,17 @@ STOP_BEFORE=""
 SOURCE_REPO=""
 TARGET_PATH=""
 EXPLICIT_PATCHES=()
-EXPLICIT_BASES=()
 declare -A INPUT_SHA
-declare -A COMPAT_BASE
-declare -A COMPAT_TIP
-declare -A COMPAT_REF
-declare -A APPLIED_RANGE
 APPLIED_ORDER=()
 ACTIVE_ORDER=()
 UPSTREAM_SHA=""
 CI_SHA=""
-cn=""
-range=""
 while (($# > 0)); do
 	case "$1" in
 	--print-inputs) MODE="print" ; shift ;;
 	--print-marker) MODE="print-marker" ; shift ;;
 	--check) MODE="check" ; shift ;;
 	--diagnostic) DIAGNOSTIC=1 ; shift ;;
-	--base)
-		(($# >= 2)) && [[ "$2" == *=* ]] || die "--base requires name=sha"
-		COMPAT_BASE["${2%%=*}"]="${2#*=}"
-		EXPLICIT_BASES+=("${2%%=*}")
-		shift 2
-		;;
 	--stop-before)
 		(($# >= 2)) || die "--stop-before requires a value"
 		STOP_BEFORE="$2"
@@ -321,18 +294,7 @@ while read -r name sha; do
 		;;
 	esac
 done <<<"$DEFAULT_INPUTS"
-while read -r name base accum_ref tip; do
-	[[ -n "${COMPAT_BASE[$name]:-}" ]] || COMPAT_BASE[$name]="$base"
-	COMPAT_REF[$name]="$accum_ref"
-	# The accumulated tip resolves from the explicitly passed
-	# patch/<accum-ref> input when present, else the recorded default.
-	COMPAT_TIP[$name]="${INPUT_SHA[$accum_ref]:-$tip}"
-done <<<"$COMPAT_RANGES"
-# A recorded compat pair only activates when its patch input is present; keep
-# the map aligned so provenance never names a pair that cannot apply.
-for name in "${!COMPAT_BASE[@]}"; do
-	[[ -n "${INPUT_SHA[$name]:-}" ]] || unset "COMPAT_BASE[$name]" "COMPAT_TIP[$name]" "COMPAT_REF[$name]"
-done
+
 select_active() {
 	ACTIVE_ORDER=()
 	if ((DIAGNOSTIC == 0)); then
@@ -355,7 +317,6 @@ validate_inputs() {
 	for p in "${EXPLICIT_PATCHES[@]}"; do
 		known=0
 		for q in "${PATCH_ORDER[@]}"; do [[ "$p" == "$q" ]] && known=1; done
-		for q in "${!COMPAT_REF[@]}"; do [[ "$p" == "${COMPAT_REF[$q]}" ]] && known=1; done
 		((known)) || die "unknown patch input name: $p"
 		[[ "${INPUT_SHA[$p]}" =~ ^[0-9a-f]{40}$ ]] || die "patch/$p input is not a full fixed SHA"
 	done
@@ -365,54 +326,23 @@ validate_inputs() {
 	elif ((${#EXPLICIT_PATCHES[@]} > 0)); then
 		# Overrides in a full run must describe a complete vector. A caller
 		# wanting a subset must opt into a non-publishable diagnostic run.
-		for p in "${PATCH_ORDER[@]}" "${COMPAT_REF[@]}"; do
+		for p in "${PATCH_ORDER[@]}"; do
 			[[ " ${EXPLICIT_PATCHES[*]} " == *" $p "* ]] || die "missing explicit input patch/$p in full vector"
 		done
 	fi
-	for p in "${EXPLICIT_BASES[@]}"; do
-		[[ -n "${COMPAT_REF[$p]:-}" ]] || die "unknown compat base name: $p"
-		[[ " ${ACTIVE_ORDER[*]} " == *" $p "* ]] || die "compat base $p requires its owning patch step"
-		[[ "${COMPAT_BASE[$p]}" =~ ^[0-9a-f]{40}$ ]] || die "compat base $p is not a full fixed SHA"
-	done
-	for p in "${!COMPAT_REF[@]}"; do
-		q="${COMPAT_REF[$p]}"
-		if [[ " ${EXPLICIT_PATCHES[*]} " == *" $q "* ]]; then
-			[[ " ${ACTIVE_ORDER[*]} " == *" $p "* ]] || die "compat input $q requires owning patch $p"
-		fi
-	done
 	if [[ -n "$STOP_BEFORE" && "$STOP_BEFORE" != ci ]]; then
 		[[ " ${ACTIVE_ORDER[*]} " == *" $STOP_BEFORE "* ]] || die "unknown --stop-before step or step not selected: $STOP_BEFORE"
 	fi
 }
 
-planned_range() {
-	local name="$1" base_name
-	if [[ -n "${COMPAT_BASE[$name]:-}" ]]; then
-		printf '%s..%s' "${COMPAT_BASE[$name]}" "${COMPAT_TIP[$name]}"
-		return
-	fi
-	case "$name" in
-	esc-abort|manual-retry) base_name=agent-run-failure-seam ;;
-	update-clean) base_name=native-wrapper-release ;;
-	bundle-usage-claims) base_name=update-clean ;;
-	git-package-storage) base_name=use-embedded-bun-package-manager ;;
-	session-tree-splice) base_name=slow-hook-tui-only ;;
-	*) return 0 ;;
-	esac
-	printf '%s..%s' "${INPUT_SHA[$base_name]}" "${INPUT_SHA[$name]}"
-}
-
 if [[ "$MODE" == "print-marker" ]]; then
 	validate_inputs
 	APPLIED_ORDER=()
-	APPLIED_RANGE=()
 	if [[ "$STOP_BEFORE" != ci ]]; then
 		APPLIED_ORDER=(ci)
 		for p in "${ACTIVE_ORDER[@]}"; do
 			[[ -n "$STOP_BEFORE" && "$STOP_BEFORE" == "$p" ]] && break
 			APPLIED_ORDER+=("$p")
-			range="$(planned_range "$p")"
-			[[ -z "$range" ]] || APPLIED_RANGE[$p]="$range"
 		done
 	fi
 	print_marker
@@ -422,8 +352,7 @@ fi
 label_of() {
 	# Canonical git label for a recorded input name: "origin/ci" or
 	# "origin/patch/<name>". Merging against this label (not the raw SHA) keeps
-	# conflict markers identical to the CI workflow's, so the resolvers'
-	# fail-closed shape checks match exactly.
+	# conflict markers identical to the CI workflow's.
 	if [[ "$1" == ci ]]; then
 		printf 'ci'
 	else
@@ -432,7 +361,6 @@ label_of() {
 }
 
 active() {
-	# True when the named input is part of this run's active order.
 	local p
 	for p in "${ACTIVE_ORDER[@]}"; do
 		[[ "$p" == "$1" ]] && return 0
@@ -472,21 +400,6 @@ commit_input_marker() {
 
 # Guard helpers -------------------------------------------------------------
 
-# Resolver/helper files this script consumes, extracted with git archive from
-# the recorded CI_SHA (never a worktree overlay, whose bytes could differ from
-# the frozen input).
-HELPERS=(
-	rebuild-from-inputs.sh
-	union-contributor-approvals.py
-	resolve-model-catalog-squash-conflicts.py
-	resolve-model-refresh-timeout-conflicts.py
-	resolve-embedded-bun-squash-conflicts.py
-	resolve-managed-tool-executions-conflicts.py
-	resolve-esc-abort-conflicts.py
-	resolve-slow-hook-conflicts.py
-	resolve-session-tree-splice-conflicts.py
-)
-
 ensure_no_conflicts() {
 	local msg="$1"
 	if ! git diff --quiet --diff-filter=U --; then
@@ -501,24 +414,6 @@ ensure_not_empty() {
 	fi
 }
 
-ensure_conflicts_are() {
-	# ensure_conflicts_are <msg> <expected-file>...
-	# Fail closed unless the conflicted file set is exactly the expected files.
-	local msg="$1"
-	shift
-	mapfile -d '' -t actual < <(git diff --name-only --diff-filter=U -z)
-	if (( ${#actual[@]} != $# )); then
-		printf '::error::Unexpected %s conflicts:' "$msg" >&2
-		printf ' %q' "${actual[@]}" >&2
-		printf '\n' >&2
-		die "$msg expected conflict set: $*"
-	fi
-	local expected
-	for expected in "$@"; do
-		[[ " ${actual[*]} " == *" $expected "* ]] || die "Unexpected $msg conflict set: ${actual[*]}"
-	done
-}
-
 verify_staged() {
 	# Whitespace damage guard on the staged integration.
 	git diff --cached --check
@@ -530,10 +425,23 @@ commit_step() {
 	APPLIED_ORDER+=("$CURRENT_STEP")
 }
 
+require_ancestor() {
+	# require_ancestor <ancestor-patch-name> <descendant-patch-name>
+	# Fails closed when either input is missing (the descendant guard must not
+	# silently pass because an ancestor was not provided).
+	local ancestor="${INPUT_SHA[$1]:-}" descendant="${INPUT_SHA[$2]:-}"
+	[[ -n "$ancestor" ]] || die "patch/$2 guard requires patch/$1 input"
+	git merge-base --is-ancestor "$ancestor" "$descendant" ||
+		die "patch/$2 must descend from patch/$1 — rebase the descendant onto the new predecessor tip"
+}
+
 # Step helpers ---------------------------------------------------------------
 
 merge_squash() {
 	# merge_squash <name> <msg> [flags]
+	# On conflict the replay fails closed and names the patch. The repair is to
+	# rebase that patch branch onto the latest upstream (or its chain
+	# predecessor) and rerun — never to teach this script conflict shapes.
 	local name="$1" msg="$2"
 	local flags="${3:-}"
 	stop_before "$name"
@@ -547,7 +455,7 @@ merge_squash() {
 			for f in "${ci_conflicts[@]}"; do
 				case "$f" in
 				README.md|.github/workflows/publish-model-catalog.yml) ;;
-				*) die "Unexpected $msg squash conflict: $f" ;;
+				*) die "Unexpected $msg squash conflict: $f — rebase patch/$name onto upstream and rerun" ;;
 				esac
 			done
 			if git diff --name-only --diff-filter=U | grep -qx 'README.md'; then
@@ -558,7 +466,11 @@ merge_squash() {
 				git rm -f .github/workflows/publish-model-catalog.yml
 			fi
 		else
-			die "Unexpected $msg squash conflict"
+			local conflicts
+			mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+			printf '::error::%s conflicts: %s — rebase patch/%s onto upstream (or its chain predecessor) and rerun\n' \
+				"$msg" "${conflicts[*]}" "$name" >&2
+			exit 1
 		fi
 	fi
 	ensure_no_conflicts "$msg"
@@ -567,125 +479,6 @@ merge_squash() {
 		verify_staged
 	fi
 	commit_step "$msg"
-}
-
-merge_squash_resolver() {
-	# merge_squash_resolver <name> <msg> <resolver> [<expected-conflict-file>...]
-	# The resolver runs only when the merge conflicts, and only after the
-	# conflict set matches the expected files exactly (when any are declared).
-	# Resolvers themselves fail closed on unexpected content shapes.
-	local name="$1" msg="$2" resolver="$3"
-	shift 3
-	stop_before "$name"
-	if ! git merge --squash "origin/$(label_of "$name")"; then
-		if (($# > 0)); then
-			ensure_conflicts_are "$msg" "$@"
-		fi
-		if [[ "$resolver" == *.py ]]; then
-			python3 "$HELPER_DIR/$resolver"
-		else
-			bash "$HELPER_DIR/$resolver"
-		fi
-	fi
-	ensure_no_conflicts "$msg"
-	ensure_not_empty "$msg"
-	verify_staged
-	commit_step "$msg"
-}
-
-apply_range() {
-	# apply_range <name> <msg> <base-sha> <tip-sha> [<resolver> [<expected-file>...]]
-	# 3-way apply of the explicit base..tip diff. Empty integration, conflicts,
-	# and whitespace damage fail closed. Optional resolver runs only on the
-	# exact expected conflict shape.
-	local name="$1" msg="$2" base="$3" tip="$4"
-	shift 4
-	stop_before "$name"
-	git diff --binary "$base" "$tip" -- >"$TMPDIR_WORK/$name.patch"
-	if ! git apply --3way --index "$TMPDIR_WORK/$name.patch"; then
-		if (($# > 0)); then
-			local resolver="$1"
-			shift
-			if (($# > 0)); then
-				ensure_conflicts_are "$msg" "$@"
-			fi
-			if [[ "$resolver" == *.py ]]; then
-				python3 "$HELPER_DIR/$resolver"
-			else
-				bash "$HELPER_DIR/$resolver"
-			fi
-		else
-			die "Failed to apply $msg compat diff"
-		fi
-	fi
-	ensure_no_conflicts "$msg"
-	ensure_not_empty "$msg"
-	verify_staged
-	CURRENT_STEP="$name"
-	commit_step "$msg"
-	APPLIED_RANGE[$name]="$base..$tip"
-}
-
-apply_compat_range() {
-	# apply_compat_range <name> <msg> [<resolver> [<expected-file>...]]
-	# Applies the recorded explicit base..accumulated-tip compat pair for
-	# <name>. The base is recorded provenance; the tip is the captured
-	# -on-accumulated ref SHA. Never tip^.
-	local name="$1" msg="$2"
-	shift 2
-	local base="${COMPAT_BASE[$name]:-}" tip="${COMPAT_TIP[$name]:-}"
-	[[ -n "$base" && -n "$tip" ]] || die "$msg requires a recorded base..tip compat pair"
-	sha_of "$base" "$msg compat base"
-	sha_of "$tip" "$msg compat tip"
-	git merge-base --is-ancestor "$base" "$tip" || die "$msg compat tip must descend from its recorded base"
-	case "$name" in
-	slow-hook-tui-only)
-		git merge-base --is-ancestor "${INPUT_SHA[$name]}" "$tip" ||
-			die "$msg compat does not contain selected source patch/$name"
-		;;
-	agent-run-failure-seam|managed-tool-executions|esc-abort|manual-retry)
-		local dependency
-		for dependency in agent-run-failure-seam managed-tool-executions esc-abort manual-retry; do
-			if active "$dependency"; then
-				git merge-base --is-ancestor "${INPUT_SHA[$dependency]}" "$tip" ||
-					die "$msg compat does not contain selected source patch/$dependency"
-			fi
-			[[ "$dependency" == "$name" ]] && break
-		done
-		;;
-	esac
-	# The compat tip is the accumulated pre-image commit carrying the patch's
-	# semantics on top of the accumulated tree; the patch's own tip is recorded
-	# in the marker for provenance but is not itself applied.
-	apply_range "$name" "$msg" "$base" "$tip" "$@"
-}
-
-cherry_pick_range() {
-	# cherry_pick_range <name> <msg> <base-patch-name> — applies
-	# base..name as a linear descendant range.
-	local name="$1" msg="$2" base_name="$3"
-	local base="${INPUT_SHA[$base_name]}" tip="${INPUT_SHA[$name]}"
-	stop_before "$name"
-	git merge-base --is-ancestor "$base" "$tip" || die "$msg must descend from patch/$base_name"
-	[[ -z "$(git rev-list --min-parents=2 "$base..$tip")" ]] || die "$msg range must be linear"
-	if ! git cherry-pick --no-commit "origin/patch/$base_name..origin/patch/$name"; then
-		die "Failed to apply $msg descendant range"
-	fi
-	ensure_no_conflicts "$msg"
-	ensure_not_empty "$msg"
-	verify_staged
-	commit_step "$msg"
-	APPLIED_RANGE[$name]="$base..$tip"
-}
-
-require_ancestor() {
-	# require_ancestor <ancestor-patch-name> <descendant-patch-name>
-	# Fails closed when either input is missing (the descendant guard must not
-	# silently pass because an ancestor was not provided).
-	local ancestor="${INPUT_SHA[$1]:-}" descendant="${INPUT_SHA[$2]:-}"
-	[[ -n "$ancestor" ]] || die "patch/$2 guard requires patch/$1 input"
-	git merge-base --is-ancestor "$ancestor" "$descendant" ||
-		die "patch/$2 must descend from patch/$1"
 }
 
 prepare_target() {
@@ -755,21 +548,17 @@ run_replay() {
 	local p
 	prepare_target
 
-	# The selected ci input must actually carry every helper this replay
-	# executes; extract them from the immutable CI_SHA object, never a
-	# worktree overlay (which could carry uncommitted edits or stale
-	# generated-main bytes). A dirty source worktree is irrelevant: the
-	# recorded commit bytes are what run.
+	# The selected ci input must actually carry the helper this replay
+	# executes; extract it from the immutable CI_SHA object, never a worktree
+	# overlay (which could carry uncommitted edits).
 	TMPDIR_WORK="$(mktemp -d "${TMPDIR:-/tmp}/rebuild-from-inputs.XXXXXX")"
-	# ponytail: per-run temp dir never cleaned on failure; keeps conflict
-	# evidence for diagnosis. /tmp cleaners reap it.
 	HELPER_DIR="$TMPDIR_WORK/helpers"
 	mkdir -p "$HELPER_DIR"
 	if ! git archive "$CI_SHA" scripts/ >"$TMPDIR_WORK/ci-scripts.tar" 2>/dev/null; then
 		die "ci input $CI_SHA carries no scripts/ helpers"
 	fi
 	tar -xf "$TMPDIR_WORK/ci-scripts.tar" -C "$TMPDIR_WORK"
-	for helper in "${HELPERS[@]}"; do
+	for helper in rebuild-from-inputs.sh union-contributor-approvals.py; do
 		[[ -f "$TMPDIR_WORK/scripts/$helper" ]] || die "ci input $CI_SHA lacks helper scripts/$helper"
 		cp "$TMPDIR_WORK/scripts/$helper" "$HELPER_DIR/$helper"
 	done
@@ -785,8 +574,7 @@ run_replay() {
 	sha_of "$CI_SHA" ci
 	# Every active input must resolve locally. In the default full-vector run
 	# this is what makes a missing recorded input fail closed instead of
-	# silently shrinking the replay; in an explicit-subset run it rechecks
-	# the named inputs.
+	# silently shrinking the replay.
 	for p in "${ACTIVE_ORDER[@]}"; do
 		sha_of "${INPUT_SHA[$p]:-}" "patch/$p"
 	done
@@ -804,6 +592,16 @@ run_replay() {
 	git update-ref refs/remotes/origin/ci "$CI_SHA"
 	for p in "${ACTIVE_ORDER[@]}"; do
 		git update-ref "refs/remotes/origin/patch/$p" "${INPUT_SHA[$p]}"
+	done
+
+	# Dependent chains must keep the predecessor patch tip in their ancestry.
+	local edge pred desc
+	for edge in "${CHAIN_EDGES[@]}"; do
+		pred="${edge%%:*}"
+		desc="${edge##*:}"
+		if active "$pred" && active "$desc"; then
+			require_ancestor "$pred" "$desc"
+		fi
 	done
 
 	# Upstream-maintained changelogs move every release cycle, so patch
@@ -853,417 +651,13 @@ run_replay() {
 		fi
 	fi
 
-	# 3 model-startup-refresh-barrier
-	if active model-startup-refresh-barrier; then
-		CURRENT_STEP=model-startup-refresh-barrier
-		merge_squash model-startup-refresh-barrier "merge patch/model-startup-refresh-barrier branch"
-	fi
-
-	# 4 model-refresh-session-rebind — explicit recorded compat base..tip.
-	if active model-refresh-session-rebind; then
-		apply_compat_range model-refresh-session-rebind "merge patch/model-refresh-session-rebind branch"
-		agent_session=packages/coding-agent/src/core/agent-session.ts
-		grep -Fq 'private _cacheWarmer?:' "$agent_session"
-		grep -Fq 'private _unsubscribeModelsChanged: () => void;' "$agent_session"
-		grep -Fq 'this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime())' "$agent_session"
-		if grep -Fq '_refreshCurrentModelFromRegistry' "$agent_session"; then
-			die "Stale _refreshCurrentModelFromRegistry reference remains"
-		fi
-	fi
-
-	# 5 model-catalog-extension-refresh — upstream v0.87.1 doc refresh makes
-	# README + packages.md + usage.md conflict; resolver takes upstream's side
-	# (patch code still applies cleanly and owns the feature).
-	if active model-catalog-extension-refresh; then
-		CURRENT_STEP=model-catalog-extension-refresh
-		merge_squash_resolver model-catalog-extension-refresh "merge patch/model-catalog-extension-refresh branch" \
-			resolve-model-catalog-squash-conflicts.py \
-			packages/coding-agent/README.md \
-			packages/coding-agent/docs/packages.md \
-			packages/coding-agent/docs/usage.md
-	fi
-
-	# 6 model-refresh-timeout — explicit recorded compat base..tip, kept
-	# immediately after the model-catalog refresh it builds on. Upstream's doc
-	# refresh moved its settings.md anchor; resolver re-appends the row to the
-	# new Network-and-retries table.
-	if active model-refresh-timeout; then
-		apply_compat_range model-refresh-timeout "merge patch/model-refresh-timeout branch" \
-			resolve-model-refresh-timeout-conflicts.py \
-			packages/coding-agent/docs/settings.md
-	fi
-
-	# 7 bun-bytecode-entrypoint
-	if active bun-bytecode-entrypoint; then
-		CURRENT_STEP=bun-bytecode-entrypoint
-		merge_squash bun-bytecode-entrypoint "merge patch/bun-bytecode-entrypoint branch"
-	fi
-
-	# 8 startup-benchmark-exit
-	if active startup-benchmark-exit; then
-		CURRENT_STEP=startup-benchmark-exit
-		merge_squash startup-benchmark-exit "merge patch/startup-benchmark-exit branch"
-	fi
-
-	# 9 native-wrapper-release
-	if active native-wrapper-release; then
-		CURRENT_STEP=native-wrapper-release
-		merge_squash native-wrapper-release "merge patch/native-wrapper-release branch"
-	fi
-
-	# 10-11 linear descendant ranges
-	if active update-clean; then
-		CURRENT_STEP=update-clean
-		cherry_pick_range update-clean "merge patch/update-clean branch" native-wrapper-release
-	fi
-	if active bundle-usage-claims; then
-		CURRENT_STEP=bundle-usage-claims
-		cherry_pick_range bundle-usage-claims "merge patch/bundle-usage-claims branch" update-clean
-	fi
-
-	# 12 use-embedded-bun-package-manager — config.ts metadata + upstream's
-	# doc refresh moved the patch's packages.md/settings.md sections.
-	if active use-embedded-bun-package-manager; then
-		CURRENT_STEP=use-embedded-bun-package-manager
-		merge_squash_resolver use-embedded-bun-package-manager "merge patch/use-embedded-bun-package-manager branch" \
-			resolve-embedded-bun-squash-conflicts.py \
-			packages/coding-agent/docs/packages.md \
-			packages/coding-agent/docs/settings.md \
-			packages/coding-agent/src/config.ts
-	fi
-
-	# 13 git-package-storage — descendant range. Its docs/packages.md hunk
-	# conflicts against the embedded-Bun section we just appended; resolve
-	# that file by taking the accumulated side, keeping the new source
-	# unchanged (upstream's rewritten doc does not cover these behaviors).
-	if active git-package-storage; then
-		CURRENT_STEP=git-package-storage
-		stop_before git-package-storage
-		local base="${INPUT_SHA[use-embedded-bun-package-manager]}" tip="${INPUT_SHA[git-package-storage]}"
-		git merge-base --is-ancestor "$base" "$tip" || die "merge patch/git-package-storage branch must descend from patch/use-embedded-bun-package-manager"
-		[[ -z "$(git rev-list --min-parents=2 "$base..$tip")" ]] || die "merge patch/git-package-storage branch range must be linear"
-		if ! git cherry-pick --no-commit "origin/patch/use-embedded-bun-package-manager..origin/patch/git-package-storage"; then
-			ensure_conflicts_are "merge patch/git-package-storage branch" \
-				packages/coding-agent/docs/packages.md \
-				packages/coding-agent/src/core/package-manager.ts \
-				packages/coding-agent/test/package-manager.test.ts
-			# Upstream's packages.md was rewritten wholesale; the patch range's
-			# doc version predates that rewrite, so taking --theirs would revert
-			# upstream's doc refresh. Restore upstream's file, then re-append
-			# only the storage-specific git source notes.
-			git checkout --ours -- packages/coding-agent/docs/packages.md
-			python3 - <<'PY'
-from pathlib import Path
-
-path = Path("packages/coding-agent/docs/packages.md")
-text = path.read_text()
-anchor = "Versioned npm specifications are pinned. Git tags and commits are also pinned; package updates reconcile the checkout but do not move a configured ref.\n"
-addition = """
-New git installs use depth-one, single-branch clones without unrelated tags. Branches and tags are selected during cloning; full commit IDs are fetched directly without cloning another branch. Abbreviated commit IDs require a full clone for local resolution; use a full commit ID to avoid downloading history.
-
-Git updates fetch only the selected ref at depth one and discard stale commit-graph caches. Existing refs, reflogs, and stored objects are not automatically deleted; making an old clone shallow does not by itself reclaim all of its history.
-
-When reconciliation changes the checkout, Pi resets and cleans the clone, then installs dependencies if `package.json` exists. Default npm uses `install --omit=dev --legacy-peer-deps`; embedded Bun uses `install --omit=dev --omit=peer`. This avoids installing Pi-provided host APIs again through peer dependencies. Explicit `npmCommand` commands use plain `install`. A current checkout with missing runtime dependencies is repaired without cleaning it; existing extra dependencies are not automatically pruned.
-"""
-if text.count(anchor) != 1:
-    raise SystemExit("unexpected packages.md git-source anchor")
-text = text.replace(anchor, anchor + addition, 1)
-path.write_text(text)
-PY
-			git add packages/coding-agent/docs/packages.md
-			# package-manager.ts: upstream's getGitDependencyInstallArgs switch is
-			# already in place from the embedded-bun merge; the cherry-picked
-			# patch re-adds its old ternary tail. Keep ours (switch + gate).
-			python3 - <<'PY'
-from pathlib import Path
-
-path = Path("packages/coding-agent/src/core/package-manager.ts")
-text = path.read_text()
-block = (
-    "<<<<<<< HEAD\n"
-    "=======\n"
-    "\t\t// Pi supplies host APIs. Omitting dev alone can reinstall them through peerDependencies.\n"
-    "\t\treturn this.getPackageManagerName() === \"bun\"\n"
-    "\t\t\t? [\"install\", \"--omit=dev\", \"--omit=peer\"]\n"
-    "\t\t\t: [\"install\", \"--omit=dev\", \"--legacy-peer-deps\"];\n"
-    ">>>>>>> 72abe9a79 (Reapply \"fix(coding-agent): reduce Git package installation storage (#7)\")\n"
-)
-if text.count(block) != 1:
-    raise SystemExit("unexpected package-manager.ts install-args conflict shape")
-text = text.replace(block, "", 1)
-path.write_text(text)
-PY
-			git add packages/coding-agent/src/core/package-manager.ts
-			# package-manager.test.ts: the patch re-adds getNpmCommand next to the
-			# copy the embedded-bun resolver already merged in, and the cherry-pick
-			# stops at the FIRST commit's conflict — its --theirs is that commit's
-			# stale version, not the tip's. Take --theirs here to clear the
-			# conflict, then after the range finishes apply the tip's version.
-			git checkout --theirs -- packages/coding-agent/test/package-manager.test.ts
-			git add packages/coding-agent/test/package-manager.test.ts
-			git cherry-pick --no-commit --continue 2>/dev/null || true
-			# Apply the patch tip's test file (it carries the merged expectations).
-			git checkout "origin/patch/git-package-storage" -- packages/coding-agent/test/package-manager.test.ts
-			git add packages/coding-agent/test/package-manager.test.ts
-		fi
-		ensure_no_conflicts "merge patch/git-package-storage branch"
-		ensure_not_empty "merge patch/git-package-storage branch"
-		verify_staged
-		commit_step "merge patch/git-package-storage branch"
-		APPLIED_RANGE[git-package-storage]="$base..$tip"
-	fi
-
-	# 14-15 reviewed accumulated ranges; no runtime rewriting in CI.
-	if active agent-run-failure-seam; then
-		apply_compat_range agent-run-failure-seam "merge patch/agent-run-failure-seam branch"
-	fi
-
-	# MTE's source remains independent: the compat base describes application
-	# order, not invented ancestry between its source branch and the seam.
-	if active managed-tool-executions; then
-		apply_compat_range managed-tool-executions "merge patch/managed-tool-executions branch" \
-			resolve-managed-tool-executions-conflicts.py \
-			packages/coding-agent/README.md \
-			packages/coding-agent/docs/settings.md \
-			packages/coding-agent/docs/usage.md
-	fi
-
-	# 16-17 esc-abort and manual-retry must descend from the recorded seam and
-	# stay disjoint except agent-session.ts.
-	if active esc-abort || active manual-retry; then
-		# Cross-patch guards run pairwise only for the children present in
-		# this run; the disjointness check below uses whichever are active.
-		if active esc-abort; then
-			require_ancestor agent-run-failure-seam esc-abort
-		fi
-		if active manual-retry; then
-			require_ancestor agent-run-failure-seam manual-retry
-		fi
-		local seam="${INPUT_SHA[agent-run-failure-seam]}"
-		if active esc-abort; then
-			git diff --quiet "$seam..${INPUT_SHA[esc-abort]}" -- packages/agent/src/types.ts ||
-				die "patch/esc-abort must not redefine the shared run_failure event type"
-		fi
-		if active manual-retry; then
-			git diff --quiet "$seam..${INPUT_SHA[manual-retry]}" -- packages/agent ||
-				die "patch/manual-retry must not modify packages/agent after the shared seam"
-		fi
-		if active esc-abort && active manual-retry; then
-			mapfile -t overlap < <(comm -12 \
-				<(git diff --name-only "$seam..${INPUT_SHA[esc-abort]}" | sort) \
-				<(git diff --name-only "$seam..${INPUT_SHA[manual-retry]}" | sort))
-			local expected_overlap=(packages/coding-agent/src/core/agent-session.ts)
-			if (( ${#overlap[@]} != ${#expected_overlap[@]} )) ||
-				[[ "${overlap[*]}" != "${expected_overlap[*]}" ]]; then
-				printf '::error::Unexpected Esc/manual-retry overlap: %q\n' "${overlap[*]}" >&2
-				exit 1
-			fi
-		fi
-		if active esc-abort; then
-			apply_compat_range esc-abort "merge patch/esc-abort branch" \
-				resolve-esc-abort-conflicts.py
-		fi
-		if active manual-retry; then
-			apply_compat_range manual-retry "merge patch/manual-retry branch"
-		fi
-	fi
-
-	# 18 changelog-prerelease — inline conflict resolution, exact shape.
-	if active changelog-prerelease; then
-		CURRENT_STEP=changelog-prerelease
-		stop_before changelog-prerelease
-		if ! git merge --squash "origin/patch/changelog-prerelease"; then
-			ensure_conflicts_are patch/changelog-prerelease \
-				packages/coding-agent/src/config.ts
-			python3 - <<'PY'
-from pathlib import Path
-import subprocess
-
-path = Path("packages/coding-agent/src/config.ts")
-base, ours, theirs = (
-    subprocess.check_output(["git", "show", f":{stage}:{path}"], text=True)
-    for stage in (1, 2, 3)
-)
-
-def add_changelog_settings(text: str) -> str:
-    for anchor, addition in (
-        ("\t\tconfigDir?: string;\n", "\t\tchangelogVersion?: string;\n"),
-        ('export const VERSION: string = pkg.version || "0.0.0";\n',
-         'export const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;\n'),
-    ):
-        if text.count(anchor) != 1 or addition in text:
-            raise SystemExit("Unexpected changelog config anchor or duplicate declaration")
-        text = text.replace(anchor, anchor + addition, 1)
-    return text
-
-# Only the two source-patch additions are mechanical. Reject any other
-# incoming edit before replacing conflict markers or staging the file.
-if add_changelog_settings(base) != theirs:
-    raise SystemExit("Unexpected changelog patch config delta")
-resolved = add_changelog_settings(ours)
-path.write_text(resolved)
-PY
-			git add packages/coding-agent/src/config.ts
-		fi
-		ensure_no_conflicts patch/changelog-prerelease
-		ensure_not_empty patch/changelog-prerelease
-		verify_staged
-		commit_step "merge patch/changelog-prerelease branch"
-	fi
-
-	# 19-20
-	if active skill-overrides; then
-		CURRENT_STEP=skill-overrides
-		stop_before skill-overrides
-		if ! git merge --squash "origin/patch/skill-overrides"; then
-			ensure_conflicts_are "merge patch/skill-overrides branch" \
-				packages/coding-agent/docs/packages.md
-			# The patch branch was rebased onto upstream's rewritten docs and
-			# already carries the skillOverrides paragraph; the accumulated side
-			# additionally carries the embedded-Bun section, so keep ours.
-			git checkout --ours -- packages/coding-agent/docs/packages.md
-			grep -Fq 'skillOverrides' packages/coding-agent/docs/packages.md ||
-				die "merge patch/skill-overrides branch: packages.md lost skillOverrides docs"
-			git add packages/coding-agent/docs/packages.md
-		fi
-		ensure_no_conflicts "merge patch/skill-overrides branch"
-		ensure_not_empty "merge patch/skill-overrides branch"
-		verify_staged
-		commit_step "merge patch/skill-overrides branch"
-	fi
-	if active retry-non-retryable-patterns; then
-		CURRENT_STEP=retry-non-retryable-patterns
-		stop_before retry-non-retryable-patterns
-		if ! git merge --squash "origin/patch/retry-non-retryable-patterns"; then
-			ensure_conflicts_are "merge patch/retry-non-retryable-patterns branch" packages/coding-agent/docs/settings.md
-			# Ours carries the accumulated docs (embedded-Bun, tool_task); theirs
-			# carries the nonRetryableErrorPatterns row + paragraph on upstream's
-			# table. Graft theirs' additions into ours.
-			python3 - <<'PY'
-import subprocess
-from pathlib import Path
-
-ours = subprocess.check_output(["git", "show", ":2:packages/coding-agent/docs/settings.md"], text=True)
-theirs = subprocess.check_output(["git", "show", ":3:packages/coding-agent/docs/settings.md"], text=True)
-
-# row after retry.maxAgentDelayMs
-row_anchor = "| `retry.maxAgentDelayMs` | number | `60000` | Max agent-level retry delay (60s) |"
-row_addition = "\n| `retry.nonRetryableErrorPatterns` | string[] | - | Extra case-insensitive `errorMessage` substrings that skip auto-retry (in addition to built-in quota/billing patterns) |"
-assert ours.count(row_anchor) == 1, f"row anchor count={ours.count(row_anchor)}"
-assert row_addition.strip() in theirs, "theirs lacks nonRetryableErrorPatterns row"
-s = ours.replace(row_anchor, row_anchor + row_addition, 1)
-
-# paragraph: insert theirs' nonRetryable sentence after ours'
-# "Keep retry.provider.maxRetries ..." paragraph, before the JSON block.
-para_anchor = "Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed. Setting it above `0` can make SDK/provider retries handle out-of-usage-limit errors before Pi sees them, which may block the agent until the provider quota resets in some circumstances."
-assert s.count(para_anchor) == 1, "para anchor"
-para_line = "`retry.nonRetryableErrorPatterns` is useful when a gateway returns a terminal quota/limit error that still looks retryable (for example a plain HTTP 429 whose body is not covered by the built-in patterns)."
-assert para_line in theirs, "theirs lacks paragraph"
-s = s.replace(para_anchor, para_anchor + "\n\n" + para_line, 1)
-
-# JSON example: add the nonRetryableErrorPatterns field after maxAgentDelayMs
-json_anchor = '    "maxAgentDelayMs": 60000,'
-json_addition = '\n    "nonRetryableErrorPatterns": [\n      "quota threshold"\n    ],'
-assert s.count(json_anchor) == 1, "json anchor"
-s = s.replace(json_anchor, json_anchor + json_addition, 1)
-
-Path("packages/coding-agent/docs/settings.md").write_text(s)
-PY
-			git add packages/coding-agent/docs/settings.md
-		fi
-		ensure_no_conflicts "merge patch/retry-non-retryable-patterns branch"
-		ensure_not_empty "merge patch/retry-non-retryable-patterns branch"
-		verify_staged
-		commit_step "merge patch/retry-non-retryable-patterns branch"
-	fi
-
-	# 21 slow-hook-tui-only — explicit recorded compat base..tip. Upstream's
-	# doc refresh moved its docs anchors; resolver re-appends onto new docs.
-	if active slow-hook-tui-only; then
-		apply_compat_range slow-hook-tui-only "merge patch/slow-hook-tui-only branch" \
-			resolve-slow-hook-conflicts.py \
-			packages/coding-agent/docs/extensions.md \
-			packages/coding-agent/docs/settings.md
-		grep -Fq 'if (ext.uninterruptibleHandlers?.has(handler) === true) continue;' \
-			packages/coding-agent/src/core/extensions/runner.ts
-		grep -Fq 'this.runHandler("message_end", ext, handlerIndex' \
-			packages/coding-agent/src/core/extensions/runner.ts
-	fi
-
-	# 22 session-tree-splice — descendant range with exact conflict shape.
-	if active session-tree-splice; then
-		CURRENT_STEP=session-tree-splice
-		require_ancestor slow-hook-tui-only session-tree-splice
-		stop_before session-tree-splice
-		git diff --binary "${INPUT_SHA[slow-hook-tui-only]}" "${INPUT_SHA[session-tree-splice]}" \
-			-- >"$TMPDIR_WORK/session-tree-splice.patch"
-		if ! git apply --3way --index "$TMPDIR_WORK/session-tree-splice.patch"; then
-			ensure_conflicts_are patch/session-tree-splice \
-				packages/coding-agent/src/core/session-manager.ts \
-				packages/coding-agent/test/session-manager/tree-traversal.test.ts \
-				packages/coding-agent/test/suite/harness.ts
-			python3 "$HELPER_DIR/resolve-session-tree-splice-conflicts.py" ||
-				{ echo '::group::sts conflict dump' >&2; git diff --diff-filter=U | head -120 >&2; echo '::endgroup::' >&2; die "session-tree-splice resolver failed"; }
-		fi
-		ensure_no_conflicts patch/session-tree-splice
-		ensure_not_empty patch/session-tree-splice
-		verify_staged
-		grep -Fq 'rmSync,' packages/coding-agent/src/core/session-manager.ts
-		grep -Fq 'unlinkSync,' packages/coding-agent/src/core/session-manager.ts
-		grep -Fq 'sessionManagerFactory?: (tempDir: string) => SessionManager;' packages/coding-agent/test/suite/harness.ts
-		grep -Fq 'persist?: boolean;' packages/coding-agent/test/suite/harness.ts
-		commit_step "merge patch/session-tree-splice branch"
-		APPLIED_RANGE[session-tree-splice]="${INPUT_SHA[slow-hook-tui-only]}..${INPUT_SHA[session-tree-splice]}"
-	fi
-
-	# 23-27
-	if active ws-cached-empty-delta; then
-		CURRENT_STEP=ws-cached-empty-delta
-		merge_squash ws-cached-empty-delta "merge patch/ws-cached-empty-delta branch"
-	fi
-	if active self-update-managed-by; then
-		CURRENT_STEP=self-update-managed-by
-		merge_squash self-update-managed-by "merge patch/self-update-managed-by branch"
-	fi
-	if active google-toomany-toolcalls; then
-		CURRENT_STEP=google-toomany-toolcalls
-		merge_squash google-toomany-toolcalls "merge patch/google-toomany-toolcalls branch"
-	fi
-	if active model-selector-refresh-selection; then
-		CURRENT_STEP=model-selector-refresh-selection
-		merge_squash model-selector-refresh-selection "merge patch/model-selector-refresh-selection branch"
-	fi
-	if active ai-drop-empty-messages; then
-		CURRENT_STEP=ai-drop-empty-messages
-		merge_squash ai-drop-empty-messages "merge patch/ai-drop-empty-messages branch"
-	fi
-
-	# 28 compaction-test-exclusion
-	if active compaction-test-exclusion; then
-		CURRENT_STEP=compaction-test-exclusion
-		merge_squash compaction-test-exclusion "merge patch/compaction-test-exclusion branch"
-		grep -Fq '"test/suite/agent-session-compaction.test.ts"' packages/coding-agent/vitest.config.ts
-	fi
-
-	# 29 quarantine-auth-storage-flake — downstream-only test quarantine. The
-	# upstream auth-storage test is timing-flaky (same-size writes produce
-	# identical file revisions, defeating the coalesced-reload fast path).
-	if active quarantine-auth-storage-flake; then
-		CURRENT_STEP=quarantine-auth-storage-flake
-		merge_squash quarantine-auth-storage-flake "merge patch/quarantine-auth-storage-flake branch"
-		grep -Fq 'test.skip("keeps a coalesced reload alive while another credential reader is waiting"' \
-			packages/coding-agent/test/auth-storage.test.ts
-	fi
-
-	# 30 vitest-audit-fix — devDependency bump only (vitest/@vitest/coverage-v8
-	# 4.1.9 -> 4.1.11, GHSA-82fw-gwwq-j7x9). Carries package-lock.json +
-	# coding-agent npm-shrinkwrap.json; must merge last so no later patch's
-	# lockfile delta conflicts with it.
-	if active vitest-audit-fix; then
-		CURRENT_STEP=vitest-audit-fix
-		merge_squash vitest-audit-fix "merge patch/vitest-audit-fix branch"
-		grep -Fq '"vitest": "4.1.11"' packages/coding-agent/package.json
-	fi
+	# 3+ patches — plain squash merges in PATCH_ORDER. Any conflict fails
+	# closed with the patch name; the fix is a rebase of that patch branch.
+	for p in "${ACTIVE_ORDER[@]}"; do
+		[[ "$p" == contributor-approval ]] && continue
+		CURRENT_STEP="$p"
+		merge_squash "$p" "merge patch/$p branch"
+	done
 
 	commit_input_marker
 	say "rebuild complete: $(git rev-parse --short HEAD)"
