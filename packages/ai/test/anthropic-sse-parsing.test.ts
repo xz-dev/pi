@@ -3,8 +3,21 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
-import { getModel, normalizeContext } from "../src/compat.ts";
+import { getModel, getModels, normalizeContext } from "../src/compat.ts";
 import type { Api, Model, ToolCall } from "../src/types.ts";
+
+// Resolve an openrouter anthropic-messages model from the live catalog instead
+// of pinning a specific model id: models.dev retires ids (e.g.
+// anthropic/claude-3-haiku) faster than fixtures track, and the beta-header
+// behavior under test does not depend on which anthropic model is used.
+function anyOpenrouterAnthropicModel(): Model<"anthropic-messages"> {
+	const model = getModels("openrouter").find(
+		(candidate): candidate is Extract<typeof candidate, { api: "anthropic-messages" }> =>
+			candidate.api === "anthropic-messages",
+	);
+	if (!model) throw new Error("live catalog has no openrouter anthropic-messages model");
+	return model;
+}
 
 function createSseResponse(events: Array<{ event: string; data: string }>): Response {
 	const body = events.map(({ event, data }) => `event: ${event}\ndata: ${data}\n`).join("\n");
@@ -282,7 +295,7 @@ describe("Anthropic raw SSE parsing", () => {
 		} as unknown as Anthropic;
 
 		await streamAnthropic(
-			getModel("openrouter", "anthropic/claude-3-haiku"),
+			anyOpenrouterAnthropicModel(),
 			normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
 			{ client, thinkingEnabled: false },
 		).result();
