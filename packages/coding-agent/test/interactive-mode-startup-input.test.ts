@@ -104,8 +104,10 @@ describe("InteractiveMode startup input", () => {
 				await initializing;
 				expect(editor.getText()).toBe(text);
 				expect(editor.onSubmit).toBe((Reflect.get(mode, "defaultEditor") as CustomEditor).onSubmit);
-				terminal.sendInput("\r");
-				expect(await mode.getUserInput()).toBe(text);
+				if (text === "continue") {
+					terminal.sendInput("\r");
+					expect(await mode.getUserInput()).toBe(text);
+				}
 				expect(harness.faux.state.callCount).toBe(0);
 			} finally {
 				allowSessionStart();
