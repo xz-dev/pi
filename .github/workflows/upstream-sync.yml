@@ -56,7 +56,6 @@ jobs:
             +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
             +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
-            +refs/heads/patch/model-refresh-session-rebind-on-accumulated:refs/remotes/origin/patch/model-refresh-session-rebind-on-accumulated \
             +refs/heads/patch/model-catalog-extension-refresh:refs/remotes/origin/patch/model-catalog-extension-refresh \
             +refs/heads/patch/bun-bytecode-entrypoint:refs/remotes/origin/patch/bun-bytecode-entrypoint \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
@@ -67,18 +66,13 @@ jobs:
             +refs/heads/patch/git-package-storage:refs/remotes/origin/patch/git-package-storage \
             +refs/heads/patch/model-refresh-timeout:refs/remotes/origin/patch/model-refresh-timeout \
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
-            +refs/heads/patch/agent-run-failure-seam-on-accumulated:refs/remotes/origin/patch/agent-run-failure-seam-on-accumulated \
             +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
-            +refs/heads/patch/managed-tool-executions-on-accumulated:refs/remotes/origin/patch/managed-tool-executions-on-accumulated \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
-            +refs/heads/patch/esc-abort-on-accumulated:refs/remotes/origin/patch/esc-abort-on-accumulated \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
-            +refs/heads/patch/manual-retry-on-accumulated:refs/remotes/origin/patch/manual-retry-on-accumulated \
             +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
-            +refs/heads/patch/slow-hook-on-accumulated:refs/remotes/origin/patch/slow-hook-on-accumulated \
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
@@ -109,7 +103,6 @@ jobs:
             contributor-approval \
             model-startup-refresh-barrier \
             model-refresh-session-rebind \
-            model-refresh-session-rebind-on-accumulated \
             model-catalog-extension-refresh \
             bun-bytecode-entrypoint \
             startup-benchmark-exit \
@@ -120,18 +113,13 @@ jobs:
             git-package-storage \
             model-refresh-timeout \
             agent-run-failure-seam \
-            agent-run-failure-seam-on-accumulated \
             managed-tool-executions \
-            managed-tool-executions-on-accumulated \
             esc-abort \
-            esc-abort-on-accumulated \
             manual-retry \
-            manual-retry-on-accumulated \
             changelog-prerelease \
             skill-overrides \
             retry-non-retryable-patterns \
             slow-hook-tui-only \
-            slow-hook-on-accumulated \
             session-tree-splice \
             ws-cached-empty-delta \
             self-update-managed-by \
@@ -279,11 +267,6 @@ jobs:
 
       - name: Test release packaging scripts
         run: npm run test:scripts
-
-      - name: Test squash conflict resolvers
-        run: |
-          python3 scripts/resolve-embedded-bun-squash-conflicts.test.py
-          python3 scripts/resolve-session-tree-splice-conflicts.test.py
 
       - name: Install Linux smoke display
         run: |

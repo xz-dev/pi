@@ -393,6 +393,25 @@ stop_before() {
 	fi
 }
 
+# Idempotency: if the recorded marker for exactly this input vector already
+# sits on main (or the source's published origin/main), the rebuild would
+# produce the identical tree — skip it. CI relies on this to no-op when the
+# fetched vector has not moved since the last published sync.
+skip_if_recorded() {
+	local expected actual ref
+	local saved=("${APPLIED_ORDER[@]}")
+	APPLIED_ORDER=(ci "${ACTIVE_ORDER[@]}")
+	expected="$(print_marker)"
+	APPLIED_ORDER=("${saved[@]}")
+	for ref in main origin/main src/main; do
+		actual="$(git log --format=%B -1 "$ref" 2>/dev/null || true)"
+		if [[ -n "$actual" && "$actual" == "$expected" ]]; then
+			say "recorded input vector already present on $ref; skipping rebuild"
+			exit 0
+		fi
+	done
+}
+
 commit_input_marker() {
 	# Record the exact input vector as a final (empty) commit so a successful
 	# snapshot is reproducible from its own history. Partial runs emit a
@@ -567,6 +586,8 @@ prepare_target() {
 	git config user.name "${GIT_AUTHOR_NAME:-github-actions[bot]}"
 	git config user.email "${GIT_AUTHOR_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
 	git config commit.gpgsign false
+	# Skip before any mutation when the exact vector is already recorded.
+	skip_if_recorded
 	# Detach the scratch target from the source's remote-tracking refs: the
 	# replay writes its own refs/remotes/origin/* from frozen SHAs and must
 	# never resolve anything back through the source's remote state.
