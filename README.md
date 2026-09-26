@@ -22,6 +22,9 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 - Continue from the nearest protocol-safe conversation boundary with `/retry` or RPC `retry`, preserving superseded history as an append-only sibling branch, retaining completed tool results, and synthesizing explicit unknown-outcome errors only for missing results without replaying old tool calls.
   - Use case: Resume after Pi or its provider was interrupted, without replaying completed tool calls.
   - Patch branch: [`patch/manual-retry`](https://github.com/xz-dev/pi/tree/patch/manual-retry)
+- Keep input in the editor until interactive startup has bound the session and rendered its history. An early Enter shows `Startup is still in progress`; press Enter again after startup to submit `/retry` or an ordinary prompt. Custom editors receive the same submit handler.
+  - Use case: Press `/retry` immediately after `pi -c` without losing the native Working indication when the resumed response streams.
+  - Patch branch: [`patch/startup-submit-readiness`](https://github.com/xz-dev/pi/tree/patch/startup-submit-readiness)
 - Support per-package Skill visibility overrides through `skillOverrides.<name>.disableModelInvocation`, retaining manual `/skill:<name>` invocation and project-over-global precedence.
   - Use case: Keep a skill available to `/skill:<name>` while preventing automatic model invocation.
   - Patch branch: [`patch/skill-overrides`](https://github.com/xz-dev/pi/tree/patch/skill-overrides)
