@@ -80,6 +80,7 @@ jobs:
             +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
+            +refs/heads/patch/openrouter-live-fixture:refs/remotes/origin/patch/openrouter-live-fixture \
             +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion \
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
             +refs/heads/patch/vitest-audit-fix:refs/remotes/origin/patch/vitest-audit-fix
@@ -128,6 +129,7 @@ jobs:
             google-toomany-toolcalls \
             model-selector-refresh-selection \
             ai-drop-empty-messages \
+            openrouter-live-fixture \
             compaction-test-exclusion \
             quarantine-auth-storage-flake \
             vitest-audit-fix \
