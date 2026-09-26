@@ -75,6 +75,22 @@ Prefix a command with `!` to run it and include its output in the conversation:
 
 Use `!!` when you want to run a command without sending its output to the model.
 
+## Managed tool executions
+
+Long AI tool calls can detach from their original tool call according to `backgroundToolCalls` rules in [Settings](settings.md#tools). Detach returns one background-task result; underlying work continues under its original timeout.
+
+The default `tool_task` tool provides:
+
+- `list` and `info` to inspect managed executions
+- `wait` to retrieve final output; `timeoutSeconds` is required and must be greater than 0 and no greater than 1800. Repeated waits return the cached outcome without re-executing the original tool
+- `cancel` to request cancellation through the tool call's abort signal; this does not prove that an abort-ignoring operation stopped
+
+Escape or another abort of the current agent run does not cancel an execution after it detaches; use `tool_task cancel` to request cancellation. `tool_task` itself is never auto-backgrounded, and a `backgroundToolCalls.tool_task` rule is ignored.
+
+Completion notifications contain trusted task metadata only. Raw tool output is returned only by `tool_task wait`. Managed executions survive `/reload`; `/new`, `/resume`, `/fork`, session teardown, and process shutdown cancel and clear executions owned by the replaced session.
+
+`tool_task` remains enabled when `defaultTools` omits normal built-ins. `--tools` is a strict allowlist, so include `tool_task` to retain management controls; `--no-tools` or `--exclude-tools tool_task` disables it. User-entered `!` and `!!` commands are separate from AI-called shell tools and never become managed executions.
+
 ## Copy, export, or share results
 
 Press `Ctrl+X` or run `/copy` to copy the last assistant response. Use `/export` to save the session as HTML or JSONL.
