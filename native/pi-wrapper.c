@@ -1,10 +1,18 @@
+/*
+ * pi launcher. The bundle version is embedded at compile time via
+ * PI_WRAPPER_VERSION; the launcher executes bundles/<version>/pi-native
+ * next to itself. No runtime pointer files are consulted.
+ */
 #ifdef _WIN32
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 #include <wchar.h>
+
+#ifndef PI_WRAPPER_VERSION_W
+#error "PI_WRAPPER_VERSION_W must be provided for the Windows launcher build"
+#endif
 
 static int valid_version(const wchar_t *value) {
 	if (*value == L'\0') return 0;
@@ -17,7 +25,6 @@ static int valid_version(const wchar_t *value) {
 
 int wmain(int argc, wchar_t **argv) {
 	(void)argc;
-	(void)argv;
 	wchar_t directory[32768];
 	DWORD length = GetModuleFileNameW(NULL, directory, (DWORD)(sizeof(directory) / sizeof(directory[0])));
 	if (length == 0 || length >= sizeof(directory) / sizeof(directory[0])) return 1;
@@ -25,21 +32,16 @@ int wmain(int argc, wchar_t **argv) {
 	if (separator == NULL) return 1;
 	separator[1] = L'\0';
 
-	wchar_t current_path[32768];
-	if (swprintf(current_path, 32768, L"%lscurrent", directory) < 0) return 1;
 	wchar_t executable[32768];
-	FILE *current = _wfopen(current_path, L"r");
-	if (current != NULL) {
-		wchar_t version[256];
-		if (fgetws(version, 256, current) == NULL) { fclose(current); return 1; }
-		fclose(current);
-		version[wcscspn(version, L"\r\n")] = L'\0';
-		if (!valid_version(version) || swprintf(executable, 32768, L"%lsbundles\\%ls\\pi-native.exe", directory, version) < 0) return 1;
-	} else if (errno == ENOENT) {
-		if (swprintf(executable, 32768, L"%lspi-native.exe", directory) < 0) return 1;
-	} else {
+	const wchar_t *version = PI_WRAPPER_VERSION_W;
+	if (!valid_version(version) ||
+		swprintf(executable, 32768, L"%lsbundles\\%ls\\pi-native.exe", directory, version) < 0)
 		return 1;
+	if (GetFileAttributesW(executable) == INVALID_FILE_ATTRIBUTES) {
+		// Flat (pre-managed) layout: the executable sits next to the launcher.
+		if (swprintf(executable, 32768, L"%lspi-native.exe", directory) < 0) return 1;
 	}
+
 	const wchar_t *tail = GetCommandLineW();
 	if (*tail == L'"') {
 		tail++;
@@ -92,6 +94,10 @@ int wmain(int argc, wchar_t **argv) {
 #include <string.h>
 #include <unistd.h>
 
+#ifndef PI_WRAPPER_VERSION
+#error "PI_WRAPPER_VERSION must be defined at compile time"
+#endif
+
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
@@ -133,21 +139,16 @@ int main(int argc, char **argv) {
 	if (separator == NULL) return 1;
 	separator[1] = '\0';
 
-	char current_path[32768];
-	if (snprintf(current_path, sizeof(current_path), "%scurrent", directory) >= (int)sizeof(current_path)) return 1;
 	char executable[32768];
-	FILE *current = fopen(current_path, "r");
-	if (current != NULL) {
-		char version[256];
-		if (fgets(version, sizeof(version), current) == NULL) { fclose(current); return 1; }
-		fclose(current);
-		version[strcspn(version, "\r\n")] = '\0';
-		if (!valid_version(version) || snprintf(executable, sizeof(executable), "%sbundles/%s/pi-native", directory, version) >= (int)sizeof(executable)) return 1;
-	} else if (errno == ENOENT) {
-		if (snprintf(executable, sizeof(executable), "%spi-native", directory) >= (int)sizeof(executable)) return 1;
-	} else {
+	if (!valid_version(PI_WRAPPER_VERSION) ||
+		snprintf(executable, sizeof(executable), "%sbundles/%s/pi-native", directory, PI_WRAPPER_VERSION) >=
+			(int)sizeof(executable))
 		return 1;
+	if (access(executable, X_OK) != 0) {
+		// Flat (pre-managed) layout: the executable sits next to the launcher.
+		if (snprintf(executable, sizeof(executable), "%spi-native", directory) >= (int)sizeof(executable)) return 1;
 	}
+
 	argv[0] = executable;
 	execv(executable, argv);
 	fprintf(stderr, "pi: could not execute %s: %s\n", executable, strerror(errno));
