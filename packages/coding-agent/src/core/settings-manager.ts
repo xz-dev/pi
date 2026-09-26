@@ -1008,18 +1008,6 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
-	getSlowHookThresholdMs(): number {
-		try {
-			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? -1;
-		} catch {
-			return -1;
-		}
-	}
-
-	getShowStartupDiagnostics(): boolean {
-		return this.settings.showStartupDiagnostics ?? false;
-	}
-
 	getHideThinkingBlock(): boolean {
 		return this.settings.hideThinkingBlock ?? SETTINGS_DEFAULTS.hideThinkingBlock;
 	}
@@ -1066,6 +1054,18 @@ export class SettingsManager {
 	getQuietStartup(): QuietStartup {
 		const value = this.settings.quietStartup;
 		return value === true || value === "header" ? value : SETTINGS_DEFAULTS.quietStartup;
+	}
+
+	getSlowHookThresholdMs(): number {
+		try {
+			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? -1;
+		} catch {
+			return -1;
+		}
+	}
+
+	getShowStartupDiagnostics(): boolean {
+		return this.settings.showStartupDiagnostics ?? false;
 	}
 
 	setQuietStartup(quiet: QuietStartup): void {
