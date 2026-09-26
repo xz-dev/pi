@@ -401,6 +401,7 @@ export class AgentSession {
 
 	private _modelRuntime: ModelRuntime;
 	private _cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
+	private _unsubscribeModelsChanged: () => void;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -425,6 +426,7 @@ export class AgentSession {
 		if (this._cacheWarmer) {
 			this._cacheWarmer.onWarmed = (entry) => this._emit({ type: "entry_appended", entry });
 		}
+		this._unsubscribeModelsChanged = this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime());
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -1185,6 +1187,7 @@ export class AgentSession {
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
 		this._disconnectFromAgent();
+		this._unsubscribeModelsChanged();
 		this._eventListeners = [];
 		if (this._cacheWarmer) {
 			this._cacheWarmer.onWarmed = undefined;
@@ -3003,18 +3006,27 @@ export class AgentSession {
 			: undefined;
 	}
 
-	private _refreshCurrentModelFromRegistry(): void {
+	private _refreshModelsFromRuntime(): void {
 		const currentModel = this.model;
-		if (!currentModel) {
-			return;
+		if (currentModel) {
+			const refreshed = this._modelRuntime.getModel(currentModel.provider, currentModel.id);
+			if (refreshed) {
+				// Spread-merge so runtime-attached fields (e.g. inputLimits set in-memory by
+				// extensions/tests) survive when the registry copy lacks them. The registry
+				// copy may carry inputLimits as an explicit undefined key, so use ?? fallback
+				// after the spread rather than relying on key absence.
+				this.agent.state.model = {
+					...currentModel,
+					...refreshed,
+					inputLimits: refreshed.inputLimits ?? currentModel.inputLimits,
+					thinkingLevelMap: refreshed.thinkingLevelMap ?? currentModel.thinkingLevelMap,
+				};
+			}
 		}
-
-		const refreshedModel = this._modelRuntime.getModel(currentModel.provider, currentModel.id);
-		if (!refreshedModel || refreshedModel === currentModel) {
-			return;
-		}
-
-		this.agent.state.model = refreshedModel;
+		this._scopedModels = this._scopedModels.map((scoped) => ({
+			...scoped,
+			model: this._modelRuntime.getModel(scoped.model.provider, scoped.model.id) ?? scoped.model,
+		}));
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -3127,15 +3139,12 @@ export class AgentSession {
 			{
 				registerProvider: (name, config) => {
 					this._modelRuntime.registerProvider(name, config);
-					this._refreshCurrentModelFromRegistry();
 				},
 				registerNativeProvider: (provider) => {
 					this._modelRuntime.registerNativeProvider(provider);
-					this._refreshCurrentModelFromRegistry();
 				},
 				unregisterProvider: (name) => {
 					this._modelRuntime.unregisterProvider(name);
-					this._refreshCurrentModelFromRegistry();
 				},
 			},
 		);
