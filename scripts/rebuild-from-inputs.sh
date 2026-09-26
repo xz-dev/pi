@@ -91,7 +91,7 @@ patch/agent-run-failure-seam 8b5be9676535c90b58fbf73d829afbbb486d5440
 patch/managed-tool-executions a5b45dbcdb3355721e4de830a8151dc7a132b0ba
 patch/esc-abort 817cfc75a816772c183f832ca094792b6d84bc39
 patch/manual-retry 68eefec76b01a9d7e7ef509558720ffe99fc5a82
-patch/changelog-prerelease 5530b29703a3c11fcae5c9e189605622d1c1199b
+patch/changelog-prerelease d4fed01fb03513eb25f0c6a2395e14074ded7fc4
 patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
 patch/retry-non-retryable-patterns 003331a02a9efa6348dbf0bf9e41a1ec4e02d01e
 patch/slow-hook-tui-only 1f48dbb966ed1800b9d952c450d237f4f3869330
@@ -158,6 +158,7 @@ CHAIN_EDGES=(
 	native-wrapper-release:use-embedded-bun-package-manager
 	update-clean:bundle-usage-claims
 	use-embedded-bun-package-manager:git-package-storage
+	git-package-storage:changelog-prerelease
 	agent-run-failure-seam:managed-tool-executions
 	managed-tool-executions:esc-abort
 	esc-abort:manual-retry
