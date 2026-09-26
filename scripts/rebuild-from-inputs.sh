@@ -79,7 +79,7 @@ patch/contributor-approval 57928a38185ca3e73d26d5fde1cbd7184f676fef
 patch/model-startup-refresh-barrier 4e3b3636da9353ab52753b5435192d35d565efe9
 patch/model-refresh-session-rebind d9341253b4d04c2e631102f3dddedd66af43bbe1
 patch/model-catalog-extension-refresh 8e24d761d1bfecfd4541514347d1b565789324d5
-patch/model-refresh-timeout 602cb0f1c5af81ee73bcb2637d270e76033160e6
+patch/model-refresh-timeout b87a02f87de5b2845f79f5e573f1f89fa14f4b19
 patch/bun-bytecode-entrypoint 5a70e570b18555712901fa64374af7e67c10da1d
 patch/startup-benchmark-exit 42b103738f77bb4c709caa1d4c8df7110264c39e
 patch/native-wrapper-release 65281278ed2bdd966bec63e5406b3fb4948a99d7
@@ -148,6 +148,7 @@ PATCH_ORDER=(
 # in its ancestry so its squash-merge applies on top of the predecessor's
 # content. Rebase cascades down the chain when the predecessor is rebased.
 CHAIN_EDGES=(
+	model-catalog-extension-refresh:model-refresh-timeout
 	native-wrapper-release:update-clean
 	update-clean:bundle-usage-claims
 	use-embedded-bun-package-manager:git-package-storage
