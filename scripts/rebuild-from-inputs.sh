@@ -85,8 +85,8 @@ patch/startup-benchmark-exit 42b103738f77bb4c709caa1d4c8df7110264c39e
 patch/native-wrapper-release 65281278ed2bdd966bec63e5406b3fb4948a99d7
 patch/update-clean c66b86b5677da578a25be1914125aa6720a8ccbf
 patch/bundle-usage-claims c2786bd512d2f78fb99e80940c88489f628e7acf
-patch/use-embedded-bun-package-manager 24af4d28cddf5c7c5c3bcf6da7b30e297188f975
-patch/git-package-storage 3a0353f98f589b27f4714a9d6863f059c6dc9e75
+patch/use-embedded-bun-package-manager e083b951142014d0c0e986b58c4cfcc275ace771
+patch/git-package-storage ce3d8adb016a3d8405bddae52d14656c7bf505ff
 patch/agent-run-failure-seam 8b5be9676535c90b58fbf73d829afbbb486d5440
 patch/managed-tool-executions 0f547d214027a8413aa18575ddc2faf85be113aa
 patch/esc-abort 2a481771849cf68aa323094cd8b9cbbab73e748d
@@ -155,6 +155,7 @@ CHAIN_EDGES=(
 	model-startup-refresh-barrier:model-catalog-extension-refresh
 	model-catalog-extension-refresh:model-refresh-timeout
 	native-wrapper-release:update-clean
+	native-wrapper-release:use-embedded-bun-package-manager
 	update-clean:bundle-usage-claims
 	use-embedded-bun-package-manager:git-package-storage
 	agent-run-failure-seam:managed-tool-executions
