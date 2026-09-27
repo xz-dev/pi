@@ -602,9 +602,9 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 	return target.type === "all" || target.type === "extensions";
 }
 
-async function refreshModelCatalogs(agentDir: string, refreshTimeoutMs: number): Promise<void> {
+async function refreshModelCatalogs(agentDir: string, refreshTimeoutMs: number | undefined): Promise<void> {
 	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), refreshTimeoutMs);
+	const timeout = refreshTimeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), refreshTimeoutMs);
 	try {
 		const modelRuntime = await ModelRuntime.create({
 			authPath: join(agentDir, "auth.json"),

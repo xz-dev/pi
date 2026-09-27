@@ -36,6 +36,7 @@ export type {
 	FullscreenExitOutput,
 	ImageSettings,
 	MarkdownSettings,
+	ModelCatalogSettings,
 	MermaidRenderingMode,
 	PackageSource,
 	ProviderRetrySettings,
@@ -935,12 +936,18 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
-	getModelRefreshTimeoutMs(): number {
-		return parseTimeoutSetting(this.settings.models?.refreshTimeoutMs, "models.refreshTimeoutMs") ?? 60_000;
+	/** Returns undefined when the timeout is disabled (negative setting). */
+	getModelRefreshTimeoutMs(): number | undefined {
+		const value = this.settings.models?.refreshTimeoutMs;
+		if (value === undefined) return SETTINGS_DEFAULTS.models.refreshTimeoutMs;
+		if (typeof value !== "number" || !Number.isFinite(value)) {
+			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(value)}`);
+		}
+		return value < 0 ? undefined : Math.floor(value);
 	}
 
 	setModelRefreshTimeoutMs(timeoutMs: number): void {
-		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+		if (!Number.isFinite(timeoutMs)) {
 			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(timeoutMs)}`);
 		}
 		if (!this.globalSettings.models) {
