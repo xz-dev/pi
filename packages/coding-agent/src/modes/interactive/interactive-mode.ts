@@ -1135,7 +1135,8 @@ export class InteractiveMode {
 
 		if (!process.env.PI_OFFLINE) {
 			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), this.session.settingsManager.getModelRefreshTimeoutMs());
+			const timeoutMs = this.session.settingsManager.getModelRefreshTimeoutMs();
+			const timeout = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
 			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
 				.then(() => this.updateAvailableProviderCount())
 				.catch(() => {})
@@ -5148,10 +5149,14 @@ export class InteractiveMode {
 		this.showStatus("Refreshing model catalogs…");
 		const controller = new AbortController();
 		let timedOut = false;
-		const timeout = setTimeout(() => {
-			timedOut = true;
-			controller.abort();
-		}, this.session.settingsManager.getModelRefreshTimeoutMs());
+		const timeoutMs = this.session.settingsManager.getModelRefreshTimeoutMs();
+		const timeout =
+			timeoutMs === undefined
+				? undefined
+				: setTimeout(() => {
+						timedOut = true;
+						controller.abort();
+					}, timeoutMs);
 		try {
 			const result = await refreshModelCatalogs(this.session.modelRuntime, controller.signal);
 			if (result.aborted && timedOut) {
@@ -5344,10 +5349,14 @@ export class InteractiveMode {
 			let disposed = false;
 			let timedOut = false;
 			const controller = new AbortController();
-			const timeout = setTimeout(() => {
-				timedOut = true;
-				controller.abort();
-			}, this.session.settingsManager.getModelRefreshTimeoutMs());
+			const timeoutMs = this.session.settingsManager.getModelRefreshTimeoutMs();
+			const timeout =
+				timeoutMs === undefined
+					? undefined
+					: setTimeout(() => {
+							timedOut = true;
+							controller.abort();
+						}, timeoutMs);
 			const selector = new ScopedModelsSelectorComponent(
 				{
 					allModels: availableModels,
@@ -6059,7 +6068,8 @@ export class InteractiveMode {
 		}
 
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), session.settingsManager.getModelRefreshTimeoutMs());
+		const timeoutMs = session.settingsManager.getModelRefreshTimeoutMs();
+		const timeout = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
 		void session.modelRuntime
 			.refresh({ providers: [providerId], signal: controller.signal })
 			.then(async (result) => {
