@@ -319,11 +319,11 @@ test("a second replay of the same vector reports the marker already recorded", (
 	}
 });
 
-test("--print-inputs and --print-marker expose the recorded vector without a repo", () => {
-	const inputs = execFileSync("bash", [SCRIPT, "--print-inputs"], { encoding: "utf8" });
+test("--print-inputs and --print-marker resolve current refs from a source repo", () => {
+	const inputs = execFileSync("bash", [SCRIPT, "--print-inputs", "--source", ROOT], { encoding: "utf8" });
 	assert.match(inputs, /^upstream\/main [0-9a-f]{40}$/m);
 	assert.match(inputs, /^patch\/esc-abort [0-9a-f]{40}$/m);
-	const marker = execFileSync("bash", [SCRIPT, "--print-marker"], { encoding: "utf8" });
+	const marker = execFileSync("bash", [SCRIPT, "--print-marker", "--source", ROOT], { encoding: "utf8" });
 	assert.ok(marker.startsWith("record upstream sync inputs\n\nupstream/main "));
 	assert.match(marker, /^applied-order ci contributor-approval /m);
 });

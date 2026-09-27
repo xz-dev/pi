@@ -2,11 +2,10 @@
 # rebuild-from-inputs.sh — authoritative replay of the upstream-sync patch order.
 #
 # One source of truth for the integration order and semantics. The CI workflow
-# (.github/workflows/upstream-sync.yml "Rebuild main from upstream and squash
-# branches") captures every input as a fixed full SHA right after its fetch
-# step, clones its own source checkout into a fresh scratch target it owns,
-# then runs this script there with those captured SHAs; operators run the same
-# script with --source <repo> --target <fresh-path> for local diagnosis.
+# fetches the current upstream and patch branches, resolves their tips once for
+# that run, and invokes this script with those transient commit IDs. Operators
+# can omit the IDs when using --source; the current local refs are resolved at
+# runtime. No commit IDs are maintained in this script.
 # Fetch/publication authority stays in the workflow — this script never
 # fetches, pushes, dispatches, or mutates refs outside the scratch target it
 # creates, and it never touches the source repository's refs, index, files, or
@@ -25,9 +24,8 @@
 #                                  [--upstream <sha>] [--ci <sha>]
 #                                  [--patch <name>=<sha>]...
 #                                  [--diagnostic] [--stop-before <name>]
-#   scripts/rebuild-from-inputs.sh --print-inputs          # default SHAs + order
-#   scripts/rebuild-from-inputs.sh --print-marker          # marker commit message
-#   scripts/rebuild-from-inputs.sh --check                 # workflow self-test
+#   scripts/rebuild-from-inputs.sh --print-inputs --source <repo>
+#   scripts/rebuild-from-inputs.sh --print-marker --source <repo>
 #
 # Target contract (fail closed):
 #   --target must be a path that does not exist yet. The script clones
@@ -42,18 +40,16 @@
 #     stay committed in the target, and the run records a distinct
 #     "record upstream sync inputs (partial through <name>)" marker that never
 #     matches the complete-vector skip key.
-#   --print-inputs: print the recorded default input vector (ref name + fixed
-#     full SHA + one-line subject) and exit. No git repo required.
-#   --check: verify the workflow's fetch list and the recorded input block
-#     name the same refs (used by CI to fail when the two drift).
+#   --print-inputs: resolve and print the current input tips from --source.
+#   --check: verify the workflow fetches the refs named by PATCH_ORDER.
 #
 # Invariants (fail closed on violation):
 #   - unknown input names, unresolvable SHAs, missing required inputs,
 #     existing/source/linked targets, unexpected conflict shapes, unresolved
 #     conflicts, empty integrations, and whitespace damage all abort the
 #     replay;
-#   - inputs are frozen SHAs; no ref is read after capture, so mid-run remote
-#     movement cannot change the replay;
+#   - input commit IDs are resolved once per run; no hand-maintained SHA table
+#     participates in selecting the current patch tips;
 #   - only a run that actually applies every fetched input emits the canonical
 #     "record upstream sync inputs" marker; partial/prefix runs record their
 #     own prefixed marker instead.
@@ -63,54 +59,46 @@ ENTRYPOINT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_
 say() { printf '== %s\n' "$*" >&2; }
 die() { printf '::error::%s\n' "$*" >&2; exit 1; }
 
-# --- recorded default input vector -------------------------------------------
-# Full fixed SHAs of the recorded input snapshot. Each entry: <name> <sha>
-# where name is a bare patch name ("ci", "patch/<name>") and sha is a full
-# commit object id that must exist in the local object database. The workflow
-# passes its freshly captured SHAs explicitly; these recorded defaults are
-# what local diagnosis uses and what --print-inputs exposes.
-# SHAs recorded as literal defaults; the workflow re-captures per run after
-# fetch, so these go stale only between syncs. Never hand-expand a short SHA:
-# resolve with git rev-parse / git ls-remote.
-read -r -d '' DEFAULT_INPUTS <<'EOF' || true
-upstream/main 2b0a123de98318c2ff8069661721ce0c3794c34e
-ci 7c44f701e0ba3e86e19b9427cb8e27a73894b259
-patch/contributor-approval 57928a38185ca3e73d26d5fde1cbd7184f676fef
-patch/model-startup-refresh-barrier 5e074cee683c0412ff08a6828cf43f4555115a1d
-patch/model-refresh-session-rebind d9341253b4d04c2e631102f3dddedd66af43bbe1
-patch/model-catalog-extension-refresh a47e894e6fed7bfa7d72aef973f045096109923f
-patch/model-refresh-timeout 0a305565340654e159d66bacf781990c3fbc20e9
-patch/bun-bytecode-entrypoint 5a70e570b18555712901fa64374af7e67c10da1d
-patch/startup-benchmark-exit 944a3079d9b7a93df4bd3e92974337aa7feee2a4
-patch/native-wrapper-release 65281278ed2bdd966bec63e5406b3fb4948a99d7
-patch/update-clean c66b86b5677da578a25be1914125aa6720a8ccbf
-patch/bundle-usage-claims c2786bd512d2f78fb99e80940c88489f628e7acf
-patch/use-embedded-bun-package-manager e083b951142014d0c0e986b58c4cfcc275ace771
-patch/git-package-storage ce3d8adb016a3d8405bddae52d14656c7bf505ff
-patch/agent-run-failure-seam dc9d6756da8cfe685613d5c02e4432ccc9c513cd
-patch/managed-tool-executions dc2801ee4f63fb017322864eb92d9de7e2d0c62c
-patch/esc-abort 68d78004fe76cea140fbb7bb99dbe558b196e4fd
-patch/managed-tool-abort-drain 11a07140e907406d0fa1c330589a10d19ed0b6b0
-patch/manual-retry 27cf4b80a0da75cbb1010a05d20453374d91758f
-patch/startup-submit-readiness 39d2c8d3e9f1dff7b0ad7f13b1779549d8963601
-patch/changelog-prerelease d4fed01fb03513eb25f0c6a2395e14074ded7fc4
-patch/skill-overrides 83e390f1abcc5d82c0ce42ce0ce74d56902cda96
-patch/retry-non-retryable-patterns 0c431dd6a2d0741be5a269dfb2fd87a211aa5e6c
-patch/slow-hook-tui-only 341e04df00840bfc833b286b9e0ad53525588014
-patch/session-tree-splice 4f4a61d9ba82e80b1d00bf6167c7d102d10156fc
-patch/ws-cached-empty-delta 6eb1779b7ef737284aa862ca8cc31ea512cd1125
-patch/self-update-managed-by 992af1524a99c1b5c8f6d4b434c85341141619cc
-patch/google-toomany-toolcalls 47573caacf550ec57f7c308940b3a217d6fd00b9
-patch/model-selector-refresh-selection 8f582eb8df619f3d32899d0d78433cb841e26573
-patch/ai-drop-empty-messages 37f145b54ec4cd4b1f1d2b0066fedd3b1c7713de
-patch/openrouter-live-fixture a1bbcf9779128e25354add89406459276021104b
-patch/compaction-test-exclusion cfa24a33672f03d5e88888123ead7d4cdc636bda
-patch/quarantine-auth-storage-flake b9ab213dc9676f1f527b6ea709284c3350907378
-patch/vitest-audit-fix 559232f68ef83ac305bd775a31b5dc0d42aa5ee9
-EOF
+# --- current input resolution -----------------------------------------------
+# CI resolves branch tips after fetching them and passes those commit IDs to
+# the replay. Local diagnosis resolves the same current refs from --source.
+resolve_ref() {
+	local name="$1" ref
+	case "$name" in
+	upstream/main)
+		for ref in refs/remotes/upstream/main refs/remotes/origin/upstream/main refs/heads/upstream-main refs/heads/main; do
+			if git -C "$SOURCE_REPO" rev-parse --verify "$ref^{commit}" 2>/dev/null; then return 0; fi
+		done
+		;;
+	ci)
+		for ref in refs/remotes/origin/ci refs/heads/ci; do
+			if git -C "$SOURCE_REPO" rev-parse --verify "$ref^{commit}" 2>/dev/null; then return 0; fi
+		done
+		;;
+	patch/*)
+		for ref in "refs/remotes/origin/$name" "refs/heads/$name"; do
+			if git -C "$SOURCE_REPO" rev-parse --verify "$ref^{commit}" 2>/dev/null; then return 0; fi
+		done
+		;;
+	esac
+	die "cannot resolve current input ref $name from --source $SOURCE_REPO"
+}
+
+resolve_current_inputs() {
+	[[ -n "$SOURCE_REPO" ]] || die "--source is required to resolve current input refs"
+	[[ -n "$UPSTREAM_SHA" ]] || UPSTREAM_SHA="$(resolve_ref upstream/main)"
+	[[ -n "$CI_SHA" ]] || CI_SHA="$(resolve_ref ci)"
+	if ((${#EXPLICIT_PATCHES[@]} == 0)); then
+		local p
+		for p in "${PATCH_ORDER[@]}"; do INPUT_SHA["$p"]="$(resolve_ref "patch/$p")"; done
+	fi
+}
 
 print_inputs() {
-	printf '%s\n' "$DEFAULT_INPUTS"
+	printf 'upstream/main %s\n' "$UPSTREAM_SHA"
+	printf 'ci %s\n' "$CI_SHA"
+	local p
+	for p in "${PATCH_ORDER[@]}"; do printf 'patch/%s %s\n' "$p" "${INPUT_SHA[$p]}"; done
 }
 
 # Expected application order. run_replay is the shared implementation;
@@ -196,31 +184,28 @@ print_marker() {
 }
 
 check_mode() {
-	# Workflow self-test: every ref this script consumes must be fetched by
-	# the workflow and vice versa. The workflow's fetch list is the source of
-	# truth; this checks the recorded default names against it.
+	# Workflow self-test: the workflow must fetch upstream/main, ci, and every
+	# patch named by PATCH_ORDER. The script owns the order; the workflow only
+	# supplies the current refs and invokes this driver.
 	local workflow=".github/workflows/upstream-sync.yml"
 	[[ -f "$workflow" ]] || { say "check: no $workflow (out of repo); skipping"; exit 0; }
-	local missing=0 name ref
-	while read -r name _; do
-		case "$name" in
-		upstream/main)
-			grep -qE 'git fetch upstream main' "$workflow" || { say "check: workflow does not fetch upstream main"; missing=1; }
-			continue
-			;;
-		ci) ref=ci ;;
-		patch/*) ref="$name" ;;
-		esac
-		grep -qE "refs/heads/${ref}(:|\\\\)" "$workflow" || { say "check: workflow does not fetch $name"; missing=1; }
-	done <<<"$DEFAULT_INPUTS"
-	# Reverse direction: every patch ref the workflow fetches must appear here.
-	local fetched
-	fetched="$(grep -o 'refs/heads/patch/[^:]*' "$workflow" | sed 's/refs\/heads\///')"
-	for ref in $fetched; do
-		grep -q "^$ref " <<<"$DEFAULT_INPUTS" || { say "check: script has no recorded input for $ref"; missing=1; }
+	local missing=0 ref expected p found
+	grep -qF 'git fetch upstream main' "$workflow" || { say "check: workflow does not fetch upstream main"; missing=1; }
+	grep -qF 'refs/heads/ci:refs/remotes/origin/ci' "$workflow" || { say "check: workflow does not fetch ci"; missing=1; }
+	for p in "${PATCH_ORDER[@]}"; do
+		expected="patch/$p"
+		grep -qF "refs/heads/$expected:refs/remotes/origin/$expected" "$workflow" || { say "check: workflow does not fetch $expected"; missing=1; }
 	done
-	((missing == 0)) || die "check failed: workflow and script inputs drift"
-	say "check ok: workflow fetch list and script inputs match"
+	# Reverse direction: every explicit patch fetch must be declared in the order.
+	local fetched
+	fetched="$(grep -o 'refs/heads/patch/[^:]*' "$workflow" | sed 's/refs\/heads\///' || true)"
+	for ref in $fetched; do
+		found=0
+		for p in "${PATCH_ORDER[@]}"; do [[ "$ref" == "patch/$p" ]] && found=1; done
+		((found)) || { say "check: script has no ordered input for $ref"; missing=1; }
+	done
+	((missing == 0)) || die "check failed: workflow fetch list and PATCH_ORDER drift"
+	say "check ok: workflow fetch list and PATCH_ORDER match"
 	exit 0
 }
 
@@ -285,32 +270,22 @@ while (($# > 0)); do
 	esac
 done
 
+if [[ "$MODE" == "check" ]]; then
+	check_mode
+fi
+
 if [[ "$MODE" == "print" ]]; then
+	resolve_current_inputs
 	print_inputs
 	exit 0
 fi
 
-# Load recorded defaults for any input not provided explicitly. Refs are
-# resolved exactly once, before any mutation; every step below consumes only
-# these frozen SHAs.
-if [[ -z "$UPSTREAM_SHA" ]]; then
-	UPSTREAM_SHA="$(awk '$1=="upstream/main"{print $2}' <<<"$DEFAULT_INPUTS")"
-	[[ -n "$UPSTREAM_SHA" ]] || die "no recorded default for upstream/main"
+# Resolve current refs only when the caller did not provide a complete vector.
+# CI supplies the vector explicitly; local diagnosis can resolve the current
+# refs from its read-only source checkout.
+if [[ -z "$UPSTREAM_SHA" || -z "$CI_SHA" || ${#EXPLICIT_PATCHES[@]} -eq 0 ]]; then
+	resolve_current_inputs
 fi
-if [[ -z "$CI_SHA" ]]; then
-	CI_SHA="$(awk '$1=="ci"{print $2}' <<<"$DEFAULT_INPUTS")"
-	[[ -n "$CI_SHA" ]] || die "no recorded default for ci"
-fi
-local_name=""
-while read -r name sha; do
-	case "$name" in
-	upstream/main | ci) continue ;;
-	patch/*)
-		local_name="${name#patch/}"
-		[[ -n "${INPUT_SHA[$local_name]:-}" ]] || INPUT_SHA[$local_name]="$sha"
-		;;
-	esac
-done <<<"$DEFAULT_INPUTS"
 
 select_active() {
 	ACTIVE_ORDER=()
@@ -331,11 +306,12 @@ select_active() {
 
 validate_inputs() {
 	local p q known
+	[[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || die "upstream/main input is not a full commit ID"
+	[[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]] || die "ci input is not a full commit ID"
 	for p in "${EXPLICIT_PATCHES[@]}"; do
 		known=0
 		for q in "${PATCH_ORDER[@]}"; do [[ "$p" == "$q" ]] && known=1; done
 		((known)) || die "unknown patch input name: $p"
-		[[ "${INPUT_SHA[$p]}" =~ ^[0-9a-f]{40}$ ]] || die "patch/$p input is not a full fixed SHA"
 	done
 	select_active
 	if ((DIAGNOSTIC)); then
@@ -344,15 +320,21 @@ validate_inputs() {
 		# Overrides in a full run must describe a complete vector. A caller
 		# wanting a subset must opt into a non-publishable diagnostic run.
 		for p in "${PATCH_ORDER[@]}"; do
-			[[ " ${EXPLICIT_PATCHES[*]} " == *" $p "* ]] || die "missing explicit input patch/$p in full vector"
+			[[ " ${EXPLICIT_PATCHES[*]} " == *" $p "* ]] || die "missing explicit input patch/$p"
 		done
 	fi
+	for p in "${ACTIVE_ORDER[@]}"; do
+		[[ "${INPUT_SHA[$p]:-}" =~ ^[0-9a-f]{40}$ ]] || die "patch/$p input is not a full commit ID"
+	done
 	if [[ -n "$STOP_BEFORE" && "$STOP_BEFORE" != ci ]]; then
 		[[ " ${ACTIVE_ORDER[*]} " == *" $STOP_BEFORE "* ]] || die "unknown --stop-before step or step not selected: $STOP_BEFORE"
 	fi
 }
 
 if [[ "$MODE" == "print-marker" ]]; then
+	if [[ -z "$UPSTREAM_SHA" || -z "$CI_SHA" || ${#EXPLICIT_PATCHES[@]} -eq 0 ]]; then
+		resolve_current_inputs
+	fi
 	validate_inputs
 	APPLIED_ORDER=()
 	if [[ "$STOP_BEFORE" != ci ]]; then
@@ -387,7 +369,7 @@ active() {
 
 sha_of() {
 	local sha="$1" what="$2"
-	[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "$what input is not a full fixed SHA: $sha"
+	[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "$what input is not a full commit ID: $sha"
 	git cat-file -t "$sha" >/dev/null 2>&1 || die "$what input object does not exist locally: $sha"
 	[[ "$(git cat-file -t "$sha")" == commit ]] || die "$what input is not a commit: $sha"
 }
@@ -611,21 +593,10 @@ run_replay() {
 	local p
 	prepare_target
 
-	# The selected ci input must actually carry the helper this replay
-	# executes; extract it from the immutable CI_SHA object, never a worktree
-	# overlay (which could carry uncommitted edits).
+	# Temporary files are used only for predecessor-relative patch ranges.
 	TMPDIR_WORK="$(mktemp -d "${TMPDIR:-/tmp}/rebuild-from-inputs.XXXXXX")"
-	HELPER_DIR="$TMPDIR_WORK/helpers"
-	mkdir -p "$HELPER_DIR"
-	if ! git archive "$CI_SHA" scripts/ >"$TMPDIR_WORK/ci-scripts.tar" 2>/dev/null; then
-		die "ci input $CI_SHA carries no scripts/ helpers"
-	fi
-	tar -xf "$TMPDIR_WORK/ci-scripts.tar" -C "$TMPDIR_WORK"
-	for helper in rebuild-from-inputs.sh union-contributor-approvals.py; do
-		[[ -f "$TMPDIR_WORK/scripts/$helper" ]] || die "ci input $CI_SHA lacks helper scripts/$helper"
-		cp "$TMPDIR_WORK/scripts/$helper" "$HELPER_DIR/$helper"
-	done
-	cmp -s "$ENTRYPOINT" "$HELPER_DIR/rebuild-from-inputs.sh" || die "running replay driver differs from frozen ci input"
+	UNION_HELPER="$(dirname "$ENTRYPOINT")/union-contributor-approvals.py"
+	[[ -f "$UNION_HELPER" ]] || die "missing helper next to replay driver: $UNION_HELPER"
 
 	# Only --diagnostic allows an explicitly selected, non-publishable subset.
 	# Full runs require the entire vector, whether defaulted or supplied.
@@ -699,7 +670,7 @@ run_replay() {
 		stop_before contributor-approval
 		git show "$UPSTREAM_SHA":.github/APPROVED_CONTRIBUTORS >"$TMPDIR_WORK/up-contrib"
 		git show "${INPUT_SHA[contributor-approval]}":.github/APPROVED_CONTRIBUTORS >"$TMPDIR_WORK/patch-contrib"
-		python3 "$HELPER_DIR/union-contributor-approvals.py" \
+		python3 "$UNION_HELPER" \
 			--current "$TMPDIR_WORK/up-contrib" \
 			--patch "$TMPDIR_WORK/patch-contrib" \
 			--output .github/APPROVED_CONTRIBUTORS
