@@ -604,6 +604,11 @@ function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | u
 	return paths?.map((value) => (isLocalPath(value) ? resolvePath(value, cwd) : value));
 }
 
+function modelRefreshTimeoutSignal(settingsManager: SettingsManager): AbortSignal | undefined {
+	const timeoutMs = settingsManager.getModelRefreshTimeoutMs();
+	return timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
+}
+
 export interface MainOptions {
 	extensionFactories?: InlineExtension[];
 }
@@ -876,7 +881,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const { scopedModels, diagnostics: modelScopeDiagnostics } =
 			modelPatterns && modelPatterns.length > 0
 				? await resolveModelScopeWithDiagnostics(modelPatterns, modelRuntime, {
-						signal: AbortSignal.timeout(settingsManager.getModelRefreshTimeoutMs()),
+						signal: modelRefreshTimeoutSignal(settingsManager),
 					})
 				: { scopedModels: [], diagnostics: [] };
 		// Returned as diagnostics instead of printed: this factory runs again on /new, /resume and /fork,
@@ -968,7 +973,7 @@ export async function main(args: string[], options?: MainOptions) {
 				const result = await modelRuntime.refresh({
 					allowNetwork: true,
 					force: true,
-					signal: AbortSignal.timeout(settingsManager.getModelRefreshTimeoutMs()),
+					signal: modelRefreshTimeoutSignal(settingsManager),
 				});
 				if (result.aborted) {
 					console.error(chalk.red("Error: Model catalog refresh timed out; showing cached models."));
@@ -985,7 +990,7 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 		}
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
-		await listModels(modelRuntime, searchPattern, AbortSignal.timeout(settingsManager.getModelRefreshTimeoutMs()));
+		await listModels(modelRuntime, searchPattern, modelRefreshTimeoutSignal(settingsManager));
 		process.exit(refreshFailed ? 1 : 0);
 	}
 
@@ -1035,7 +1040,8 @@ export async function main(args: string[], options?: MainOptions) {
 	// RPC refreshes catalogs here in the background; interactive mode starts its refresh after TUI initialization.
 	if (!offlineMode && appMode === "rpc") {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), settingsManager.getModelRefreshTimeoutMs());
+		const timeoutMs = settingsManager.getModelRefreshTimeoutMs();
+		const timeout = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
 		void modelRuntime
 			.refresh({ signal: controller.signal })
 			.catch(() => {})
