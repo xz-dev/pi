@@ -135,7 +135,7 @@ const ThinkingBudgetsSettingsSchema = thinkingBudgetsSettings();
 const ModelCatalogSettingsSchema = Type.Object({
 	refreshTimeoutMs: Type.Optional(Type.Number({
 		description: "Model catalog refresh timeout in milliseconds; negative disables, zero aborts immediately.",
-		default: 60_000,
+		default: SETTINGS_DEFAULTS.models.refreshTimeoutMs,
 	})),
 });
 
