@@ -1084,7 +1084,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
 						readFileSync(logPath, "utf8").trim(),
 					);
-					expect(call.args).toEqual(["install", "--omit=dev"]);
+					expect(call.args).toEqual(["install", "--omit=dev", "--omit=peer"]);
 					expect(call.cwd).toBe(target);
 					expect(call.mode).toBe("1");
 					expect(existsSync(target)).toBe(!fail);
@@ -1124,7 +1124,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 				const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
 					readFileSync(logPath, "utf8").trim(),
 				);
-				expect(call.args).toEqual(["install", "--omit=dev"]);
+				expect(call.args).toEqual(["install", "--omit=dev", "--omit=peer"]);
 				expect(call.cwd).toBe(target);
 				expect(call.mode).toBe("1");
 				expect(existsSync(markerPath)).toBe(cleanFails);
@@ -1257,7 +1257,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.install(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should remove a newly created checkout when git clone fails", async () => {
@@ -1321,7 +1323,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 				cwd: targetDir,
 			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should reconcile an existing git checkout to its update target when installing without a ref", async () => {
@@ -1470,7 +1474,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should repair missing git package dependencies when the checkout is already current", async () => {
@@ -1495,7 +1501,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 			expect(runCommandSpy).not.toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
 		});
 
@@ -1527,7 +1535,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await expect(packageManager.update(source)).rejects.toThrow("simulated clean failure");
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
+				cwd: targetDir,
+			});
 		});
 
 		it("should disable peer installation through wrapped pnpm when updating git dependencies", async () => {

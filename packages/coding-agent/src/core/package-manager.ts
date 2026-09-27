@@ -1828,10 +1828,25 @@ export class DefaultPackageManager implements PackageManager {
 	private getPackageManagerName(): string {
 		const npmCommand = this.getNpmCommand();
 		if (npmCommand.embeddedBun) return "bun";
-		const commandParts = [npmCommand.command, ...npmCommand.args];
-		const separatorIndex = commandParts.lastIndexOf("--");
-		const packageManagerCommand = separatorIndex >= 0 ? commandParts[separatorIndex + 1] : npmCommand.command;
-		return packageManagerCommand ? basename(packageManagerCommand).replace(/\.(cmd|exe)$/i, "") : "";
+		const normalizeCommandName = (command: string): string => basename(command).replace(/\.(cmd|exe)$/i, "");
+		const supportedPackageManagers = new Set(["npm", "pnpm", "bun"]);
+		const directCommand = normalizeCommandName(npmCommand.command);
+		const separatorIndex = npmCommand.args.lastIndexOf("--");
+		if (separatorIndex >= 0) {
+			const wrappedCommand = npmCommand.args[separatorIndex + 1];
+			return wrappedCommand ? normalizeCommandName(wrappedCommand) : directCommand;
+		}
+		if (supportedPackageManagers.has(directCommand)) return directCommand;
+
+		const wrappedPackageManagers = [
+			...new Set(
+				npmCommand.args.map(normalizeCommandName).filter((command) => supportedPackageManagers.has(command)),
+			),
+		];
+		if (wrappedPackageManagers.length > 1) {
+			throw new Error(`Ambiguous npmCommand package managers: ${wrappedPackageManagers.join(", ")}`);
+		}
+		return wrappedPackageManagers[0] ?? directCommand;
 	}
 
 	private async runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void> {
@@ -1868,7 +1883,6 @@ export class DefaultPackageManager implements PackageManager {
 			default:
 				return ["install"];
 		}
-
 	}
 
 	private runNpmCommandSync(args: string[]): string {
