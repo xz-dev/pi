@@ -104,7 +104,7 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /patch\/managed-tool-executions/);
-  assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /tool cancellation signal from the current-run interrupt signal/);
+  assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /declared ancestry edges only where a descendant's range truly depends on the predecessor/);
 });
 
 test("upstream sync requires formatter-stable rebuilt sources", () => {
@@ -119,8 +119,14 @@ test("upstream sync check tolerates only the known model-catalog drift class", (
   assert.match(syncWorkflowText, /bash scripts\/check-allow-model-catalog-drift\.sh/);
   assert.match(workflowText, /bash scripts\/check-allow-model-catalog-drift\.sh/);
   const helper = readFileSync(join(ROOT, "scripts", "check-allow-model-catalog-drift.sh"), "utf8");
-  assert.match(helper, /error TS\(2345\|7053\)/);
-  assert.match(helper, /packages\/\(ai\|agent\|coding-agent\)\/\(test\|examples\)/);
+  // The filter matches concrete model/catalog markers, not every TS2345 in tests.
+  assert.match(helper, /error TS2345/);
+  assert.match(helper, /error TS7053/);
+  assert.match(helper, /error TS2339/);
+  assert.match(helper, /ModelId/);
+  assert.match(helper, /Property 'allowEmptySignature'/);
+  assert.match(helper, /packages\/ai\/test\//);
+  assert.match(helper, /packages\/coding-agent\/test\//);
   assert.match(helper, /failed outside tsc/);
   assert.match(helper, /outside the known model-catalog drift class/);
 });
@@ -143,12 +149,12 @@ test("model-catalog drift helper discriminates filtered vs real errors", () => {
     writeNpm('echo ok; exit 0');
     assert.equal(runHelper().status, 0);
     // 2. only drift-class errors -> exit 0 with warning
-    writeNpm(`cat <<'EOF'\npackages/ai/test/x.test.ts(285,4): error TS2345: Argument of type 'Model<"anthropic-messages" | "openai-completions">' is not assignable to parameter of type 'Model<"anthropic-messages">'.\npackages/ai/test/x.test.ts(285,27): error TS2345: Argument of type '"anthropic/claude-3-haiku"' is not assignable to parameter of type '"aion-labs/aion-2.0" | "~z-ai/glm-latest"'.\nEOF\nexit 1`);
+    writeNpm(`cat <<'EOF'\npackages/ai/test/x.test.ts(285,4): error TS2345: Argument of type 'Model<"anthropic-messages" | "openai-completions">' is not assignable to parameter of type 'Model<"anthropic-messages">'.\npackages/ai/test/x.test.ts(285,27): error TS2345: Argument of type '"anthropic/claude-3-haiku"' is not assignable to parameter of type '"aion-labs/aion-2.0" | "~z-ai/glm-latest"'.\npackages/ai/test/x.test.ts(286,24): error TS2339: Property 'allowEmptySignature' does not exist on type 'AnthropicMessagesCompat | OpenAICompletionsCompat'.\npackages/ai/test/x.test.ts(287,38): error TS2345: Argument of type '"glm-5.2"' is not assignable to parameter of type '"glm-5.3"'.\nEOF\nexit 1`);
     const drift = runHelper();
     assert.equal(drift.status, 0, drift.stderr);
     assert.match(drift.stderr, /Ignoring known model-catalog drift/);
     // 3. a src error survives the filter -> exit 1
-    writeNpm(`cat <<'EOF'\npackages/ai/test/x.test.ts(1,1): error TS2345: Argument of type '"retired-model"' is not assignable to parameter of type '"a" | "b"'.\npackages/ai/src/providers/openrouter.ts(9,2): error TS2322: Type 'Provider<"openai-completions" | "x">' is not assignable to type 'Provider<"openai-completions">'.\nEOF\nexit 1`);
+    writeNpm(`cat <<'EOF'\npackages/ai/test/x.test.ts(1,1): error TS2345: Argument of type '"retired-model"' is not assignable to parameter of type '"a" | "b"'.\npackages/ai/test/x.test.ts(1,2): error TS2339: Property 'unrelatedProperty' does not exist on type 'Fixture'.\npackages/ai/src/providers/openrouter.ts(9,2): error TS2322: Type 'Provider<"openai-completions" | "x">' is not assignable to type 'Provider<"openai-completions">'.\nEOF\nexit 1`);
     const real = runHelper();
     assert.equal(real.status, 1);
     assert.match(real.stderr, /outside the known model-catalog drift class/);
@@ -183,7 +189,18 @@ for (const scenario of ["unchanged", "formatted", "check fails"]) {
       writeFileSync(join(repo, "scripts", "check-allow-model-catalog-drift.sh"), "#!/usr/bin/env bash\nnpm run check\n", { mode: 0o755 });
       git("add", "source.txt", "scripts/check-allow-model-catalog-drift.sh");
       git("commit", "-qm", "base");
-      const marker = execFileSync("bash", [join(ROOT, "scripts/rebuild-from-inputs.sh"), "--print-marker"], { encoding: "utf8" }).trim();
+      const marker = execFileSync(
+        "bash",
+        [
+          join(ROOT, "scripts/rebuild-from-inputs.sh"),
+          "--diagnostic",
+          "--upstream", "a".repeat(40),
+          "--ci", "b".repeat(40),
+          "--patch", `model-startup-refresh-barrier=${"c".repeat(40)}`,
+          "--print-marker",
+        ],
+        { encoding: "utf8" },
+      ).trim();
       const markerFile = join(dir, "rebuilt-inputs-marker.txt");
       writeFileSync(markerFile, `${marker}\n`);
       git("commit", "-q", "--allow-empty", "-F", markerFile);
@@ -208,13 +225,12 @@ for (const scenario of ["unchanged", "formatted", "check fails"]) {
   });
 }
 
-test("fixed publication can pin upstream and reject a different fetched vector", () => {
+test("upstream sync uses current fetched refs without fixed-input dispatch pins", () => {
   const step = syncWorkflow.jobs["sync-main-with-squash-branches"].steps.find((step) => step.name === "Rebuild main from upstream and squash branches");
-  assert.equal(syncWorkflow.on.workflow_dispatch.inputs.upstream_sha.type, "string");
-  assert.equal(syncWorkflow.on.workflow_dispatch.inputs.expected_inputs_sha256.type, "string");
+  assert.deepEqual(syncWorkflow.on.workflow_dispatch, null);
+  assert.doesNotMatch(step.run, /PINNED_UPSTREAM_SHA|EXPECTED_INPUTS_SHA256|Fetched inputs differ from the approved vector/);
+  assert.match(step.run, /upstream_sha="\$\(git rev-parse upstream\/main\)"/);
   assert.match(step.run, /--upstream "\$upstream_sha"/);
-  assert.ok(step.run.indexOf("Fetched inputs differ from the approved vector") < step.run.indexOf('scratch_target="$RUNNER_TEMP/rebuilt-main"'));
-  assert.match(step.run, /git merge-base --is-ancestor "\$PINNED_UPSTREAM_SHA" upstream\/main/);
 });
 
 test("upstream sync carries and tests the model catalog list refresh patch", () => {
