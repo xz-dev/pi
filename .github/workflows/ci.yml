@@ -39,14 +39,16 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Downstream: tolerate only the documented model-catalog drift class and
+      # skip the upstream tests listed in scripts/catalog-drift-test-skips.txt.
       - name: Check
-        run: npm run check
+        run: bash scripts/check-allow-model-catalog-drift.sh
 
       - name: Build the pi-env daemon
         run: npm run build:daemon --workspace packages/env
 
       - name: Test
-        run: npm test
+        run: ./test.sh
 
   mcp-conformance:
     runs-on: ubuntu-latest

@@ -2,8 +2,11 @@ name: Slow Hook Integration
 
 on:
   workflow_dispatch:
+  # The patch tests exist only on generated main, not on the ci overlay.
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
 
 jobs:
   slow-hook-integration:

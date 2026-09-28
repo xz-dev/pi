@@ -320,12 +320,23 @@ test("a second replay of the same vector reports the marker already recorded", (
 });
 
 test("--print-inputs and --print-marker resolve current refs from a source repo", () => {
-	const inputs = execFileSync("bash", [SCRIPT, "--print-inputs", "--source", ROOT], { encoding: "utf8" });
-	assert.match(inputs, /^upstream\/main [0-9a-f]{40}$/m);
-	assert.match(inputs, /^patch\/esc-abort [0-9a-f]{40}$/m);
-	const marker = execFileSync("bash", [SCRIPT, "--print-marker", "--source", ROOT], { encoding: "utf8" });
-	assert.ok(marker.startsWith("record upstream sync inputs\n\nupstream/main "));
-	assert.match(marker, /^applied-order ci contributor-approval /m);
+	// A fixture source with every PATCH_ORDER ref as a local branch, so the test
+	// does not depend on the remote-tracking refs of whichever checkout runs it.
+	const fixture = buildFixture();
+	try {
+		const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
+		for (const name of order) fixture.run(`git branch -f patch/${name} upstream-main`);
+		fixture.run(`git branch -f ci ${fixture.ci}`);
+		const inputs = execFileSync("bash", [SCRIPT, "--print-inputs", "--source", fixture.dir], { encoding: "utf8" });
+		assert.match(inputs, new RegExp(`^upstream/main ${fixture.upstream}$`, "m"));
+		assert.match(inputs, new RegExp(`^ci ${fixture.ci}$`, "m"));
+		assert.match(inputs, /^patch\/esc-abort [0-9a-f]{40}$/m);
+		const marker = execFileSync("bash", [SCRIPT, "--print-marker", "--source", fixture.dir], { encoding: "utf8" });
+		assert.ok(marker.startsWith(`record upstream sync inputs\n\nupstream/main ${fixture.upstream}`));
+		assert.match(marker, /^applied-order ci contributor-approval /m);
+	} finally {
+		cleanup(fixture);
+	}
 });
 
 test("--check passes when the workflow fetch list matches the recorded inputs", () => {
