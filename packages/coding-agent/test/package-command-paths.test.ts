@@ -457,6 +457,19 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it("rejects update --clean combined with another update target", async () => {
+		const create = vi.spyOn(ModelRuntime, "create");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(runPackageCommandDirectly(["update", "--clean", "--models"])).resolves.toBeUndefined();
+
+		expect(create).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"--clean cannot be combined with another update target",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("refreshes only model catalogs with update --models", async () => {
 		const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
 		const create = vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh } as unknown as ModelRuntime);

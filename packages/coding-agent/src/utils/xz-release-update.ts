@@ -1,0 +1,1665 @@
+import { spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import {
+	chmodSync,
+	closeSync,
+	constants,
+	copyFileSync,
+	existsSync,
+	fstatSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readSync,
+	realpathSync,
+	renameSync,
+	rmdirSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+
+/** Rename one path, retrying transient Windows sharing violations. */
+function renameSyncRetryable(
+	source: string,
+	destination: string,
+	rename: (source: string, destination: string) => void = renameSync,
+): void {
+	try {
+		rename(source, destination);
+		return;
+	} catch (error: unknown) {
+		if (!isTransientWindowsShareViolation(error)) throw error;
+	}
+	// Windows briefly reports EPERM/EACCES when another process holds an open
+	// child handle without delete sharing - shell indexers, antivirus scans,
+	// and handle-duplicating child processes all close them again on their
+	// own. Wait, and recheck the destination after every failed attempt: the
+	// caller that won the race may have already moved the path for us.
+	for (let attempt = 0; attempt < 30; attempt++) {
+		if (existsSync(destination) && !existsSync(source)) return;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+		try {
+			rename(source, destination);
+			return;
+		} catch (error: unknown) {
+			if (attempt === 29 || !isTransientWindowsShareViolation(error)) throw error;
+		}
+	}
+}
+
+function isTransientWindowsShareViolation(error: unknown): boolean {
+	return error instanceof Error && "code" in error && (error.code === "EPERM" || error.code === "EACCES");
+}
+
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path";
+import lockfile from "proper-lockfile";
+import { RELEASE_TARGET } from "../config.ts";
+import { acquireRetirementClaim, warnIfKnownRemoteUsageFilesystem } from "./bundle-usage-claim.ts";
+import { getPiUserAgent } from "./pi-user-agent.ts";
+import { extractZipArchive } from "./tools-manager.ts";
+import {
+	getWindowsFilesystemSnapshotRelativePath,
+	loadWindowsFilesystemSnapshotHelper,
+	snapshotWindowsDirectory,
+	snapshotWindowsRegularFile,
+	type WindowsFilesystemSnapshotHelper,
+} from "./win32-filesystem-snapshot.ts";
+
+const REPOSITORY = "xz-dev/pi";
+const RELEASE_DOWNLOAD_ORIGIN = "https://github.com";
+const RELEASE_MAX_BYTES = 1024 * 1024;
+const MANIFEST_SCHEMA_VERSION = 5;
+const BUNDLE_LAYOUT_VERSION = 2;
+const MANIFEST_FILENAME = "release-manifest.json";
+const SUMS_FILENAME = "SHA256SUMS";
+const BUNDLE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const DEFAULT_TIMEOUT_MS = 10000;
+const BUNDLE_INACTIVITY_TIMEOUT_MS = 30000;
+const DOWNLOAD_PROGRESS_INTERVAL_MS = 1000;
+const BUNDLE_PACKAGE_MAX_BYTES = 64 * 1024;
+const BUNDLE_WRAPPER_MAX_BYTES = 16 * 1024 * 1024;
+const BUNDLE_FILESYSTEM_HELPER_MAX_BYTES = 16 * 1024 * 1024;
+const BUNDLE_WRAPPER_NAME = process.platform === "win32" ? "pi.exe" : "pi";
+const BUNDLE_EXECUTABLE_NAME = process.platform === "win32" ? "pi-native.exe" : "pi-native";
+const BUNDLE_USAGE_GUARD_NAME = "usage.lock";
+const BUNDLE_USAGE_GUARD_MAX_BYTES = 1;
+const BUNDLE_USAGE_CLAIM_MAX_BYTES = 16 * 1024 * 1024;
+const BUNDLE_LOCK_STALE_MS = Number.MAX_SAFE_INTEGER;
+const BUNDLE_LOCK_UPDATE_MS = 60_000;
+const ZIP_EOCD_SIGNATURE = 0x06054b50;
+const ZIP_CENTRAL_HEADER_SIGNATURE = 0x02014b50;
+const ZIP_DIRECTORY_TYPE = 0x4000;
+const ZIP_REGULAR_TYPE = 0x8000;
+
+interface GitHubReleaseAsset {
+	name: string;
+	browser_download_url: string;
+	size: number;
+	digest: string;
+}
+
+export interface XzCleanupOptions {
+	/** Injectable raw rename for tests; retry behavior always applies. */
+	renameSync?: (source: string, destination: string) => void;
+}
+
+export interface XzLatestRelease {
+	version: string;
+	tag: string;
+	commit: string;
+	bundle: GitHubReleaseAsset;
+	exactBaseUrl: string;
+}
+
+interface XzReleaseOptions {
+	timeoutMs?: number;
+	retry?: boolean;
+}
+
+class RetryableDiscoveryError {
+	readonly error: unknown;
+
+	constructor(error: unknown) {
+		this.error = error;
+	}
+}
+
+interface XzSelfUpdateOptions {
+	executablePath?: string;
+	inactivityTimeoutMs?: number;
+	now?: () => number;
+	writeProgress?: (message: string) => void;
+	isTTY?: boolean;
+}
+
+interface InstalledBundlePackage {
+	name?: string;
+	version?: string;
+	piConfig?: { distribution?: string; releaseTarget?: string; usageClaimProtocol?: number };
+}
+
+interface ManagedBundleInstall {
+	installRoot: string;
+	bundlesRoot: string;
+	executableDirectory: string;
+}
+
+interface PathSnapshot {
+	canonicalPath: string;
+	identity: string;
+}
+
+interface RegularFileSnapshot extends PathSnapshot {
+	size: number;
+	contents?: Buffer;
+}
+
+interface InstalledBundleSnapshot {
+	directoryIdentity: string;
+	requiredFileIdentities: string[];
+	filesystemHelperDigest?: string;
+}
+
+interface ActivationDestinationSnapshot {
+	bundle: InstalledBundleSnapshot;
+}
+
+interface QuarantinedBundleSnapshot {
+	root: string;
+	rootIdentity: string;
+	bundleDirectory: string;
+	guardPath: string;
+	bundle: InstalledBundleSnapshot;
+	version: string;
+}
+
+interface BundleValidationOptions {
+	detached?: boolean;
+	helper?: WindowsFilesystemSnapshotHelper;
+	requireFilesystemHelper?: boolean;
+	requireFilesystemHelperFile?: boolean;
+	usageGuardPath?: string;
+}
+
+export function cleanXzBundles(executablePath = process.execPath, options: XzCleanupOptions = {}): number {
+	const { renameSync: rawRename } = options;
+	// Tests inject a raw rename that throws a transient EPERM; the retry loop
+	// below is production behavior and must still sit between the caller and
+	// any injected failure.
+	const rename = (source: string, destination: string): void => renameSyncRetryable(source, destination, rawRename);
+	const target = RELEASE_TARGET;
+	if (!target) return fail("xz-dev Release target metadata is missing from this binary");
+	const helper =
+		process.platform === "win32"
+			? loadWindowsFilesystemSnapshotHelper({
+					candidates: [join(dirname(executablePath), getWindowsFilesystemSnapshotRelativePath())],
+				})
+			: undefined;
+	const { installRoot, bundlesRoot, executableDirectory } = getManagedBundleInstall(executablePath, helper);
+	const executableVersion = basename(executableDirectory);
+	parseDistributionVersion(executableVersion);
+	const installRootSnapshot = directorySnapshot(installRoot, "Pi managed install root changed", helper);
+	const bundlesRootSnapshot = directorySnapshot(bundlesRoot, "Pi managed bundles root changed", helper);
+	const executingSnapshot = validateInstalledBundle(executableDirectory, executableVersion, target, {
+		helper,
+		requireFilesystemHelper: process.platform === "win32",
+	});
+	const candidates = readdirSync(bundlesRoot, { withFileTypes: true })
+		.filter(
+			(entry) =>
+				entry.isDirectory() &&
+				!entry.name.startsWith(".update-") &&
+				!entry.name.startsWith(".cleanup-") &&
+				isCompleteInstalledBundle(join(bundlesRoot, entry.name), entry.name, target, helper),
+		)
+		.map((entry) => entry.name);
+	let removed = 0;
+	for (const candidate of candidates) {
+		const retired = withBundleInstallLock<boolean>(installRoot, () => {
+			const installRootAtLock = directorySnapshot(installRoot, "Pi managed install root changed", helper);
+			const bundlesRootAtLock = directorySnapshot(bundlesRoot, "Pi managed bundles root changed", helper);
+			const executingAtLock = validateInstalledBundle(executableDirectory, executableVersion, target, {
+				helper,
+				requireFilesystemHelper: process.platform === "win32",
+			});
+			if (
+				!samePathSnapshot(installRootSnapshot, installRootAtLock) ||
+				!samePathSnapshot(bundlesRootSnapshot, bundlesRootAtLock) ||
+				!sameInstalledBundleSnapshot(executingSnapshot, executingAtLock)
+			) {
+				fail("Pi managed installation changed before cleanup");
+			}
+			// Refresh the installed-launcher retention decision under the
+			// maintenance mutex: another updater may have activated this
+			// candidate between enumeration and this transaction (design.md
+			// D4 step 1; the pre-lock set is only an optimization).
+			if (candidate === executableVersion) return false;
+			if (isLauncherMatchedVersion(installRoot, bundlesRoot, candidate)) return false;
+			const bundleDirectory = join(bundlesRoot, candidate);
+			warnIfKnownRemoteUsageFilesystem(join(bundleDirectory, BUNDLE_USAGE_GUARD_NAME));
+			let before: InstalledBundleSnapshot;
+			try {
+				before = validateInstalledBundle(bundleDirectory, candidate, target, { helper });
+			} catch {
+				return false;
+			}
+			// Retirement exclusion: acquire the exclusive claim on this bundle's
+			// guard and hold it through quarantine, resource deletion, and the
+			// guard-last finalization (design.md D4). Busy, unsupported, or
+			// errored acquisition retains the candidate - unknown never becomes
+			// permission to delete.
+			const claim = acquireRetirementClaimForCleanup(join(bundleDirectory, BUNDLE_USAGE_GUARD_NAME));
+			if (claim === "retained") return false;
+			// The exclusive retirement claim spans EVERY mutation of this
+			// bundle: quarantine, resource deletion, and guard unlink. It is
+			// released only in the finally below (idempotently), after the
+			// guard-last unlink or after safe abandonment (design.md D4).
+			try {
+				const quarantine = mkdtempSync(join(bundlesRoot, ".cleanup-"));
+				const detachedBundle = join(quarantine, candidate);
+				const originalGuardPath = join(bundleDirectory, BUNDLE_USAGE_GUARD_NAME);
+				let quarantineGuardPath = join(detachedBundle, BUNDLE_USAGE_GUARD_NAME);
+				let guardRelocated = false;
+				let quarantined: QuarantinedBundleSnapshot | undefined;
+				try {
+					const installRootAtQuarantine = directorySnapshot(
+						installRoot,
+						"Pi managed install root changed",
+						helper,
+					);
+					const bundlesRootAtQuarantine = directorySnapshot(
+						bundlesRoot,
+						"Pi managed bundles root changed",
+						helper,
+					);
+					const executingAtQuarantine = validateInstalledBundle(executableDirectory, executableVersion, target, {
+						helper,
+						requireFilesystemHelper: process.platform === "win32",
+					});
+					if (
+						!samePathSnapshot(installRootSnapshot, installRootAtQuarantine) ||
+						!samePathSnapshot(bundlesRootSnapshot, bundlesRootAtQuarantine) ||
+						!sameInstalledBundleSnapshot(executingSnapshot, executingAtQuarantine)
+					) {
+						fail("Pi managed installation changed before quarantine");
+					}
+					if (process.platform === "win32") {
+						// Windows rejects renaming a directory that contains an open
+						// child handle, even when the child handle shares delete access.
+						// Move the locked guard itself into the quarantine root first;
+						// LockFileEx ownership follows the same open handle, while the
+						// published bundle becomes unstartable before its directory moves.
+						quarantineGuardPath = join(quarantine, BUNDLE_USAGE_GUARD_NAME);
+						rename(originalGuardPath, quarantineGuardPath);
+						guardRelocated = true;
+					}
+					rename(bundleDirectory, detachedBundle);
+					const after = validateInstalledBundle(detachedBundle, candidate, target, {
+						detached: true,
+						helper,
+						usageGuardPath: quarantineGuardPath,
+					});
+					if (!sameInstalledBundleSnapshot(before, after)) fail("Release bundle changed while being quarantined");
+					const quarantineSnapshot = directorySnapshot(quarantine, "Release quarantine path is invalid", helper);
+					quarantined = {
+						root: quarantine,
+						rootIdentity: quarantineSnapshot.identity,
+						bundleDirectory: detachedBundle,
+						guardPath: quarantineGuardPath,
+						bundle: after,
+						version: candidate,
+					};
+				} catch (error) {
+					if (existsSync(detachedBundle)) {
+						if (existsSync(bundleDirectory)) {
+							throw new Error(
+								`Cannot restore quarantined bundle ${candidate}: ${bundleDirectory} already exists; bundle retained at ${detachedBundle}`,
+								{ cause: error },
+							);
+						}
+						try {
+							rename(detachedBundle, bundleDirectory);
+						} catch (restoreError: unknown) {
+							const message = restoreError instanceof Error ? restoreError.message : String(restoreError);
+							throw new AggregateError(
+								[error, restoreError],
+								`Failed to restore quarantined bundle ${candidate}: ${message}`,
+							);
+						}
+					}
+					if (guardRelocated && existsSync(quarantineGuardPath)) {
+						if (!existsSync(bundleDirectory) || existsSync(originalGuardPath)) {
+							throw new Error(
+								`Cannot restore quarantined usage guard for ${candidate}; guard retained at ${quarantineGuardPath}`,
+								{ cause: error },
+							);
+						}
+						try {
+							rename(quarantineGuardPath, originalGuardPath);
+						} catch (restoreError: unknown) {
+							throw new AggregateError(
+								[error, restoreError],
+								`Failed to restore quarantined usage guard for ${candidate}`,
+							);
+						}
+					}
+					try {
+						rmdirSync(quarantine);
+					} catch {}
+					throw error;
+				}
+				if (!quarantined) return false;
+				// Deletion runs inside the maintenance mutex while the exclusive
+				// retirement claim is still held, with the guard removed last
+				// (design.md D4 guard-last finalization).
+				const quarantineBeforeDelete = directorySnapshot(
+					quarantined.root,
+					"Release quarantine changed before deletion",
+					helper,
+				);
+				if (quarantineBeforeDelete.identity !== quarantined.rootIdentity) {
+					fail("Release quarantine changed before deletion");
+				}
+				const bundleBeforeDelete = validateInstalledBundle(
+					quarantined.bundleDirectory,
+					quarantined.version,
+					target,
+					{
+						detached: true,
+						helper,
+						usageGuardPath: quarantined.guardPath,
+					},
+				);
+				if (!sameInstalledBundleSnapshot(quarantined.bundle, bundleBeforeDelete)) {
+					fail("Release quarantine changed before deletion");
+				}
+				const guardInsideBundle = samePath(dirname(quarantined.guardPath), quarantined.bundleDirectory);
+				for (const entry of readdirSync(quarantined.bundleDirectory, { withFileTypes: true })) {
+					if (guardInsideBundle && entry.name === BUNDLE_USAGE_GUARD_NAME) continue;
+					rmSync(join(quarantined.bundleDirectory, entry.name), { recursive: true, force: true });
+				}
+				const remaining = readdirSync(quarantined.bundleDirectory, { withFileTypes: true });
+				const expectedGuardOnly =
+					guardInsideBundle && remaining.length === 1 && remaining[0].name === BUNDLE_USAGE_GUARD_NAME;
+				if ((!guardInsideBundle && remaining.length !== 0) || (guardInsideBundle && !expectedGuardOnly)) {
+					fail("Release quarantine resources could not be fully removed");
+				}
+				// On Windows the locked guard lives at the quarantine root, so the
+				// now-empty bundle directory can be removed before guard-last.
+				if (!guardInsideBundle) rmdirSync(quarantined.bundleDirectory);
+				// Guard-last: unlink the guarded path while still holding ownership.
+				rmSync(quarantined.guardPath, { force: true });
+				// All bundle resources and the guard pathname are gone. Release
+				// before removing the now-empty directories: on Windows the final
+				// handle close completes a pending DeleteFile operation.
+				claim.release();
+				try {
+					if (guardInsideBundle) rmdirSync(quarantined.bundleDirectory);
+					rmdirSync(quarantined.root);
+				} catch (error: unknown) {
+					const message = error instanceof Error ? error.message : String(error);
+					process.stderr.write(
+						`Removed bundle ${candidate} but a residual quarantine path remains (${quarantined.root}): ${message}\n`,
+					);
+				}
+				return true;
+			} finally {
+				// Single release point: after guard unlink (completed) or after
+				// abandonment. Empty-directory removal after this release only
+				// touches already-guardless directories.
+				claim.release();
+			}
+		});
+		if (retired) removed++;
+	}
+	return removed;
+}
+
+/**
+ * Re-read the root launcher under the maintenance mutex and report whether a
+ * candidate bundle's bundled launcher currently byte-matches it. Retention
+ * must never rely on a snapshot taken before the mutex was acquired.
+ */
+function isLauncherMatchedVersion(installRoot: string, bundlesRoot: string, version: string): boolean {
+	const rootWrapperPath = join(installRoot, BUNDLE_WRAPPER_NAME);
+	if (!existsSync(rootWrapperPath)) return false;
+	const wrapperPath = join(bundlesRoot, version, BUNDLE_WRAPPER_NAME);
+	if (!existsSync(wrapperPath)) return false;
+	try {
+		return readFileSync(rootWrapperPath).equals(readFileSync(wrapperPath));
+	} catch {
+		// Unreadable launchers are unknown, not a confirmed mismatch. Retain
+		// conservatively so a permission/transient read failure cannot delete
+		// the bundle still referenced by the installed launcher.
+		return true;
+	}
+}
+
+interface CleanupRetirementClaim {
+	release(): void;
+}
+
+/**
+ * Acquire the exclusive retirement claim for a cleanup candidate. Every
+ * non-acquired outcome (busy, missing guard/backend, access error, unexpected
+ * failure) maps to "retained": cleanup never treats an unknown as permission
+ * to delete (specs/bundle-usage-claims: conservative decisions).
+ */
+function acquireRetirementClaimForCleanup(guardPath: string): CleanupRetirementClaim | "retained" {
+	const version = basename(dirname(guardPath));
+	try {
+		const claim = acquireRetirementClaim(guardPath);
+		if (claim === "busy") {
+			process.stderr.write(`Retained bundle ${version}: usage claim is busy\n`);
+			return "retained";
+		}
+		return claim;
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : String(error);
+		process.stderr.write(`Retained bundle ${version}: usage claim failed (${message.slice(0, 200)})\n`);
+		return "retained";
+	}
+}
+
+function fail(message: string): never {
+	throw new Error(message);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireString(value: unknown, label: string): string {
+	if (typeof value !== "string" || !value) return fail(`Invalid ${label}`);
+	return value;
+}
+
+function requirePositiveSize(value: unknown, maximum: number, label: string): number {
+	if (!Number.isSafeInteger(value) || (value as number) <= 0 || (value as number) > maximum) {
+		return fail(`Invalid ${label}`);
+	}
+	return value as number;
+}
+
+function requireSha256Digest(value: unknown, label: string): string {
+	if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value)) return fail(`Invalid ${label}`);
+	return value;
+}
+
+function parseDistributionVersion(value: string): { commit: string } {
+	const match = /^\d+\.\d+\.\d+-xz\.\d+\.\d+\.g([0-9a-f]{8})$/.exec(value);
+	if (!match) return fail("Invalid xz-dev distribution version");
+	return { commit: match[1] };
+}
+
+function samePath(left: string, right: string): boolean {
+	const normalizedLeft = resolve(left);
+	const normalizedRight = resolve(right);
+	return process.platform === "win32"
+		? toNamespacedPath(normalizedLeft).toLowerCase() === toNamespacedPath(normalizedRight).toLowerCase()
+		: normalizedLeft === normalizedRight;
+}
+
+function isWithinPath(child: string, parent: string): boolean {
+	const path = relative(parent, child);
+	return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
+}
+
+function failSnapshot(errorMessage: string, error: unknown): never {
+	if (error instanceof Error && error.message === errorMessage) throw error;
+	throw new Error(errorMessage, { cause: error });
+}
+
+function posixDirectorySnapshot(path: string, errorMessage: string): PathSnapshot {
+	let direct: ReturnType<typeof lstatSync>;
+	try {
+		direct = lstatSync(path);
+	} catch (error: unknown) {
+		return failSnapshot(errorMessage, error);
+	}
+	if (!direct.isDirectory() || direct.isSymbolicLink()) return fail(errorMessage);
+	let fd: number;
+	try {
+		fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_DIRECTORY ?? 0));
+	} catch (error: unknown) {
+		return failSnapshot(errorMessage, error);
+	}
+	try {
+		const directory = fstatSync(fd);
+		if (!directory.isDirectory() || directory.dev !== direct.dev || directory.ino !== direct.ino) {
+			return fail(errorMessage);
+		}
+		const canonicalPath = realpathSync(path);
+		const finalDirectory = fstatSync(fd);
+		const finalDirect = lstatSync(path);
+		if (
+			!finalDirectory.isDirectory() ||
+			finalDirectory.dev !== directory.dev ||
+			finalDirectory.ino !== directory.ino ||
+			!finalDirect.isDirectory() ||
+			finalDirect.isSymbolicLink() ||
+			finalDirect.dev !== directory.dev ||
+			finalDirect.ino !== directory.ino
+		) {
+			return fail(errorMessage);
+		}
+		if (!samePath(canonicalPath, path)) return fail(errorMessage);
+		return { canonicalPath, identity: `${directory.dev}:${directory.ino}` };
+	} catch (error: unknown) {
+		return failSnapshot(errorMessage, error);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function directorySnapshot(path: string, errorMessage: string, helper?: WindowsFilesystemSnapshotHelper): PathSnapshot {
+	if (process.platform !== "win32") return posixDirectorySnapshot(path, errorMessage);
+	try {
+		const snapshot = snapshotWindowsDirectory(path, helper);
+		if (!samePath(snapshot.canonicalPath, path)) return fail(errorMessage);
+		return snapshot;
+	} catch (error: unknown) {
+		return failSnapshot(errorMessage, error);
+	}
+}
+
+function posixRegularFileSnapshot(
+	path: string,
+	maximumBytes: number,
+	includeContents: boolean,
+	errorMessage: string,
+): RegularFileSnapshot {
+	let direct: ReturnType<typeof lstatSync>;
+	try {
+		direct = lstatSync(path);
+	} catch (error: unknown) {
+		return failSnapshot(errorMessage, error);
+	}
+	if (!direct.isFile()) return fail(errorMessage);
+	let fd: number;
+	try {
+		fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	} catch (error: unknown) {
+		return failSnapshot(errorMessage, error);
+	}
+	try {
+		const file = fstatSync(fd);
+		if (
+			!file.isFile() ||
+			file.dev !== direct.dev ||
+			file.ino !== direct.ino ||
+			file.size <= 0 ||
+			file.size > maximumBytes
+		) {
+			return fail(errorMessage);
+		}
+		let contents: Buffer | undefined;
+		if (includeContents) {
+			const bytes = Buffer.alloc(file.size + 1);
+			let offset = 0;
+			while (offset < bytes.length) {
+				const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+				if (count === 0) break;
+				offset += count;
+			}
+			if (offset !== file.size) return fail(errorMessage);
+			contents = bytes.subarray(0, offset);
+		}
+		const finalFile = fstatSync(fd);
+		const canonicalPath = realpathSync(path);
+		const finalDirect = lstatSync(path);
+		if (
+			finalFile.dev !== file.dev ||
+			finalFile.ino !== file.ino ||
+			finalFile.size !== file.size ||
+			!finalDirect.isFile() ||
+			finalDirect.isSymbolicLink() ||
+			finalDirect.dev !== file.dev ||
+			finalDirect.ino !== file.ino ||
+			finalDirect.size !== file.size ||
+			!samePath(canonicalPath, path)
+		) {
+			return fail(errorMessage);
+		}
+		return {
+			canonicalPath,
+			identity: `${file.dev}:${file.ino}`,
+			size: file.size,
+			...(contents ? { contents } : {}),
+		};
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function regularFileSnapshot(
+	path: string,
+	maximumBytes: number,
+	includeContents: boolean,
+	errorMessage: string,
+	helper?: WindowsFilesystemSnapshotHelper,
+): RegularFileSnapshot {
+	if (process.platform !== "win32") return posixRegularFileSnapshot(path, maximumBytes, includeContents, errorMessage);
+	try {
+		const snapshot = snapshotWindowsRegularFile(path, maximumBytes, includeContents, helper);
+		if (!samePath(snapshot.canonicalPath, path) || snapshot.size <= 0) return fail(errorMessage);
+		return snapshot;
+	} catch (error: unknown) {
+		return failSnapshot(errorMessage, error);
+	}
+}
+
+function getManagedBundleInstall(
+	executablePath: string,
+	helper?: WindowsFilesystemSnapshotHelper,
+): ManagedBundleInstall {
+	const requestedExecutable = resolve(executablePath);
+	const requestedExecutableDirectory = dirname(requestedExecutable);
+	const requestedBundlesRoot = dirname(requestedExecutableDirectory);
+	const requestedInstallRoot = dirname(requestedBundlesRoot);
+	if (basename(requestedBundlesRoot) !== "bundles") {
+		return fail("Pi is not running from a managed bundle installation");
+	}
+	const installRoot = directorySnapshot(
+		requestedInstallRoot,
+		"Pi managed bundle installation escapes its install root",
+		helper,
+	).canonicalPath;
+	const bundlesRoot = directorySnapshot(
+		requestedBundlesRoot,
+		"Pi managed bundle installation escapes its install root",
+		helper,
+	).canonicalPath;
+	const executableDirectory = directorySnapshot(
+		requestedExecutableDirectory,
+		"Pi managed bundle installation escapes its install root",
+		helper,
+	).canonicalPath;
+	regularFileSnapshot(
+		requestedExecutable,
+		BUNDLE_MAX_BYTES,
+		false,
+		"Pi managed bundle executable is not a regular file",
+		helper,
+	);
+	if (
+		!samePath(installRoot, requestedInstallRoot) ||
+		!samePath(bundlesRoot, requestedBundlesRoot) ||
+		!samePath(executableDirectory, requestedExecutableDirectory) ||
+		!isWithinPath(bundlesRoot, installRoot) ||
+		!isWithinPath(executableDirectory, bundlesRoot) ||
+		!samePath(dirname(executableDirectory), bundlesRoot)
+	) {
+		return fail("Pi managed bundle installation escapes its install root");
+	}
+	return { installRoot, bundlesRoot, executableDirectory };
+}
+
+function samePathSnapshot(left: PathSnapshot, right: PathSnapshot): boolean {
+	return left.identity === right.identity && samePath(left.canonicalPath, right.canonicalPath);
+}
+
+function readBoundedRegularFile(
+	path: string,
+	maximumBytes: number,
+	errorMessage: string,
+	helper?: WindowsFilesystemSnapshotHelper,
+): string {
+	const snapshot = regularFileSnapshot(path, maximumBytes, true, errorMessage, helper);
+	if (!snapshot.contents) return fail(errorMessage);
+	return snapshot.contents.toString("utf8");
+}
+
+function validateInstalledBundle(
+	bundleDirectory: string,
+	version: string,
+	target: string,
+	options: BundleValidationOptions = {},
+): InstalledBundleSnapshot {
+	const {
+		detached = false,
+		helper,
+		requireFilesystemHelper = false,
+		requireFilesystemHelperFile = false,
+		usageGuardPath = join(bundleDirectory, BUNDLE_USAGE_GUARD_NAME),
+	} = options;
+	const isStaging = basename(bundleDirectory).startsWith(".update-");
+	if (!isStaging && !detached && basename(bundleDirectory) !== version) {
+		fail("Release bundle path is invalid");
+	}
+	const parent = directorySnapshot(dirname(bundleDirectory), "Release bundle path is invalid", helper);
+	const directory = directorySnapshot(bundleDirectory, "Release bundle path is invalid", helper);
+	if (
+		!samePath(directory.canonicalPath, bundleDirectory) ||
+		!samePath(parent.canonicalPath, dirname(bundleDirectory))
+	) {
+		fail("Release bundle path is invalid");
+	}
+	const requiredFileIdentities: string[] = [];
+	for (const [required, maximum] of [
+		[BUNDLE_WRAPPER_NAME, BUNDLE_WRAPPER_MAX_BYTES],
+		[BUNDLE_EXECUTABLE_NAME, BUNDLE_MAX_BYTES],
+		["package.json", BUNDLE_PACKAGE_MAX_BYTES],
+	] as const) {
+		const snapshot = regularFileSnapshot(
+			join(bundleDirectory, required),
+			maximum,
+			false,
+			`Release bundle is missing required path ${required}`,
+			helper,
+		);
+		requiredFileIdentities.push(snapshot.identity);
+	}
+	// The usage-claim guard is required in every supported bundle: a one-byte
+	// immutable payload whose identity participates in bundle snapshots. Its
+	// absence makes the candidate unverifiable, and neither startup nor
+	// cleanup may create it in place (design.md D2).
+	const guardSnapshot = regularFileSnapshot(
+		usageGuardPath,
+		BUNDLE_USAGE_GUARD_MAX_BYTES,
+		true,
+		`Release bundle is missing required path ${BUNDLE_USAGE_GUARD_NAME} at ${bundleDirectory}`,
+		helper,
+	);
+	if (!guardSnapshot.contents || !guardSnapshot.contents.equals(Buffer.from("P"))) {
+		fail("Release bundle usage guard payload is invalid");
+	}
+	requiredFileIdentities.push(guardSnapshot.identity);
+	const claimModuleSnapshot = regularFileSnapshot(
+		join(bundleDirectory, "native", "usage-claim", "pi-usage-claim.node"),
+		BUNDLE_USAGE_CLAIM_MAX_BYTES,
+		false,
+		`Release bundle is missing the usage-claim module at ${bundleDirectory}`,
+		helper,
+	);
+	requiredFileIdentities.push(claimModuleSnapshot.identity);
+	let filesystemHelperDigest: string | undefined;
+	if (requireFilesystemHelper || requireFilesystemHelperFile) {
+		const helperPath = join(bundleDirectory, getWindowsFilesystemSnapshotRelativePath());
+		const helperSnapshot = regularFileSnapshot(
+			helperPath,
+			BUNDLE_FILESYSTEM_HELPER_MAX_BYTES,
+			true,
+			"Release bundle is missing the Windows filesystem snapshot helper",
+			helper,
+		);
+		requiredFileIdentities.push(helperSnapshot.identity);
+		if (!helperSnapshot.contents) fail("Release bundle Windows filesystem snapshot helper is unreadable");
+		filesystemHelperDigest = createHash("sha256").update(helperSnapshot.contents).digest("hex");
+		if (requireFilesystemHelper) {
+			loadValidatedBundledWindowsFilesystemSnapshotHelper(
+				bundleDirectory,
+				directory.identity,
+				"Release bundle Windows filesystem snapshot helper failed validation",
+			);
+		}
+	}
+	let pkg: InstalledBundlePackage;
+	try {
+		pkg = JSON.parse(
+			readBoundedRegularFile(
+				join(bundleDirectory, "package.json"),
+				BUNDLE_PACKAGE_MAX_BYTES,
+				"Release bundle package.json is invalid",
+				helper,
+			),
+		);
+	} catch {
+		fail("Release bundle package.json is invalid");
+	}
+	if (
+		pkg.name !== "@earendil-works/pi-coding-agent" ||
+		pkg.version !== version ||
+		pkg.piConfig?.distribution !== "xz-dev" ||
+		pkg.piConfig.releaseTarget !== target ||
+		pkg.piConfig.usageClaimProtocol !== 1
+	) {
+		fail("Release bundle package identity mismatch");
+	}
+	return { directoryIdentity: directory.identity, requiredFileIdentities, filesystemHelperDigest };
+}
+
+function loadValidatedBundledWindowsFilesystemSnapshotHelper(
+	bundleDirectory: string,
+	expectedDirectoryIdentity: string,
+	errorMessage: string,
+): WindowsFilesystemSnapshotHelper {
+	try {
+		const helperPath = join(bundleDirectory, getWindowsFilesystemSnapshotRelativePath());
+		const bundledHelper = loadWindowsFilesystemSnapshotHelper({ candidates: [helperPath] });
+		const bundledDirectory = snapshotWindowsDirectory(bundleDirectory, bundledHelper);
+		if (
+			!samePath(bundledDirectory.canonicalPath, bundleDirectory) ||
+			bundledDirectory.identity !== expectedDirectoryIdentity
+		) {
+			fail(errorMessage);
+		}
+		return bundledHelper;
+	} catch (error: unknown) {
+		return failSnapshot(errorMessage, error);
+	}
+}
+
+function sameInstalledBundleSnapshot(left: InstalledBundleSnapshot, right: InstalledBundleSnapshot): boolean {
+	return (
+		left.directoryIdentity === right.directoryIdentity &&
+		left.requiredFileIdentities.length === right.requiredFileIdentities.length &&
+		left.requiredFileIdentities.every((identity, index) => identity === right.requiredFileIdentities[index]) &&
+		left.filesystemHelperDigest === right.filesystemHelperDigest
+	);
+}
+
+function validateWindowsFilesystemSnapshotProbe(
+	probeExecutablePath: string,
+	bundleDirectory: string,
+	version: string,
+	expected: InstalledBundleSnapshot,
+): void {
+	if (process.platform !== "win32") return;
+	const nonce = randomBytes(32).toString("hex");
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		PI_INTERNAL_WIN32_FILESYSTEM_SNAPSHOT_PROBE: nonce,
+		PI_INTERNAL_WIN32_FILESYSTEM_SNAPSHOT_VERSION: version,
+		PI_INTERNAL_WIN32_FILESYSTEM_SNAPSHOT_BUNDLE: bundleDirectory,
+	};
+	delete env.NODE_OPTIONS;
+	delete env.BUN_OPTIONS;
+	const result = spawnSync(probeExecutablePath, [], {
+		cwd: dirname(probeExecutablePath),
+		env,
+		encoding: "utf8",
+		maxBuffer: 64 * 1024,
+		stdio: ["ignore", "pipe", "pipe"],
+		timeout: 30_000,
+		windowsHide: true,
+	});
+	if (result.error || result.status !== 0 || result.signal) {
+		const detail = result.error?.message ?? (result.stderr.trim() || `exit status ${result.status ?? "unknown"}`);
+		fail(`Release bundle Windows filesystem snapshot helper probe failed: ${detail}`);
+	}
+	let report: unknown;
+	try {
+		report = JSON.parse(result.stdout);
+	} catch {
+		fail("Release bundle Windows filesystem snapshot helper probe returned invalid output");
+	}
+	if (
+		!isRecord(report) ||
+		report.nonce !== nonce ||
+		report.directoryIdentity !== expected.directoryIdentity ||
+		report.filesystemHelperDigest !== expected.filesystemHelperDigest ||
+		!Array.isArray(report.requiredFileIdentities) ||
+		report.requiredFileIdentities.length !== expected.requiredFileIdentities.length ||
+		!report.requiredFileIdentities.every(
+			(identity, index) => typeof identity === "string" && identity === expected.requiredFileIdentities[index],
+		)
+	) {
+		fail("Release bundle Windows filesystem snapshot helper probe returned inconsistent results");
+	}
+}
+
+function validateActivationDestination(
+	probeExecutablePath: string,
+	bundleDirectory: string,
+	version: string,
+	target: string,
+	executingHelper?: WindowsFilesystemSnapshotHelper,
+): ActivationDestinationSnapshot {
+	const snapshot = validateInstalledBundle(bundleDirectory, version, target, {
+		helper: executingHelper,
+		requireFilesystemHelperFile: process.platform === "win32",
+	});
+	validateWindowsFilesystemSnapshotProbe(probeExecutablePath, bundleDirectory, version, snapshot);
+	return { bundle: snapshot };
+}
+
+function isCompleteInstalledBundle(
+	bundleDirectory: string,
+	version: string,
+	target: string,
+	helper?: WindowsFilesystemSnapshotHelper,
+): boolean {
+	try {
+		parseDistributionVersion(version);
+		validateInstalledBundle(bundleDirectory, version, target, { helper });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function withBundleInstallLock<T>(installRoot: string, action: () => T): T {
+	const updatePath = join(installRoot, "update");
+	let release: () => void;
+	try {
+		release = lockfile.lockSync(updatePath, {
+			lockfilePath: join(installRoot, "update.lock"),
+			realpath: false,
+			stale: BUNDLE_LOCK_STALE_MS,
+			update: BUNDLE_LOCK_UPDATE_MS,
+		});
+	} catch (error: unknown) {
+		if (error instanceof Error && "code" in error && error.code === "ELOCKED") {
+			return fail("Another Pi update or cleanup is already running");
+		}
+		throw error;
+	}
+	try {
+		return action();
+	} finally {
+		release();
+	}
+}
+
+function releaseBaseUrl(kind: "latest" | string): string {
+	const override = process.env.PI_XZ_RELEASE_BASE_URL;
+	if (override) {
+		const url = new URL(override);
+		if (url.protocol !== "https:" && url.protocol !== "http:") return fail("Invalid PI_XZ_RELEASE_BASE_URL");
+		return url.href.endsWith("/") ? url.href : `${url.href}/`;
+	}
+	return `${RELEASE_DOWNLOAD_ORIGIN}/${REPOSITORY}/releases/${kind === "latest" ? "latest/download" : `download/${encodeURIComponent(kind)}`}/`;
+}
+
+function exactBaseUrl(tag: string): string {
+	return releaseBaseUrl(tag);
+}
+
+function expectedBundleName(target: string): string {
+	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(target)) return fail("Invalid xz-dev Release target metadata");
+	return `pi-${target}.zip`;
+}
+
+function validateZipEntries(archivePath: string): void {
+	const archive = readFileSync(archivePath);
+	const tailLength = Math.min(archive.length, 22 + 65535);
+	const tailStart = archive.length - tailLength;
+	let endOffset = -1;
+	for (let offset = archive.length - 22; offset >= tailStart; offset--) {
+		if (archive.readUInt32LE(offset) === ZIP_EOCD_SIGNATURE) {
+			endOffset = offset;
+			break;
+		}
+	}
+	if (endOffset < 0) fail("Release bundle ZIP is missing its central directory");
+	const entryCount = archive.readUInt16LE(endOffset + 10);
+	const directorySize = archive.readUInt32LE(endOffset + 12);
+	const directoryOffset = archive.readUInt32LE(endOffset + 16);
+	const directoryEnd = directoryOffset + directorySize;
+	if (directoryEnd > archive.length) fail("Release bundle ZIP central directory is truncated");
+	let offset = directoryOffset;
+	const names = new Set<string>();
+	for (let index = 0; index < entryCount; index++) {
+		if (offset + 46 > directoryEnd || archive.readUInt32LE(offset) !== ZIP_CENTRAL_HEADER_SIGNATURE) {
+			fail("Release bundle ZIP central directory is invalid");
+		}
+		const nameLength = archive.readUInt16LE(offset + 28);
+		const extraLength = archive.readUInt16LE(offset + 30);
+		const commentLength = archive.readUInt16LE(offset + 32);
+		const nameEnd = offset + 46 + nameLength;
+		if (nameEnd > directoryEnd) fail("Release bundle ZIP entry is truncated");
+		const name = archive
+			.subarray(offset + 46, nameEnd)
+			.toString("utf8")
+			.replaceAll("\\", "/");
+		const type = (archive.readUInt32LE(offset + 38) >>> 16) & 0xf000;
+		if (
+			!name ||
+			name.includes("\0") ||
+			/^(?:[A-Za-z]:)?\//.test(name) ||
+			name.split("/").some((segment) => segment === "..") ||
+			(type !== ZIP_REGULAR_TYPE && type !== ZIP_DIRECTORY_TYPE) ||
+			names.has(name)
+		) {
+			fail(`Unsafe Release bundle ZIP entry ${JSON.stringify(name)}`);
+		}
+		names.add(name);
+		offset = nameEnd + extraLength + commentLength;
+	}
+	if (offset !== directoryEnd) fail("Release bundle ZIP central directory size mismatch");
+}
+
+function parseLatestRelease(value: unknown): XzLatestRelease {
+	if (!isRecord(value)) return fail("Invalid xz-dev Release manifest");
+	if (
+		value.schemaVersion !== MANIFEST_SCHEMA_VERSION ||
+		value.repository !== REPOSITORY ||
+		value.packaging !== "binary" ||
+		value.layoutVersion !== BUNDLE_LAYOUT_VERSION
+	) {
+		return fail("Invalid xz-dev Release manifest identity");
+	}
+	const tag = requireString(value.tag, "release tag");
+	if (!tag.startsWith("xz-v")) return fail("Invalid xz-dev Release tag");
+	const version = requireString(value.distributionVersion, "distribution version");
+	if (tag !== `xz-v${version}`) return fail("Release tag/version mismatch");
+	const parsedVersion = parseDistributionVersion(version);
+	const commit = requireString(value.commit, "release commit");
+	if (!/^[0-9a-f]{40}$/.test(commit) || !commit.startsWith(parsedVersion.commit)) {
+		return fail("Release commit/version mismatch");
+	}
+	if (!RELEASE_TARGET) return fail("xz-dev Release target metadata is missing from this binary");
+	const expectedFile = expectedBundleName(RELEASE_TARGET);
+	if (!isRecord(value.bundles)) return fail("Latest xz-dev Release bundles are missing");
+	const bundle = value.bundles[RELEASE_TARGET];
+	if (!isRecord(bundle) || bundle.file !== expectedFile) return fail(`Invalid ${expectedFile} bundle metadata`);
+	const exactBase = exactBaseUrl(tag);
+	return {
+		version,
+		tag,
+		commit,
+		exactBaseUrl: exactBase,
+		bundle: {
+			name: expectedFile,
+			browser_download_url: `${exactBase}${expectedFile}`,
+			size: requirePositiveSize(bundle.bytes, BUNDLE_MAX_BYTES, "bundle size"),
+			digest: requireSha256Digest(`sha256:${requireString(bundle.sha256, "bundle digest")}`, "bundle digest"),
+		},
+	};
+}
+
+function fetchHeaders(currentVersion: string, accept: string): Record<string, string> {
+	return { "User-Agent": getPiUserAgent(currentVersion), accept };
+}
+
+function manifestDigestFromSums(bytes: Uint8Array): string {
+	const matches = new TextDecoder()
+		.decode(bytes)
+		.split(/\r?\n/)
+		.filter((line) => line.endsWith(`  ${MANIFEST_FILENAME}`));
+	if (matches.length !== 1 || !/^[0-9a-f]{64} {2}release-manifest\.json$/.test(matches[0])) {
+		return fail(`Invalid ${SUMS_FILENAME} entry for ${MANIFEST_FILENAME}`);
+	}
+	return matches[0].slice(0, 64);
+}
+
+async function fetchResponse(
+	url: URL | string,
+	currentVersion: string,
+	timeout: number | AbortSignal,
+	accept: string,
+	classifyRetryable = false,
+): Promise<Response> {
+	let response: Response;
+	try {
+		response = await fetch(new URL(url).href, {
+			headers: fetchHeaders(currentVersion, accept),
+			signal: typeof timeout === "number" ? AbortSignal.timeout(timeout) : timeout,
+		});
+	} catch (error) {
+		if (classifyRetryable) throw new RetryableDiscoveryError(error);
+		throw error;
+	}
+	if (!response.ok) {
+		const error = new Error(`GitHub Release request failed: HTTP ${response.status}`);
+		if (classifyRetryable && [408, 425, 429, 500, 502, 503, 504].includes(response.status)) {
+			throw new RetryableDiscoveryError(error);
+		}
+		throw error;
+	}
+	return response;
+}
+
+async function readBoundedResponse(
+	response: Response,
+	maximumBytes: number,
+	label: string,
+	retryTransportFailures = false,
+	onProgress?: (total: number) => void,
+): Promise<Uint8Array> {
+	const contentLength = response.headers.get("content-length");
+	if (contentLength) {
+		const parsed = Number(contentLength);
+		if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximumBytes) {
+			return fail(`${label} exceeds the allowed size`);
+		}
+	}
+	if (!response.body) return fail(`${label} returned no body`);
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	for (;;) {
+		let next: Awaited<ReturnType<typeof reader.read>>;
+		try {
+			next = await reader.read();
+		} catch (error) {
+			if (retryTransportFailures) throw new RetryableDiscoveryError(error);
+			throw error;
+		}
+		if (next.done) break;
+		total += next.value.byteLength;
+		if (total > maximumBytes) {
+			await reader.cancel();
+			return fail(`${label} exceeds the allowed size`);
+		}
+		if (next.value.byteLength > 0) onProgress?.(total);
+		chunks.push(next.value);
+	}
+	const body = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		body.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return body;
+}
+
+async function discoverLatestXzRelease(currentVersion: string, timeoutMs: number): Promise<XzLatestRelease> {
+	const latestBase = releaseBaseUrl("latest");
+	const sumsResponse = await fetchResponse(
+		`${latestBase}${SUMS_FILENAME}`,
+		currentVersion,
+		timeoutMs,
+		"text/plain",
+		true,
+	);
+	const sumsBytes = await readBoundedResponse(sumsResponse, RELEASE_MAX_BYTES, SUMS_FILENAME, true);
+	const expectedManifestDigest = manifestDigestFromSums(sumsBytes);
+	const manifestResponse = await fetchResponse(
+		`${latestBase}${MANIFEST_FILENAME}`,
+		currentVersion,
+		timeoutMs,
+		"application/json",
+		true,
+	);
+	const bytes = await readBoundedResponse(manifestResponse, RELEASE_MAX_BYTES, "Release manifest", true);
+	const actualManifestDigest = createHash("sha256").update(bytes).digest("hex");
+	if (actualManifestDigest !== expectedManifestDigest) return fail("Release manifest sha256 mismatch");
+	let value: unknown;
+	try {
+		value = JSON.parse(new TextDecoder().decode(bytes));
+	} catch {
+		return fail("Invalid xz-dev Release manifest JSON");
+	}
+	return parseLatestRelease(value);
+}
+
+export async function getLatestXzRelease(
+	currentVersion: string,
+	options: XzReleaseOptions = {},
+): Promise<XzLatestRelease | undefined> {
+	if (process.env.PI_OFFLINE) return undefined;
+	parseDistributionVersion(currentVersion);
+	const attempts = options.retry ? 3 : 1;
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return await discoverLatestXzRelease(currentVersion, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+		} catch (error) {
+			if (!(error instanceof RetryableDiscoveryError) || attempt + 1 >= attempts) {
+				throw error instanceof RetryableDiscoveryError ? error.error : error;
+			}
+		}
+	}
+}
+
+function formatBytes(bytes: number): string {
+	const units = ["B", "KiB", "MiB", "GiB"];
+	let value = bytes;
+	let unit = units[0];
+	for (const nextUnit of units.slice(1)) {
+		if (value < 1024) break;
+		value /= 1024;
+		unit = nextUnit;
+	}
+	return `${value.toFixed(unit === "B" ? 0 : 1)} ${unit}`;
+}
+
+function writeDownloadProgress(message: string, isTTY = Boolean(process.stdout.isTTY)): void {
+	process.stdout.write(isTTY ? `\r\x1b[2K${message}` : `${message}\n`);
+}
+
+async function downloadBundle(
+	release: XzLatestRelease,
+	currentVersion: string,
+	destination: string,
+	options: XzSelfUpdateOptions,
+): Promise<void> {
+	const expectedBase = exactBaseUrl(release.tag);
+	const expectedFile = RELEASE_TARGET ? expectedBundleName(RELEASE_TARGET) : "";
+	const expectedUrl = `${expectedBase}${expectedFile}`;
+	if (
+		release.exactBaseUrl !== expectedBase ||
+		release.bundle.name !== expectedFile ||
+		release.bundle.browser_download_url !== expectedUrl
+	) {
+		return fail("Release bundle URL is not the exact xz-dev tag asset");
+	}
+	const controller = new AbortController();
+	const inactivityTimeoutMs = options.inactivityTimeoutMs ?? BUNDLE_INACTIVITY_TIMEOUT_MS;
+	const abortStalledDownload = (): void => {
+		controller.abort(
+			new Error(
+				`${release.bundle.name} download stalled: no data received for ${Math.round(inactivityTimeoutMs / 1000)} seconds`,
+			),
+		);
+	};
+	let inactivityTimeout = setTimeout(abortStalledDownload, inactivityTimeoutMs);
+	const resetInactivityTimeout = (): void => {
+		clearTimeout(inactivityTimeout);
+		inactivityTimeout = setTimeout(abortStalledDownload, inactivityTimeoutMs);
+	};
+	const now = options.now ?? Date.now;
+	const writeProgress = options.writeProgress ?? ((message) => writeDownloadProgress(message, options.isTTY));
+	const startedAt = now();
+	let lastProgressAt = -Infinity;
+	let downloaded = 0;
+	let progressShown = false;
+	const showProgress = (complete = false): void => {
+		const timestamp = now();
+		if (!complete && timestamp - lastProgressAt < DOWNLOAD_PROGRESS_INTERVAL_MS) return;
+		lastProgressAt = timestamp;
+		progressShown = true;
+		const percent = Math.min(100, Math.floor((downloaded / release.bundle.size) * 100));
+		const elapsedSeconds = Math.max((timestamp - startedAt) / 1000, 0.001);
+		writeProgress(
+			`Downloading ${release.bundle.name}: ${percent}%  ${formatBytes(downloaded)} / ${formatBytes(release.bundle.size)}  ${formatBytes(downloaded / elapsedSeconds)}/s`,
+		);
+	};
+	try {
+		const response = await fetchResponse(expectedUrl, currentVersion, controller.signal, "application/octet-stream");
+		showProgress();
+		const bytes = await readBoundedResponse(response, release.bundle.size, release.bundle.name, false, (total) => {
+			resetInactivityTimeout();
+			downloaded = total;
+			showProgress();
+		});
+		if (downloaded !== release.bundle.size) return fail(`${release.bundle.name} byte length mismatch`);
+		showProgress(true);
+		const digest = createHash("sha256").update(bytes).digest("hex");
+		if (`sha256:${digest}` !== release.bundle.digest) return fail(`${release.bundle.name} sha256 mismatch`);
+		writeFileSync(destination, bytes, { flag: "wx", mode: 0o600 });
+		validateZipEntries(destination);
+	} finally {
+		clearTimeout(inactivityTimeout);
+		if (progressShown && !options.writeProgress && (options.isTTY ?? process.stdout.isTTY))
+			process.stdout.write("\n");
+	}
+}
+
+export function runWindowsFilesystemSnapshotProbe(): boolean {
+	const nonce = process.env.PI_INTERNAL_WIN32_FILESYSTEM_SNAPSHOT_PROBE;
+	if (nonce === undefined) return false;
+	try {
+		const version = process.env.PI_INTERNAL_WIN32_FILESYSTEM_SNAPSHOT_VERSION;
+		const requestedBundleDirectory = process.env.PI_INTERNAL_WIN32_FILESYSTEM_SNAPSHOT_BUNDLE;
+		if (
+			process.platform !== "win32" ||
+			!/^[0-9a-f]{64}$/.test(nonce) ||
+			!version ||
+			!requestedBundleDirectory ||
+			!isAbsolute(requestedBundleDirectory) ||
+			!RELEASE_TARGET
+		) {
+			fail("Invalid Windows filesystem snapshot probe request");
+		}
+		const bundleDirectory = resolve(requestedBundleDirectory);
+		if (!samePath(bundleDirectory, requestedBundleDirectory))
+			fail("Invalid Windows filesystem snapshot probe request");
+		parseDistributionVersion(version);
+		const executableDirectory = dirname(process.execPath);
+		const parentDirectory = dirname(executableDirectory);
+		const managedExecution = basename(parentDirectory) === "bundles";
+		const installRoot = managedExecution ? dirname(parentDirectory) : executableDirectory;
+		const bundlesRoot = join(installRoot, "bundles");
+		const trustedHelper = loadWindowsFilesystemSnapshotHelper({
+			candidates: [join(executableDirectory, getWindowsFilesystemSnapshotRelativePath())],
+		});
+		if (managedExecution) {
+			const managed = getManagedBundleInstall(process.execPath, trustedHelper);
+			if (
+				!samePath(managed.installRoot, installRoot) ||
+				!samePath(managed.bundlesRoot, bundlesRoot) ||
+				!samePath(managed.executableDirectory, executableDirectory)
+			) {
+				fail("Invalid Windows filesystem snapshot probe request");
+			}
+		} else {
+			const installRootSnapshot = directorySnapshot(
+				installRoot,
+				"Invalid Windows filesystem snapshot probe request",
+				trustedHelper,
+			);
+			const bundlesRootSnapshot = directorySnapshot(
+				bundlesRoot,
+				"Invalid Windows filesystem snapshot probe request",
+				trustedHelper,
+			);
+			if (
+				!samePath(installRootSnapshot.canonicalPath, installRoot) ||
+				!samePath(bundlesRootSnapshot.canonicalPath, bundlesRoot) ||
+				!isWithinPath(bundlesRootSnapshot.canonicalPath, installRootSnapshot.canonicalPath)
+			) {
+				fail("Invalid Windows filesystem snapshot probe request");
+			}
+		}
+		if (
+			!samePath(dirname(bundleDirectory), bundlesRoot) ||
+			(basename(bundleDirectory) !== version && !basename(bundleDirectory).startsWith(".update-"))
+		) {
+			fail("Invalid Windows filesystem snapshot probe request");
+		}
+		const trustedSnapshot = validateInstalledBundle(bundleDirectory, version, RELEASE_TARGET, {
+			helper: trustedHelper,
+			requireFilesystemHelperFile: true,
+		});
+		const helper = loadWindowsFilesystemSnapshotHelper({
+			candidates: [join(bundleDirectory, getWindowsFilesystemSnapshotRelativePath())],
+		});
+		const snapshot = validateInstalledBundle(bundleDirectory, version, RELEASE_TARGET, {
+			helper,
+			requireFilesystemHelperFile: true,
+		});
+		if (!sameInstalledBundleSnapshot(trustedSnapshot, snapshot)) {
+			fail("Release bundle Windows filesystem snapshot helper returned inconsistent results");
+		}
+		process.stdout.write(`${JSON.stringify({ nonce, ...snapshot })}\n`);
+	} catch (error: unknown) {
+		process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+		process.exitCode = 1;
+	}
+	return true;
+}
+
+export async function runXzSelfUpdate(
+	release: XzLatestRelease,
+	currentVersion: string,
+	_force = false,
+	options: XzSelfUpdateOptions = {},
+): Promise<void> {
+	if (!RELEASE_TARGET) return fail("xz-dev Release target metadata is missing from this binary");
+	const target = RELEASE_TARGET;
+	const executablePath = options.executablePath ?? process.execPath;
+	const executableDirectory = dirname(executablePath);
+	const parentDirectory = dirname(executableDirectory);
+	const managedExecution = basename(parentDirectory) === "bundles";
+	const installRoot = managedExecution ? dirname(parentDirectory) : executableDirectory;
+	const bundlesRoot = join(installRoot, "bundles");
+	const destination = join(bundlesRoot, release.version);
+	const wrapperName = BUNDLE_WRAPPER_NAME;
+	const executableName = BUNDLE_EXECUTABLE_NAME;
+	const helper =
+		process.platform === "win32"
+			? loadWindowsFilesystemSnapshotHelper({
+					candidates: [join(executableDirectory, getWindowsFilesystemSnapshotRelativePath())],
+				})
+			: undefined;
+	let executingVersion: string;
+	let executingSnapshot: InstalledBundleSnapshot;
+	if (managedExecution) {
+		const managed = getManagedBundleInstall(executablePath, helper);
+		if (
+			!samePath(managed.installRoot, installRoot) ||
+			!samePath(managed.bundlesRoot, bundlesRoot) ||
+			!samePath(managed.executableDirectory, executableDirectory)
+		) {
+			fail("Pi managed bundle installation is invalid before staging");
+		}
+		executingVersion = basename(executableDirectory);
+		parseDistributionVersion(executingVersion);
+		executingSnapshot = validateInstalledBundle(executableDirectory, executingVersion, target, {
+			helper,
+			requireFilesystemHelper: process.platform === "win32",
+		});
+	} else {
+		executingVersion = currentVersion;
+		parseDistributionVersion(executingVersion);
+		executingSnapshot = validateInstalledBundle(executableDirectory, executingVersion, target, {
+			detached: true,
+			helper,
+			requireFilesystemHelper: process.platform === "win32",
+		});
+	}
+	const directory = mkdtempSync(join(tmpdir(), "pi-xz-self-update-"));
+	const archive = join(directory, release.bundle.name);
+	mkdirSync(bundlesRoot, { recursive: true });
+	const installRootSnapshot = directorySnapshot(installRoot, "Pi self-update install root is invalid", helper);
+	const bundlesRootSnapshot = directorySnapshot(bundlesRoot, "Pi self-update bundles root is invalid", helper);
+	if (
+		!samePath(installRootSnapshot.canonicalPath, installRoot) ||
+		!samePath(bundlesRootSnapshot.canonicalPath, bundlesRoot) ||
+		!isWithinPath(bundlesRootSnapshot.canonicalPath, installRootSnapshot.canonicalPath)
+	) {
+		fail("Pi self-update bundles root escapes its install root");
+	}
+	const staging = mkdtempSync(join(bundlesRoot, ".update-"));
+	try {
+		await downloadBundle(release, currentVersion, archive, options);
+		extractZipArchive(archive, staging, release.bundle.name);
+		const stagingSnapshot = validateInstalledBundle(staging, release.version, target, {
+			helper,
+			requireFilesystemHelperFile: process.platform === "win32",
+		});
+		const stagingDestination = validateActivationDestination(
+			executablePath,
+			staging,
+			release.version,
+			target,
+			helper,
+		);
+		if (!sameInstalledBundleSnapshot(stagingSnapshot, stagingDestination.bundle)) {
+			fail("Release bundle Windows filesystem snapshot helper returned inconsistent results");
+		}
+		withBundleInstallLock(installRoot, () => {
+			const installRootAtActivation = directorySnapshot(installRoot, "Pi self-update install root changed", helper);
+			const bundlesRootAtActivation = directorySnapshot(bundlesRoot, "Pi self-update bundles root changed", helper);
+			if (
+				!samePathSnapshot(installRootSnapshot, installRootAtActivation) ||
+				!samePathSnapshot(bundlesRootSnapshot, bundlesRootAtActivation) ||
+				!isWithinPath(bundlesRootAtActivation.canonicalPath, installRootAtActivation.canonicalPath)
+			) {
+				fail("Pi self-update install layout changed before activation");
+			}
+			let executingAtActivation: InstalledBundleSnapshot;
+			if (managedExecution) {
+				const managed = getManagedBundleInstall(executablePath, helper);
+				if (
+					!samePath(managed.installRoot, installRoot) ||
+					!samePath(managed.bundlesRoot, bundlesRoot) ||
+					!samePath(managed.executableDirectory, executableDirectory)
+				) {
+					fail("Pi managed bundle installation changed before activation");
+				}
+				parseDistributionVersion(executingVersion);
+				executingAtActivation = validateInstalledBundle(executableDirectory, executingVersion, target, {
+					helper,
+					requireFilesystemHelper: process.platform === "win32",
+				});
+			} else {
+				executingAtActivation = validateInstalledBundle(executableDirectory, executingVersion, target, {
+					detached: true,
+					helper,
+					requireFilesystemHelper: process.platform === "win32",
+				});
+			}
+			if (!sameInstalledBundleSnapshot(executingSnapshot, executingAtActivation)) {
+				fail("Pi executing bundle changed before activation");
+			}
+			const stagingAtInstall = validateInstalledBundle(staging, release.version, target, {
+				helper,
+				requireFilesystemHelperFile: process.platform === "win32",
+			});
+			if (!sameInstalledBundleSnapshot(stagingSnapshot, stagingAtInstall)) {
+				fail("Release bundle changed before installation");
+			}
+			const protectedVersions = new Set([managedExecution ? basename(executableDirectory) : undefined]);
+			let existingDestination: ActivationDestinationSnapshot | undefined;
+			if (existsSync(destination)) {
+				if (protectedVersions.has(release.version)) {
+					existingDestination = validateActivationDestination(
+						executablePath,
+						destination,
+						release.version,
+						target,
+						helper,
+					);
+				} else {
+					// Replacing an existing generation uses the same retirement
+					// exclusion as cleanup: validate the old generation, acquire
+					// the exclusive claim, revalidate, and only then quarantine
+					// (design.md D5). Unverifiable or busy targets are refused
+					// without being moved. The rejected generation stays in its
+					// quarantine for later explicit handling; no resource is
+					// deleted here, so the claim is released after the rename.
+					let rejectedBefore: InstalledBundleSnapshot;
+					try {
+						rejectedBefore = validateInstalledBundle(destination, release.version, target, { helper });
+					} catch (validationError: unknown) {
+						throw new Error(
+							`Cannot replace existing bundle ${release.version}: its current state cannot be verified`,
+							{ cause: validationError },
+						);
+					}
+					const rejectedClaim = acquireRetirementClaimForCleanup(join(destination, BUNDLE_USAGE_GUARD_NAME));
+					if (rejectedClaim === "retained") {
+						throw new Error(
+							`Cannot replace existing bundle ${release.version} while it is in use or its usage state cannot be verified`,
+						);
+					}
+					let rejectedRoot: string | undefined;
+					let rejectedDestination: string | undefined;
+					const originalGuardPath = join(destination, BUNDLE_USAGE_GUARD_NAME);
+					let quarantineGuardPath = originalGuardPath;
+					let guardRelocated = false;
+					try {
+						const rejectedAtClaim = validateInstalledBundle(destination, release.version, target, { helper });
+						if (!sameInstalledBundleSnapshot(rejectedBefore, rejectedAtClaim)) {
+							throw new Error(`Cannot replace existing bundle ${release.version}: it changed before quarantine`);
+						}
+						rejectedRoot = mkdtempSync(join(bundlesRoot, ".update-rejected-"));
+						rejectedDestination = join(rejectedRoot, release.version);
+						quarantineGuardPath = join(rejectedDestination, BUNDLE_USAGE_GUARD_NAME);
+						try {
+							if (process.platform === "win32") {
+								quarantineGuardPath = join(rejectedRoot, BUNDLE_USAGE_GUARD_NAME);
+								renameSyncRetryable(originalGuardPath, quarantineGuardPath);
+								guardRelocated = true;
+							}
+							renameSyncRetryable(destination, rejectedDestination);
+							const rejectedAfter = validateInstalledBundle(rejectedDestination, release.version, target, {
+								detached: true,
+								helper,
+								usageGuardPath: quarantineGuardPath,
+							});
+							if (!sameInstalledBundleSnapshot(rejectedBefore, rejectedAfter)) {
+								throw new Error(
+									`Cannot replace existing bundle ${release.version}: it changed while being quarantined`,
+								);
+							}
+						} catch (quarantineError: unknown) {
+							if (rejectedDestination && existsSync(rejectedDestination) && !existsSync(destination)) {
+								renameSyncRetryable(rejectedDestination, destination);
+							}
+							if (guardRelocated && existsSync(quarantineGuardPath) && !existsSync(originalGuardPath)) {
+								renameSyncRetryable(quarantineGuardPath, originalGuardPath);
+							}
+							if (rejectedRoot) {
+								try {
+									rmdirSync(rejectedRoot);
+								} catch {}
+							}
+							const message =
+								quarantineError instanceof Error ? quarantineError.message : String(quarantineError);
+							throw new Error(
+								`Failed to quarantine existing unactivated bundle ${release.version}: ${message}`,
+								{ cause: quarantineError },
+							);
+						}
+					} finally {
+						rejectedClaim.release();
+					}
+					if (guardRelocated && rejectedDestination) {
+						renameSyncRetryable(quarantineGuardPath, join(rejectedDestination, BUNDLE_USAGE_GUARD_NAME));
+					}
+				}
+			}
+			const installedFromStaging = !existingDestination;
+			if (installedFromStaging) renameSyncRetryable(staging, destination);
+			const installedDestination = existingDestination ?? {
+				bundle: validateInstalledBundle(destination, release.version, target, {
+					helper,
+					requireFilesystemHelperFile: process.platform === "win32",
+				}),
+			};
+			if (installedFromStaging && !sameInstalledBundleSnapshot(stagingSnapshot, installedDestination.bundle)) {
+				fail("Release bundle changed while being installed");
+			}
+
+			const executingBeforeWrapper = validateInstalledBundle(executableDirectory, executingVersion, target, {
+				detached: !managedExecution,
+				helper,
+				requireFilesystemHelper: process.platform === "win32",
+			});
+			if (!sameInstalledBundleSnapshot(executingSnapshot, executingBeforeWrapper)) {
+				fail("Pi executing bundle changed before wrapper activation");
+			}
+			// The root launcher is version-embedded: each update ships its own
+			// launcher and the root copy is replaced only when its bytes differ.
+			// No current/previous pointer files exist; the launcher itself is the
+			// activation record.
+			const rootWrapperPath = join(installRoot, wrapperName);
+			const nextWrapperSource = join(destination, wrapperName);
+			chmodSync(join(destination, executableName), 0o755);
+			chmodSync(nextWrapperSource, 0o755);
+			const rootWrapperExists = existsSync(rootWrapperPath);
+			const wrappersIdentical =
+				rootWrapperExists && readFileSync(rootWrapperPath).equals(readFileSync(nextWrapperSource));
+			if (wrappersIdentical) {
+				// Launcher already references this exact build; nothing to copy.
+			} else if (process.platform !== "win32") {
+				const nextWrapper = join(installRoot, `.${wrapperName}.next-${process.pid}`);
+				copyFileSync(nextWrapperSource, nextWrapper);
+				chmodSync(nextWrapper, 0o755);
+				renameSyncRetryable(nextWrapper, rootWrapperPath);
+			} else {
+				// Windows cannot overwrite a running executable, but renaming it is
+				// allowed. Move the old root launcher back into its version bundle
+				// directory (dropping any stale copy there first) so the old version
+				// stays runnable for manual rollback, then rename the new launcher
+				// in. If the old launcher is locked and cannot be moved, keep it: the
+				// previous version remains complete and usable.
+				if (rootWrapperExists) {
+					const executingBundleWrapper = join(executableDirectory, wrapperName);
+					if (existsSync(executingBundleWrapper)) {
+						try {
+							rmSync(executingBundleWrapper, { force: true });
+						} catch {
+							// Stale copy locked; the root rename below will surface the
+							// conflict as a kept old launcher instead.
+						}
+					}
+					let oldWrapperMoved = false;
+					try {
+						renameSyncRetryable(rootWrapperPath, executingBundleWrapper);
+						oldWrapperMoved = true;
+					} catch {
+						// Locked (still running). Leave the old launcher in place; the
+						// freshly installed bundle is complete and activates on a later
+						// update or manual launcher copy.
+						options.writeProgress?.(
+							`Kept the old launcher (${executingVersion}); it is still in use. Run pi update again after closing other pi sessions.`,
+						);
+					}
+					if (oldWrapperMoved) {
+						const nextWrapper = join(installRoot, `.${wrapperName}.next-${process.pid}`);
+						copyFileSync(nextWrapperSource, nextWrapper);
+						try {
+							renameSyncRetryable(nextWrapper, rootWrapperPath);
+						} catch (error: unknown) {
+							// Restore the old launcher so the installation stays bootable.
+							renameSyncRetryable(executingBundleWrapper, rootWrapperPath);
+							throw error;
+						}
+					}
+				}
+			}
+		});
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+		rmSync(staging, { recursive: true, force: true });
+	}
+}
