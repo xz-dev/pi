@@ -174,6 +174,8 @@ These operations are command-only because calling them from lifecycle handlers c
 
 Session replacement invalidates the old context. Capture only plain data before switching, then use the fresh context supplied to `withSession` for session-bound work.
 
+`pi.spliceEntry(entryId)` deletes exactly one existing non-root session entry and reparents its direct children to that entry's parent. If the deleted entry is the current leaf, its parent becomes the leaf. Pi rewrites the persisted JSONL so a reload keeps the same topology, and rebuilds the live agent context. Call it only while the agent is idle. Root and missing entries throw, as do entries still referenced by metadata (label targets, compaction `firstKeptEntryId`, branch-summary `fromId`).
+
 <a id="state-management"></a>
 <a id="persist-state"></a>
 
