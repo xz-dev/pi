@@ -203,11 +203,10 @@ jobs:
           # upstream CI (npm test -> vitest --run).
           (
             cd packages/coding-agent
-            # Temporary: models.dev deprecated opencode-go/kimi-k2.6, which is
-            # still upstream's opencode-go default. Skip only that catalog check
-            # until upstream moves the default; the rest of the suite still runs.
+            # Skip only the upstream tests listed in
+            # scripts/catalog-drift-test-skips.txt (live catalog drift).
             node ../../node_modules/vitest/dist/cli.js --run --config vitest.config.ts \
-              --testNamePattern '^(?!.*built-in chat providers have defaults in their generated catalogs)'
+              --testNamePattern "$(node ../../scripts/catalog-drift-test-pattern.mjs)"
           )
           node --test --test-reporter=dot \
             packages/tui/test/tui-render.test.ts
