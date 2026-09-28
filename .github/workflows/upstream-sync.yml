@@ -207,12 +207,8 @@ jobs:
               test/event-stream.test.ts \
               test/openai-responses-compat.test.ts \
               test/google-stop-reason-exhaustive.test.ts \
+              test/providers.test.ts \
               test/retry.test.ts
-            # Temporary: this upstream test hard-codes a live-catalog model ID
-            # (fireworks kimi-k2p6) that models.dev has retired. Skip only that
-            # case until upstream refreshes its fixture; the rest still runs.
-            node ../../node_modules/vitest/dist/cli.js --run test/providers.test.ts \
-              --testNamePattern '^(?!.*mid-conversation system messages only for verified models)'
           )
           (
             cd packages/agent
