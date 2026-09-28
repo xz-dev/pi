@@ -130,7 +130,6 @@ PATCH_ORDER=(
 	self-update-managed-by
 	model-selector-refresh-selection
 	ai-drop-empty-messages
-	compaction-test-exclusion
 	quarantine-auth-storage-flake
 	vitest-audit-fix
 )
