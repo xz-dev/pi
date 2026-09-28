@@ -266,14 +266,10 @@ test("upstream sync requires ci to merge cleanly without source rewriting", () =
   assert.doesNotMatch(script, /resolve-ci-squash-conflicts/);
 });
 
-test("upstream sync globally retires the runner-sensitive compaction characterization", () => {
-  assert.match(
-    syncWorkflowText,
-    /\+refs\/heads\/patch\/compaction-test-exclusion:refs\/remotes\/origin\/patch\/compaction-test-exclusion/,
-  );
-  assertPatchIntegrated(syncScript, "compaction-test-exclusion");
-  assert.doesNotMatch(syncWorkflowText, /--exclude test\/suite\/agent-session-compaction\.test\.ts/);
-  assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /one policy/);
+test("upstream sync runs the compaction characterization suite", () => {
+  assert.doesNotMatch(syncWorkflowText, /compaction-test-exclusion/);
+  assert.doesNotMatch(syncScript, /compaction-test-exclusion/);
+  assert.doesNotMatch(syncWorkflowText, /agent-session-compaction/);
 });
 
 test("upstream sync keeps provider-transparent compaction temporarily retired", () => {
