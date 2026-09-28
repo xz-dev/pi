@@ -33,7 +33,10 @@ is_model_catalog_drift() {
 	esac
 
 	case "$line" in
-		*ModelId*|*"Model<"*|*ModelCatalog*|*"Property 'allowEmptySignature'"*|*"Property 'forceAdaptiveThinking'"*|*"Property 'supportsEagerToolInputStreaming'"*|*"Property 'supportsCacheControlOnTools'"*|*"'model' is of type 'unknown'"*)
+		# A catalog-resolved model's compat type is the union of the compat types of
+		# the APIs the live catalog currently offers, so any compat property can
+		# disappear from it when models move between APIs.
+		*ModelId*|*"Model<"*|*ModelCatalog*|*"error TS2339: Property '"*"' does not exist on type '"*Compat*|*"'model' is of type 'unknown'"*)
 			return 0
 		;;
 		*"Argument of type '"*accounts/*|*"Argument of type '"*anthropic/*|*"Argument of type '"*claude-*|*"Argument of type '"*deepseek-*|*"Argument of type '"*gemini-*|*"Argument of type '"*glm-*|*"Argument of type '"*gpt-*|*"Argument of type '"*kimi-*|*"Argument of type '"*mimo-*|*"Argument of type '"*qwen-*|*"Argument of type '"*xai-*|*"Argument of type '"*zai-*|*"Argument of type '"*openai-*|*"Argument of type '"*google-*|*"Argument of type '"*minimax-*|*"Argument of type '"*moonshotai-*|*"Argument of type '"*opencode-*|*"Argument of type '"*fireworks-*|*"Argument of type '"*baseten-*)
