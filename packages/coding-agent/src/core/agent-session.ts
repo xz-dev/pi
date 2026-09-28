@@ -682,6 +682,8 @@ export class AgentSession {
 	}
 
 	private async _notifyManagedExecution(notification: ManagedExecutionNotification): Promise<void> {
+		// The notice tells the model to call tool_task, so the next request must offer it.
+		this._activateToolTaskForManagedExecutions();
 		const text = `Managed tool execution ${notification.id} (${notification.toolName}) ${notification.status}. Use tool_task wait with this task ID to retrieve its result.`;
 		await this.sendCustomMessage(
 			{
