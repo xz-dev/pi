@@ -124,7 +124,7 @@ test("upstream sync check tolerates only the known model-catalog drift class", (
   assert.match(helper, /error TS7053/);
   assert.match(helper, /error TS2339/);
   assert.match(helper, /ModelId/);
-  assert.match(helper, /Property 'allowEmptySignature'/);
+  assert.match(helper, /does not exist on type '"\*Compat/);
   assert.match(helper, /packages\/ai\/test\//);
   assert.match(helper, /packages\/coding-agent\/test\//);
   assert.match(helper, /failed outside tsc/);
@@ -149,7 +149,7 @@ test("model-catalog drift helper discriminates filtered vs real errors", () => {
     writeNpm('echo ok; exit 0');
     assert.equal(runHelper().status, 0);
     // 2. only drift-class errors -> exit 0 with warning
-    writeNpm(`cat <<'EOF'\npackages/ai/test/x.test.ts(285,4): error TS2345: Argument of type 'Model<"anthropic-messages" | "openai-completions">' is not assignable to parameter of type 'Model<"anthropic-messages">'.\npackages/ai/test/x.test.ts(285,27): error TS2345: Argument of type '"anthropic/claude-3-haiku"' is not assignable to parameter of type '"aion-labs/aion-2.0" | "~z-ai/glm-latest"'.\npackages/ai/test/x.test.ts(286,24): error TS2339: Property 'allowEmptySignature' does not exist on type 'AnthropicMessagesCompat | OpenAICompletionsCompat'.\npackages/ai/test/x.test.ts(287,38): error TS2345: Argument of type '"glm-5.2"' is not assignable to parameter of type '"glm-5.3"'.\nEOF\nexit 1`);
+    writeNpm(`cat <<'EOF'\npackages/ai/test/x.test.ts(285,4): error TS2345: Argument of type 'Model<"anthropic-messages" | "openai-completions">' is not assignable to parameter of type 'Model<"anthropic-messages">'.\npackages/ai/test/x.test.ts(285,27): error TS2345: Argument of type '"anthropic/claude-3-haiku"' is not assignable to parameter of type '"aion-labs/aion-2.0" | "~z-ai/glm-latest"'.\npackages/ai/test/x.test.ts(286,24): error TS2339: Property 'allowEmptySignature' does not exist on type 'AnthropicMessagesCompat | OpenAICompletionsCompat'.\npackages/ai/test/x.test.ts(287,38): error TS2345: Argument of type '"glm-5.2"' is not assignable to parameter of type '"glm-5.3"'.\npackages/ai/test/x.test.ts(1526,25): error TS2339: Property 'maxTokensField' does not exist on type 'AnthropicMessagesCompat | OpenAICompletionsCompat | OpenAIResponsesCompat'.\nEOF\nexit 1`);
     const drift = runHelper();
     assert.equal(drift.status, 0, drift.stderr);
     assert.match(drift.stderr, /Ignoring known model-catalog drift/);
