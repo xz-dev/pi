@@ -670,6 +670,17 @@ export class AgentSession {
 		this.agent.managedExecutions.setCompletionHandler((notification) => this._notifyManagedExecution(notification));
 	}
 
+	/**
+	 * tool_task stays out of the tool loadout until a tool call actually moves to
+	 * the background, so ordinary requests do not carry its schema.
+	 */
+	private _activateToolTaskForManagedExecutions(): void {
+		if (this.agent.managedExecutions.list().length === 0 || !this._toolRegistry.has("tool_task")) return;
+		const activeToolNames = this.getActiveToolNames();
+		if (activeToolNames.includes("tool_task")) return;
+		this.setActiveToolsByName([...activeToolNames, "tool_task"]);
+	}
+
 	private async _notifyManagedExecution(notification: ManagedExecutionNotification): Promise<void> {
 		const text = `Managed tool execution ${notification.id} (${notification.toolName}) ${notification.status}. Use tool_task wait with this task ID to retrieve its result.`;
 		await this.sendCustomMessage(
@@ -939,6 +950,7 @@ export class AgentSession {
 			const context = await this._compactBeforeNextAssistantResponse(turn.context);
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
+			this._activateToolTaskForManagedExecutions();
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
 			const options = normalizeBuildSystemPromptOptions({
 				...runOptions,
@@ -3601,9 +3613,6 @@ export class AgentSession {
 		const nextActiveToolNames = (
 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
 		).filter((name) => this._isAllowedTool(name));
-		if (this._toolRegistry.has("tool_task") && this._isAllowedTool("tool_task")) {
-			nextActiveToolNames.push("tool_task");
-		}
 
 		if (allowedTools) {
 			for (const toolName of this._toolRegistry.keys()) {
@@ -3689,8 +3698,8 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 
 		const defaultActiveToolNames = this._baseToolsOverride
-			? [...Object.keys(this._baseToolsOverride), "tool_task"]
-			: ["read", "bash", "edit", "write", "tool_task"];
+			? Object.keys(this._baseToolsOverride)
+			: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
