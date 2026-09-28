@@ -109,7 +109,6 @@ PATCH_ORDER=(
 	model-refresh-session-rebind
 	model-catalog-extension-refresh
 	model-refresh-timeout
-	bun-bytecode-entrypoint
 	startup-benchmark-exit
 	native-wrapper-release
 	update-clean
@@ -129,10 +128,8 @@ PATCH_ORDER=(
 	session-tree-splice
 	ws-cached-empty-delta
 	self-update-managed-by
-	google-toomany-toolcalls
 	model-selector-refresh-selection
 	ai-drop-empty-messages
-	openrouter-live-fixture
 	compaction-test-exclusion
 	quarantine-auth-storage-flake
 	vitest-audit-fix

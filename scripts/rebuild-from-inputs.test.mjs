@@ -49,7 +49,7 @@ function buildFixture() {
 	const mte = file("mte.txt", "mte\n", "mte", "patch/managed-tool-executions", "patch/agent-run-failure-seam");
 	const esc = file("esc.txt", "esc\n", "esc", "patch/esc-abort", "patch/managed-tool-executions");
 	// Conflict fixture: touches f.txt which ci already edited.
-	const conf = file("f.txt", "base\nconflict\n", "conf", "patch/bun-bytecode-entrypoint");
+	const conf = file("f.txt", "base\nconflict\n", "conf", "patch/ws-cached-empty-delta");
 	// Changelog offender fixture.
 	const offender = (() => {
 		run("git checkout -q -B patch/vitest-audit-fix upstream-main");
@@ -273,10 +273,10 @@ test("a squash conflict fails closed and names the patch", () => {
 	const { out, target } = replay(fixture, [
 		"--upstream", fixture.upstream,
 		"--ci", fixture.ci,
-		"--patch", `bun-bytecode-entrypoint=${fixture.conf}`,
+		"--patch", `ws-cached-empty-delta=${fixture.conf}`,
 	], { expectFail: true });
 	try {
-		assert.match(out, /merge patch\/bun-bytecode-entrypoint branch conflicts: f\.txt/);
+		assert.match(out, /merge patch\/ws-cached-empty-delta branch conflicts: f\.txt/);
 		// No fixup machinery: the conflict stays exactly where git put it.
 		const status = execSync("git status --porcelain", { cwd: target, encoding: "utf8" });
 		assert.match(status, /UU f\.txt/);
