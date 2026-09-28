@@ -1527,6 +1527,12 @@ export interface ExtensionAPI {
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
+	/**
+	 * Delete exactly one existing non-root session entry and reparent its children to its parent.
+	 * Call only while the agent is idle. Root, missing, and unsafe metadata references are rejected.
+	 */
+	spliceEntry(entryId: string): void;
+
 	// =========================================================================
 	// Session Metadata
 	// =========================================================================
@@ -1821,6 +1827,8 @@ export type SendUserMessageHandler = (
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
+export type SpliceEntryHandler = (entryId: string) => void;
+
 export type SetSessionNameHandler = (name: string) => void;
 
 export type GetSessionNameHandler = () => string | undefined;
@@ -1883,6 +1891,7 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
+	spliceEntry: SpliceEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;
 	setLabel: SetLabelHandler;
