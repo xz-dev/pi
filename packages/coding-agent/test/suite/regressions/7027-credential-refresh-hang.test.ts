@@ -87,7 +87,7 @@ describe("issues #7027 and #7113 credential refresh hang", () => {
 	});
 
 	it("completes interactive login before its bounded background refresh", async () => {
-		harness = await createHarness();
+		harness = await createHarness({ settings: { models: { refreshTimeoutMs: 15_000 } } });
 		vi.useFakeTimers();
 		const runtime = harness.session.modelRuntime;
 		vi.spyOn(runtime, "refresh").mockImplementation(
@@ -134,7 +134,7 @@ describe("post-login model discovery", () => {
 	});
 
 	async function startLogin() {
-		harness = await createHarness();
+		harness = await createHarness({ settings: { models: { refreshTimeoutMs: 15_000 } } });
 		vi.useFakeTimers();
 		const session = harness.session;
 		const model = harness.getModel();
