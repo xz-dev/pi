@@ -105,20 +105,15 @@ print_inputs() {
 # a complete marker is allowed only when its actual step trace matches this.
 PATCH_ORDER=(
 	contributor-approval
-	model-startup-refresh-barrier
+	model-refresh
 	model-refresh-session-rebind
-	model-catalog-extension-refresh
-	model-refresh-timeout
 	startup-benchmark-exit
-	native-wrapper-release
-	update-clean
-	bundle-usage-claims
+	xz-bundle-lifecycle
 	use-embedded-bun-package-manager
 	git-package-storage
 	agent-run-failure-seam
 	managed-tool-executions
 	esc-abort
-	managed-tool-abort-drain
 	manual-retry
 	startup-submit-readiness
 	changelog-prerelease
@@ -142,19 +137,13 @@ PATCH_ORDER=(
 # the two patches share. Rebase cascades down the chain when the predecessor
 # is rebased.
 CHAIN_EDGES=(
-	model-startup-refresh-barrier:model-catalog-extension-refresh
-	model-catalog-extension-refresh:model-refresh-timeout
-	native-wrapper-release:update-clean
-	native-wrapper-release:use-embedded-bun-package-manager
-	update-clean:bundle-usage-claims
+	xz-bundle-lifecycle:use-embedded-bun-package-manager
 	use-embedded-bun-package-manager:git-package-storage
-	git-package-storage:changelog-prerelease
+	xz-bundle-lifecycle:changelog-prerelease
 	agent-run-failure-seam:managed-tool-executions
 	managed-tool-executions:esc-abort
-	esc-abort:managed-tool-abort-drain
 	esc-abort:manual-retry
-	manual-retry:retry-non-retryable-patterns
-	retry-non-retryable-patterns:slow-hook-tui-only
+	manual-retry:slow-hook-tui-only
 	slow-hook-tui-only:session-tree-splice
 )
 

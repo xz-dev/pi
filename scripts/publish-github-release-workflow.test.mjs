@@ -52,16 +52,17 @@ function pinnedUses() {
   );
 }
 
-test("upstream sync fetches and merges the persistent native wrapper patch", () => {
+test("upstream sync fetches and merges the xz bundle lifecycle patch", () => {
 	assert.match(
 		syncWorkflowText,
-		/\+refs\/heads\/patch\/native-wrapper-release:refs\/remotes\/origin\/patch\/native-wrapper-release/,
+		/\+refs\/heads\/patch\/xz-bundle-lifecycle:refs\/remotes\/origin\/patch\/xz-bundle-lifecycle/,
 	);
 	// The merge itself is owned by the replay script; here we prove the
 	// workflow feeds the patch's frozen SHA into it.
-	assert.match(syncWorkflowText, /native-wrapper-release \\\n/);
+	assert.match(syncWorkflowText, /xz-bundle-lifecycle \\\n/);
 	assert.match(syncWorkflowText, /rebuild_args\+=\(--patch "\$ref=\$\(git rev-parse \"origin\/patch\/\$ref\"\)"\)/);
-	assertPatchIntegrated(syncScript, "native-wrapper-release");
+	assertPatchIntegrated(syncScript, "xz-bundle-lifecycle");
+	assert.doesNotMatch(syncWorkflowText, /patch\/(?:native-wrapper-release|update-clean|bundle-usage-claims)\b/);
 	assert.doesNotMatch(syncScript, /resolve-release-self-update-squash-conflicts/);
 });
 
@@ -196,7 +197,7 @@ for (const scenario of ["unchanged", "formatted", "check fails"]) {
           "--diagnostic",
           "--upstream", "a".repeat(40),
           "--ci", "b".repeat(40),
-          "--patch", `model-startup-refresh-barrier=${"c".repeat(40)}`,
+          "--patch", `model-refresh=${"c".repeat(40)}`,
           "--print-marker",
         ],
         { encoding: "utf8" },
@@ -236,10 +237,10 @@ test("upstream sync uses current fetched refs without fixed-input dispatch pins"
 test("upstream sync carries and tests the model catalog list refresh patch", () => {
   assert.match(
     syncWorkflowText,
-    /\+refs\/heads\/patch\/model-catalog-extension-refresh:refs\/remotes\/origin\/patch\/model-catalog-extension-refresh/,
+    /\+refs\/heads\/patch\/model-refresh:refs\/remotes\/origin\/patch\/model-refresh/,
   );
-  assertPatchIntegrated(syncScript, "model-catalog-extension-refresh");
-  assertChainEdge(syncScript, "model-startup-refresh-barrier", "model-catalog-extension-refresh");
+  assertPatchIntegrated(syncScript, "model-refresh");
+  assert.doesNotMatch(syncWorkflowText, /patch\/(?:model-startup-refresh-barrier|model-catalog-extension-refresh|model-refresh-timeout)\b/);
   // list-models-refresh and args tests are covered by the coding-agent auto-discovery run.
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi --list-models`/);
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
@@ -286,7 +287,7 @@ test("upstream sync carries the unified TUI-only slow-hook patch", () => {
     /\+refs\/heads\/patch\/slow-hook-tui-only:refs\/remotes\/origin\/patch\/slow-hook-tui-only/,
   );
   assertPatchIntegrated(syncScript, "slow-hook-tui-only");
-  assertChainEdge(syncScript, "retry-non-retryable-patterns", "slow-hook-tui-only");
+  assertChainEdge(syncScript, "manual-retry", "slow-hook-tui-only");
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:shutdown-lifecycle-log|slow-hook-execution-kind|shutdown-screen-log)/);
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });

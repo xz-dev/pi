@@ -44,7 +44,7 @@ function buildFixture() {
 	run("git commit -q -m ci-content");
 	const ciSha = run("git rev-parse HEAD").trim();
 	const approval = file("approval.txt", "approval\n", "approval", "patch/contributor-approval");
-	const aaa = file("aaa.txt", "aaa\n", "aaa", "patch/model-startup-refresh-barrier");
+	const aaa = file("aaa.txt", "aaa\n", "aaa", "patch/model-refresh");
 	const seam = file("seam.txt", "seam\n", "seam", "patch/agent-run-failure-seam");
 	const mte = file("mte.txt", "mte\n", "mte", "patch/managed-tool-executions", "patch/agent-run-failure-seam");
 	const esc = file("esc.txt", "esc\n", "esc", "patch/esc-abort", "patch/managed-tool-executions");
@@ -103,14 +103,14 @@ test("applies recorded inputs in the declared fixed order", () => {
 	const { target } = replay(fixture, [
 		"--upstream", fixture.upstream,
 		"--ci", fixture.ci,
-		"--patch", `model-startup-refresh-barrier=${fixture.aaa}`,
+		"--patch", `model-refresh=${fixture.aaa}`,
 		...CHAIN(fixture),
 	]);
 	try {
 		const subjects = log(target);
 		assert.equal(subjects[0], "base");
 		assert.equal(subjects[1], "merge ci branch");
-		assert.equal(subjects[2], "merge patch/model-startup-refresh-barrier branch");
+		assert.equal(subjects[2], "merge patch/model-refresh branch");
 		assert.equal(subjects[3], "merge patch/agent-run-failure-seam branch");
 		assert.equal(subjects[4], "merge patch/managed-tool-executions branch");
 		assert.equal(subjects[5], "merge patch/esc-abort branch");
@@ -156,13 +156,13 @@ test("stop-before halts exactly before the named mutation and records a partial 
 	const { target } = replay(fixture, [
 		"--upstream", fixture.upstream,
 		"--ci", fixture.ci,
-		"--patch", `model-startup-refresh-barrier=${fixture.aaa}`,
+		"--patch", `model-refresh=${fixture.aaa}`,
 		...CHAIN(fixture),
 		"--stop-before", "managed-tool-executions",
 	]);
 	try {
 		const subjects = log(target);
-		assert.ok(subjects.includes("merge patch/model-startup-refresh-barrier branch"));
+		assert.ok(subjects.includes("merge patch/model-refresh branch"));
 		assert.ok(subjects.includes("merge patch/agent-run-failure-seam branch"));
 		assert.ok(!subjects.includes("merge patch/managed-tool-executions branch"));
 		assert.ok(!existsSync(join(target, "mte.txt")));
@@ -178,7 +178,7 @@ test("rejects a target path that already exists before any mutation", () => {
 	const fixture = buildFixture();
 	const existing = mkdtempSync(join(tmpdir(), "replay-existing-"));
 	try {
-		const { out } = replay(fixture, ["--upstream", fixture.upstream, "--ci", fixture.ci, "--patch", `model-startup-refresh-barrier=${fixture.aaa}`], {
+		const { out } = replay(fixture, ["--upstream", fixture.upstream, "--ci", fixture.ci, "--patch", `model-refresh=${fixture.aaa}`], {
 			expectFail: true,
 			target: existing,
 		});
@@ -195,7 +195,7 @@ test("rejects source==target before any mutation", () => {
 	try {
 		const { out } = replay(
 			fixture,
-			["--upstream", fixture.upstream, "--ci", fixture.ci, "--patch", `model-startup-refresh-barrier=${fixture.aaa}`],
+			["--upstream", fixture.upstream, "--ci", fixture.ci, "--patch", `model-refresh=${fixture.aaa}`],
 			{ expectFail: true, target: fixture.dir },
 		);
 		assert.match(out, /already exists|must not equal/);
@@ -211,7 +211,7 @@ test("the source repository is fully untouched by a replay", () => {
 	const { target } = replay(fixture, [
 		"--upstream", fixture.upstream,
 		"--ci", fixture.ci,
-		"--patch", `model-startup-refresh-barrier=${fixture.aaa}`,
+		"--patch", `model-refresh=${fixture.aaa}`,
 	]);
 	try {
 		assert.equal(HEAD(fixture.dir), fixture.upstream);
@@ -242,7 +242,7 @@ test("rejects an explicit subset without --diagnostic", () => {
 		const { out } = replay(fixture, [
 			"--upstream", fixture.upstream,
 			"--ci", fixture.ci,
-			"--patch", `model-startup-refresh-barrier=${fixture.aaa}`,
+			"--patch", `model-refresh=${fixture.aaa}`,
 		], { expectFail: true, diagnostic: false });
 		assert.match(out, /missing explicit input/);
 	} finally {
@@ -304,7 +304,7 @@ test("a second replay of the same vector reports the marker already recorded", (
 	const args = [
 		"--upstream", fixture.upstream,
 		"--ci", fixture.ci,
-		"--patch", `model-startup-refresh-barrier=${fixture.aaa}`,
+		"--patch", `model-refresh=${fixture.aaa}`,
 	];
 	const first = replay(fixture, args);
 	try {

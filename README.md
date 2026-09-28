@@ -53,13 +53,13 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
   - Patch branch: [`patch/ws-cached-empty-delta`](https://github.com/xz-dev/pi/tree/patch/ws-cached-empty-delta)
 - Wait for extension-provider registration refreshes before startup resolves configured models, while preserving synchronous registration and caller-owned cancellation.
   - Use case: Start with models an extension registered asynchronously instead of resolving a stale catalog.
-  - Patch branch: [`patch/model-startup-refresh-barrier`](https://github.com/xz-dev/pi/tree/patch/model-startup-refresh-barrier)
+  - Patch branch: [`patch/model-refresh`](https://github.com/xz-dev/pi/tree/patch/model-refresh)
 - Rebind active and scoped sessions to refreshed same-ID model metadata so context percentages and automatic compaction use the current context window.
   - Use case: Keep context percentages and compaction limits correct after a provider refreshes model metadata.
   - Patch branch: [`patch/model-refresh-session-rebind`](https://github.com/xz-dev/pi/tree/patch/model-refresh-session-rebind)
 - Add `--refresh` to `pi --list-models` so the command loads extension providers, force-refreshes every loaded catalog, then prints refreshed models while preserving cached entries for failed providers. Keep `pi update --models` extension-free for Pi-managed catalog maintenance.
   - Use case: Refresh and inspect a third-party provider's latest model list from one non-interactive CLI command.
-  - Patch branch: [`patch/model-catalog-extension-refresh`](https://github.com/xz-dev/pi/tree/patch/model-catalog-extension-refresh)
+  - Patch branch: [`patch/model-refresh`](https://github.com/xz-dev/pi/tree/patch/model-refresh)
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
   - Use case: Recover control when Esc is pressed during a hook, provider setup, stream, or listener that does not settle.
   - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
@@ -73,7 +73,7 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
   - Use case: Extension-injected custom messages (for example watchdog inquiry fold markers) become empty user messages that some providers reject, e.g. Gemini `contents.parts must not be empty`.
   - Patch branch: [`patch/ai-drop-empty-messages`](https://github.com/xz-dev/pi/tree/patch/ai-drop-empty-messages)
 
-The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://github.com/xz-dev/pi/tree/patch/agent-run-failure-seam). Managed tool executions are integrated before those two patches; the `ci` overlay owns their narrowly scoped conflict handling. See [downstream maintenance](MAINTAIN.md) for the current integration rules.
+The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://github.com/xz-dev/pi/tree/patch/agent-run-failure-seam). Managed tool executions are integrated before those two patches, and `patch/esc-abort` carries the managed-execution abort drain. See [downstream maintenance](MAINTAIN.md) for the current integration rules.
 
 ### Temporarily disabled
 
@@ -91,7 +91,7 @@ The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://
   - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
 - Remove old managed binary bundles with `pi update --clean` while preserving the executing version, the currently installed launcher target, and every participating bundle with a live kernel-held usage claim.
   - Use case: Free disk after several `pi update --self` cycles without deleting resources still needed by interactive, print, RPC, background, or subagent processes. Cleanup warns for recognized remote filesystems and continues; generic FUSE is not blocked or warned solely by type.
-  - Patch branches: [`patch/update-clean`](https://github.com/xz-dev/pi/tree/patch/update-clean), then dependent [`patch/bundle-usage-claims`](https://github.com/xz-dev/pi/tree/patch/bundle-usage-claims)
+  - Patch branch: [`patch/xz-bundle-lifecycle`](https://github.com/xz-dev/pi/tree/patch/xz-bundle-lifecycle)
 
 ## Installation
 
