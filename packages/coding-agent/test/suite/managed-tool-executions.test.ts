@@ -129,7 +129,7 @@ describe("coding-agent managed tool executions", () => {
 		}
 	});
 
-	it("registers tool_task by default and never detaches it", async () => {
+	it("registers tool_task, activates it once a call detaches, and never detaches it", async () => {
 		vi.useFakeTimers();
 		const hang = hangTool("hang");
 		const harness = await createHarness({
@@ -138,7 +138,8 @@ describe("coding-agent managed tool executions", () => {
 		});
 		harnesses.push(harness);
 
-		expect(harness.session.getActiveToolNames()).toContain("tool_task");
+		// Inactive until needed, so ordinary requests do not carry the tool_task schema.
+		expect(harness.session.getActiveToolNames()).not.toContain("tool_task");
 		expect(harness.session.getAllTools().some((tool) => tool.name === "tool_task")).toBe(true);
 
 		harness.setResponses([
@@ -153,8 +154,10 @@ describe("coding-agent managed tool executions", () => {
 		await vi.advanceTimersByTimeAsync(1000);
 		await expectSettled(promptPromise, "session prompt released after detach");
 
+		expect(harness.session.getActiveToolNames()).toContain("tool_task");
 		const toolTaskResult = toolResults(harness.session).find((message) => message.toolCallId === "call-task");
 		expect(toolTaskResult).toBeDefined();
+		expect(JSON.stringify(toolTaskResult)).not.toContain("not found");
 		expect(JSON.stringify(toolTaskResult)).not.toContain("secret-output");
 		expect(managedFromSession(harness.session).list()).toHaveLength(1);
 
