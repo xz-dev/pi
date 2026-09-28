@@ -296,6 +296,18 @@ describe("detectInstallMethod", () => {
 
 	test("self-update respects configured npmCommand", () => {
 		const { prefix } = createNpmPrefixInstall();
+		const root = join(prefix, "lib", "node_modules");
+		const binDir = join(prefix, "bin");
+		const npmPath = join(binDir, process.platform === "win32" ? "npm.cmd" : "npm");
+		mkdirSync(binDir, { recursive: true });
+		writeFileSync(
+			npmPath,
+			process.platform === "win32"
+				? `@echo off\r\necho ${root}\r\n`
+				: `#!/bin/sh\nprintf '%s\\n' '${root.replaceAll("'", "'\\''")}'\n`,
+		);
+		chmodSync(npmPath, 0o755);
+		process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
 
 		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", ["npm", "--prefix", prefix]);
 
