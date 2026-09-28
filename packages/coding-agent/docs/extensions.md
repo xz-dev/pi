@@ -305,6 +305,8 @@ A prompt starts a run. Input handling comes first:
 3. Skill commands (`/skill:name`) and prompt templates (`/template`) expand.
 4. `before_agent_start` runs, then the agent loop starts.
 
+In interactive TUI, Pi shows slow extension handlers as transient notices when `slowHookThresholdMs` is `>= 0` (default `-1`, disabled). Timing diagnostics are not saved to the session, model context, RPC/print events, or disk. During shutdown, the current handler is shown while Pi waits; fast handlers are cleared and only slow handlers remain on the terminal. Outside interactive TUI, these diagnostics are dropped.
+
 The run repeats turns, then checks whether more work starts another low-level agent run:
 
 ```mermaid
