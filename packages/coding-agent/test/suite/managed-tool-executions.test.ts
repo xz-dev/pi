@@ -375,6 +375,70 @@ describe("coding-agent managed tool executions", () => {
 		expect(noticeText).not.toContain("secret-output");
 	});
 
+	it("keeps tool_task active after reload while a managed execution exists", async () => {
+		vi.useFakeTimers();
+		const hang = hangTool("hang");
+		const harness = await createHarness({
+			tools: [hang.tool],
+			settings: { backgroundToolCalls: { hang: { detachAfterSeconds: 1 } } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("hang", {}, { id: "call-hang" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("detached"),
+		]);
+
+		const promptPromise = harness.session.prompt("run hang");
+		await hang.started.promise;
+		await vi.advanceTimersByTimeAsync(1000);
+		await expectSettled(promptPromise, "session prompt released after detach");
+		expect(harness.session.getActiveToolNames()).toContain("tool_task");
+
+		await harness.session.reload();
+		expect(harness.session.getActiveToolNames()).toContain("tool_task");
+		harness.session.agent.managedExecutions.setCompletionHandler(undefined);
+		hang.finish.resolve({ text: "done" });
+	});
+
+	it("offers tool_task in the completion-triggered request", async () => {
+		vi.useFakeTimers();
+		const hang = hangTool("hang");
+		const harness = await createHarness({
+			tools: [hang.tool],
+			settings: { backgroundToolCalls: { hang: { detachAfterSeconds: 1 } } },
+		});
+		harnesses.push(harness);
+		let notifiedTools: string[] | undefined;
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("hang", {}, { id: "call-hang" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("detached"),
+			(context) => {
+				// Tools reach the provider as system-message deltas; replay them in order.
+				const tools = new Set<string>();
+				for (const message of context.messages) {
+					if (message.role !== "system") continue;
+					for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+					for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
+				}
+				notifiedTools = [...tools];
+				return fauxAssistantMessage("noticed completion");
+			},
+		]);
+
+		const promptPromise = harness.session.prompt("run hang");
+		await hang.started.promise;
+		await vi.advanceTimersByTimeAsync(1000);
+		await expectSettled(promptPromise, "session prompt released after detach");
+		// Simulate a loadout reset (e.g. an extension replacing active tools) before completion.
+		harness.session.setActiveToolsByName(["hang"]);
+
+		hang.finish.resolve({ text: "secret-output" });
+		await vi.advanceTimersByTimeAsync(0);
+		await harness.session.agent.waitForIdle();
+		expect(getMessageText(harness.session.messages.at(-1))).toContain("noticed completion");
+		expect(notifiedTools).toContain("tool_task");
+	});
+
 	it("queues a trusted completion notice while the agent is busy and does not notify after dispose", async () => {
 		vi.useFakeTimers();
 		const hang = hangTool("hang");
