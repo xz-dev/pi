@@ -245,14 +245,6 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
   assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
 });
 
-test("upstream sync carries the Bun bytecode entrypoint patch", () => {
-  assert.match(
-    syncWorkflowText,
-    /\+refs\/heads\/patch\/bun-bytecode-entrypoint:refs\/remotes\/origin\/patch\/bun-bytecode-entrypoint/,
-  );
-  assertPatchIntegrated(syncScript, "bun-bytecode-entrypoint");
-});
-
 test("upstream sync carries and tests the bounded startup benchmark patch", () => {
   assert.match(syncWorkflowText, /\+refs\/heads\/patch\/startup-benchmark-exit:refs\/remotes\/origin\/patch\/startup-benchmark-exit/);
   assertPatchIntegrated(syncScript, "startup-benchmark-exit");

@@ -39,7 +39,6 @@ jobs:
             +refs/heads/patch/model-startup-refresh-barrier:refs/remotes/origin/patch/model-startup-refresh-barrier \
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
             +refs/heads/patch/model-catalog-extension-refresh:refs/remotes/origin/patch/model-catalog-extension-refresh \
-            +refs/heads/patch/bun-bytecode-entrypoint:refs/remotes/origin/patch/bun-bytecode-entrypoint \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/native-wrapper-release:refs/remotes/origin/patch/native-wrapper-release \
             +refs/heads/patch/update-clean:refs/remotes/origin/patch/update-clean \
@@ -60,10 +59,8 @@ jobs:
             +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
-            +refs/heads/patch/google-toomany-toolcalls:refs/remotes/origin/patch/google-toomany-toolcalls \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
-            +refs/heads/patch/openrouter-live-fixture:refs/remotes/origin/patch/openrouter-live-fixture \
             +refs/heads/patch/compaction-test-exclusion:refs/remotes/origin/patch/compaction-test-exclusion \
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
             +refs/heads/patch/vitest-audit-fix:refs/remotes/origin/patch/vitest-audit-fix
@@ -86,7 +83,6 @@ jobs:
             model-startup-refresh-barrier \
             model-refresh-session-rebind \
             model-catalog-extension-refresh \
-            bun-bytecode-entrypoint \
             startup-benchmark-exit \
             native-wrapper-release \
             update-clean \
@@ -107,10 +103,8 @@ jobs:
             session-tree-splice \
             ws-cached-empty-delta \
             self-update-managed-by \
-            google-toomany-toolcalls \
             model-selector-refresh-selection \
             ai-drop-empty-messages \
-            openrouter-live-fixture \
             compaction-test-exclusion \
             quarantine-auth-storage-flake \
             vitest-audit-fix \
@@ -206,7 +200,6 @@ jobs:
             node ../../node_modules/vitest/dist/cli.js --run \
               test/event-stream.test.ts \
               test/openai-responses-compat.test.ts \
-              test/google-stop-reason-exhaustive.test.ts \
               test/providers.test.ts \
               test/retry.test.ts
           )
