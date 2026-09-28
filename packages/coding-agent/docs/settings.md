@@ -56,7 +56,7 @@ This replaces `bash` with `powershell` and enables `grep`: `["-bash", "+powershe
 
 The `tool_task` management tool remains available even with an empty `defaultTools` array; `--tools` is a strict allowlist, so include `tool_task` there explicitly when needed.
 
-`backgroundToolCalls` opts named extension or SDK tools into managed execution. A rule such as `"long_report": { "detachAfterSeconds": 900 }` must use a positive finite threshold; invalid rules are diagnosed and ignored. Unlisted third-party tools stay foreground-only. AI-called `bash` and `powershell` use a 600-second default detach threshold when their timeout is omitted or greater than 1200 seconds. User-entered `!` and `!!` commands are not managed, and `tool_task` itself is never auto-backgrounded. See [Managed tool executions](usage.md#managed-tool-executions) for lifecycle and cancellation details.
+`backgroundToolCalls` opts named extension or SDK tools into managed execution. A rule such as `"long_report": { "detachAfterSeconds": 900 }` must use a positive finite threshold; invalid rules are diagnosed and ignored. Unlisted third-party tools stay foreground-only. AI-called `bash` and `powershell` use a 600-second default detach threshold when their timeout is omitted or greater than 1200 seconds. User-entered `!` and `!!` commands are not managed, and `tool_task` itself is never auto-backgrounded. See [Manage long-running tool calls](usage.md#manage-long-running-tool-calls) for lifecycle and cancellation details.
 
 CLI tool options override this setting for one invocation; `--tools` does not accept `+name` or `-name`. See [Command Line](cli.md#tools).
 
