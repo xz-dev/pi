@@ -120,12 +120,12 @@ PATCH_ORDER=(
 	skill-overrides
 	retry-non-retryable-patterns
 	slow-hook-tui-only
-	session-tree-splice
 	ws-cached-empty-delta
 	self-update-managed-by
 	model-selector-refresh-selection
 	ai-drop-empty-messages
 	quarantine-auth-storage-flake
+	env-overrides
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip
@@ -143,7 +143,6 @@ CHAIN_EDGES=(
 	managed-tool-executions:esc-abort
 	esc-abort:manual-retry
 	manual-retry:slow-hook-tui-only
-	slow-hook-tui-only:session-tree-splice
 )
 
 print_marker() {

@@ -51,12 +51,12 @@ jobs:
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
-            +refs/heads/patch/session-tree-splice:refs/remotes/origin/patch/session-tree-splice \
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
-            +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake
+            +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
+            +refs/heads/patch/env-overrides:refs/remotes/origin/patch/env-overrides
 
           # Driver source: the replay script and its small union helper come
           # from the reviewed ci snapshot, never from a stale generated-main
@@ -88,12 +88,12 @@ jobs:
             skill-overrides \
             retry-non-retryable-patterns \
             slow-hook-tui-only \
-            session-tree-splice \
             ws-cached-empty-delta \
             self-update-managed-by \
             model-selector-refresh-selection \
             ai-drop-empty-messages \
             quarantine-auth-storage-flake \
+            env-overrides \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done
