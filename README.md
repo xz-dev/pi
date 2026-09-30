@@ -40,6 +40,9 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 - Set `LC_ALL=C.UTF-8`, `LANG=C.UTF-8`, `LANGUAGE=en` at startup so tools, MCP servers, and extension subprocesses run with an English locale while Pi's own UI locale stays unchanged. Override with global `envOverrides` (`KEY=VALUE` list, replaces the default); `[]` disables.
   - Use case: Keep tool output the model reads in English on a non-English desktop.
   - Patch branch: [`patch/env-overrides`](https://github.com/xz-dev/pi/tree/patch/env-overrides)
+- List models with a configured override first in `/settings` -> Default thinking level per model, with configured and unconfigured models each sorted by `provider/model-id`; the current model is preselected instead of pinned to the top.
+  - Use case: See and edit saved per-model thinking levels without scanning the whole model list.
+  - Patch branch: [`patch/model-thinking-sort`](https://github.com/xz-dev/pi/tree/patch/model-thinking-sort)
 
 ### Fixes
 

@@ -56,7 +56,8 @@ jobs:
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
-            +refs/heads/patch/env-overrides:refs/remotes/origin/patch/env-overrides
+            +refs/heads/patch/env-overrides:refs/remotes/origin/patch/env-overrides \
+            +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort
 
           # Driver source: the replay script and its small union helper come
           # from the reviewed ci snapshot, never from a stale generated-main
@@ -94,6 +95,7 @@ jobs:
             ai-drop-empty-messages \
             quarantine-auth-storage-flake \
             env-overrides \
+            model-thinking-sort \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done

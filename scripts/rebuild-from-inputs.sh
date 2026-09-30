@@ -126,6 +126,7 @@ PATCH_ORDER=(
 	ai-drop-empty-messages
 	quarantine-auth-storage-flake
 	env-overrides
+	model-thinking-sort
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip
