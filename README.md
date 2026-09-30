@@ -46,6 +46,11 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 
 ### Fixes
 
+- Defer automatic threshold and successful-response overflow compaction until another model request needs the context. Completed idle replies do not generate an unused summary; tool-loop compaction, extension/queued continuations, manual `/compact`, and immediate overflow/length retry recovery remain supported. No new setting is required.
+  - Use case: Stop after an answer without paying for a summary that would only be useful if the session continued.
+  - Details: [Automatic compaction](packages/coding-agent/docs/compaction.md#when-it-triggers)
+  - Patch branch: [`patch/defer-threshold-compaction`](https://github.com/xz-dev/pi/tree/patch/defer-threshold-compaction)
+
 - Fix standalone extension installation and updates failing when an external package manager is unavailable by using the Bun embedded in the xz-dev bundle. Explicit `npmCommand` settings take precedence; otherwise package operations use public `pi` on `PATH`, without separately installing Node.js, npm, or Bun.
   - Use case: Install a Git extension with runtime dependencies on a machine that only has Pi and Git. Managed npm updates retain version selectors and exact pins. If metadata lookup fails, Pi warns about possible downgrade and continues; successful queries still skip equal or older targets.
   - Limits: Official Bun 1.4.2 requires a project manifest for metadata queries. Registry configuration, lockfiles, dependency scripts, and native modules are not guaranteed to behave like npm; Pi does not broaden script trust or install native build tools automatically.
