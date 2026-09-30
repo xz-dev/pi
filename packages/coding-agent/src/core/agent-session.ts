@@ -900,6 +900,7 @@ export class AgentSession {
 	private _installAgentRequestProjection(): void {
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
+			signal?.throwIfAborted();
 			const failed = this._failedResponse;
 			this._failedResponse = undefined;
 			const prepare = async () => {
@@ -922,9 +923,18 @@ export class AgentSession {
 				return { previous, context: previous?.context ?? canonicalContext, projection };
 			};
 			let { previous, context, projection } = await prepare();
+			signal?.throwIfAborted();
 			const model = previous?.model ?? this.agent.state.model;
 			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
-			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
+			if (!isVirtualModel(model)) {
+				// Threshold compaction runs here, before the request that needs it, instead of after the
+				// previous run ended: a session the user never continues pays nothing.
+				if (this._exceedsCompactionThreshold(model, projection)) {
+					await this._runAutoCompaction("threshold", false);
+					({ previous, context } = await prepare());
+				}
+				return { ...previous, context, model, thinkingLevel };
+			}
 
 			// The selection stays in agent state; only this request uses the routed model. A routing
 			// failure rejects, which ends the run with an error response. Only messages the user wrote
@@ -2186,7 +2196,7 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(message, true, toolResults)) {
+		if (await this._checkCompaction(message, true, toolResults, true)) {
 			return !this._agentRunAbortRequested;
 		}
 
@@ -3229,7 +3239,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Dispatch automatic compaction after `agent_end` or before prompt submission.
+	 * Dispatch automatic compaction after `agent_end` (retry only) or before prompt submission.
 	 * Manual compaction does not call this method; it enters through `compact()`.
 	 *
 	 * Automatic cases:
@@ -3247,12 +3257,15 @@ export class AgentSession {
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
+	 * @param retryOnly Only compact when the turn is retried (case 1). Cases 2 and 3 are left to the
+	 *   next request, which compacts in `prepareRequest`, so an idle session does not compact.
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
 	private async _checkCompaction(
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck = true,
 		toolResults: AgentMessage[] = [],
+		retryOnly = false,
 	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings(this.model);
 		if (!settings.enabled) return false;
@@ -3318,7 +3331,7 @@ export class AgentSession {
 			// Case 2: the response completed successfully. Compact, but do not retry because
 			// agent.continue() cannot continue from a completed assistant response.
 			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
+				return retryOnly ? false : await this._runAutoCompaction("overflow", false);
 			}
 
 			if (this._overflowRecoveryAttempted) {
@@ -3352,6 +3365,7 @@ export class AgentSession {
 		}
 
 		// Case 3: threshold compaction without retry.
+		if (retryOnly) return false;
 		// For error messages or all-zero usage messages, estimate from the last valid response.
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
 		// responses can still compact and do not reset context accounting.
