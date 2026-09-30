@@ -57,7 +57,7 @@ describe("Slow hook TUI notice (tmux integration)", () => {
 		}
 	});
 
-	it("shows a slow-hook notice when slowHookThresholdMs >= 0 and hides it when disabled", () => {
+	it("shows a slow-hook notice when slowAsyncHookThresholdMs >= 0 and hides it when disabled", () => {
 		if (run("tmux", ["-V"]).status !== 0) {
 			throw new Error("tmux is required for this integration regression test");
 		}
@@ -66,7 +66,7 @@ describe("Slow hook TUI notice (tmux integration)", () => {
 		tempDirs.push(tempDir);
 		const agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ slowHookThresholdMs: 0 }));
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ slowAsyncHookThresholdMs: 0 }));
 
 		const slowExtension = join(tempDir, "slow-input.ts");
 		const providerExtension = join(tempDir, "test-provider.ts");
@@ -150,7 +150,7 @@ export default function testProvider(pi: ExtensionAPI): void {
 			return capture(session);
 		};
 
-		const enabled = runCase("on", { slowHookThresholdMs: 0 }, true);
+		const enabled = runCase("on", { slowAsyncHookThresholdMs: 0 }, true);
 		expect(enabled).toContain("Slow async extension hook:");
 		expect(enabled).toContain("slow-input.ts#0");
 		expect(enabled).toContain("input");
