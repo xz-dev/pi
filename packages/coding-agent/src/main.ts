@@ -58,6 +58,7 @@ import {
 } from "./core/session-cwd.ts";
 import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
 import { collectSettingsDiagnostics, deduplicateDiagnostics } from "./core/settings-diagnostics.ts";
+import { applyEnvOverrides } from "./core/env-overrides.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
@@ -594,6 +595,10 @@ export async function main(args: string[], options?: MainOptions) {
 	const agentDir = getAgentDir();
 	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
+	// Child processes (tools, MCP servers, extension spawns) inherit these; pi's own Intl locale is fixed at startup.
+	for (const entry of applyEnvOverrides(bootstrapSettingsManager.getGlobalSettings().envOverrides)) {
+		console.error(chalk.yellow(`Warning: ignoring invalid envOverrides entry (expected KEY=VALUE): ${entry}`));
+	}
 	configureHttpDispatcher();
 
 	if (await handlePackageCommand(args, { extensionFactories })) {

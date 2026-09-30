@@ -139,6 +139,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are requir
 | `shellPath` | string | Platform default | Custom shell executable path. Supports a leading `~`. |
 | `shellCommandPrefix` | string | None | Prefix prepended to every shell command. |
 | `npmCommand` | `string[]` | `npm` | Command and arguments used for npm package lookup and installation. |
+| `envOverrides` | `string[]` | `["LC_ALL=C.UTF-8", "LANG=C.UTF-8", "LANGUAGE=en"]` | `KEY=VALUE` entries written to the environment at startup, before extensions load, so tools, MCP servers, and extension subprocesses inherit them. A set list replaces the default entirely; `[]` disables. Pi's own UI locale is unaffected. **Can only be set in agent-directory settings.** |
 
 See [Shell aliases](shell-aliases.md) for shell setup and [Pi Packages](packages.md) for package-manager behavior.
 
