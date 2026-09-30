@@ -426,6 +426,30 @@ for (const [field, mutate] of [
   });
 }
 
+for (const [label, env, pattern] of [
+  ["a later run attempt (re-run failed jobs)", { ...ENV, GITHUB_RUN_ATTEMPT: "2" }, /GitHub must be called/],
+  ["an earlier run attempt", { ...ENV, GITHUB_RUN_ATTEMPT: "0" }, /does not match this workflow run/],
+  ["another run number", { ...ENV, GITHUB_RUN_NUMBER: "124", GITHUB_RUN_ATTEMPT: "2" }, /does not match this workflow run/],
+]) {
+  test(`manifest from attempt 1 checked against ${label}`, async () => {
+    const candidate = fixture();
+    try {
+      await assert.rejects(
+        () =>
+          withFetch(
+            async () => {
+              throw new Error("GitHub must be called");
+            },
+            () => publishGitHubRelease(candidate.manifestPath, env),
+          ),
+        pattern,
+      );
+    } finally {
+      rmSync(candidate.directory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("draft asset mismatch fails before upload or publication", async () => {
   const candidate = fixture();
   const [name] = candidate.assetBodies.keys();
