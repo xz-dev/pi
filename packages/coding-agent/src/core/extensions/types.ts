@@ -675,6 +675,8 @@ export interface ProjectTrustContext {
 	mode: ExtensionMode;
 	hasUI: boolean;
 	ui: Pick<ExtensionUIContext, "select" | "confirm" | "input" | "notify">;
+	/** Transient TUI-only slow-hook sink. Absent outside a real interactive TUI. */
+	onSlowHook?: (entry: SlowExtensionHookEntry) => void;
 }
 
 export type ProjectTrustHandler = (
@@ -2231,6 +2233,14 @@ export interface Extension {
 }
 
 /** Result of loading extensions. */
+export interface SlowExtensionHookEntry {
+	event: string;
+	extensionPath: string;
+	handlerIndex: number;
+	elapsedMs: number;
+	executionKind: "sync" | "async";
+}
+
 export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
