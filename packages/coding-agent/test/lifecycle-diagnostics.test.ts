@@ -63,7 +63,7 @@ describe("transient extension timing diagnostics", () => {
 		vi.useRealTimers();
 	});
 
-	async function createRunner(source: string, threshold: () => number = () => 0) {
+	async function createRunner(source: string, threshold: (kind: "sync" | "async") => number = () => 0) {
 		const extensionPath = path.join(tempDir, "extension.ts");
 		fs.writeFileSync(extensionPath, source);
 		const result = await loadExtensions([extensionPath], tempDir);
@@ -115,6 +115,23 @@ describe("transient extension timing diagnostics", () => {
 		expect(sessionManager.getEntries()).toEqual([]);
 		expect(sessionManager.buildSessionContext().messages).toEqual([]);
 		expect(fs.existsSync(path.join(tempDir, "logs", "extension-lifecycle.jsonl"))).toBe(false);
+	});
+
+	it("selects the sync or async threshold by handler execution kind", async () => {
+		const source = `export default function(pi) {
+			pi.on("input", () => { const end = Date.now() + 20; while (Date.now() < end) {} });
+			pi.on("input", async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+		}`;
+		const run = async (sync: number, async: number) => {
+			const { runner } = await createRunner(source, (kind) => (kind === "sync" ? sync : async));
+			const notices = bindNotices(runner, "tui", stubUi);
+			await runner.emitInput("x", undefined, "interactive");
+			return notices.map((notice) => notice.executionKind);
+		};
+
+		expect(await run(0, 10_000)).toEqual(["sync"]);
+		expect(await run(-1, 0)).toEqual(["async"]);
+		expect(await run(-1, -1)).toEqual([]);
 	});
 
 	it("emits no timing diagnostics when TUI mode has no real UI", async () => {
@@ -239,7 +256,7 @@ describe("transient extension timing diagnostics", () => {
 			["rpc", false, 0],
 		] as const) {
 			const ctx = createProjectTrustContext({ cwd: tempDir, mode, settingsManager, hasUI });
-			await emitProjectTrustEvent(result, { type: "project_trust", cwd: tempDir }, ctx, 0);
+			await emitProjectTrustEvent(result, { type: "project_trust", cwd: tempDir }, ctx, () => 0);
 			expect(error.mock.calls, mode).toHaveLength(expected);
 			error.mockClear();
 		}
