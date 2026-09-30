@@ -288,13 +288,17 @@ export async function publishGitHubRelease(manifestPath, env = process.env) {
   const versionMatch = /^(\d+\.\d+\.\d+)-xz\.(\d+)\.(\d+)\.g([0-9a-f]{8})$/.exec(
     manifest.distributionVersion,
   );
+  // "Re-run failed jobs" reuses the release candidate built by an earlier
+  // attempt of this same run, so its version carries that attempt number.
   if (
     !versionMatch ||
     versionMatch[2] !== runNumber ||
-    versionMatch[3] !== runAttempt ||
+    !/^[1-9]\d*$/.test(runAttempt) ||
+    Number(versionMatch[3]) < 1 ||
+    Number(versionMatch[3]) > Number(runAttempt) ||
     versionMatch[4] !== commit.slice(0, 8)
   ) {
-    fail("Manifest distribution version does not match this workflow run attempt");
+    fail("Manifest distribution version does not match this workflow run");
   }
   if (manifest.commit !== commit)
     fail("Manifest commit does not match GITHUB_SHA");
