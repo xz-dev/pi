@@ -495,8 +495,6 @@ async function streamAssistantResponse(
 
 			case "done":
 			case "error": {
-			case "done":
-			case "error": {
 				const finalMessage = await result();
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
@@ -627,7 +625,7 @@ async function executeToolCallsSequential(
 				signal,
 				emit,
 			);
-			finalized = await awaitPreparedToolExecution(preparation, execution, config);
+			finalized = await awaitPreparedToolExecution(preparation, execution, config, signal);
 		}
 
 		await emitToolExecutionEnd(finalized, emit, signal);
@@ -703,7 +701,7 @@ async function executeToolCallsParallel(
 				signal,
 				emit,
 			);
-			const finalized = await awaitPreparedToolExecution(preparation, execution, config);
+			const finalized = await awaitPreparedToolExecution(preparation, execution, config, signal);
 			await emitToolExecutionEnd(finalized, emit, signal);
 			return finalized;
 		});
@@ -838,18 +836,41 @@ async function awaitPreparedToolExecution(
 	prepared: PreparedToolCall,
 	execution: PreparedToolExecution,
 	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
 ): Promise<FinalizedToolCallOutcome> {
 	if (execution.detachAfterMs === undefined || !config.managedExecutions) {
-		return execution.completion;
+		return abortable(execution.completion, signal).catch((error) => {
+			if (signal?.aborted) {
+				return {
+					toolCall: prepared.toolCall,
+					result: createErrorToolResult("Operation aborted"),
+					isError: true,
+				};
+			}
+			throw error;
+		});
 	}
 
 	let detachTimer: ReturnType<typeof setTimeout> | undefined;
 	const detach = new Promise<"detach">((resolve) => {
 		detachTimer = setTimeout(() => resolve("detach"), execution.detachAfterMs);
 	});
-	const winner = await Promise.race([execution.completion, detach]);
+	const winner = await abortable(Promise.race([execution.completion, detach]), signal)
+		.catch((error): "aborted" => {
+			if (signal?.aborted) return "aborted";
+			throw error;
+		})
+		.finally(() => {
+			if (detachTimer) clearTimeout(detachTimer);
+		});
+	if (winner === "aborted") {
+		return {
+			toolCall: prepared.toolCall,
+			result: createErrorToolResult("Operation aborted"),
+			isError: true,
+		};
+	}
 	if (winner !== "detach") {
-		if (detachTimer) clearTimeout(detachTimer);
 		return winner;
 	}
 
@@ -1015,26 +1036,23 @@ async function executePreparedToolCall(
 	const elapsed = () => Math.round(performance.now() - startedAt);
 
 	try {
-		const result = await callAbortable(
-			() =>
-				prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
-					if (!acceptingUpdates) return;
-					updateEvents.push(Promise.resolve(onUpdate(partialResult)));
-				}),
+		const result = await prepared.tool.execute(
+			prepared.toolCall.id,
+			prepared.args as never,
 			signal,
+			(partialResult) => {
+				if (!acceptingUpdates) return;
+				updateEvents.push(Promise.resolve(onUpdate(partialResult)));
+			},
 		);
 		const durationMs = elapsed();
 		acceptingUpdates = false;
-		await abortable(Promise.all(updateEvents), signal);
+		await Promise.all(updateEvents);
 		return { result, isError: result.isError === true, durationMs };
 	} catch (error) {
 		const durationMs = elapsed();
 		acceptingUpdates = false;
-		if (signal?.aborted) {
-			await Promise.all(updateEvents);
-		} else {
-			await abortable(Promise.all(updateEvents), signal);
-		}
+		await Promise.all(updateEvents);
 		return {
 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
 			isError: true,
@@ -1059,19 +1077,15 @@ async function finalizeExecutedToolCall(
 
 	if (config.afterToolCall && replayError === undefined) {
 		try {
-			const afterResult = await callAbortable(
-				() =>
-					config.afterToolCall?.(
-						{
-							assistantMessage,
-							toolCall: prepared.toolCall,
-							args: prepared.args,
-							result,
-							isError,
-							context: currentContext,
-						},
-						signal,
-					),
+			const afterResult = await config.afterToolCall(
+				{
+					assistantMessage,
+					toolCall: prepared.toolCall,
+					args: prepared.args,
+					result,
+					isError,
+					context: currentContext,
+				},
 				signal,
 			);
 			if (afterResult) {
