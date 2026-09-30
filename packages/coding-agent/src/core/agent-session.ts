@@ -3956,7 +3956,7 @@ export class AgentSession {
 			this._cwd,
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
-			() => this.settingsManager.getSlowHookThresholdMs(),
+			(kind) => this.settingsManager.getSlowHookThresholdMs(kind),
 		);
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;

@@ -323,7 +323,7 @@ export async function emitProjectTrustEvent(
 	extensionsResult: LoadExtensionsResult,
 	event: ProjectTrustEvent,
 	ctx: ProjectTrustContext,
-	slowHookThresholdMs = -1,
+	getSlowHookThresholdMs: (kind: SlowExtensionHookEntry["executionKind"]) => number = () => -1,
 ): Promise<{ result?: ProjectTrustEventResult; errors: ExtensionError[] }> {
 	const errors: ExtensionError[] = [];
 	for (const { ext, handlers } of snapshotEventHandlers(extensionsResult.extensions, "project_trust")) {
@@ -349,7 +349,8 @@ export async function emitProjectTrustEvent(
 			} finally {
 				const elapsedMs = performance.now() - startedAt;
 				try {
-					if (slowHookThresholdMs >= 0 && ctx.mode === "tui" && ctx.hasUI && elapsedMs > slowHookThresholdMs) {
+					const thresholdMs = getSlowHookThresholdMs(executionKind);
+					if (thresholdMs >= 0 && ctx.mode === "tui" && ctx.hasUI && elapsedMs > thresholdMs) {
 						ctx.onSlowHook?.({
 							event: event.type,
 							extensionPath: ext.resolvedPath,
@@ -438,7 +439,7 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
-	private getSlowHookThresholdMs: () => number;
+	private getSlowHookThresholdMs: (kind: SlowExtensionHookEntry["executionKind"]) => number;
 	private shutdownProgressListener?: ExtensionShutdownProgressListener;
 	private onSlowHook?: (entry: SlowExtensionHookEntry) => void;
 
@@ -448,7 +449,7 @@ export class ExtensionRunner {
 		cwd: string,
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
-		getSlowHookThresholdMs: () => number = () => -1,
+		getSlowHookThresholdMs: (kind: SlowExtensionHookEntry["executionKind"]) => number = () => -1,
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
@@ -1200,7 +1201,8 @@ export class ExtensionRunner {
 			try {
 				let slow = false;
 				try {
-					slow = this.getSlowHookThresholdMs() >= 0 && elapsedMs > this.getSlowHookThresholdMs();
+					const thresholdMs = this.getSlowHookThresholdMs(executionKind);
+					slow = thresholdMs >= 0 && elapsedMs > thresholdMs;
 				} catch {
 					// Diagnostics must never alter extension behavior.
 				}

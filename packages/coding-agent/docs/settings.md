@@ -142,7 +142,8 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are requir
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `slowHookThresholdMs` | number | `-1` | Interactive TUI only: show a transient reminder for awaited extension hooks taking longer than this many milliseconds. Negative values disable it; `0` reports every hook. Timing diagnostics are not persisted. |
+| `slowSyncHookThresholdMs` | number | `-1` | Interactive TUI only: show a transient reminder for synchronous extension handlers taking longer than this many milliseconds. Negative values disable it; `0` reports every such handler. Timing diagnostics are not persisted. |
+| `slowAsyncHookThresholdMs` | number | `-1` | Same as `slowSyncHookThresholdMs`, for handlers that return a promise. |
 | `shellPath` | string | Platform default | Custom shell executable path. Supports a leading `~`. |
 | `shellCommandPrefix` | string | None | Prefix prepended to every shell command. |
 | `npmCommand` | `string[]` | `npm` | Command and arguments used for npm package lookup and installation. |

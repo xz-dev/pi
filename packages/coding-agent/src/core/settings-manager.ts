@@ -1056,9 +1056,10 @@ export class SettingsManager {
 		return value === true || value === "header" ? value : SETTINGS_DEFAULTS.quietStartup;
 	}
 
-	getSlowHookThresholdMs(): number {
+	getSlowHookThresholdMs(kind: "sync" | "async"): number {
+		const key = kind === "sync" ? "slowSyncHookThresholdMs" : "slowAsyncHookThresholdMs";
 		try {
-			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? -1;
+			return parseTimeoutSetting(this.settings[key], key) ?? -1;
 		} catch {
 			return -1;
 		}
