@@ -154,7 +154,8 @@ export interface Settings {
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
 	quietStartup?: QuietStartup; // default: false
-	slowHookThresholdMs?: number; // Extension hook duration warning threshold in milliseconds; default: -1 (disabled); >=0 enables slow-hook notices in interactive TUI
+	slowSyncHookThresholdMs?: number; // Sync extension handler duration warning threshold in ms; default: -1 (disabled); >=0 enables slow-hook notices in interactive TUI
+	slowAsyncHookThresholdMs?: number; // Async (promise-returning) extension handler threshold in ms; default: -1 (disabled); >=0 enables
 	showStartupDiagnostics?: boolean; // Show [Skill conflicts]/[Extension issues]/[Prompt conflicts]/[Theme conflicts] blocks at startup; default: false
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
@@ -1170,9 +1171,10 @@ export class SettingsManager {
 		return value === true || value === "header" ? value : false;
 	}
 
-	getSlowHookThresholdMs(): number {
+	getSlowHookThresholdMs(kind: "sync" | "async"): number {
+		const key = kind === "sync" ? "slowSyncHookThresholdMs" : "slowAsyncHookThresholdMs";
 		try {
-			return parseTimeoutSetting(this.settings.slowHookThresholdMs, "slowHookThresholdMs") ?? -1;
+			return parseTimeoutSetting(this.settings[key], key) ?? -1;
 		} catch {
 			return -1;
 		}

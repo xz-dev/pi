@@ -474,18 +474,26 @@ describe("SettingsManager", () => {
 		});
 	});
 
-	describe("slowHookThresholdMs", () => {
-		it("defaults to -1 (disabled) and accepts a non-negative override", () => {
-			expect(SettingsManager.inMemory().getSlowHookThresholdMs()).toBe(-1);
-			expect(SettingsManager.inMemory({ slowHookThresholdMs: 250 }).getSlowHookThresholdMs()).toBe(250);
-			expect(SettingsManager.inMemory({ slowHookThresholdMs: 0 }).getSlowHookThresholdMs()).toBe(0);
+	describe("slow hook thresholds", () => {
+		it("defaults both kinds to -1 (disabled) and reads each kind independently", () => {
+			const defaults = SettingsManager.inMemory();
+			expect(defaults.getSlowHookThresholdMs("sync")).toBe(-1);
+			expect(defaults.getSlowHookThresholdMs("async")).toBe(-1);
+			const manager = SettingsManager.inMemory({ slowSyncHookThresholdMs: 100, slowAsyncHookThresholdMs: 0 });
+			expect(manager.getSlowHookThresholdMs("sync")).toBe(100);
+			expect(manager.getSlowHookThresholdMs("async")).toBe(0);
 		});
 
-		it("keeps negative values as disabled and falls back to -1 for invalid thresholds", () => {
-			expect(SettingsManager.inMemory({ slowHookThresholdMs: -1 }).getSlowHookThresholdMs()).toBe(-1);
+		it("keeps negative values as disabled, falls back to -1 for invalid thresholds, and ignores the legacy key", () => {
+			expect(SettingsManager.inMemory({ slowSyncHookThresholdMs: -1 }).getSlowHookThresholdMs("sync")).toBe(-1);
 			expect(
-				SettingsManager.inMemory({ slowHookThresholdMs: "bogus" as unknown as number }).getSlowHookThresholdMs(),
+				SettingsManager.inMemory({
+					slowAsyncHookThresholdMs: "bogus" as unknown as number,
+				}).getSlowHookThresholdMs("async"),
 			).toBe(-1);
+			const legacy = SettingsManager.inMemory({ slowHookThresholdMs: 100 } as Settings);
+			expect(legacy.getSlowHookThresholdMs("sync")).toBe(-1);
+			expect(legacy.getSlowHookThresholdMs("async")).toBe(-1);
 		});
 	});
 
