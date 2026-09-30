@@ -119,6 +119,78 @@ describe("InteractiveMode startup input", () => {
 		},
 	);
 
+	it("retains input submitted while a replacement session (/new) is still binding", async () => {
+		const first = await createHarness({ settings: { theme: "dark", quietStartup: true } });
+		let allowSessionStart: () => void = () => {};
+		let sessionStartEntered: () => void = () => {};
+		const sessionStartReady = new Promise<void>((resolve) => {
+			sessionStartEntered = resolve;
+		});
+		const sessionStartGate = new Promise<void>((resolve) => {
+			allowSessionStart = resolve;
+		});
+		const second = await createHarness({
+			settings: { theme: "dark", quietStartup: true },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", async () => {
+						sessionStartEntered();
+						await sessionStartGate;
+					});
+				},
+			],
+		});
+		let beforeInvalidate: () => void = () => {};
+		let rebind: () => Promise<void> = async () => {};
+		const runtime = {
+			session: first.session,
+			setBeforeSessionInvalidate: (fn: () => void) => {
+				beforeInvalidate = fn;
+			},
+			setRebindSession: (fn: () => Promise<void>) => {
+				rebind = fn;
+			},
+		};
+		const terminal = new VirtualTerminal(100, 30);
+		const mode = new InteractiveMode(runtime as unknown as AgentSessionRuntime, {
+			terminal,
+			tuiMode: "regular",
+			initialThemeSetting: "dark",
+		});
+		let replacing: Promise<void> | undefined;
+		try {
+			await mode.init();
+			const live = (Reflect.get(mode, "defaultEditor") as CustomEditor).onSubmit;
+
+			// Mirror AgentSessionRuntime.newSession(): invalidate, swap, rebind.
+			beforeInvalidate();
+			runtime.session = second.session;
+			replacing = rebind();
+			await sessionStartReady;
+
+			terminal.sendInput("continue");
+			terminal.sendInput("\r");
+			const editor = Reflect.get(mode, "editor") as CustomEditor;
+			expect(editor.getText()).toBe("continue");
+			expect(Reflect.get(mode, "pendingUserInputs")).toEqual([]);
+
+			allowSessionStart();
+			await replacing;
+			const restored = (Reflect.get(mode, "defaultEditor") as CustomEditor).onSubmit;
+			expect(restored).not.toBe(live);
+			terminal.sendInput("\r");
+			expect(await mode.getUserInput()).toBe("continue");
+			expect(first.faux.state.callCount + second.faux.state.callCount).toBe(0);
+		} finally {
+			allowSessionStart();
+			await replacing?.catch(() => {});
+			mode.stop();
+			stopThemeWatcher();
+			first.cleanup();
+			second.cleanup();
+		}
+	});
+
 	it("restores a prompt submitted while managed-tool setup is running", () => {
 		const context: StartupSubmitContext = {
 			editor: { setText: vi.fn() },
@@ -128,7 +200,7 @@ describe("InteractiveMode startup input", () => {
 		interactiveModePrototype.handleStartupSubmit.call(context, "early prompt");
 
 		expect(context.editor.setText).toHaveBeenCalledWith("early prompt");
-		expect(context.showStatus).toHaveBeenCalledWith("Startup is still in progress");
+		expect(context.showStatus).toHaveBeenCalledWith("Session is still starting");
 	});
 
 	it("queues a normal prompt submitted before the input callback is installed", async () => {
