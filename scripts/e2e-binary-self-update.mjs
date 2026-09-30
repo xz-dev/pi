@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { binaryArchiveName, bunTarget } from "./lib/bun-targets.mjs";
 import { BUNDLE_LAYOUT_VERSION, MANIFEST_SCHEMA_VERSION } from "./lib/github-release.mjs";
+import { run } from "./lib/e2e-command.mjs";
 
 const [candidateArg, targetId, expectedVersion] = process.argv.slice(2);
 if (!candidateArg || !targetId || !expectedVersion) {
@@ -32,41 +33,6 @@ const work = mkdtempSync(join(tmpdir(), "pi self-update e2e-"));
 const install = join(work, "install");
 const wrapper = join(install, target.wrapper);
 const executable = join(install, target.executable);
-
-function run(command, args, env = process.env) {
-	return new Promise((resolveRun, reject) => {
-		const child = spawn(command, args, { env, windowsHide: true });
-		child.stdin.end();
-		let stdout = "";
-		let stderr = "";
-		let settled = false;
-		const timer = setTimeout(() => {
-			if (settled) return;
-			settled = true;
-			if (process.platform === "win32" && child.pid) {
-				const taskkill = join(process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows", "System32", "taskkill.exe");
-				spawnSync(taskkill, ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
-			} else {
-				child.kill("SIGKILL");
-			}
-			reject(new Error(`${command} ${args.join(" ")} timed out: ${stdout}${stderr}`));
-		}, 120_000);
-		child.stdout.on("data", (chunk) => { stdout += chunk; });
-		child.stderr.on("data", (chunk) => { stderr += chunk; });
-		child.once("error", (error) => {
-			clearTimeout(timer);
-			settled = true;
-			reject(error);
-		});
-		child.once("exit", (code, signal) => {
-			if (settled) return;
-			clearTimeout(timer);
-			settled = true;
-			if (code === 0) resolveRun(stdout);
-			else reject(new Error(`${command} ${args.join(" ")} failed (${signal ?? code}): ${stdout}${stderr}`));
-		});
-	});
-}
 
 const manifest = JSON.parse(readFileSync(join(candidate, "release-manifest.json"), "utf8"));
 if (manifest.schemaVersion !== MANIFEST_SCHEMA_VERSION || manifest.layoutVersion !== BUNDLE_LAYOUT_VERSION) {
@@ -236,7 +202,10 @@ try {
 	const wrapperInode = statSync(wrapper).ino;
 	const offlineEnv = { ...process.env, PI_CODING_AGENT_DIR: join(work, "agent"), PI_OFFLINE: "1" };
 	console.log(`Starting old bundle: ${targetId} ${oldVersion}`);
-	if ((await run(wrapper, ["--version"], offlineEnv)).trim() !== oldVersion) throw new Error("Old direct bundle did not start");
+	const startedVersion = (await run(wrapper, ["--version"], offlineEnv)).trim();
+	if (startedVersion !== oldVersion) {
+		throw new Error(`Old direct bundle did not start: expected ${oldVersion}, received ${JSON.stringify(startedVersion)}`);
+	}
 
 	await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
 	const address = server.address();
