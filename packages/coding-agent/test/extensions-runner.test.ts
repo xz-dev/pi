@@ -331,7 +331,7 @@ describe("ExtensionRunner", () => {
 							executionKind: entry.executionKind,
 						}),
 				},
-				0,
+				() => 0,
 			);
 
 			expect(result.result).toEqual({ trusted: "yes" });
