@@ -1686,6 +1686,7 @@ export class DefaultPackageManager implements PackageManager {
 				head,
 				fetchArgs: [
 					"fetch",
+					"--depth=1",
 					"--prune",
 					"--no-tags",
 					"origin",
@@ -1697,7 +1698,7 @@ export class DefaultPackageManager implements PackageManager {
 			const head = await this.runCommandCapture("git", ["rev-parse", "origin/HEAD"], {
 				cwd: installedPath,
 				timeoutMs: NETWORK_TIMEOUT_MS,
-			});
+			}).catch(() => ""); // A commit-only install has no remote default branch yet.
 			const originHeadRef = await this.runCommandCapture("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], {
 				cwd: installedPath,
 				timeoutMs: NETWORK_TIMEOUT_MS,
@@ -1709,6 +1710,7 @@ export class DefaultPackageManager implements PackageManager {
 					head,
 					fetchArgs: [
 						"fetch",
+						"--depth=1",
 						"--prune",
 						"--no-tags",
 						"origin",
@@ -1719,7 +1721,7 @@ export class DefaultPackageManager implements PackageManager {
 			return {
 				ref: "origin/HEAD",
 				head,
-				fetchArgs: ["fetch", "--prune", "--no-tags", "origin", "+HEAD:refs/remotes/origin/HEAD"],
+				fetchArgs: ["fetch", "--depth=1", "--prune", "--no-tags", "origin", "+HEAD:refs/remotes/origin/HEAD"],
 			};
 		}
 	}
@@ -1974,7 +1976,7 @@ export class DefaultPackageManager implements PackageManager {
 		const targetDir = this.getGitInstallPath(source, scope);
 		if (existsSync(targetDir)) {
 			if (source.ref) {
-				await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD");
+				await this.ensureGitRef(targetDir, ["fetch", "--depth=1", "--no-tags", "origin", source.ref], "FETCH_HEAD");
 				return;
 			}
 			const target = await this.getLocalGitUpdateTarget(targetDir);
@@ -1989,9 +1991,26 @@ export class DefaultPackageManager implements PackageManager {
 		rmSync(this.getGitUpdateMarkerPath(targetDir), { force: true });
 
 		try {
-			await this.runCommand("git", ["clone", source.repo, targetDir]);
-			if (source.ref) {
+			if (source.ref && /^[0-9a-f]{40}$/i.test(source.ref)) {
+				// --branch accepts branch/tag names, not commit IDs. Fetch the commit without cloning another branch.
+				await this.runCommand("git", ["init", targetDir]);
+				await this.runCommand("git", ["remote", "add", "origin", source.repo], { cwd: targetDir });
+				await this.runCommand("git", ["fetch", "--depth=1", "--no-tags", "origin", source.ref], { cwd: targetDir });
+				await this.runCommand("git", ["checkout", "--detach", "FETCH_HEAD"], { cwd: targetDir });
+			} else if (source.ref && /^[0-9a-f]{4,39}$/i.test(source.ref)) {
+				// Servers cannot resolve abbreviated commit IDs; retain history for local resolution.
+				await this.runCommand("git", ["clone", source.repo, targetDir]);
 				await this.runCommand("git", ["checkout", source.ref], { cwd: targetDir });
+			} else {
+				await this.runCommand("git", [
+					"clone",
+					"--depth=1",
+					"--single-branch",
+					"--no-tags",
+					...(source.ref ? ["--branch", source.ref] : []),
+					source.repo,
+					targetDir,
+				]);
 			}
 			const packageJsonPath = join(targetDir, "package.json");
 			if (existsSync(packageJsonPath)) {
@@ -2012,7 +2031,7 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		if (source.ref) {
-			await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD");
+			await this.ensureGitRef(targetDir, ["fetch", "--depth=1", "--no-tags", "origin", source.ref], "FETCH_HEAD");
 			return;
 		}
 
@@ -2074,6 +2093,11 @@ export class DefaultPackageManager implements PackageManager {
 	private async ensureGitRef(targetDir: string, fetchArgs: string[], ref: string): Promise<void> {
 		// Fetch only the ref we will reset to, avoiding unrelated branch/tag noise.
 		await this.runCommand("git", fetchArgs, { cwd: targetDir });
+		if (existsSync(join(targetDir, ".git", "shallow"))) {
+			// Shallow parents invalidate Git's derived commit-graph caches.
+			rmSync(join(targetDir, ".git", "objects", "info", "commit-graph"), { force: true });
+			rmSync(join(targetDir, ".git", "objects", "info", "commit-graphs"), { recursive: true, force: true });
+		}
 
 		const localHead = await this.runCommandCapture("git", ["rev-parse", "HEAD"], {
 			cwd: targetDir,
