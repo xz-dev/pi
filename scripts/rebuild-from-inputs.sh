@@ -126,7 +126,6 @@ PATCH_ORDER=(
 	model-selector-refresh-selection
 	ai-drop-empty-messages
 	quarantine-auth-storage-flake
-	vitest-audit-fix
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip

@@ -56,8 +56,7 @@ jobs:
             +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
-            +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
-            +refs/heads/patch/vitest-audit-fix:refs/remotes/origin/patch/vitest-audit-fix
+            +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake
 
           # Driver source: the replay script and its small union helper come
           # from the reviewed ci snapshot, never from a stale generated-main
@@ -95,7 +94,6 @@ jobs:
             model-selector-refresh-selection \
             ai-drop-empty-messages \
             quarantine-auth-storage-flake \
-            vitest-audit-fix \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done

@@ -52,7 +52,7 @@ function buildFixture() {
 	const conf = file("f.txt", "base\nconflict\n", "conf", "patch/ws-cached-empty-delta");
 	// Changelog offender fixture.
 	const offender = (() => {
-		run("git checkout -q -B patch/vitest-audit-fix upstream-main");
+		run("git checkout -q -B patch/quarantine-auth-storage-flake upstream-main");
 		mkdirSync(join(dir, "packages", "coding-agent"), { recursive: true });
 		writeFileSync(join(dir, "packages", "coding-agent", "CHANGELOG.md"), "offender\n");
 		execFileSync("git", ["add", "--", "packages/coding-agent/CHANGELOG.md"], { cwd: dir });
@@ -291,7 +291,7 @@ test("rejects a patch that carries a packages/*/CHANGELOG.md hunk", () => {
 		const { out } = replay(fixture, [
 			"--upstream", fixture.upstream,
 			"--ci", fixture.ci,
-			"--patch", `vitest-audit-fix=${fixture.offender}`,
+			"--patch", `quarantine-auth-storage-flake=${fixture.offender}`,
 		], { expectFail: true });
 		assert.match(out, /modifies an upstream-maintained packages\/\*\/CHANGELOG\.md/);
 	} finally {
