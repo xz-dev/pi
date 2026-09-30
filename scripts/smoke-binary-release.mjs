@@ -19,10 +19,13 @@ const commands = [];
 const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 function run(name, command, args, options = {}) {
 	const started = performance.now();
-	const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? options.maxMs ?? 10_000, env: options.env });
+	// The kill timeout is only a hang guard. Budgets are enforced from the
+	// measured elapsed time below, so a slow run reports its real duration
+	// instead of dying at the budget with SIGTERM.
+	const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? 60_000, env: options.env });
 	const elapsedMs = Math.round(performance.now() - started);
 	commands.push({ name, command: [command, ...args].join(" "), status: result.status, elapsedMs });
-	if (result.status !== 0) throw new Error(`${name} failed (${result.status ?? result.signal ?? result.error?.message ?? "unknown"}): ${result.stdout ?? ""}${result.stderr ?? ""}`);
+	if (result.status !== 0) throw new Error(`${name} failed after ${elapsedMs}ms (${result.status ?? result.signal ?? result.error?.message ?? "unknown"}): ${result.stdout ?? ""}${result.stderr ?? ""}`);
 	if (options.maxMs && elapsedMs > options.maxMs) throw new Error(`${name} ${elapsedMs}ms exceeds ${options.maxMs}ms`);
 	return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", elapsedMs };
 }

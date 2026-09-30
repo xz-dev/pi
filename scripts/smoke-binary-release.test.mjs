@@ -11,8 +11,12 @@ const target = "linux-x64-gnu-baseline";
 const bunAvailable = spawnSync("bun", ["--version"]).status === 0;
 const smokeScript = readFileSync(join(import.meta.dirname, "smoke-binary-release.mjs"), "utf8");
 
-test("command runtime timeout defaults to the authoritative performance limit", () => {
-	assert.match(smokeScript, /timeout: options\.timeout \?\? options\.maxMs \?\? 10_000/);
+test("command kill timeout is a hang guard separate from the measured performance limit", () => {
+	// A budget-sized kill timeout turned slow cold starts into opaque SIGTERM failures.
+	assert.match(smokeScript, /timeout: options\.timeout \?\? 60_000/);
+	assert.doesNotMatch(smokeScript, /timeout: options\.timeout \?\? options\.maxMs/);
+	assert.match(smokeScript, /if \(options\.maxMs && elapsedMs > options\.maxMs\) throw/);
+	assert.match(smokeScript, /failed after \$\{elapsedMs\}ms/);
 });
 
 test("Windows extraction passes absolute paths through environment variables with a bounded archive budget", () => {
