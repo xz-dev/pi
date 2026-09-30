@@ -302,6 +302,15 @@ test("upstream sync retires session-tree-splice and integrates env-overrides", (
   assert.doesNotMatch(syncWorkflowText, /patch\/pre-provider-compaction/);
 });
 
+test("upstream sync integrates model-thinking-sort as an independent patch", () => {
+  assertPatchIntegrated(syncScript, "model-thinking-sort");
+  assert.match(
+    syncWorkflowText,
+    /\+refs\/heads\/patch\/model-thinking-sort:refs\/remotes\/origin\/patch\/model-thinking-sort/,
+  );
+  assert.doesNotMatch(syncScript, /:model-thinking-sort\n/);
+});
+
 test("esc abort integration builds the workspace dependency graph before focused regressions", () => {
   const steps = escWorkflow.jobs["esc-abort-integration"].steps;
   assert.equal(
