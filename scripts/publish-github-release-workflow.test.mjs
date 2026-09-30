@@ -292,12 +292,12 @@ test("upstream sync carries the unified TUI-only slow-hook patch", () => {
   assert.doesNotMatch(syncWorkflowText, /test\/slow-extension-hook-entry\.test\.ts/);
 });
 
-test("upstream sync preserves bounded slow-hook and session-tree compatibility", () => {
+test("upstream sync retires session-tree-splice and integrates env-overrides", () => {
   assert.doesNotMatch(syncScript, /resolve-(?:slow-hook|session-tree-splice)-squash-conflicts\.py/);
-  assertChainEdge(syncScript, "slow-hook-tui-only", "session-tree-splice");
-  assert.ok(
-    orderBlock(syncScript).indexOf("slow-hook-tui-only") < orderBlock(syncScript).indexOf("session-tree-splice"),
-  );
+  assert.doesNotMatch(syncWorkflowText, /patch\/session-tree-splice/);
+  assert.doesNotMatch(orderBlock(syncScript), /session-tree-splice/);
+  assertPatchIntegrated(syncScript, "env-overrides");
+  assert.match(syncWorkflowText, /\+refs\/heads\/patch\/env-overrides:refs\/remotes\/origin\/patch\/env-overrides/);
   assert.doesNotMatch(syncWorkflowText, /patch\/provider-transparent-compaction/);
   assert.doesNotMatch(syncWorkflowText, /patch\/pre-provider-compaction/);
 });
