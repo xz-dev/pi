@@ -1102,7 +1102,14 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					const originalRun = internals.runCommand.bind(internals);
 					vi.spyOn(internals, "runCommand").mockImplementation(async (command, args, options) => {
 						if (command !== "git") return originalRun(command, args, options);
-						expect(args).toEqual(["clone", "https://github.com/example/fixture", target]);
+						expect(args).toEqual([
+							"clone",
+							"--depth=1",
+							"--single-branch",
+							"--no-tags",
+							"https://github.com/example/fixture",
+							target,
+						]);
 						expect(options?.env?.BUN_BE_BUN).toBeUndefined();
 						mkdirSync(target, { recursive: true });
 						writeFileSync(join(target, "package.json"), JSON.stringify({ dependencies: { fixture: "1.0.0" } }));
@@ -1347,7 +1354,9 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await packageManager.install(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("git", ["fetch", "origin", "v2"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("git", ["fetch", "--depth=1", "--no-tags", "origin", "v2"], {
+				cwd: targetDir,
+			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["reset", "--hard", "FETCH_HEAD^{commit}"], {
 				cwd: targetDir,
 			});
@@ -1826,7 +1835,14 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 
 			await expect(packageManager.install(source)).rejects.toThrow("simulated git clone failure");
 
-			expect(runCommand).toHaveBeenCalledWith("git", ["clone", source, expect.any(String)]);
+			expect(runCommand).toHaveBeenCalledWith("git", [
+				"clone",
+				"--depth=1",
+				"--single-branch",
+				"--no-tags",
+				source,
+				expect.any(String),
+			]);
 			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
 		});
 
