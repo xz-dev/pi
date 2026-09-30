@@ -631,10 +631,15 @@ export class InteractiveMode {
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
+			// Gate submissions until the replacement session finishes binding, as during startup.
+			this.defaultEditor.onSubmit = (text) => this.handleStartupSubmit(text);
 		});
 		this.runtimeHost.setRebindSession(async () => {
+			const session = this.session;
 			await this.rebindCurrentSession({ renderBeforeBind: true });
 			this.themeController.applyFromSettings();
+			// A newer replacement that started during this bind keeps its own gate.
+			if (this.session === session) this.setupEditorSubmitHandler();
 		});
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({
@@ -3330,7 +3335,7 @@ export class InteractiveMode {
 
 	private handleStartupSubmit(text: string): void {
 		this.editor.setText(text);
-		this.showStatus("Startup is still in progress");
+		this.showStatus("Session is still starting");
 	}
 
 	private setupEditorSubmitHandler(): void {
