@@ -290,7 +290,7 @@ describe("ExtensionRunner", () => {
 					},
 					onSlowHook: (entry) => notices.push({ event: entry.event, executionKind: entry.executionKind }),
 				},
-				-1,
+				() => -1,
 			);
 
 			expect(result.errors).toHaveLength(1);
