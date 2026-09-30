@@ -421,8 +421,21 @@ try {
 	const liveSession = spawn(join(liveBundle, target.executable), ["--mode", "rpc"], {
 		env: { ...offlineEnv, PI_CODING_AGENT_DIR: join(work, "live-agent") },
 		windowsHide: true,
-		stdio: ["pipe", "ignore", "ignore"],
+		stdio: ["pipe", "ignore", "pipe"],
 	});
+	let liveStderr = "";
+	liveSession.stderr.on("data", (chunk) => {
+		liveStderr = (liveStderr + chunk).slice(-4000);
+	});
+	const liveState = () => {
+		let claim;
+		try {
+			claim = probeExclusiveUsageClaim(probeModule, liveGuard);
+		} catch (error) {
+			claim = `probe-error:${error instanceof Error ? error.message : String(error)}`;
+		}
+		return `live session exitCode=${liveSession.exitCode} signal=${liveSession.signalCode} claim=${claim} stderr=${JSON.stringify(liveStderr)}`;
+	};
 	try {
 		let registered = false;
 		for (let attempt = 0; attempt < 500; attempt++) {
@@ -437,7 +450,13 @@ try {
 		}
 		if (!registered) throw new Error("Live managed session never acquired its usage claim");
 		console.log(`Cleaning while non-current bundle is running: ${targetId} ${liveVersion}`);
-		await run(wrapper, ["update", "--clean"], offlineEnv);
+		try {
+			await run(wrapper, ["update", "--clean"], offlineEnv);
+		} catch (error) {
+			// Diagnose Windows EPERM flakes: did the live session die and drop its claim?
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`${message}\n${liveState()}`, { cause: error });
+		}
 		if (!existsSync(liveBundle)) throw new Error("Cleanup removed a live non-current bundle");
 		if ((await run(join(liveBundle, target.executable), ["--version"], offlineEnv)).trim() !== liveVersion) {
 			throw new Error("Live non-current bundle stopped working after cleanup");
