@@ -57,6 +57,7 @@ jobs:
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
             +refs/heads/patch/env-overrides:refs/remotes/origin/patch/env-overrides \
+            +refs/heads/patch/defer-threshold-compaction:refs/remotes/origin/patch/defer-threshold-compaction \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort
 
           # Driver source: the replay script and its small union helper come
@@ -95,6 +96,7 @@ jobs:
             ai-drop-empty-messages \
             quarantine-auth-storage-flake \
             env-overrides \
+            defer-threshold-compaction \
             model-thinking-sort \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")

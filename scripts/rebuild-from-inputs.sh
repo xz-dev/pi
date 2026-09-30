@@ -126,6 +126,7 @@ PATCH_ORDER=(
 	ai-drop-empty-messages
 	quarantine-auth-storage-flake
 	env-overrides
+	defer-threshold-compaction
 	model-thinking-sort
 )
 
