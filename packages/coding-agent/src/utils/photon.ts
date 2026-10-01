@@ -17,6 +17,7 @@ import type { PathOrFileDescriptor } from "fs";
 import { createRequire } from "module";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { getEmbeddedAssetPath } from "../config.ts";
 
 const require = createRequire(import.meta.url);
 const fs = require("fs") as typeof import("fs");
@@ -44,7 +45,7 @@ function pathOrNull(file: PathOrFileDescriptor): string | null {
 
 function getFallbackWasmPaths(): string[] {
 	const execDir = path.dirname(process.execPath);
-	const embedded = path.join("/$bunfs", "root", WASM_FILENAME);
+	const embedded = getEmbeddedAssetPath(WASM_FILENAME);
 	return [
 		path.join(execDir, WASM_FILENAME),
 		path.join(execDir, "photon", WASM_FILENAME),
