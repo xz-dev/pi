@@ -147,6 +147,8 @@ jobs:
         with: { pattern: "github-release-target-${{ github.sha }}-*", path: "${{ runner.temp }}/prebuilt", merge-multiple: true }
       - run: |
           test "$(find "$RUNNER_TEMP/prebuilt" -maxdepth 1 -type f -name 'pi-*' | wc -l)" -eq 14
+          # Artifact zips drop POSIX mode bits.
+          chmod +x "$RUNNER_TEMP"/prebuilt/pi-*
           node scripts/prepare-github-release.mjs --out "$RUNNER_TEMP/pi-github-release" --prebuilt "$RUNNER_TEMP/prebuilt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release", if-no-files-found: error, overwrite: true, retention-days: 14 }
@@ -174,6 +176,9 @@ jobs:
           sudo apt-get install -y xvfb libxcb1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
+      - name: Restore executable bits dropped by artifact transport
+        shell: bash
+        run: chmod +x "$RUNNER_TEMP"/pi-github-release/pi-*
       - name: Execute final native archive
         if: matrix.executor == 'native'
         shell: bash
@@ -265,6 +270,9 @@ jobs:
         with: { node-version: "22" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
+      - name: Restore executable bits dropped by artifact transport
+        shell: bash
+        run: chmod +x "$RUNNER_TEMP"/pi-github-release/pi-*
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { pattern: "github-release-smoke-${{ github.sha }}-*", path: "${{ runner.temp }}/smoke-records" }
       - run: |
@@ -289,6 +297,9 @@ jobs:
         with: { version: "0.15.2" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: "github-release-accepted-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
+      - name: Restore executable bits dropped by artifact transport
+        shell: bash
+        run: chmod +x "$RUNNER_TEMP"/pi-github-release/pi-*
       - name: Update an extracted native bundle
         if: matrix.executor == 'native'
         env: { PI_XZ_EXECUTOR: native, PI_XZ_E2E_ALLOW_NO_OLD: "1" }
@@ -329,6 +340,9 @@ jobs:
         with: { node-version: "22" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: "github-release-accepted-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
+      - name: Restore executable bits dropped by artifact transport
+        shell: bash
+        run: chmod +x "$RUNNER_TEMP"/pi-github-release/pi-*
       - run: node scripts/verify-github-release.mjs all "$RUNNER_TEMP/pi-github-release/release-manifest.json"
       - name: Attest exact Release subjects
         id: attest
