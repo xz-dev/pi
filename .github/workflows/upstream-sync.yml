@@ -39,6 +39,8 @@ jobs:
             +refs/heads/patch/model-refresh:refs/remotes/origin/patch/model-refresh \
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
+            +refs/heads/patch/freebsd-support:refs/remotes/origin/patch/freebsd-support \
+            +refs/heads/patch/freebsd-launcher:refs/remotes/origin/patch/freebsd-launcher \
             +refs/heads/patch/xz-bundle-lifecycle:refs/remotes/origin/patch/xz-bundle-lifecycle \
             +refs/heads/patch/use-embedded-bun-package-manager:refs/remotes/origin/patch/use-embedded-bun-package-manager \
             +refs/heads/patch/git-package-storage:refs/remotes/origin/patch/git-package-storage \
@@ -78,6 +80,8 @@ jobs:
             model-refresh \
             model-refresh-session-rebind \
             startup-benchmark-exit \
+            freebsd-support \
+            freebsd-launcher \
             xz-bundle-lifecycle \
             use-embedded-bun-package-manager \
             git-package-storage \

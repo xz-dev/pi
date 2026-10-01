@@ -81,6 +81,7 @@ function hostPlatform() {
 		return override;
 	}
 	const modern = process.arch === "x64" && process.features?.typescript !== undefined && process.env.PI_XZ_VERIFY_MODERN === "1";
+	if (process.platform === "freebsd" && process.arch === "x64") return "freebsd-x64";
 	if (process.platform === "darwin") return process.arch === "arm64" ? "darwin-arm64" : `darwin-x64-${modern ? "modern" : "baseline"}`;
 	if (process.platform === "linux") {
 		const libc = process.report?.getReport()?.header?.glibcVersionRuntime ? "gnu" : "musl";

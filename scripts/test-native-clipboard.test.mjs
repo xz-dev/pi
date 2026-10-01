@@ -7,9 +7,8 @@ import test from "node:test";
 import { BUN_TARGETS } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries, verifyMuslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 
-test("all twelve targets package an existing upstream native clipboard helper", () => {
-	assert.equal(BUN_TARGETS.length, 12);
-	for (const target of BUN_TARGETS) {
+test("prebuilt targets package an existing upstream native clipboard helper", () => {
+	for (const target of BUN_TARGETS.filter(({ os }) => os !== "freebsd")) {
 		assert.ok(target.nativeHelperDir && target.nativeHelperFile);
 		assert.ok(existsSync(join(import.meta.dirname, "../packages/tui", target.nativeHelperDir, target.nativeHelperFile)), target.id);
 	}

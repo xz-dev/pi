@@ -61,8 +61,9 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 	if (!GITHUB_HOSTED_RUNNERS.includes(runner)) throw new Error(`Unsupported GitHub-hosted runner label: ${runner}`);
 	if (!GITHUB_HOSTED_RUNNERS.includes(buildRunner)) throw new Error(`Unsupported GitHub-hosted build runner label: ${buildRunner}`);
 	const buildPlatform = GITHUB_RUNNER_PLATFORMS[buildRunner];
-	if (buildPlatform.os !== os || buildPlatform.arch !== arch) throw new Error(`Build runner ${buildRunner} does not natively match ${id}`);
-	const executor = libc === "musl" ? "pinned-musl-container" : "native";
+	if (os !== "freebsd" && (buildPlatform.os !== os || buildPlatform.arch !== arch)) throw new Error(`Build runner ${buildRunner} does not natively match ${id}`);
+	if (os === "freebsd" && (arch !== "x64" || buildPlatform.os !== "linux" || buildPlatform.arch !== "x64")) throw new Error(`FreeBSD requires an x64 KVM host: ${id}`);
+	const executor = os === "freebsd" ? "freebsd-vm" : libc === "musl" ? "pinned-musl-container" : "native";
 	return Object.freeze({
 		id,
 		bunTarget,
@@ -74,7 +75,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 		buildRunner,
 		buildRunnerOs: buildPlatform.os === "darwin" ? "macOS" : buildPlatform.os === "windows" ? "Windows" : "Linux",
 		buildRunnerArch: buildPlatform.arch === "arm64" ? "ARM64" : "X64",
-		runnerOs: os === "darwin" ? "macOS" : os === "windows" ? "Windows" : "Linux",
+		runnerOs: os === "freebsd" ? "FreeBSD" : os === "darwin" ? "macOS" : os === "windows" ? "Windows" : "Linux",
 		runnerArch: arch === "arm64" ? "ARM64" : "X64",
 		executor,
 		...(executor === "pinned-musl-container" ? { containerImage: MUSL_IMAGES[arch] } : {}),
@@ -119,6 +120,7 @@ const windowsHelper = (arch) => ({
 	filesystemHelperFile: "pi-filesystem-snapshot.node",
 });
 export const BUN_TARGETS = Object.freeze([
+	target({ id: "freebsd-x64", bunTarget: "bun-freebsd-x64", os: "freebsd", arch: "x64", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "native-freebsd-x64", clipboardNativeFile: "freebsd-platform-x11.node", nativeHelperDir: "native/freebsd/prebuilds/freebsd-x64", nativeHelperFile: "freebsd-platform-x11.node" }),
 	target({ id: "darwin-x64-baseline", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "baseline", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-x64-modern", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "modern", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-arm64", bunTarget: "bun-darwin-arm64", os: "darwin", arch: "arm64", cpu: "arm64", runner: "macos-15", clipboardNativePackage: "clipboard-darwin-arm64", clipboardNativeFile: "clipboard.darwin-arm64.node", ...darwinHelper("arm64") }),
@@ -135,9 +137,9 @@ export const BUN_TARGETS = Object.freeze([
 export const BUN_TARGET_IDS = Object.freeze(BUN_TARGETS.map(({ id }) => id));
 export function bunTarget(id) { const found = BUN_TARGETS.find((entry) => entry.id === id); if (!found) throw new Error(`Unknown Bun Release target: ${id}`); return found; }
 export function binaryArchiveName(id) { const entry = bunTarget(id); return `pi-${id}.${entry.archive}`; }
-export function githubBuildMatrix() { return { include: BUN_TARGETS.map(({ id, buildRunner, arch, buildRunnerOs, buildRunnerArch }) => ({ id, runner: buildRunner, arch, runnerOs: buildRunnerOs, runnerArch: buildRunnerArch })) }; }
+export function githubBuildMatrix() { return { include: BUN_TARGETS.filter(({ os }) => os !== "freebsd").map(({ id, buildRunner, arch, buildRunnerOs, buildRunnerArch }) => ({ id, runner: buildRunner, arch, runnerOs: buildRunnerOs, runnerArch: buildRunnerArch })) }; }
 export function githubSmokeMatrix() {
-	return { include: BUN_TARGETS.map(({ id: target, runner, executor, containerImage }) => ({ target, runner, executor, ...(containerImage ? { containerImage } : {}) })) };
+	return { include: BUN_TARGETS.filter(({ os }) => os !== "freebsd").map(({ id: target, runner, executor, containerImage }) => ({ target, runner, executor, ...(containerImage ? { containerImage } : {}) })) };
 }
 
 export function isMainModulePath(modulePath, argvPath, pathApi = path) {

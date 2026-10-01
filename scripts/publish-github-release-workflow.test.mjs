@@ -386,13 +386,13 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
     }
   }
   assert.match(workflowText, /--prebuilt/);
-  assert.match(workflowText, /-eq 12/);
+  assert.match(workflowText, /-eq 13/);
   const nativeRunnerStep = workflow.jobs["build-target"].steps.find((step) => step.name === "Assert native build runner");
   assert.equal(nativeRunnerStep?.shell, "bash");
   assert.match(nativeRunnerStep?.run ?? "", /test "\$RUNNER_OS" = '\$\{\{ matrix\.runnerOs \}\}'/);
   assert.match(nativeRunnerStep?.run ?? "", /test "\$RUNNER_ARCH" = '\$\{\{ matrix\.runnerArch \}\}'/);
   const aggregateRun = workflow.jobs["aggregate-release-candidate"].steps.find((step) => step.run)?.run;
-  assert.ok(aggregateRun.indexOf("-eq 12") < aggregateRun.indexOf("prepare-github-release.mjs"));
+  assert.ok(aggregateRun.indexOf("-eq 13") < aggregateRun.indexOf("prepare-github-release.mjs"));
   assert.doesNotMatch(workflowText, /macos-13/);
   assert.match(workflowText, /macos-15-intel|bun-targets\.mjs --matrix/);
 
@@ -606,7 +606,7 @@ test("publication attests final subjects before draft publication and keeps audi
   assert.match(workflowText, /GH_CONFIG_DIR="\$empty_gh_config" GH_TOKEN= GITHUB_TOKEN=/);
   assert.doesNotMatch(workflowText, /mapfile|readarray/);
   assert.match(workflowText, /while IFS= read -r subject/);
-  assert.match(workflowText, /test "\$subject_count" -eq 15/);
+  assert.match(workflowText, /test "\$subject_count" -eq 16/);
   assert.match(workflowText, /gh attestation verify/);
   assert.match(workflowText, /--bundle "\$bundle"/);
   assert.match(workflowText, /--source-digest "\$GITHUB_SHA"/);

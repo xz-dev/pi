@@ -133,6 +133,8 @@ required_paths=(
     "packages/tui/native/darwin/src/darwin-platform.m"
     "packages/tui/native/darwin/prebuilds/darwin-arm64/darwin-platform.node"
     "packages/tui/native/darwin/prebuilds/darwin-x64/darwin-platform.node"
+    "packages/tui/native/freebsd/build.sh"
+    "scripts/freebsd-release.sh"
     "packages/tui/native/linux/build.sh"
     "packages/tui/native/linux/src/linux-platform-x11.c"
     "packages/tui/native/linux/prebuilds/linux-arm64/linux-platform-x11.node"
