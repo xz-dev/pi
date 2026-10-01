@@ -1,11 +1,214 @@
-import { accessSync, constants, existsSync, readFileSync, realpathSync } from "fs";
+import {
+	accessSync,
+	constants,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "fs";
 import { createRequire } from "module";
-import { homedir } from "os";
+import { homedir, tmpdir, userInfo } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
 import { stripBom } from "./utils/text.ts";
+
+// =============================================================================
+// Embedded Assets and Materialized Resources (single-executable builds)
+// =============================================================================
+
+/**
+ * `bun build --compile --asset=<path>` embeds package resources under
+ * `/$bunfs/root/<basename>` (the argument's basename, directory trees kept).
+ * `readFileSync`/`readdirSync`/`statSync` read them, but APIs that need a real
+ * fd (`fs.open`, `require` of a `.node` addon, `realpath`, `cpSync`) fail on
+ * `/$bunfs`. Resources consumed by external programs (README/docs/examples,
+ * exposed to `rg` and editors via the system prompt) and native addons must
+ * therefore live on the real filesystem.
+ *
+ * Materialization target: `os.tmpdir()/<pi-resources-uid>/<release target>/<version>`.
+ * Missing or empty directory means populate; nonempty means reuse as-is — no
+ * per-file integrity checks, no repair of user-modified files, no locks.
+ * Population writes a private sibling directory then renames it into place so
+ * a partial tree is never published; a lost rename race reuses the winner.
+ */
+const EMBEDDED_ASSETS_ROOT = "/$bunfs/root";
+const RESOURCE_ROOT_PREFIX = "pi-resources";
+
+/** Embedded asset root inside the compiled executable. */
+export function getEmbeddedAssetsRoot(): string {
+	return EMBEDDED_ASSETS_ROOT;
+}
+
+/** Embedded asset path by basename (`--asset` preserves only the basename). */
+export function getEmbeddedAssetPath(name: string): string {
+	return `${EMBEDDED_ASSETS_ROOT}/${name}`;
+}
+
+/** Whether a path points into the embedded `/$bunfs` tree. */
+export function isEmbeddedAssetPath(path: string): boolean {
+	return path.startsWith(`${EMBEDDED_ASSETS_ROOT}/`);
+}
+
+/** True when a directory exists and holds at least one entry. */
+export function isNonEmptyDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory() && readdirSync(path).length > 0;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Copy a directory tree with `readdirSync`/`readFileSync`/`writeFileSync`.
+ * `fs.cpSync`/`copyFileSync` cannot read `/$bunfs` files.
+ */
+export function copyResourceTree(sourceDir: string, targetDir: string): void {
+	mkdirSync(targetDir, { recursive: true });
+	for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+		const source = join(sourceDir, entry.name);
+		const target = join(targetDir, entry.name);
+		if (entry.isDirectory()) {
+			copyResourceTree(source, target);
+		} else if (entry.isFile()) {
+			writeFileSync(target, readFileSync(source));
+		}
+	}
+}
+
+/**
+ * Resolve the materialization cache root for this build. Includes the user id
+ * so a shared `os.tmpdir()` never collides across users.
+ */
+export function getResourceCacheRoot(): string {
+	let userKey: string;
+	try {
+		userKey = String(userInfo().uid);
+	} catch {
+		userKey = process.env.USER || process.env.USERNAME || "unknown";
+	}
+	return join(tmpdir(), `${RESOURCE_ROOT_PREFIX}-${userKey}`, RELEASE_TARGET ?? "unknown-target", VERSION);
+}
+
+export interface MaterializeOptions {
+	/** Embedded or on-disk tree to copy. */
+	sourceDir: string;
+	/** Package-relative path of the tree (`"docs"`, `"native/linux/prebuilds/linux-x64"`). */
+	relativePath: string;
+	/** Override the computed cache root (tests, custom tmpdir). */
+	cacheRoot?: string;
+}
+
+/**
+ * Materialize a resource tree onto disk and return its directory.
+ * A nonempty target directory is reused without touching its contents.
+ */
+export function materializeResourceTree(options: MaterializeOptions): string {
+	// Non-bun runtimes read assets in place unless a test pins a cache root.
+	if (!isBunBinary && !options.cacheRoot) return options.sourceDir;
+
+	const cacheRoot = options.cacheRoot ?? getResourceCacheRoot();
+	const targetDir = join(cacheRoot, ...options.relativePath.split("/"));
+
+	if (isNonEmptyDirectory(targetDir)) return targetDir;
+
+	mkdirSync(dirname(targetDir), { recursive: true });
+	const stagingDir = mkdtempSync(join(dirname(targetDir), `.staging-${basename(targetDir)}-`));
+	try {
+		copyResourceTree(options.sourceDir, stagingDir);
+		renameSync(stagingDir, targetDir);
+	} catch (error) {
+		rmSync(stagingDir, { recursive: true, force: true });
+		// A concurrent process won the rename; its nonempty tree is authoritative.
+		if (!isNonEmptyDirectory(targetDir)) throw error;
+	}
+	return targetDir;
+}
+
+export interface MaterializedDocs {
+	docsDir: string;
+	readmePath: string;
+	examplesDir: string;
+}
+
+let materializedDocs: MaterializedDocs | undefined;
+
+/**
+ * Lazily materialize the document/example trees that external programs read
+ * (the system prompt hands these paths to `rg` and editors). In a Bun binary
+ * the first call populates the cache; later calls reuse it. Outside Bun
+ * binaries this returns the package's own docs/examples paths. Do NOT call
+ * this from a path where the physical tree is not actually needed — the
+ * `/$bunfs` fallback keeps `--version`/`--help` from paying for a copy they
+ * never read.
+ */
+export function ensureMaterializedDocs(): MaterializedDocs {
+	if (!isBunBinary) {
+		const packageDir = getPackageDir();
+		return {
+			docsDir: resolve(join(packageDir, "docs")),
+			readmePath: resolve(join(packageDir, "README.md")),
+			examplesDir: resolve(join(packageDir, "examples")),
+		};
+	}
+	return materializePhysicalResources();
+}
+
+/**
+ * Materialize the document/example trees that external programs read
+ * (the system prompt hands these paths to `rg` and editors). Idempotent.
+ */
+export function materializePhysicalResources(cacheRoot?: string): MaterializedDocs {
+	if (materializedDocs && !cacheRoot) return materializedDocs;
+	const root = EMBEDDED_ASSETS_ROOT;
+	const docsDir = materializeResourceTree({ sourceDir: `${root}/docs`, relativePath: "docs", cacheRoot });
+	const examplesDir = materializeResourceTree({
+		sourceDir: `${root}/examples`,
+		relativePath: "examples",
+		cacheRoot,
+	});
+	const readmePath = join(dirname(docsDir), "README.md");
+	if (!existsSync(readmePath)) {
+		try {
+			writeFileSync(readmePath, readFileSync(`${root}/README.md`));
+		} catch {
+			// The readme is informational; a failed copy must not abort startup.
+		}
+	}
+	const result = { docsDir, readmePath, examplesDir };
+	if (!cacheRoot) materializedDocs = result;
+	return result;
+}
+
+/** Materialized document paths, or undefined until registered. */
+export function getMaterializedDocs(): MaterializedDocs | undefined {
+	return materializedDocs;
+}
+
+export function setMaterializedDocs(docs: MaterializedDocs | undefined): void {
+	materializedDocs = docs;
+}
+
+/**
+ * Materialize the embedded native addon tree and return the directory that
+ * contains the `.node` files. `require` of an embedded `.node` makes Bun
+ * unpack it to an unpredictable global temp name, so addons must be loaded
+ * from this explicit on-disk path instead.
+ */
+export function materializeNativeAddons(cacheRoot?: string): string {
+	return materializeResourceTree({
+		sourceDir: `${EMBEDDED_ASSETS_ROOT}/native`,
+		relativePath: "native",
+		cacheRoot,
+	});
+}
 
 // =============================================================================
 // Package Detection
@@ -100,7 +303,7 @@ export function detectInstallMethod(): InstallMethod {
 }
 
 function getInferredNpmInstall(): { root: string; prefix: string } | undefined {
-	const packageDir = getPackageDir();
+	const packageDir = getInstallDir();
 	const path = process.platform === "win32" || packageDir.includes("\\") ? win32 : { basename, dirname };
 	const parent = path.dirname(packageDir);
 	let root: string | undefined;
@@ -131,7 +334,7 @@ function getSelfUpdateCommandForMethod(
 		case "pnpm": {
 			const match = readCommandOutput("pnpm", ["root", "-g"])
 				? undefined
-				: /^(.*[\\/]global[\\/][^\\/]+)[\\/]\.pnpm[\\/]/.exec(getPackageDir());
+				: /^(.*[\\/]global[\\/][^\\/]+)[\\/]\.pnpm[\\/]/.exec(getInstallDir());
 			const binDirArgs = match
 				? [`--config.global-bin-dir=${process.env.PNPM_HOME || dirname(dirname(match[1]))}`]
 				: [];
@@ -236,7 +439,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 		case "pnpm": {
 			const root = readCommandOutput("pnpm", ["root", "-g"]);
 			if (root) return [root, dirname(root)];
-			const match = /^(.*[\\/]global[\\/][^\\/]+)[\\/]\.pnpm[\\/]/.exec(getPackageDir());
+			const match = /^(.*[\\/]global[\\/][^\\/]+)[\\/]\.pnpm[\\/]/.exec(getInstallDir());
 			return match ? [match[1]] : [];
 		}
 		case "yarn": {
@@ -300,7 +503,7 @@ function getEntrypointPackageDir(): string | undefined {
 }
 
 function isSelfUpdatePathWritable(): boolean {
-	const packageDir = getPackageDir();
+	const packageDir = getInstallDir();
 	try {
 		accessSync(packageDir, constants.W_OK);
 		accessSync(dirname(packageDir), constants.W_OK);
@@ -311,7 +514,7 @@ function isSelfUpdatePathWritable(): boolean {
 }
 
 function isManagedByGlobalPackageManager(method: InstallMethod, packageName: string, npmCommand?: string[]): boolean {
-	const packageDirs = [getPackageDir(), getEntrypointPackageDir()].filter((dir): dir is string => !!dir);
+	const packageDirs = [getInstallDir(), getEntrypointPackageDir()].filter((dir): dir is string => !!dir);
 	const packageDirCandidates = packageDirs.flatMap((dir) => getPathComparisonCandidates(dir));
 	return getGlobalPackageRoots(method, packageName, npmCommand).some((root) => {
 		return getPathComparisonCandidates(root).some((normalizedRoot) => {
@@ -342,7 +545,9 @@ export function getSelfUpdateUnavailableInstruction(
 	const method = detectInstallMethod();
 	const target = normalizeSelfUpdatePackageTarget(updatePackageTarget);
 	if (method === "bun-binary") {
-		return `Download from: https://github.com/earendil-works/pi/releases/latest`;
+		return DISTRIBUTION === "xz-dev"
+			? `Download from: https://github.com/xz-dev/pi/releases/latest`
+			: `Download from: https://github.com/earendil-works/pi/releases/latest`;
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, target, npmCommand);
 	if (command) {
@@ -361,6 +566,18 @@ export function getUpdateInstruction(packageName: string): string {
 		return `Run: ${command.display}`;
 	}
 	return getSelfUpdateUnavailableInstruction(packageName);
+}
+
+export function getXzDevSourceUpdateGuidance(): string {
+	return [
+		"This xz-dev installation is a source checkout and is user-managed.",
+		"Run the following to update it (Pi does not run these for you):",
+		"",
+		"git -C <xz-dev-pi-checkout> pull --ff-only",
+		"cd <xz-dev-pi-checkout>",
+		"npm ci --ignore-scripts",
+		"npm run build",
+	].join("\n");
 }
 
 // =============================================================================
@@ -398,7 +615,26 @@ export function getPackageDir(): string {
 	}
 
 	if (isBunBinary) {
-		// Bun binary: process.execPath points to the compiled executable
+		// Single-executable builds embed package resources under `/$bunfs/root`.
+		// Install-location and channel detection must use the real executable
+		// directory instead (see getInstallDir).
+		return getEmbeddedAssetPath(".").slice(0, -2);
+	}
+	return findNodePackageDir(__dirname);
+}
+
+/**
+ * Physical directory containing the executable/installation. Used for
+ * `*.managed.lock` channel markers, managed-install detection, and Windows
+ * self-update quarantine — anything that inspects files on disk next to the
+ * binary. Never returns an embedded `/$bunfs` path.
+ */
+export function getInstallDir(): string {
+	const envDir = process.env.PI_PACKAGE_DIR;
+	if (envDir) {
+		return normalizePath(envDir);
+	}
+	if (isBunBinary) {
 		return dirname(process.execPath);
 	}
 	return findNodePackageDir(__dirname);
@@ -412,7 +648,7 @@ export function getPackageDir(): string {
  */
 export function getThemesDir(): string {
 	if (isBunBinary) {
-		return join(getPackageDir(), "theme");
+		return getEmbeddedAssetPath("theme");
 	}
 	// Theme is in modes/interactive/theme/ relative to src/ or dist/
 	const packageDir = getPackageDir();
@@ -428,35 +664,47 @@ export function getThemesDir(): string {
  */
 export function getExportTemplateDir(): string {
 	if (isBunBinary) {
-		return join(getPackageDir(), "export-html");
+		return getEmbeddedAssetPath("export-html");
 	}
 	const packageDir = getPackageDir();
 	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
 	return join(packageDir, srcOrDist, "core", "export-html");
 }
 
-/** Get path to package.json */
+/** Get path to package.json (embedded under `/$bunfs` in Bun binaries) */
 export function getPackageJsonPath(): string {
 	return join(getPackageDir(), "package.json");
 }
 
 /** Get path to README.md */
 export function getReadmePath(): string {
+	if (isBunBinary) {
+		return materializedDocs?.readmePath ?? getEmbeddedAssetPath("README.md");
+	}
 	return resolve(join(getPackageDir(), "README.md"));
 }
 
 /** Get path to docs directory */
 export function getDocsPath(): string {
+	if (isBunBinary) {
+		return materializedDocs?.docsDir ?? getEmbeddedAssetPath("docs");
+	}
 	return resolve(join(getPackageDir(), "docs"));
 }
 
 /** Get path to examples directory */
 export function getExamplesPath(): string {
+	if (isBunBinary) {
+		return materializedDocs?.examplesDir ?? getEmbeddedAssetPath("examples");
+	}
 	return resolve(join(getPackageDir(), "examples"));
 }
 
 /** Get path to CHANGELOG.md */
 export function getChangelogPath(): string {
+	if (isBunBinary) {
+		return getEmbeddedAssetPath("CHANGELOG.md");
+	}
 	return resolve(join(getPackageDir(), "CHANGELOG.md"));
 }
 
@@ -468,7 +716,7 @@ export function getChangelogPath(): string {
  */
 export function getInteractiveAssetsDir(): string {
 	if (isBunBinary) {
-		return join(getPackageDir(), "assets");
+		return getEmbeddedAssetPath("assets");
 	}
 	const packageDir = getPackageDir();
 	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
@@ -559,6 +807,9 @@ interface PackageJson {
 	piConfig?: {
 		name?: string;
 		configDir?: string;
+		distribution?: string;
+		releaseTarget?: string;
+		changelogVersion?: string;
 	};
 }
 
@@ -579,7 +830,10 @@ export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent
 export const APP_NAME: string = piConfigName || "pi";
 export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
+export const DISTRIBUTION: string | undefined = pkg.piConfig?.distribution;
+export const RELEASE_TARGET: string | undefined = pkg.piConfig?.releaseTarget;
 export const VERSION: string = pkg.version || "0.0.0";
+export const CHANGELOG_VERSION: string = pkg.piConfig?.changelogVersion || VERSION;
 
 // e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
 export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
