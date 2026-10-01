@@ -116,7 +116,11 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		mkdir -p "$build_dir/$native_dir"
 		cp "$native_source" "$build_dir/$native_dir/"
 		if [[ "$target" == *-musl* ]]; then
+			# The provenance names its license as `native/LICENSE` relative to the
+			# provenance file, so ship both inside the native tree.
 			cp "$CLIPBOARD_MUSL_DIR/provenance.json" "$build_dir/native/clipboard-native-provenance.json"
+			mkdir -p "$build_dir/native/native"
+			cp "$CLIPBOARD_MUSL_DIR/native/LICENSE" "$build_dir/native/native/LICENSE"
 		fi
 		asset_args+=(--asset="$build_dir/native")
 	fi
