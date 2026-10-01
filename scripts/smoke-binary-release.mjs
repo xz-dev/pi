@@ -108,7 +108,8 @@ try {
 		clipboard = { helper: helperRelative, sha256: sha256(helperPath), loadedAndCalled: true, ...clipboardReads, elapsedMs: nativeClipboard.elapsedMs };
 	}
 	if (target.libc === "musl") {
-		const provenancePath = join(materializedNative, "..", "clipboard-native-provenance.json");
+		// build-binaries.sh embeds the provenance inside the native tree.
+		const provenancePath = join(materializedNative, "clipboard-native-provenance.json");
 		if (!existsSync(provenancePath)) throw new Error(`materialized musl provenance missing: ${provenancePath}`);
 		run("musl-provenance", process.execPath, [join(process.cwd(), "scripts", "verify-musl-provenance.mjs"), provenancePath, helperPath, targetId], { env });
 	}
