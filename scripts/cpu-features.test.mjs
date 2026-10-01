@@ -51,6 +51,20 @@ test("Windows arm64 records its model without probing x64 features", () => {
 
 test("FreeBSD records CPUID flags from its boot log", () => {
 	assert.match(cpuFeatures({ platform: "freebsd", arch: "x64", cpuModel: "BSD CPU", freebsdBootLog: "Features2=0x1<SSE4.1,SSE4.2,AVX>\n" }), /SSE4\.2/);
+	if (process.platform === "freebsd") return;
+	// Off FreeBSD there is no /var/run/dmesg.boot, which exercises the kernel message buffer fallback.
+	const calls = [];
+	const features = cpuFeatures({
+		platform: "freebsd",
+		arch: "x64",
+		cpuModel: "BSD CPU",
+		run: (command, args) => {
+			calls.push([command, ...args].join(" "));
+			return { status: 0, stdout: "  Features2=0x1<SSE4.1,SSE4.2,AVX>\n" };
+		},
+	});
+	assert.deepEqual(calls, ["sysctl -n kern.msgbuf"]);
+	assert.match(features, /SSE4\.2/);
 });
 
 test("Linux and Darwin feature evidence remains compatible", () => {

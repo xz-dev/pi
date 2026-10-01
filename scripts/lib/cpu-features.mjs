@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { arch, cpus, platform } from "node:os";
 
 // Microsoft IsProcessorFeaturePresent constants:
@@ -22,8 +22,13 @@ export function cpuFeatures(options = {}) {
 		return (options.linuxCpuInfo ?? readFileSync("/proc/cpuinfo", "utf8")).match(/^Features\s*:.*|^flags\s*:.*$/m)?.[0] ?? "unknown";
 	}
 	if (hostPlatform === "freebsd") {
-		// FreeBSD's boot log records CPUID flags; hw.model only names the CPU.
-		const bootLog = options.freebsdBootLog ?? readFileSync("/var/run/dmesg.boot", "utf8");
+		// FreeBSD's boot log records CPUID flags; hw.model only names the CPU. Minimal VM images may
+		// not save /var/run/dmesg.boot, so fall back to the live kernel message buffer.
+		const bootLog =
+			options.freebsdBootLog ??
+			(existsSync("/var/run/dmesg.boot")
+				? readFileSync("/var/run/dmesg.boot", "utf8")
+				: (run("sysctl", ["-n", "kern.msgbuf"], { encoding: "utf8" }).stdout ?? ""));
 		return `${cpuModel}\n${bootLog.match(/Features2=.*$/m)?.[0] ?? "unknown"}`;
 	}
 	if (hostPlatform === "darwin") {
