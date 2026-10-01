@@ -39,7 +39,8 @@ import { stripBom } from "./utils/text.ts";
  * Population writes a private sibling directory then renames it into place so
  * a partial tree is never published; a lost rename race reuses the winner.
  */
-const EMBEDDED_ASSETS_ROOT = "/$bunfs/root";
+// Bun uses `B:/~BUN/root` on Windows (file URLs need a drive letter).
+const EMBEDDED_ASSETS_ROOT = process.platform === "win32" ? "B:/~BUN/root" : "/$bunfs/root";
 const RESOURCE_ROOT_PREFIX = "pi-resources";
 
 /** Embedded asset root inside the compiled executable. */

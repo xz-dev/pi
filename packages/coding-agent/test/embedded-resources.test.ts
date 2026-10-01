@@ -36,14 +36,17 @@ function makeSource(): string {
 }
 
 describe("embedded asset paths", () => {
+	// Bun's embedded root: B:/~BUN/root on Windows, /$bunfs/root elsewhere.
+	const root = process.platform === "win32" ? "B:/~BUN/root" : "/$bunfs/root";
+
 	test("resolve under the bunfs root by basename", () => {
-		expect(getEmbeddedAssetPath("docs")).toBe("/$bunfs/root/docs");
-		expect(getEmbeddedAssetPath("package.json")).toBe("/$bunfs/root/package.json");
+		expect(getEmbeddedAssetPath("docs")).toBe(`${root}/docs`);
+		expect(getEmbeddedAssetPath("package.json")).toBe(`${root}/package.json`);
 	});
 
 	test("detect embedded asset paths", () => {
-		expect(isEmbeddedAssetPath("/$bunfs/root/docs")).toBe(true);
-		expect(isEmbeddedAssetPath("/$bunfs/root")).toBe(false);
+		expect(isEmbeddedAssetPath(`${root}/docs`)).toBe(true);
+		expect(isEmbeddedAssetPath(root)).toBe(false);
 		expect(isEmbeddedAssetPath("/real/path/docs")).toBe(false);
 	});
 });
