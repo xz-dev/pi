@@ -33,6 +33,7 @@ import type {
 	BeforeToolCallContext,
 	BeforeToolCallResult,
 	FinishTurn,
+	PrepareInput,
 	PrepareNextTurnContext,
 	PrepareRequest,
 	QueueMode,
@@ -130,6 +131,7 @@ export interface AgentOptions {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	finishTurn?: FinishTurn;
+	prepareInput?: PrepareInput;
 	prepareRequest?: PrepareRequest;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
@@ -234,6 +236,7 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public finishTurn?: FinishTurn;
+	public prepareInput?: PrepareInput;
 	public prepareRequest?: PrepareRequest;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
@@ -274,6 +277,7 @@ export class Agent {
 		this.beforeToolCall = runtimeOptions.beforeToolCall;
 		this.afterToolCall = runtimeOptions.afterToolCall;
 		this.finishTurn = runtimeOptions.finishTurn;
+		this.prepareInput = runtimeOptions.prepareInput;
 		this.prepareRequest = runtimeOptions.prepareRequest;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
@@ -518,6 +522,7 @@ export class Agent {
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			finishTurn: this.finishTurn,
+			prepareInput: this.prepareInput,
 			prepareRequest: this.prepareRequest,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
