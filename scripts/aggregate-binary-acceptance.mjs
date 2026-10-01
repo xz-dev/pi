@@ -35,7 +35,7 @@ for (const id of BUN_TARGET_IDS) {
 	assertLimit(id, "listModelsMs", record.timingsMs?.listModels, SMOKE_LIMITS.listModelsMs);
 	assertLimit(id, "interactiveMs", record.tui?.elapsedMs, SMOKE_LIMITS.interactiveMs);
 	if (JSON.stringify(record.limits) !== JSON.stringify(SMOKE_LIMITS)) throw new Error(`${id} self-reported limits do not equal authoritative limits`);
-	const expectedTui = descriptor.os === "windows" ? { harness: "Bun.Terminal ConPTY", input: "startup-benchmark", exitSent: false, benchmarkCompleted: true } : { harness: "Bun.Terminal PTY", exitSent: true, benchmarkCompleted: null };
+	const expectedTui = descriptor.os === "windows" ? { harness: "Bun.Terminal ConPTY", input: "startup-benchmark", exitSent: false, benchmarkCompleted: true } : { harness: "Bun.Terminal PTY", input: "ctrl-c,ctrl-d", exitSent: true, benchmarkCompleted: null };
 	if (!Number.isSafeInteger(record.tui?.outputBytes) || record.tui.outputBytes <= 0 || record.tui.harness !== expectedTui.harness || (record.tui.input !== "ctrl-v,ctrl-c,ctrl-d" && record.tui.input !== expectedTui.input) || record.tui.childExitCode !== 0 || !record.tui.terminalClosed || !Number.isSafeInteger(record.tui.terminalExitCode) || !record.tui.observedOutput || record.tui.benchmarkCompleted !== expectedTui.benchmarkCompleted || record.tui.exitSent !== expectedTui.exitSent || !record.tui.cleanExit) throw new Error(`${id} missing bounded TUI acceptance`);
 	// The shipped native helper was materialized out of the single executable and
 	// called for real text/image reads under an isolated display.

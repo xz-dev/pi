@@ -163,6 +163,24 @@ test("aggregator rejects cold and warm version timings above their separate limi
 	}
 });
 
+test("aggregator accepts display-less musl TUI evidence without a paste", () => {
+	const value = fixture();
+	try {
+		// The musl container probe has no display, so it never sends ctrl+v; the
+		// in-display paste probe that materializes the helper is separate.
+		for (const target of BUN_TARGETS.filter(({ libc }) => libc === "musl")) {
+			const path = join(value.records, `${target.id}.json`);
+			const changed = JSON.parse(readFileSync(path, "utf8"));
+			changed.tui.input = "ctrl-c,ctrl-d";
+			writeFileSync(path, JSON.stringify(changed));
+		}
+		const result = runAggregator(value);
+		assert.equal(result.status, 0, result.stderr);
+	} finally {
+		rmSync(value.root, { recursive: true, force: true });
+	}
+});
+
 test("aggregator rejects TUI evidence that does not match the target platform", () => {
 	const value = fixture();
 	try {
