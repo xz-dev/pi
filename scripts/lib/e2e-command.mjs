@@ -1,6 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 
+// Emulated targets (QEMU TCG) raise this through PI_XZ_E2E_TIMEOUT_MS.
+const E2E_COMMAND_TIMEOUT_MS = Number(process.env.PI_XZ_E2E_TIMEOUT_MS ?? 120_000);
+
 export function run(command, args, env = process.env) {
 	return new Promise((resolveRun, reject) => {
 		const child = spawn(command, args, { env, windowsHide: true });
@@ -18,7 +21,7 @@ export function run(command, args, env = process.env) {
 				child.kill("SIGKILL");
 			}
 			reject(new Error(`${command} ${args.join(" ")} timed out: ${stdout}${stderr}`));
-		}, 120_000);
+		}, E2E_COMMAND_TIMEOUT_MS);
 		child.stdout.on("data", (chunk) => { stdout += chunk; });
 		child.stderr.on("data", (chunk) => { stderr += chunk; });
 		child.once("error", (error) => {

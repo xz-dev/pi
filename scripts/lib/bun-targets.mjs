@@ -39,7 +39,16 @@ export const SMOKE_LIMITS = Object.freeze({
 	helpMs: 3000,
 	listModelsMs: 5000,
 	interactiveMs: 7000,
+	clipboardMs: 10_000,
 });
+// FreeBSD arm64 has no GitHub-hosted KVM host, so its guest runs under QEMU TCG on x64.
+// ponytail: one fixed slowdown factor for every timing budget; tune from measured TCG runs.
+export const EMULATED_SMOKE_SLOWDOWN = 30;
+/** Timing budgets scale for emulated acceptance; size budgets never do. */
+export function smokeLimits(id) {
+	if (!bunTarget(id).emulated) return SMOKE_LIMITS;
+	return Object.freeze(Object.fromEntries(Object.entries(SMOKE_LIMITS).map(([key, value]) => [key, key.endsWith("Ms") ? value * EMULATED_SMOKE_SLOWDOWN : value])));
+}
 
 const GITHUB_RUNNER_PLATFORMS = Object.freeze({
 	"macos-15-intel": { os: "darwin", arch: "x64" },
@@ -62,7 +71,8 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 	if (!GITHUB_HOSTED_RUNNERS.includes(buildRunner)) throw new Error(`Unsupported GitHub-hosted build runner label: ${buildRunner}`);
 	const buildPlatform = GITHUB_RUNNER_PLATFORMS[buildRunner];
 	if (os !== "freebsd" && (buildPlatform.os !== os || buildPlatform.arch !== arch)) throw new Error(`Build runner ${buildRunner} does not natively match ${id}`);
-	if (os === "freebsd" && (arch !== "x64" || buildPlatform.os !== "linux" || buildPlatform.arch !== "x64")) throw new Error(`FreeBSD requires an x64 KVM host: ${id}`);
+	if (os === "freebsd" && (buildPlatform.os !== "linux" || buildPlatform.arch !== "x64")) throw new Error(`FreeBSD requires an x64 KVM host: ${id}`);
+	const emulated = os === "freebsd" && arch !== "x64";
 	const executor = os === "freebsd" ? "freebsd-vm" : libc === "musl" ? "pinned-musl-container" : "native";
 	return Object.freeze({
 		id,
@@ -78,6 +88,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 		runnerOs: os === "freebsd" ? "FreeBSD" : os === "darwin" ? "macOS" : os === "windows" ? "Windows" : "Linux",
 		runnerArch: arch === "arm64" ? "ARM64" : "X64",
 		executor,
+		emulated,
 		...(executor === "pinned-musl-container" ? { containerImage: MUSL_IMAGES[arch] } : {}),
 		requiredCpuFeatures: arch === "x64" ? ["sse4_2"] : [],
 		requiredCommands: [
@@ -111,6 +122,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 	});
 }
 
+const freebsdHelper = (arch) => ({ nativeHelperDir: `native/freebsd/prebuilds/freebsd-${arch}`, nativeHelperFile: "freebsd-platform-x11.node" });
 const darwinHelper = (arch) => ({ nativeHelperDir: `native/darwin/prebuilds/darwin-${arch}`, nativeHelperFile: "darwin-platform.node" });
 const linuxHelper = (arch) => ({ nativeHelperDir: `native/linux/prebuilds/linux-${arch}`, nativeHelperFile: "linux-platform-x11.node" });
 const windowsHelper = (arch) => ({
@@ -120,7 +132,8 @@ const windowsHelper = (arch) => ({
 	filesystemHelperFile: "pi-filesystem-snapshot.node",
 });
 export const BUN_TARGETS = Object.freeze([
-	target({ id: "freebsd-x64", bunTarget: "bun-freebsd-x64", os: "freebsd", arch: "x64", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "native-freebsd-x64", clipboardNativeFile: "freebsd-platform-x11.node", nativeHelperDir: "native/freebsd/prebuilds/freebsd-x64", nativeHelperFile: "freebsd-platform-x11.node" }),
+	target({ id: "freebsd-x64", bunTarget: "bun-freebsd-x64", os: "freebsd", arch: "x64", cpu: "baseline", runner: "ubuntu-24.04", clipboardNativePackage: "native-freebsd-x64", clipboardNativeFile: "freebsd-platform-x11.node", ...freebsdHelper("x64") }),
+	target({ id: "freebsd-arm64", bunTarget: "bun-freebsd-arm64", os: "freebsd", arch: "arm64", cpu: "arm64", runner: "ubuntu-24.04", clipboardNativePackage: "native-freebsd-arm64", clipboardNativeFile: "freebsd-platform-x11.node", ...freebsdHelper("arm64") }),
 	target({ id: "darwin-x64-baseline", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "baseline", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-x64-modern", bunTarget: "bun-darwin-x64", os: "darwin", arch: "x64", cpu: "modern", runner: "macos-15-intel", clipboardNativePackage: "clipboard-darwin-x64", clipboardNativeFile: "clipboard.darwin-x64.node", ...darwinHelper("x64") }),
 	target({ id: "darwin-arm64", bunTarget: "bun-darwin-arm64", os: "darwin", arch: "arm64", cpu: "arm64", runner: "macos-15", clipboardNativePackage: "clipboard-darwin-arm64", clipboardNativeFile: "clipboard.darwin-arm64.node", ...darwinHelper("arm64") }),

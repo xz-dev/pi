@@ -6,6 +6,9 @@ const [executable] = process.argv.slice(2);
 if (!executable) throw new Error("Usage: smoke-bun-tui.mjs <executable>");
 
 const started = performance.now();
+// Emulated targets pass a scaled budget; the interrupt/exit delays scale with it (1000/500 ms at 7000).
+const timeoutMs = Number(process.env.PI_XZ_TUI_TIMEOUT_MS ?? 7000);
+if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error(`Invalid PI_XZ_TUI_TIMEOUT_MS: ${process.env.PI_XZ_TUI_TIMEOUT_MS}`);
 const startupBenchmark = ["1", "true", "yes"].includes((process.env.PI_STARTUP_BENCHMARK ?? "").toLowerCase());
 const startupBenchmarkCompleteMarker = "__PI_STARTUP_BENCHMARK_COMPLETE__";
 const startupBenchmarkStagePattern = /__PI_STARTUP_BENCHMARK_STAGE__:(main-entered|session-manager-ready|runtime-ready|input-ready|interactive-created|init-entered|tools-ready|tui-started|theme-applied|session-rebound|providers-counted)/g;
@@ -50,8 +53,8 @@ const child = Bun.spawn([executable], {
 					exitTimer = setTimeout(() => {
 						exitSent = true;
 						terminal.write("\x04");
-					}, 500);
-				}, 1000);
+					}, timeoutMs / 14);
+				}, timeoutMs / 7);
 			}
 		},
 		exit(_terminal, exitCode) {
@@ -68,7 +71,7 @@ timeoutTimer = setTimeout(
 				`TUI PTY timeout: exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput} lastStage=${lastBenchmarkStage} tail=${JSON.stringify(diagnosticTail)}`,
 			),
 		),
-	7000,
+	timeoutMs,
 );
 try {
 	const [exitCode, terminalExitCode] = await Promise.race([Promise.all([child.exited, terminalClosure.promise]), timedOut.promise]);

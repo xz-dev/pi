@@ -13,6 +13,7 @@ const VERIFY_SCRIPT = join(REPO_ROOT, "scripts", "verify-github-release.mjs");
 const LIB_URL = pathToFileURL(join(REPO_ROOT, "scripts", "lib", "github-release.mjs")).href;
 const TARGETS = [
 	"freebsd-x64",
+	"freebsd-arm64",
 	"darwin-x64-baseline",
 	"darwin-x64-modern",
 	"darwin-arm64",
@@ -105,7 +106,8 @@ function addAcceptanceEvidence(
 			target,
 			archive: manifest.bundles[target],
 			runner: { osArchitecture: target.includes("arm64") ? "arm64" : "x64" },
-			executor: { emulated: false },
+			// Only FreeBSD arm64 is accepted under QEMU TCG emulation.
+			executor: { emulated: target === "freebsd-arm64" },
 			tui: { observedOutput: true, cleanExit: true },
 			clipboard: { loadedAndCalled: true },
 			thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: sha256(notice), bytes: statSync(notice).size },
@@ -141,13 +143,13 @@ function addAcceptanceEvidence(
 }
 
 describe("GitHub Release binary packaging helpers", () => {
-	test("defines the thirteen canonical target bundles and the layout version", async () => {
+	test("defines the fourteen canonical target bundles and the layout version", async () => {
 		const lib = await loadLib();
 		expect(lib.BINARY_PLATFORMS).toEqual(TARGETS);
 		expect(lib.MANIFEST_SCHEMA_VERSION).toBe(5);
 		expect(lib.BUNDLE_LAYOUT_VERSION).toBe(2);
 		expect(lib.PACKAGING_BINARY).toBe("binary");
-		expect(lib.BINARY_PLATFORMS).toHaveLength(13);
+		expect(lib.BINARY_PLATFORMS).toHaveLength(14);
 		expect(lib.binaryArchiveName("linux-x64-gnu-modern")).toBe("pi-linux-x64-gnu-modern.zip");
 		expect(lib.binaryArchiveName("windows-arm64")).toBe("pi-windows-arm64.zip");
 	});
@@ -182,6 +184,7 @@ describe("GitHub Release binary packaging helpers", () => {
 		const lib = await loadLib();
 		expect(lib.platformNativeInfo("freebsd-x64").nativeHelperDir).toBe("native/freebsd/prebuilds/freebsd-x64");
 		expect(lib.platformNativeInfo("freebsd-x64").nativeHelperFile).toBe("freebsd-platform-x11.node");
+		expect(lib.platformNativeInfo("freebsd-arm64").nativeHelperDir).toBe("native/freebsd/prebuilds/freebsd-arm64");
 		expect(lib.platformNativeInfo("darwin-arm64").nativeHelperFile).toBe("darwin-platform.node");
 		expect(lib.platformNativeInfo("darwin-x64-modern").nativeHelperDir).toBe("native/darwin/prebuilds/darwin-x64");
 		expect(lib.platformNativeInfo("windows-x64-modern").nativeHelperDir).toBe("native/win32/prebuilds/win32-x64");
@@ -201,7 +204,7 @@ describe("GitHub Release preparation (binary bundles)", () => {
 		expect(`${result.stdout}\n${result.stderr}`).toMatch(/external temporary directory/);
 	});
 
-	test("assembles the exact schema-v5 Release from thirteen prebuilt archives", async () => {
+	test("assembles the exact schema-v5 Release from fourteen prebuilt archives", async () => {
 		const prebuilt = temporaryDirectory("pi-release-prebuilt-");
 		const output = temporaryDirectory("pi-release-output-");
 		const head = run("git", ["rev-parse", "HEAD"]).stdout.trim();
