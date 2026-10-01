@@ -2,6 +2,8 @@
 
 This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
+Supported OS: Linux (glibc/musl, x64/arm64), macOS (x64/arm64), Windows (x64/arm64), FreeBSD (amd64). See [Installation](#installation).
+
 > [!NOTE]
 > 🌟 Star this fork to show your support for its direction and encourage change in upstream Pi.
 
