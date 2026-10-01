@@ -1,0 +1,13 @@
+# Temporary: upstream tests pinned to models that models.dev has since dropped
+# from the generated catalog. One exact test title per line; the runner turns
+# them into a vitest --testNamePattern exclusion. Delete a line as soon as
+# upstream updates the test. opencode-go/kimi-k2.6 (deprecated on models.dev,
+# still upstream's opencode-go default):
+should omit long cache retention for $provider/$id
+normalizes OpenCode Go reasoning deltas to reasoning_content for replay
+replays OpenCode Go reasoning thinking blocks as reasoning_content
+sends thinking disabled for OpenCode Go Kimi K2.6 when thinking is off
+sends thinking enabled for OpenCode Go Kimi K2.6 when thinking is enabled
+sends max_tokens for OpenCode completions models
+includes only high plus off for OpenCode Go Kimi K2.6
+built-in chat providers have defaults in their generated catalogs
