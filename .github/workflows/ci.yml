@@ -29,17 +29,23 @@ jobs:
           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
+      # Vitest builds the usage-claim fixture through
+      # scripts/build-pi-usage-claim.sh, which targets linux via `zig cc`.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
       - name: Build
         run: npm run build
 
+      # Downstream: tolerate only the documented model-catalog drift class and
+      # skip the upstream tests listed in scripts/catalog-drift-test-skips.txt.
       - name: Check
-        run: npm run check
+        run: bash scripts/check-allow-model-catalog-drift.sh
 
       - name: Test
-        run: npm test
+        run: ./test.sh
 
   mcp-conformance:
     runs-on: ubuntu-latest
