@@ -25,6 +25,12 @@ node_include() {
 }
 
 case "$target" in
+	freebsd-*)
+		[[ "$(uname -s)" == FreeBSD ]] || { echo "FreeBSD usage claims must be built natively" >&2; exit 1; }
+		include=$(node_include)
+		cc -shared -fPIC -O2 -std=c11 -Wall -Wextra -Werror \
+			-I"$include" -o "$output" native/pi-usage-claim-posix.c
+		;;
 	darwin-*)
 		include=$(node_include)
 		cc -bundle -undefined dynamic_lookup -D_DARWIN_C_SOURCE -O2 -std=c11 -Wall -Wextra -Werror \
