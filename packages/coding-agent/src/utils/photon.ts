@@ -44,10 +44,13 @@ function pathOrNull(file: PathOrFileDescriptor): string | null {
 
 function getFallbackWasmPaths(): string[] {
 	const execDir = path.dirname(process.execPath);
+	const embedded = path.join("/$bunfs", "root", WASM_FILENAME);
 	return [
 		path.join(execDir, WASM_FILENAME),
 		path.join(execDir, "photon", WASM_FILENAME),
 		path.join(process.cwd(), WASM_FILENAME),
+		// Single-executable builds embed the wasm next to the package metadata.
+		embedded,
 	];
 }
 
