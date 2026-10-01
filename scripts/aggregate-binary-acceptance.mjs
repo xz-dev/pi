@@ -28,7 +28,7 @@ for (const id of BUN_TARGET_IDS) {
 	const commands = record.commands ?? [];
 	if (JSON.stringify(commands.map(({ name }) => name)) !== JSON.stringify(descriptor.requiredCommands)) throw new Error(`${id} command inventory does not match authoritative descriptor`);
 	for (const command of commands) if (command.status !== 0 || !Number.isSafeInteger(command.elapsedMs) || command.elapsedMs < 0) throw new Error(`${id} invalid command evidence: ${command.name}`);
-	assertLimit(id, "assetBytes", record.asset.bytes, SMOKE_LIMITS.archiveBytes);
+	assertLimit(id, "assetBytes", record.asset.bytes, SMOKE_LIMITS.assetBytes);
 	assertLimit(id, "coldVersionMs", record.timingsMs?.coldVersion, SMOKE_LIMITS.coldVersionMs);
 	assertLimit(id, "versionMs", record.timingsMs?.version, SMOKE_LIMITS.versionMs);
 	assertLimit(id, "helpMs", record.timingsMs?.help, SMOKE_LIMITS.helpMs);

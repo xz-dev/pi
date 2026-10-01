@@ -33,7 +33,7 @@ function run(name, command, args, options = {}) {
 }
 try {
 	const assetBytes = statSync(asset).size;
-	if (assetBytes > SMOKE_LIMITS.archiveBytes) throw new Error(`executable size ${assetBytes} exceeds ${SMOKE_LIMITS.archiveBytes}`);
+	if (assetBytes > SMOKE_LIMITS.assetBytes) throw new Error(`executable size ${assetBytes} exceeds ${SMOKE_LIMITS.assetBytes}`);
 	// The release artifact is the raw executable. Stage it under the public
 	// entrypoint name (`pi`/`pi.exe`) so self-path resolution behaves like an
 	// installed copy.

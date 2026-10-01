@@ -110,16 +110,15 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 			native_source="$CLIPBOARD_MUSL_DIR/$native_dir/$native_file"
 			node ../../scripts/verify-musl-provenance.mjs "$CLIPBOARD_MUSL_DIR/provenance.json" "$native_source" "$target"
 		fi
-		# Embed under `native/` so materialization serves the platform path the
-		# loader expects (e.g. `native/linux/prebuilds/linux-x64/...`).
-		if [[ "$native_source" == ../tui/* ]]; then
-			asset_args+=(--asset="../tui/native")
-		else
-			mkdir -p "$build_dir/native/$native_dir"
-			cp "$native_source" "$build_dir/native/$native_dir/"
+		# Embed only this target's helper under `native/` so materialization
+		# serves the path the loader expects (e.g.
+		# `native/linux/prebuilds/linux-x64/...`) and unfolds nothing else.
+		mkdir -p "$build_dir/$native_dir"
+		cp "$native_source" "$build_dir/$native_dir/"
+		if [[ "$target" == *-musl* ]]; then
 			cp "$CLIPBOARD_MUSL_DIR/provenance.json" "$build_dir/native/clipboard-native-provenance.json"
-			asset_args+=(--asset="$build_dir/native")
 		fi
+		asset_args+=(--asset="$build_dir/native")
 	fi
 	# Do not load project .env files into the standalone process (upstream #10473).
 	bun build --compile "${bun_build_flags[@]}" --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" "${asset_args[@]}" ./src/bun/cli-portable.ts ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$target_dir/$executable"
