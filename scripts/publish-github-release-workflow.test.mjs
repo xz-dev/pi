@@ -686,3 +686,11 @@ test("upstream sync smoke packages and executes only the hydrated Linux host tar
   assert.doesNotMatch(syncWorkflowText, /prepare-github-release\.mjs/);
   assert.doesNotMatch(syncWorkflowText, /verify-github-release\.mjs local/);
 });
+
+test("FreeBSD guest verifies the exact checked-out commit with Git", () => {
+  const vmStep = workflow.jobs["build-freebsd"].steps.find((step) => step.name === "Build and accept FreeBSD amd64");
+  assert.equal(vmStep.with.release, "14.3");
+  // Release tooling runs git rev-parse HEAD inside the guest; it needs Git and must trust the runner-owned checkout.
+  assert.match(vmStep.with.prepare, /\bgit-lite\b/);
+  assert.match(vmStep.with.run, /git config --global --add safe\.directory "\$PWD" && bash scripts\/freebsd-release\.sh/);
+});
