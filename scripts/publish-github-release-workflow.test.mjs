@@ -386,13 +386,13 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
     }
   }
   assert.match(workflowText, /--prebuilt/);
-  assert.match(workflowText, /-eq 13/);
+  assert.match(workflowText, /-eq 14/);
   const nativeRunnerStep = workflow.jobs["build-target"].steps.find((step) => step.name === "Assert native build runner");
   assert.equal(nativeRunnerStep?.shell, "bash");
   assert.match(nativeRunnerStep?.run ?? "", /test "\$RUNNER_OS" = '\$\{\{ matrix\.runnerOs \}\}'/);
   assert.match(nativeRunnerStep?.run ?? "", /test "\$RUNNER_ARCH" = '\$\{\{ matrix\.runnerArch \}\}'/);
   const aggregateRun = workflow.jobs["aggregate-release-candidate"].steps.find((step) => step.run)?.run;
-  assert.ok(aggregateRun.indexOf("-eq 13") < aggregateRun.indexOf("prepare-github-release.mjs"));
+  assert.ok(aggregateRun.indexOf("-eq 14") < aggregateRun.indexOf("prepare-github-release.mjs"));
   assert.doesNotMatch(workflowText, /macos-13/);
   assert.match(workflowText, /macos-15-intel|bun-targets\.mjs --matrix/);
 
@@ -688,8 +688,11 @@ test("upstream sync smoke packages and executes only the hydrated Linux host tar
 });
 
 test("FreeBSD guest verifies the exact checked-out commit with Git", () => {
-  const vmStep = workflow.jobs["build-freebsd"].steps.find((step) => step.name === "Build and accept FreeBSD amd64");
+  const job = workflow.jobs["build-freebsd"];
+  const vmStep = job.steps.find((step) => step.name === "Build and accept FreeBSD");
   assert.equal(vmStep.with.release, "14.3");
+  assert.equal(vmStep.with.arch, "${{ matrix.arch }}");
+  assert.deepEqual(job.strategy.matrix.include.map(({ target, arch }) => [target, arch]), [["freebsd-x64", "x86_64"], ["freebsd-arm64", "aarch64"]]);
   // Release tooling runs git rev-parse HEAD inside the guest; it needs Git and must trust the runner-owned checkout.
   assert.match(vmStep.with.prepare, /\bgit-lite\b/);
   assert.match(vmStep.with.run, /git config --global --add safe\.directory "\$PWD" && bash scripts\/freebsd-release\.sh/);

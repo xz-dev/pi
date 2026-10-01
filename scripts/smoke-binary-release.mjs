@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { cpus, platform, release, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { bunTarget, SMOKE_LIMITS } from "./lib/bun-targets.mjs";
+import { EMULATED_SMOKE_SLOWDOWN, bunTarget, smokeLimits } from "./lib/bun-targets.mjs";
 import { cpuFeatures } from "./lib/cpu-features.mjs";
 import { operatingSystemArchitecture } from "./lib/runtime-architecture.mjs";
 import { verifyMuslSmokeLibraries } from "./prepare-musl-smoke.mjs";
@@ -12,6 +12,8 @@ import { verifyMuslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 const [archiveArg, targetId, expectedVersion, recordArg] = process.argv.slice(2);
 if (!archiveArg || !targetId || !expectedVersion || !recordArg) throw new Error("Usage: smoke-binary-release.mjs <archive> <target> <version> <record.json>");
 const target = bunTarget(targetId);
+const SMOKE_LIMITS = smokeLimits(targetId);
+const hangGuardScale = target.emulated ? EMULATED_SMOKE_SLOWDOWN : 1;
 const archive = resolve(archiveArg);
 const recordPath = resolve(recordArg);
 const work = mkdtempSync(join(tmpdir(), "pi-binary-smoke-"));
@@ -22,7 +24,7 @@ function run(name, command, args, options = {}) {
 	// The kill timeout is only a hang guard. Budgets are enforced from the
 	// measured elapsed time below, so a slow run reports its real duration
 	// instead of dying at the budget with SIGTERM.
-	const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? 60_000, env: options.env });
+	const result = spawnSync(command, args, { encoding: "utf8", timeout: (options.timeout ?? 60_000) * hangGuardScale, env: options.env });
 	const elapsedMs = Math.round(performance.now() - started);
 	commands.push({ name, command: [command, ...args].join(" "), status: result.status, elapsedMs });
 	if (result.status !== 0) throw new Error(`${name} failed after ${elapsedMs}ms (${result.status ?? result.signal ?? result.error?.message ?? "unknown"}): ${result.stdout ?? ""}${result.stderr ?? ""}`);
@@ -43,7 +45,7 @@ try {
 	if (extractedBytes > SMOKE_LIMITS.extractedBytes) throw new Error(`extracted size ${extractedBytes} exceeds ${SMOKE_LIMITS.extractedBytes}`);
 	const executable = join(root, target.wrapper);
 	const nativeExecutable = join(root, target.executable);
-	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color" };
+	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), TERM: "xterm-256color", PI_XZ_TUI_TIMEOUT_MS: String(SMOKE_LIMITS.interactiveMs) };
 	const tuiEnv = target.os === "windows" ? { ...env, PI_STARTUP_BENCHMARK: "1" } : env;
 	const coldVersion = run("cold-version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.coldVersionMs });
 	if (coldVersion.stdout.trim() !== expectedVersion) throw new Error(`cold version mismatch: ${coldVersion.stdout.trim()}`);
@@ -85,7 +87,7 @@ try {
 	const nativeHelper = join(root, target.nativeHelperDir, target.nativeHelperFile);
 	if (!existsSync(nativeHelper)) throw new Error(`native platform helper missing: ${nativeHelper}`);
 	const muslLibraries = target.libc === "musl" ? verifyMuslSmokeLibraries(process.env.PI_XZ_MUSL_LIBRARIES, target.arch) : null;
-	const nativeClipboard = run("clipboard", "bun", [join(process.cwd(), "scripts", "test-native-clipboard.mjs"), nativeHelper], { env });
+	const nativeClipboard = run("clipboard", "bun", [join(process.cwd(), "scripts", "test-native-clipboard.mjs"), nativeHelper], { env, maxMs: SMOKE_LIMITS.clipboardMs });
 	const clipboardReads = JSON.parse(nativeClipboard.stdout.trim());
 	if (clipboardReads.textRead !== true || clipboardReads.imageRead !== true) throw new Error("native clipboard smoke returned invalid evidence");
 	const clipboard = { helper: `${target.nativeHelperDir}/${target.nativeHelperFile}`, sha256: sha256(nativeHelper), loadedAndCalled: true, ...clipboardReads, elapsedMs: nativeClipboard.elapsedMs };
@@ -168,7 +170,7 @@ try {
 		schemaVersion: 1, target: targetId, version: expectedVersion,
 		archive: { file: archive.split(/[\\/]/).at(-1), sha256: sha256(archive), bytes: archiveBytes, extractedBytes },
 		runner: { name: process.env.RUNNER_NAME ?? "local", os: process.env.RUNNER_OS ?? platform(), arch: process.env.RUNNER_ARCH ?? osArchitecture, osArchitecture, imageOs: process.env.ImageOS ?? null, imageVersion: process.env.ImageVersion ?? null, cpuModel: cpus()[0]?.model ?? "unknown", cpuFeatures: cpuFeatures(), libc: target.libc ?? null },
-		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, libraries: muslLibraries, emulated: false },
+		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, libraries: muslLibraries, emulated: target.emulated },
 		commands, tui, clipboard,
 		usageClaim: existsSync(usageClaimModule) && existsSync(usageGuard) ? { helper: "native/usage-claim/pi-usage-claim.node", sha256: sha256(usageClaimModule), ...usageClaimEvidence } : null,
 		filesystemSnapshot: filesystemSnapshot ?? null,

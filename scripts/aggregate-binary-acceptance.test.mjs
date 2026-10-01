@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { BUN_TARGETS, SMOKE_LIMITS, binaryArchiveName } from "./lib/bun-targets.mjs";
+import { BUN_TARGETS, SMOKE_LIMITS, binaryArchiveName, smokeLimits } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 
 const nativeBytes = Buffer.from("native helper fixture");
@@ -56,7 +56,7 @@ function record(target, archive = { sha256: digest, bytes: 1 }) {
 			kind: target.executor,
 			containerDigest: target.containerImage ?? null,
 			libraries: target.libc === "musl" ? muslSmokeLibraries(target.arch) : null,
-			emulated: false,
+			emulated: target.emulated,
 		},
 		commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })),
 		tui: {
@@ -80,7 +80,7 @@ function record(target, archive = { sha256: digest, bytes: 1 }) {
 			bytes: Buffer.byteLength(notice),
 		},
 		timingsMs: { coldVersion: 1, version: 1, help: 1, listModels: 1, interactive: 1 },
-		limits: SMOKE_LIMITS,
+		limits: smokeLimits(target.id),
 	};
 }
 
@@ -153,6 +153,28 @@ test("aggregator rejects self-asserted emulation and runner mismatch", () => {
 		const result = runAggregator(value);
 		assert.notEqual(result.status, 0);
 		assert.match(result.stderr, /executor does not match authoritative descriptor/);
+	} finally {
+		rmSync(value.root, { recursive: true, force: true });
+	}
+});
+
+test("aggregator applies scaled timing budgets only to emulated targets", () => {
+	const emulated = BUN_TARGETS.find((target) => target.emulated);
+	const native = BUN_TARGETS.find((target) => !target.emulated);
+	const value = fixture();
+	try {
+		const emulatedPath = join(value.records, `${emulated.id}.json`);
+		const slow = JSON.parse(readFileSync(emulatedPath, "utf8"));
+		slow.timingsMs.coldVersion = SMOKE_LIMITS.coldVersionMs + 1;
+		writeFileSync(emulatedPath, JSON.stringify(slow));
+		assert.equal(runAggregator(value).status, 0);
+		const nativePath = join(value.records, `${native.id}.json`);
+		const claimed = JSON.parse(readFileSync(nativePath, "utf8"));
+		claimed.limits = smokeLimits(emulated.id);
+		writeFileSync(nativePath, JSON.stringify(claimed));
+		const result = runAggregator(value);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /self-reported limits do not equal authoritative limits/);
 	} finally {
 		rmSync(value.root, { recursive: true, force: true });
 	}

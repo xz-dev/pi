@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { BUN_TARGET_IDS, SMOKE_LIMITS, bunTarget } from "./lib/bun-targets.mjs";
+import { BUN_TARGET_IDS, bunTarget, smokeLimits } from "./lib/bun-targets.mjs";
 import { readZipFileBuffer } from "./lib/github-release.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 const [recordsArg, manifestArg, outputArg] = process.argv.slice(2);
@@ -28,10 +28,10 @@ const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 const normalizeRunnerArch = (value) => value === "ARM64" ? "arm64" : value === "X64" ? "x64" : value;
 const assertLimit = (id, name, actual, maximum) => { if (!Number.isSafeInteger(actual) || actual < 0 || actual > maximum) throw new Error(`${id} ${name} ${actual} exceeds authoritative limit ${maximum}`); };
 for (const id of BUN_TARGET_IDS) {
-	const descriptor = bunTarget(id); const record = byTarget.get(id); const bundle = manifest.bundles?.[id];
+	const descriptor = bunTarget(id); const record = byTarget.get(id); const bundle = manifest.bundles?.[id]; const SMOKE_LIMITS = smokeLimits(id);
 	if (!bundle || record.schemaVersion !== 1 || record.archive?.file !== bundle.file || record.archive.sha256 !== bundle.sha256 || record.archive.bytes !== bundle.bytes) throw new Error(`${id} archive identity mismatch`);
 	if (record.runner?.os !== descriptor.runnerOs || normalizeRunnerArch(record.runner?.arch) !== descriptor.arch || record.runner?.osArchitecture !== descriptor.arch) throw new Error(`${id} runner OS/architecture does not match authoritative descriptor`);
-	if (record.executor?.kind !== descriptor.executor || record.executor?.emulated !== false) throw new Error(`${id} executor does not match authoritative descriptor`);
+	if (record.executor?.kind !== descriptor.executor || record.executor?.emulated !== descriptor.emulated) throw new Error(`${id} executor does not match authoritative descriptor`);
 	if ((record.executor.containerDigest ?? null) !== (descriptor.containerImage ?? null)) throw new Error(`${id} container digest does not match authoritative descriptor`);
 	if (descriptor.libc === "musl" && JSON.stringify(record.executor.libraries) !== JSON.stringify(muslSmokeLibraries(descriptor.arch))) throw new Error(`${id} musl library evidence does not match fixed inputs`);
 	const features = String(record.runner.cpuFeatures ?? "").toLowerCase().replaceAll(".", "_");
@@ -51,7 +51,7 @@ for (const id of BUN_TARGET_IDS) {
 	if (!Number.isSafeInteger(record.tui?.outputBytes) || record.tui.outputBytes <= 0 || record.tui.harness !== expectedTui.harness || record.tui.input !== expectedTui.input || record.tui.childExitCode !== 0 || !record.tui.terminalClosed || !Number.isSafeInteger(record.tui.terminalExitCode) || !record.tui.observedOutput || record.tui.benchmarkCompleted !== expectedTui.benchmarkCompleted || record.tui.exitSent !== expectedTui.exitSent || !record.tui.cleanExit || !record.clipboard?.loadedAndCalled) throw new Error(`${id} missing bounded TUI or clipboard acceptance`);
 	const helperFile = `${descriptor.nativeHelperDir}/${descriptor.nativeHelperFile}`;
 	if (record.clipboard?.loadedAndCalled !== true || record.clipboard.textRead !== true || record.clipboard.imageRead !== true || record.clipboard.helper !== helperFile) throw new Error(`${id} missing native clipboard read evidence`);
-	assertLimit(id, "clipboardMs", record.clipboard.elapsedMs, 10_000);
+	assertLimit(id, "clipboardMs", record.clipboard.elapsedMs, SMOKE_LIMITS.clipboardMs);
 	const helperHash = createHash("sha256").update(readZipFileBuffer(join(resolve(manifestPath, ".."), bundle.file), helperFile)).digest("hex");
 	if (record.clipboard.sha256 !== helperHash) throw new Error(`${id} archived native helper does not match acceptance evidence`);
 	if (descriptor.os === "windows") {

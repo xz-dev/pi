@@ -18,7 +18,7 @@ import {
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { binaryArchiveName, bunTarget } from "./lib/bun-targets.mjs";
+import { EMULATED_SMOKE_SLOWDOWN, binaryArchiveName, bunTarget } from "./lib/bun-targets.mjs";
 import { BUNDLE_LAYOUT_VERSION, MANIFEST_SCHEMA_VERSION } from "./lib/github-release.mjs";
 import { run } from "./lib/e2e-command.mjs";
 
@@ -28,6 +28,8 @@ if (!candidateArg || !targetId || !expectedVersion) {
 }
 const candidate = resolve(candidateArg);
 const target = bunTarget(targetId);
+// Live-session claim polling: 500 x 20 ms natively, scaled under emulation.
+const claimPollAttempts = 500 * (target.emulated ? EMULATED_SMOKE_SLOWDOWN : 1);
 const archive = join(candidate, binaryArchiveName(targetId));
 const work = mkdtempSync(join(tmpdir(), "pi self-update e2e-"));
 const install = join(work, "install");
@@ -407,7 +409,7 @@ try {
 	};
 	try {
 		let registered = false;
-		for (let attempt = 0; attempt < 500; attempt++) {
+		for (let attempt = 0; attempt < claimPollAttempts; attempt++) {
 			if (liveSession.exitCode !== null) {
 				throw new Error(`Live managed session exited before claim readiness: ${liveSession.exitCode}`);
 			}
@@ -454,7 +456,7 @@ try {
 		}
 	}
 	let liveReleased = false;
-	for (let attempt = 0; attempt < 500; attempt++) {
+	for (let attempt = 0; attempt < claimPollAttempts; attempt++) {
 		if (probeExclusiveUsageClaim(probeModule, liveGuard) === "acquired") {
 			liveReleased = true;
 			break;

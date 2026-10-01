@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import * as path from "node:path";
 import test from "node:test";
-import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, BUN_VERSION, GITHUB_HOSTED_RUNNERS, RELEASE_BUILD, SMOKE_LIMITS, binaryArchiveName, bunBuildFlags, githubBuildMatrix, githubSmokeMatrix, isMainModulePath } from "./lib/bun-targets.mjs";
+import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, BUN_VERSION, EMULATED_SMOKE_SLOWDOWN, GITHUB_HOSTED_RUNNERS, RELEASE_BUILD, SMOKE_LIMITS, binaryArchiveName, bunBuildFlags, githubBuildMatrix, githubSmokeMatrix, isMainModulePath, smokeLimits } from "./lib/bun-targets.mjs";
 
 const EXPECTED = [
-	"freebsd-x64",
+	"freebsd-x64", "freebsd-arm64",
 	"darwin-x64-baseline", "darwin-x64-modern", "darwin-arm64",
 	"linux-x64-gnu-baseline", "linux-x64-gnu-modern", "linux-arm64-gnu",
 	"linux-x64-musl-baseline", "linux-x64-musl-modern", "linux-arm64-musl",
@@ -19,7 +19,7 @@ test("target descriptor CLI recognizes native Windows paths", () => {
 
 test("authoritative Bun target descriptors contain the exact supported matrix", () => {
 	assert.deepEqual(BUN_TARGET_IDS, EXPECTED);
-	assert.equal(new Set(BUN_TARGET_IDS).size, 13);
+	assert.equal(new Set(BUN_TARGET_IDS).size, 14);
 	const matrix = githubBuildMatrix();
 	assert.deepEqual(matrix.include.map(({ id }) => id), EXPECTED.filter((id) => !id.startsWith("freebsd-")));
 	assert.ok(matrix.include.every(({ id, runner, arch, runnerOs, runnerArch }) => id && runner && arch && runnerOs && runnerArch));
@@ -101,6 +101,16 @@ test("release compiler settings and smoke descriptors cover every target", () =>
 	assert.deepEqual(smoke.filter(({ executor }) => executor === "pinned-musl-container").map(({ target }) => target), [
 		"linux-x64-musl-baseline", "linux-x64-musl-modern", "linux-arm64-musl",
 	]);
+});
+
+test("only FreeBSD arm64 is emulated, and only its timing budgets scale", () => {
+	assert.deepEqual(BUN_TARGETS.filter(({ emulated }) => emulated).map(({ id }) => id), ["freebsd-arm64"]);
+	assert.equal(smokeLimits("freebsd-x64"), SMOKE_LIMITS);
+	const scaled = smokeLimits("freebsd-arm64");
+	assert.equal(scaled.coldVersionMs, SMOKE_LIMITS.coldVersionMs * EMULATED_SMOKE_SLOWDOWN);
+	assert.equal(scaled.clipboardMs, SMOKE_LIMITS.clipboardMs * EMULATED_SMOKE_SLOWDOWN);
+	assert.equal(scaled.archiveBytes, SMOKE_LIMITS.archiveBytes);
+	assert.equal(scaled.extractedBytes, SMOKE_LIMITS.extractedBytes);
 });
 
 test("Linux descriptors include GNU and musl native clipboard packages for both architectures", () => {

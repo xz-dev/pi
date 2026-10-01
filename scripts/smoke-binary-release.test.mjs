@@ -13,7 +13,8 @@ const smokeScript = readFileSync(join(import.meta.dirname, "smoke-binary-release
 
 test("command kill timeout is a hang guard separate from the measured performance limit", () => {
 	// A budget-sized kill timeout turned slow cold starts into opaque SIGTERM failures.
-	assert.match(smokeScript, /timeout: options\.timeout \?\? 60_000/);
+	assert.match(smokeScript, /timeout: \(options\.timeout \?\? 60_000\) \* hangGuardScale/);
+	assert.match(smokeScript, /const hangGuardScale = target\.emulated \? EMULATED_SMOKE_SLOWDOWN : 1;/);
 	assert.doesNotMatch(smokeScript, /timeout: options\.timeout \?\? options\.maxMs/);
 	assert.match(smokeScript, /if \(options\.maxMs && elapsedMs > options\.maxMs\) throw/);
 	assert.match(smokeScript, /failed after \$\{elapsedMs\}ms/);

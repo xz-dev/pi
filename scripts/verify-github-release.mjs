@@ -81,7 +81,7 @@ function hostPlatform() {
 		return override;
 	}
 	const modern = process.arch === "x64" && process.features?.typescript !== undefined && process.env.PI_XZ_VERIFY_MODERN === "1";
-	if (process.platform === "freebsd" && process.arch === "x64") return "freebsd-x64";
+	if (process.platform === "freebsd") return process.arch === "arm64" ? "freebsd-arm64" : "freebsd-x64";
 	if (process.platform === "darwin") return process.arch === "arm64" ? "darwin-arm64" : `darwin-x64-${modern ? "modern" : "baseline"}`;
 	if (process.platform === "linux") {
 		const libc = process.report?.getReport()?.header?.glibcVersionRuntime ? "gnu" : "musl";
@@ -133,7 +133,7 @@ const acceptance = readJson(join(releaseDir, ACCEPTANCE_FILENAME));
 if (acceptance.schemaVersion !== 1 || acceptance.targetCount !== BINARY_PLATFORMS.length || acceptance.manifest?.sha256 !== sha256File(manifestPath) || acceptance.manifest?.commit !== manifest.commit || !Array.isArray(acceptance.targets) || acceptance.targets.length !== BINARY_PLATFORMS.length) throw new Error("Invalid binary acceptance record");
 for (const record of acceptance.targets) {
 	const bundle = manifest.bundles[record.target];
-	if (!bundle || record.archive?.sha256 !== bundle.sha256 || record.runner?.osArchitecture !== platformNativeInfo(record.target).arch || record.executor?.emulated !== false || record.tui?.observedOutput !== true || record.tui?.cleanExit !== true || record.clipboard?.loadedAndCalled !== true || record.thirdPartyNotices?.file !== "THIRD_PARTY_NOTICES.md" || !/^[0-9a-f]{64}$/.test(record.thirdPartyNotices?.sha256 ?? "") || !Number.isSafeInteger(record.thirdPartyNotices?.bytes)) throw new Error(`Invalid acceptance evidence for ${record.target}`);
+	if (!bundle || record.archive?.sha256 !== bundle.sha256 || record.runner?.osArchitecture !== platformNativeInfo(record.target).arch || record.executor?.emulated !== platformNativeInfo(record.target).emulated || record.tui?.observedOutput !== true || record.tui?.cleanExit !== true || record.clipboard?.loadedAndCalled !== true || record.thirdPartyNotices?.file !== "THIRD_PARTY_NOTICES.md" || !/^[0-9a-f]{64}$/.test(record.thirdPartyNotices?.sha256 ?? "") || !Number.isSafeInteger(record.thirdPartyNotices?.bytes)) throw new Error(`Invalid acceptance evidence for ${record.target}`);
 	const notice = readArchivedNotice(join(releaseDir, bundle.file), record.target);
 	if (notice.sha256 !== record.thirdPartyNotices.sha256 || notice.bytes !== record.thirdPartyNotices.bytes) throw new Error(`Archived third-party notices mismatch for ${record.target}`);
 }
