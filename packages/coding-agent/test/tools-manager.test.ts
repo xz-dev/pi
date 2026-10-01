@@ -112,6 +112,24 @@ describe("getLatestVersion", () => {
 });
 
 describe("ensureTool", () => {
+	it.each([
+		["fd", "fd-find"],
+		["rg", "ripgrep"],
+	] as const)("reports the FreeBSD package for %s without network access", async (tool, pkgName) => {
+		delete process.env.PI_OFFLINE;
+		vi.mocked(platform).mockReturnValue("freebsd");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const statuses: ToolStatus[] = [];
+		await expect(ensureTool(tool, (status) => statuses.push(status))).resolves.toBeUndefined();
+		expect(statuses).toEqual([
+			{
+				type: "warning",
+				message: `${tool === "fd" ? "fd" : "ripgrep"} not found. Install with: pkg install ${pkgName}`,
+			},
+		]);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
 	it("reports status through a callback without writing to the console", async () => {
 		process.env.PI_OFFLINE = "1";
 		const statuses: ToolStatus[] = [];
