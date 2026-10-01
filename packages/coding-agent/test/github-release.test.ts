@@ -12,6 +12,7 @@ const PREPARE_SCRIPT = join(REPO_ROOT, "scripts", "prepare-github-release.mjs");
 const VERIFY_SCRIPT = join(REPO_ROOT, "scripts", "verify-github-release.mjs");
 const LIB_URL = pathToFileURL(join(REPO_ROOT, "scripts", "lib", "github-release.mjs")).href;
 const TARGETS = [
+	"freebsd-x64",
 	"darwin-x64-baseline",
 	"darwin-x64-modern",
 	"darwin-arm64",
@@ -140,13 +141,13 @@ function addAcceptanceEvidence(
 }
 
 describe("GitHub Release binary packaging helpers", () => {
-	test("defines the twelve canonical target bundles and the layout version", async () => {
+	test("defines the thirteen canonical target bundles and the layout version", async () => {
 		const lib = await loadLib();
 		expect(lib.BINARY_PLATFORMS).toEqual(TARGETS);
 		expect(lib.MANIFEST_SCHEMA_VERSION).toBe(5);
 		expect(lib.BUNDLE_LAYOUT_VERSION).toBe(2);
 		expect(lib.PACKAGING_BINARY).toBe("binary");
-		expect(lib.BINARY_PLATFORMS).toHaveLength(12);
+		expect(lib.BINARY_PLATFORMS).toHaveLength(13);
 		expect(lib.binaryArchiveName("linux-x64-gnu-modern")).toBe("pi-linux-x64-gnu-modern.zip");
 		expect(lib.binaryArchiveName("windows-arm64")).toBe("pi-windows-arm64.zip");
 	});
@@ -177,8 +178,10 @@ describe("GitHub Release binary packaging helpers", () => {
 		}
 	});
 
-	test("all platforms carry the upstream native platform helper", async () => {
+	test("all platforms declare the matching native platform helper", async () => {
 		const lib = await loadLib();
+		expect(lib.platformNativeInfo("freebsd-x64").nativeHelperDir).toBe("native/freebsd/prebuilds/freebsd-x64");
+		expect(lib.platformNativeInfo("freebsd-x64").nativeHelperFile).toBe("freebsd-platform-x11.node");
 		expect(lib.platformNativeInfo("darwin-arm64").nativeHelperFile).toBe("darwin-platform.node");
 		expect(lib.platformNativeInfo("darwin-x64-modern").nativeHelperDir).toBe("native/darwin/prebuilds/darwin-x64");
 		expect(lib.platformNativeInfo("windows-x64-modern").nativeHelperDir).toBe("native/win32/prebuilds/win32-x64");
@@ -198,7 +201,7 @@ describe("GitHub Release preparation (binary bundles)", () => {
 		expect(`${result.stdout}\n${result.stderr}`).toMatch(/external temporary directory/);
 	});
 
-	test("assembles the exact schema-v5 Release from twelve prebuilt archives", async () => {
+	test("assembles the exact schema-v5 Release from thirteen prebuilt archives", async () => {
 		const prebuilt = temporaryDirectory("pi-release-prebuilt-");
 		const output = temporaryDirectory("pi-release-output-");
 		const head = run("git", ["rev-parse", "HEAD"]).stdout.trim();
@@ -216,10 +219,10 @@ describe("GitHub Release preparation (binary bundles)", () => {
 		const manifest = JSON.parse(readFileSync(join(output, "release-manifest.json"), "utf8"));
 		expect(manifest.schemaVersion).toBe(5);
 		expect(Object.keys(manifest.bundles)).toEqual(TARGETS);
-		expect(manifest.acceptance).toEqual({ file: "binary-acceptance.json", targetCount: 12 });
+		expect(manifest.acceptance).toEqual({ file: "binary-acceptance.json", targetCount: TARGETS.length });
 		const lib = await loadLib();
 		const sums = lib.parseSha256Sums(readFileSync(join(output, "SHA256SUMS"), "utf8"));
-		expect(sums.size).toBe(13);
+		expect(sums.size).toBe(TARGETS.length + 1);
 		for (const target of TARGETS) {
 			const bundle = manifest.bundles[target];
 			expect(bundle.file).toBe(lib.binaryArchiveName(target));
