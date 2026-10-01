@@ -10,7 +10,7 @@ Release platforms (one ZIP each, see [Installation](#installation)):
 | Linux musl | `linux-x64-musl-baseline`, `linux-x64-musl-modern`, `linux-arm64-musl` |
 | macOS | `darwin-x64-baseline`, `darwin-x64-modern`, `darwin-arm64` |
 | Windows | `windows-x64-baseline`, `windows-x64-modern`, `windows-arm64` |
-| FreeBSD 14.3+ | `freebsd-x64` |
+| FreeBSD 14.3+ | `freebsd-x64`, `freebsd-arm64` |
 
 > [!NOTE]
 > 🌟 Star this fork to show your support for its direction and encourage change in upstream Pi.
@@ -26,9 +26,9 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 
 ### Features
 
-- Run the native FreeBSD amd64 ZIP with CLI, TUI, extension loading, self-update, and kernel-held bundle cleanup locks.
+- Run the native FreeBSD amd64 and arm64 ZIPs with CLI, TUI, extension loading, self-update, and kernel-held bundle cleanup locks.
   - Use case: Use Pi on FreeBSD without a Linux compatibility layer or a separately installed JavaScript runtime.
-  - Limits: FreeBSD 14.3 or newer; arm64 is not a published target. Install `fd-find` and `ripgrep` for find/grep tools. X11 clipboard reads require `libxcb`; Wayland uses `wl-clipboard`, and SSH/headless copy uses OSC 52.
+  - Limits: FreeBSD 14.3 or newer. The arm64 ZIP is accepted in an emulated (QEMU TCG) guest because GitHub has no arm64 KVM host. Install `fd-find` and `ripgrep` for find/grep tools. X11 clipboard reads require `libxcb`; Wayland uses `wl-clipboard`, and SSH/headless copy uses OSC 52.
   - Patch branches: [`patch/freebsd-support`](https://github.com/xz-dev/pi/tree/patch/freebsd-support), [`patch/freebsd-launcher`](https://github.com/xz-dev/pi/tree/patch/freebsd-launcher)
 - Detach eligible long-running AI tool calls into session-owned managed executions, with `tool_task` controls for status, bounded waits, and cancellation requests while preserving exactly one result for each original tool call.
   - Use case: Let Pi continue reasoning while opted-in shell or extension work runs, without turning untrusted tool output into a steering message or losing cancellation/lifecycle ownership.
@@ -117,7 +117,7 @@ The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://
 
 ## Installation
 
-xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 13 ZIP bundles: FreeBSD amd64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64. The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. Each ZIP contains `pi` plus `pi-native` (`.exe` on Windows) and all version-matched runtime assets. No Node.js, Bun, npm, package manager, or generated installer script is required.
+xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 14 ZIP bundles: FreeBSD amd64 and arm64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64. The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. Each ZIP contains `pi` plus `pi-native` (`.exe` on Windows) and all version-matched runtime assets. No Node.js, Bun, npm, package manager, or generated installer script is required.
 
 Keep the extracted ZIP contents together; the launcher alone is not a single-file distribution. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
 
@@ -132,11 +132,11 @@ chmod +x pi/pi pi/pi-native
 
 ### FreeBSD
 
-Download `pi-freebsd-x64.zip` on FreeBSD 14.3 or newer (amd64), then:
+Download `pi-freebsd-x64.zip` (amd64) or `pi-freebsd-arm64.zip` (arm64) on FreeBSD 14.3 or newer, then:
 
 ```sh
 pkg install unzip fd-find ripgrep
-unzip pi-freebsd-x64.zip -d pi
+unzip pi-freebsd-<arch>.zip -d pi
 chmod +x pi/pi pi/pi-native
 ./pi/pi --version
 ```
