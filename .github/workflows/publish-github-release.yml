@@ -119,8 +119,9 @@ jobs:
           release: "14.3"
           arch: x86_64
           mem: 6144
-          prepare: pkg install -y node22 npm-node22 bash curl zip unzip libxcb xorg-vfbserver fd-find ripgrep
-          run: bash scripts/freebsd-release.sh
+          prepare: pkg install -y node22 npm-node22 bash curl git-lite zip unzip libxcb xorg-vfbserver fd-find ripgrep
+          # The synced checkout keeps the runner uid; trust it so release tooling can verify HEAD == GITHUB_SHA.
+          run: git config --global --add safe.directory "$PWD" && bash scripts/freebsd-release.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-target-${{ github.sha }}-freebsd-x64", path: ".artifacts/freebsd-release/pi-freebsd-x64.zip", if-no-files-found: error, overwrite: true, retention-days: 14 }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
