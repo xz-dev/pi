@@ -374,7 +374,7 @@ jobs:
             subject_count=$((subject_count + 1))
             gh attestation verify "$candidate/$subject" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
           done < "$subjects"
-          test "$subject_count" -eq 16
+          test "$subject_count" -eq 17
           empty_gh_config="$RUNNER_TEMP/empty-gh-config"; mkdir "$empty_gh_config"; GH_CONFIG_DIR="$empty_gh_config" GH_TOKEN= GITHUB_TOKEN= gh attestation verify "$candidate/binary-acceptance.json" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners --format json > "$RUNNER_TEMP/public-attestation-verification.json"
           cp "$bundle" "$subjects"
       - name: Publish immutable GitHub Release
