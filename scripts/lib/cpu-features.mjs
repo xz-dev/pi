@@ -21,6 +21,11 @@ export function cpuFeatures(options = {}) {
 	if (hostPlatform === "linux") {
 		return (options.linuxCpuInfo ?? readFileSync("/proc/cpuinfo", "utf8")).match(/^Features\s*:.*|^flags\s*:.*$/m)?.[0] ?? "unknown";
 	}
+	if (hostPlatform === "freebsd") {
+		// FreeBSD's boot log records CPUID flags; hw.model only names the CPU.
+		const bootLog = options.freebsdBootLog ?? readFileSync("/var/run/dmesg.boot", "utf8");
+		return `${cpuModel}\n${bootLog.match(/Features2=.*$/m)?.[0] ?? "unknown"}`;
+	}
 	if (hostPlatform === "darwin") {
 		const result = run("sysctl", ["-n", "machdep.cpu.features", "machdep.cpu.leaf7_features"], {
 			encoding: "utf8",

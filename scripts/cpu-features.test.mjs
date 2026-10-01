@@ -49,6 +49,10 @@ test("Windows arm64 records its model without probing x64 features", () => {
 	assert.equal(called, false);
 });
 
+test("FreeBSD records CPUID flags from its boot log", () => {
+	assert.match(cpuFeatures({ platform: "freebsd", arch: "x64", cpuModel: "BSD CPU", freebsdBootLog: "Features2=0x1<SSE4.1,SSE4.2,AVX>\n" }), /SSE4\.2/);
+});
+
 test("Linux and Darwin feature evidence remains compatible", () => {
 	assert.equal(cpuFeatures({ platform: "linux", arch: "x64", linuxCpuInfo: "flags : sse4_2 avx2\n" }), "flags : sse4_2 avx2");
 	assert.equal(

@@ -93,6 +93,9 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	if [[ -n "$native_dir" ]]; then
 		native_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperFile)
 		mkdir -p "$target_dir/$native_dir"
+		if [[ "$target" == freebsd-* ]]; then
+			bash ../tui/native/freebsd/build.sh
+		fi
 		native_source="../tui/$native_dir/$native_file"
 		if [[ "$target" == *-musl* ]]; then
 			native_source="$CLIPBOARD_MUSL_DIR/$native_dir/$native_file"

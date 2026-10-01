@@ -5,6 +5,12 @@ target=${1:?Usage: build-pi-wrapper.sh <release-target> <output> [version]}
 output=${2:?Usage: build-pi-wrapper.sh <release-target> <output> [version]}
 version=${3:-}
 case "$target" in
+	freebsd-x64)
+		[[ "$(uname -s):$(uname -m)" == FreeBSD:amd64 ]] || { echo "FreeBSD launcher must be built natively" >&2; exit 1; }
+		mkdir -p "$(dirname "$output")"
+		cc -std=c11 -Os -s -DPI_WRAPPER_VERSION="\"$version\"" native/pi-wrapper.c -o "$output"
+		exit 0
+		;;
 	darwin-x64-*) zig_target=x86_64-macos ;;
 	darwin-arm64) zig_target=aarch64-macos ;;
 	linux-x64-gnu-*) zig_target=x86_64-linux-gnu ;;

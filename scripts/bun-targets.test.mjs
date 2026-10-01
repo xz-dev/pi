@@ -4,6 +4,7 @@ import test from "node:test";
 import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, BUN_VERSION, GITHUB_HOSTED_RUNNERS, RELEASE_BUILD, SMOKE_LIMITS, binaryArchiveName, bunBuildFlags, githubBuildMatrix, githubSmokeMatrix, isMainModulePath } from "./lib/bun-targets.mjs";
 
 const EXPECTED = [
+	"freebsd-x64",
 	"darwin-x64-baseline", "darwin-x64-modern", "darwin-arm64",
 	"linux-x64-gnu-baseline", "linux-x64-gnu-modern", "linux-arm64-gnu",
 	"linux-x64-musl-baseline", "linux-x64-musl-modern", "linux-arm64-musl",
@@ -18,9 +19,9 @@ test("target descriptor CLI recognizes native Windows paths", () => {
 
 test("authoritative Bun target descriptors contain the exact supported matrix", () => {
 	assert.deepEqual(BUN_TARGET_IDS, EXPECTED);
-	assert.equal(new Set(BUN_TARGET_IDS).size, 12);
+	assert.equal(new Set(BUN_TARGET_IDS).size, 13);
 	const matrix = githubBuildMatrix();
-	assert.deepEqual(matrix.include.map(({ id }) => id), EXPECTED);
+	assert.deepEqual(matrix.include.map(({ id }) => id), EXPECTED.filter((id) => !id.startsWith("freebsd-")));
 	assert.ok(matrix.include.every(({ id, runner, arch, runnerOs, runnerArch }) => id && runner && arch && runnerOs && runnerArch));
 	assert.deepEqual(
 		matrix.include.filter(({ id }) => id.startsWith("windows-")).map(({ id, runner }) => [id, runner]),
@@ -36,10 +37,10 @@ test("authoritative Bun target descriptors contain the exact supported matrix", 
 	};
 	for (const target of BUN_TARGETS) {
 		const os = target.os;
-		const base = os === "darwin" ? "darwin" : os === "windows" ? "windows" : "linux";
+		const base = os === "freebsd" ? "freebsd" : os === "darwin" ? "darwin" : os === "windows" ? "windows" : "linux";
 		assert.equal(target.bunTarget, bunTargetFor(base, target.arch, target.libc ?? ""));
 		assert.equal(binaryArchiveName(target.id), `pi-${target.id}.${target.archive}`);
-		assert.match(target.clipboardNativePackage, target.libc ? new RegExp(`${target.libc}$`) : /clipboard-/);
+		assert.match(target.clipboardNativePackage, target.os === "freebsd" ? /native-freebsd-/ : target.libc ? new RegExp(`${target.libc}$`) : /clipboard-/);
 		if (target.os === "windows") {
 			assert.equal(target.filesystemHelperDir, `native/win32/prebuilds/win32-${target.arch}`);
 			assert.equal(target.filesystemHelperFile, "pi-filesystem-snapshot.node");
@@ -87,7 +88,7 @@ test("release compiler settings and smoke descriptors cover every target", () =>
 	assert.equal(SMOKE_LIMITS.versionMs, 2500);
 	assert.ok(BUN_TARGETS.every(({ requiredCommands }) => requiredCommands.includes("bytecode") && requiredCommands.includes("cold-version") && requiredCommands.includes("version")));
 	const smoke = githubSmokeMatrix().include;
-	assert.deepEqual(smoke.map(({ target }) => target), EXPECTED);
+	assert.deepEqual(smoke.map(({ target }) => target), EXPECTED.filter((id) => !id.startsWith("freebsd-")));
 	assert.ok(smoke.every(({ runner, executor }) => runner && ["native", "pinned-musl-container"].includes(executor)));
 	assert.deepEqual(
 		smoke.filter(({ target }) => target.startsWith("windows-")).map(({ target, runner }) => [target, runner]),
@@ -95,7 +96,7 @@ test("release compiler settings and smoke descriptors cover every target", () =>
 	);
 	for (const target of BUN_TARGETS) {
 		assert.ok(target.runnerOs && target.runnerArch && target.requiredCommands.length > 0);
-		assert.deepEqual(target.executor, target.libc === "musl" ? "pinned-musl-container" : "native");
+		assert.deepEqual(target.executor, target.os === "freebsd" ? "freebsd-vm" : target.libc === "musl" ? "pinned-musl-container" : "native");
 	}
 	assert.deepEqual(smoke.filter(({ executor }) => executor === "pinned-musl-container").map(({ target }) => target), [
 		"linux-x64-musl-baseline", "linux-x64-musl-modern", "linux-arm64-musl",

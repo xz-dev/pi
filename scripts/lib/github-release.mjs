@@ -5,7 +5,7 @@
  * Plain ESM (.mjs) so it runs directly under Node without a build step.
  *
  * Binary packaging contract:
- * - each Release ships exactly twelve Bun-compiled target bundles
+ * - each Release ships the canonical Bun-compiled target bundles
  * - the manifest freezes the exact tag, full commit, downstream/upstream API
  *   versions, per-platform archive metadata, bundle layout version, required
  *   paths, acceptance evidence, and attestation policy

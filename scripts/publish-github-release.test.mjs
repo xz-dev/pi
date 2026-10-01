@@ -58,7 +58,7 @@ function fixture() {
         },
       ]),
     ),
-    acceptance: { file: "binary-acceptance.json", targetCount: 12 },
+    acceptance: { file: "binary-acceptance.json", targetCount: PLATFORMS.length },
     attestation: {
       repository: "xz-dev/pi",
       signerWorkflow: "xz-dev/pi/.github/workflows/publish-github-release.yml",

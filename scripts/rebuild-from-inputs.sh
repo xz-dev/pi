@@ -109,6 +109,7 @@ PATCH_ORDER=(
 	model-refresh-session-rebind
 	startup-benchmark-exit
 	xz-bundle-lifecycle
+	freebsd-launcher
 	use-embedded-bun-package-manager
 	git-package-storage
 	agent-run-failure-seam
@@ -126,6 +127,7 @@ PATCH_ORDER=(
 	ai-drop-empty-messages
 	quarantine-auth-storage-flake
 	env-overrides
+	freebsd-support
 	defer-threshold-compaction
 	model-thinking-sort
 )
@@ -138,6 +140,7 @@ PATCH_ORDER=(
 # the two patches share. Rebase cascades down the chain when the predecessor
 # is rebased.
 CHAIN_EDGES=(
+	xz-bundle-lifecycle:freebsd-launcher
 	xz-bundle-lifecycle:use-embedded-bun-package-manager
 	use-embedded-bun-package-manager:git-package-storage
 	xz-bundle-lifecycle:changelog-prerelease
