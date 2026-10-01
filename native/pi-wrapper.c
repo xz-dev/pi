@@ -100,6 +100,9 @@ int wmain(int argc, wchar_t **argv) {
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#elif defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
 #endif
 
 static int executable_path(char *path, size_t capacity) {
@@ -107,6 +110,12 @@ static int executable_path(char *path, size_t capacity) {
 	ssize_t length = readlink("/proc/self/exe", path, capacity - 1);
 	if (length < 0 || (size_t)length >= capacity - 1) return -1;
 	path[length] = '\0';
+	return 0;
+#elif defined(__FreeBSD__)
+	int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+	size_t size = capacity;
+	if (sysctl(mib, 4, path, &size, NULL, 0) != 0 || size == 0 || size >= capacity) return -1;
+	path[size] = '\0';
 	return 0;
 #elif defined(__APPLE__)
 	uint32_t size = (uint32_t)capacity;
