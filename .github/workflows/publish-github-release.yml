@@ -110,11 +110,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: freebsd-x64, arch: x86_64, mem: 6144, timeout: 120 }
+          - { target: freebsd-x64, arch: x86_64, mem: 6144 }
           # No GitHub-hosted KVM host for arm64 guests: QEMU TCG emulation, scaled smoke budgets.
-          - { target: freebsd-arm64, arch: aarch64, mem: 8192, timeout: 60 }
+          - { target: freebsd-arm64, arch: aarch64, mem: 8192 }
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ matrix.timeout }}
     permissions: { contents: read }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
