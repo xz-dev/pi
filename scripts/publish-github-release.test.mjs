@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BUN_TARGET_IDS, binaryArchiveName } from "./lib/bun-targets.mjs";
-import { listZipBundleEntries, normalizeWindowsZipMetadata, readZipFile, zipCentralDirectoryEntries } from "./lib/github-release.mjs";
 import { publishGitHubRelease } from "./publish-github-release.mjs";
 
 const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -34,20 +32,20 @@ function digest(body) {
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "pi-release-publisher-"));
   const files = new Map([
-    ...BUNDLE_FILES.map((file) => [file, Buffer.from(`bundle:${file}`)]),
+    ...BUNDLE_FILES.map((file) => [file, Buffer.from(`executable:${file}`)]),
     ["release-manifest.json", Buffer.from("")],
     ["SHA256SUMS", Buffer.from("sums")],
     ["binary-acceptance.json", Buffer.from("acceptance")],
+    ["THIRD_PARTY_NOTICES.md", Buffer.from("# Third-Party Notices\n")],
   ]);
   const manifest = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     repository: "xz-dev/pi",
     tag: TAG,
     distributionVersion: VERSION,
     commit: SHA,
     minimumNodeVersion: "22.19.0",
     packaging: "binary",
-    layoutVersion: 2,
     bundles: Object.fromEntries(
       PLATFORMS.map((platform) => [
         platform,
@@ -125,71 +123,7 @@ async function withFetch(mock, body) {
   }
 }
 
-test("zip verifier accepts DOS regular-file attributes while retaining path checks", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-dos-zip-"));
-  try {
-    const stage = join(root, "stage");
-    mkdirSync(stage);
-    writeFileSync(join(stage, "package.json"), "{}\n");
-    const archive = join(root, "bundle.zip");
-    execFileSync("zip", ["-qr", archive, "."], { cwd: stage });
-    const bytes = readFileSync(archive);
-    for (let offset = 0; offset + 46 <= bytes.length; offset += 1) {
-      if (bytes.readUInt32LE(offset) !== 0x02014b50) continue;
-      const nameLength = bytes.readUInt16LE(offset + 28);
-      const name = bytes.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
-      if (!name.endsWith("/")) bytes.writeUInt32LE(bytes.readUInt32LE(offset + 38) & 0xffff, offset + 38);
-    }
-    writeFileSync(archive, bytes);
-    assert.deepEqual(listZipBundleEntries(archive), ["package.json"]);
-    assert.equal(readZipFile(archive, "package.json"), "{}\n");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-
-test("normalizes Windows 7z DOS metadata without changing archive contents", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-windows-zip-"));
-  try {
-    const stage = join(root, "stage");
-    mkdirSync(join(stage, "assets", "nested"), { recursive: true });
-    writeFileSync(join(stage, "package.json"), "{}\n");
-    writeFileSync(join(stage, "assets", "nested", "file.txt"), "asset\n");
-    const archive = join(root, "bundle.zip");
-    execFileSync("zip", ["-qr", archive, "."], { cwd: stage });
-    const dosBytes = readFileSync(archive);
-    for (const record of zipCentralDirectoryEntries(dosBytes)) {
-      dosBytes.writeUInt16LE(record.versionMadeBy & 0xff, record.centralOffset + 4);
-      dosBytes.writeUInt32LE(record.name.endsWith("/") ? 0x10 : 0x20, record.centralOffset + 38);
-    }
-    writeFileSync(archive, dosBytes);
-    const dosRecords = zipCentralDirectoryEntries(dosBytes);
-    assert.ok(dosRecords.some((record) => record.name.endsWith("/")));
-    assert.ok(dosRecords.every((record) => record.creatorOs === 0 && record.typeBits === 0));
-
-    assert.equal(normalizeWindowsZipMetadata(archive), dosRecords.length);
-    const normalizedRecords = zipCentralDirectoryEntries(readFileSync(archive));
-    assert.deepEqual(normalizedRecords.map((record) => record.name), dosRecords.map((record) => record.name));
-    assert.ok(normalizedRecords.every((record) => record.creatorOs === 3));
-    assert.ok(normalizedRecords.every((record) => record.typeBits === (record.name.endsWith("/") ? 0x4000 : 0x8000)));
-    assert.equal(readZipFile(archive, "package.json"), "{}\n");
-    assert.equal(readZipFile(archive, "assets/nested/file.txt"), "asset\n");
-
-    const unsafe = join(root, "unsafe.zip");
-    const unsafeBytes = Buffer.from(dosBytes);
-    const fileRecord = zipCentralDirectoryEntries(unsafeBytes).find((record) => !record.name.endsWith("/"));
-    assert.ok(fileRecord);
-    unsafeBytes.writeUInt16LE((3 << 8) | (fileRecord.versionMadeBy & 0xff), fileRecord.centralOffset + 4);
-    unsafeBytes.writeUInt32LE(((0xa1ff << 16) | 0x20) >>> 0, fileRecord.centralOffset + 38);
-    writeFileSync(unsafe, unsafeBytes);
-    assert.throws(() => normalizeWindowsZipMetadata(unsafe), /Unsafe zip entry type/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("creates a draft, uploads every bundle asset plus subjects, then publishes after latest ref recheck", async () => {
+test("creates a draft, uploads every executable asset plus subjects, then publishes after latest ref recheck", async () => {
   const candidate = fixture();
   const assets = new Map();
   let currentRelease;
@@ -255,7 +189,7 @@ test("creates a draft, uploads every bundle asset plus subjects, then publishes 
       [...candidate.assetBodies.keys()].sort(),
     );
     for (const file of BUNDLE_FILES) {
-      assert.ok(assets.has(file), `missing uploaded bundle ${file}`);
+      assert.ok(assets.has(file), `missing uploaded executable ${file}`);
     }
     assert.ok(events.indexOf("latest-ref-recheck") < events.indexOf("publish"));
     assert.ok(events.indexOf("upload:attestation-subjects.jsonl") < events.indexOf("latest-ref-recheck"));
@@ -396,7 +330,7 @@ test("empty public attestation bundle fails before any GitHub request", async ()
 });
 
 for (const [field, mutate] of [
-  ["schema", (manifest) => { manifest.schemaVersion = 4; }],
+  ["schema", (manifest) => { manifest.schemaVersion = 5; }],
   ["attestation workflow", (manifest) => { manifest.attestation.signerWorkflow = "evil/workflow.yml"; }],
   ["acceptance", (manifest) => { manifest.acceptance.targetCount = 11; }],
   ["bundles", (manifest) => { delete manifest.bundles["windows-arm64"]; }],

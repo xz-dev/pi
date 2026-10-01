@@ -31,13 +31,13 @@ npm run build:offline
 node scripts/prepare-github-release.mjs --out "$work/candidate" --skip-build --platform "$target"
 version=$(node -p 'require(process.argv[1]).distributionVersion' "$work/candidate/release-manifest.json")
 # DISPLAY is deliberately absent for the basic TUI, then set for clipboard reads.
-env -u DISPLAY -u WAYLAND_DISPLAY PI_OFFLINE=1 PI_CODING_AGENT_DIR="$work/agent" TERM=xterm-256color PI_XZ_TUI_TIMEOUT_MS="$interactive_ms" bun scripts/smoke-bun-tui.mjs "$work/candidate/work/$target/pi"
+env -u DISPLAY -u WAYLAND_DISPLAY PI_OFFLINE=1 PI_CODING_AGENT_DIR="$work/agent" TERM=xterm-256color PI_XZ_TUI_TIMEOUT_MS="$interactive_ms" bun scripts/smoke-bun-tui.mjs "$work/candidate/pi-$target"
 Xvfb :99 -screen 0 1024x768x24 -nolisten tcp -ac >"$work/xvfb.log" 2>&1 &
 xvfb_pid=$!
 for _ in {1..300}; do [[ -S /tmp/.X11-unix/X99 ]] && break; sleep 0.1; done
 test -S /tmp/.X11-unix/X99
 export DISPLAY=:99
 mkdir -p .artifacts/freebsd-release
-node scripts/smoke-binary-release.mjs "$work/candidate/pi-$target.zip" "$target" "$version" ".artifacts/freebsd-release/$target.json"
-node scripts/e2e-binary-self-update.mjs "$work/candidate" "$target" "$version"
-cp "$work/candidate/pi-$target.zip" .artifacts/freebsd-release/
+node scripts/smoke-binary-release.mjs "$work/candidate/pi-$target" "$target" "$version" ".artifacts/freebsd-release/$target.json"
+PI_XZ_E2E_ALLOW_NO_OLD=1 node scripts/e2e-binary-self-update.mjs "$work/candidate" "$target" "$version"
+cp "$work/candidate/pi-$target" .artifacts/freebsd-release/

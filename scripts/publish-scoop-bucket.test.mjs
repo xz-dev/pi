@@ -37,8 +37,8 @@ test("creates and updates isolated Scoop bucket branch without force push", () =
 			tag: TAG,
 			commit: mainCommit,
 			bundles: {
-				"windows-x64-modern": { file: "pi-windows-x64-modern.zip", sha256: "a".repeat(64) },
-				"windows-arm64": { file: "pi-windows-arm64.zip", sha256: "b".repeat(64) },
+				"windows-x64-modern": { file: "pi-windows-x64-modern.exe", sha256: "a".repeat(64) },
+				"windows-arm64": { file: "pi-windows-arm64.exe", sha256: "b".repeat(64) },
 			},
 		})}\n`,
 	);
@@ -55,8 +55,8 @@ test("creates and updates isolated Scoop bucket branch without force push", () =
 		const manifest = JSON.parse(git(root, `--git-dir=${remote}`, "show", "scoop:bucket/pi.json"));
 		assert.deepEqual(files, ["bucket/pi.json"]);
 		assert.equal(manifest.version, VERSION);
-		assert.match(manifest.architecture["64bit"].url, /windows-x64-modern\.zip$/);
-		assert.match(manifest.architecture.arm64.url, /windows-arm64\.zip$/);
+		assert.match(manifest.architecture["64bit"].url, /windows-x64-modern.exe$/);
+		assert.match(manifest.architecture.arm64.url, /windows-arm64.exe$/);
 
 		execFileSync("bash", [join(import.meta.dirname, "publish-scoop-bucket.sh"), manifestPath], { env });
 		assert.equal(git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/scoop"), first);

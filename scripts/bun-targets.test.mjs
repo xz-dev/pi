@@ -39,22 +39,15 @@ test("authoritative Bun target descriptors contain the exact supported matrix", 
 		const os = target.os;
 		const base = os === "freebsd" ? "freebsd" : os === "darwin" ? "darwin" : os === "windows" ? "windows" : "linux";
 		assert.equal(target.bunTarget, bunTargetFor(base, target.arch, target.libc ?? ""));
-		assert.equal(binaryArchiveName(target.id), `pi-${target.id}.${target.archive}`);
+		assert.equal(binaryArchiveName(target.id), `pi-${target.id}${target.os === "windows" ? ".exe" : ""}`);
+		assert.equal(target.executable, target.os === "windows" ? "pi.exe" : "pi");
+		assert.equal(target.wrapper, undefined);
+		assert.equal(target.archive, undefined);
+		assert.equal(target.filesystemHelperDir, undefined);
+		assert.equal(target.filesystemHelperFile, undefined);
+		assert.equal(target.requiredCommands.some((command) => command.startsWith("win32-filesystem-snapshot") || command === "usage-claim" || command === "extract" || command === "measure-extracted-size"), false);
+		assert.ok(target.requiredCommands.includes("resource-materialization"));
 		assert.match(target.clipboardNativePackage, target.os === "freebsd" ? /native-freebsd-/ : target.libc ? new RegExp(`${target.libc}$`) : /clipboard-/);
-		if (target.os === "windows") {
-			assert.equal(target.filesystemHelperDir, `native/win32/prebuilds/win32-${target.arch}`);
-			assert.equal(target.filesystemHelperFile, "pi-filesystem-snapshot.node");
-			for (const command of [
-				"win32-filesystem-snapshot-lazy-missing",
-				"win32-filesystem-snapshot-lazy-corrupt",
-				"win32-filesystem-snapshot",
-				"win32-filesystem-snapshot-loader",
-			]) assert.ok(target.requiredCommands.includes(command), `${target.id} missing ${command}`);
-		} else {
-			assert.equal(target.filesystemHelperDir, undefined);
-			assert.equal(target.filesystemHelperFile, undefined);
-			assert.equal(target.requiredCommands.some((command) => command.startsWith("win32-filesystem-snapshot")), false);
-		}
 	}
 	for (const group of [
 		BUN_TARGETS.filter((target) => target.os === "darwin" && target.arch === "x64"),

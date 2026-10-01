@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -20,17 +20,16 @@ test("command kill timeout is a hang guard separate from the measured performanc
 	assert.match(smokeScript, /failed after \$\{elapsedMs\}ms/);
 });
 
-test("Windows extraction passes absolute paths through environment variables with a bounded archive budget", () => {
-	assert.match(smokeScript, /PI_XZ_ARCHIVE: archive, PI_XZ_EXTRACT_DIR: work/);
-	assert.match(smokeScript, /Expand-Archive -LiteralPath \$env:PI_XZ_ARCHIVE -DestinationPath \$env:PI_XZ_EXTRACT_DIR -Force/);
-	assert.match(smokeScript, /PI_XZ_EXTRACT_DIR: work \}, timeout: 60_000/);
-	assert.doesNotMatch(smokeScript, /Expand-Archive[^\n]*\$args/);
+test("single-executable smoke stages the raw asset as the public entrypoint", () => {
+	assert.match(smokeScript, /copyFileSync\(asset, executable\)/);
+	assert.match(smokeScript, /pi-resources-\$\{userInfo\(\)\.uid\}/);
+	assert.doesNotMatch(smokeScript, /unzip|Expand-Archive|extractedBytes/);
 });
 
 test("native TUI smoke scopes the Windows benchmark lifecycle to the TUI child", () => {
 	assert.match(smokeScript, /const env = \{ \.\.\.process\.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR/);
 	assert.doesNotMatch(smokeScript.match(/const env = [^;]+/)?.[0] ?? "", /PI_STARTUP_BENCHMARK/);
-	assert.match(smokeScript, /const tuiEnv = target\.os === "windows" \? \{ \.\.\.env, PI_STARTUP_BENCHMARK: "1" \} : env/);
+	assert.match(smokeScript, /const tuiEnv = \{ \.\.\.env, PI_XZ_TUI_PASTE_PROBE: "1"[^\n]*PI_STARTUP_BENCHMARK/);
 	assert.match(smokeScript, /run\("version"[^\n]+\{ env, maxMs/);
 	assert.match(smokeScript, /"smoke-bun-tui\.mjs"[^\n]+\{ env: tuiEnv, timeout/);
 });
@@ -109,43 +108,40 @@ test("external TUI evidence contributes the authoritative pseudoterminal command
 	const root = mkdtempSync(join(tmpdir(), "pi-external-tui-"));
 	try {
 		const stage = join(root, "stage");
-		const nativeDir = join(stage, "native", "linux", "prebuilds", "linux-x64");
-		mkdirSync(nativeDir, { recursive: true });
-		const pi = join(stage, "pi"); writeFileSync(pi, "#!/bin/sh\ncase \"$1\" in --version) echo 1.2.3;; --help) echo Usage: pi;; --list-models) echo model;; *) exit 1;; esac\n"); chmodSync(pi, 0o755);
-		const piNative = join(stage, "pi-native"); writeFileSync(piNative, "#!/bin/sh\necho '[Disk Cache] Cache hit for sourceCode' >&2\n[ \"$1\" = --version ] && echo 1.2.3\n"); chmodSync(piNative, 0o755);
-		writeFileSync(join(stage, "native", "LICENSE"), "fixture clipboard license\n");
-		mkdirSync(join(stage, "native", "usage-claim"), { recursive: true });
-		writeFileSync(join(stage, "usage.lock"), "P");
-		writeFileSync(
-			join(stage, "native", "usage-claim", "pi-usage-claim.node"),
-			`const fs=require("node:fs");module.exports={acquire(path,mode,scope){const marker=path+".shared";if(mode==="shared"){fs.writeFileSync(marker,String(process.pid));return scope==="session"?"acquired":{mockUsageClaim:true}}if(fs.existsSync(marker))return "busy";return {mockUsageClaim:true}},releaseScoped(){return "released"},sessionHeld(){return false}};\n`,
-		);
-		writeFileSync(
-			join(stage, "package.json"),
-			JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.2.3", piConfig: { distribution: "xz-dev", releaseTarget: target, usageClaimProtocol: 1 } }),
-		);
-		// This protocol fixture mocks N-API loading; native execution is a separate CI gate.
-		writeFileSync(join(nativeDir, "linux-platform-x11.node"), "module.exports = { getText: async () => null, getImage: async () => null };\n");
+		mkdirSync(stage, { recursive: true });
+		// The fixture executable is a shell script that materializes the native
+		// helper tree into the isolated tmpdir resource cache itself, so the
+		// materialization/clipboard probes have real files to find.
+		const descriptor = bunTarget(target);
+		const helperRelative = `${descriptor.nativeHelperDir}/${descriptor.nativeHelperFile}`;
+		const pi = join(stage, `pi-${target}`);
+		writeFileSync(pi, `#!/bin/sh
+uid=$(id -u)
+cache="$TMPDIR/pi-resources-$uid/${target}/1.2.3/${helperRelative}"
+mkdir -p "$(dirname "$cache")"
+printf 'module.exports = { getText: async () => null, getImage: async () => null };\\n' > "$cache"
+mkdir -p "$TMPDIR/pi-resources-$uid/${target}/1.2.3/native"
+printf '{}' > "$TMPDIR/pi-resources-$uid/${target}/1.2.3/native/clipboard-native-provenance.json"
+if [ -n "$BUN_JSC_verboseDiskCache" ]; then echo "[Disk Cache] Cache hit for sourceCode /$bunfs/entry" >&2; fi
+case "$1" in
+  --version) echo 1.2.3;;
+  --help) echo Usage: pi;;
+  --list-models) echo model;;
+  *) exit 0;;
+esac
+`); chmodSync(pi, 0o755);
 		const preload = join(root, "native-fixture.cjs");
 		writeFileSync(preload, "require.extensions['.node'] = (module, filename) => module._compile(require('node:fs').readFileSync(filename, 'utf8'), filename);\n");
-		const lockPath = join(root, "package-lock.json");
-		writeFileSync(lockPath, JSON.stringify({ version: "1.2.3", lockfileVersion: 3, packages: { "packages/coding-agent": { name: "@earendil-works/pi-coding-agent", dependencies: { fixture: "1.0.0" } }, "node_modules/fixture": { version: "1.0.0", license: "MIT" } } }));
-		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), stage, join(stage, "THIRD_PARTY_NOTICES.md"), lockPath]);
-		const notices = readFileSync(join(stage, "THIRD_PARTY_NOTICES.md"), "utf8");
-		assert.match(notices, /## native@1\.2\.3/);
-		assert.match(notices, /### LICENSE\nLicense SHA-256: [0-9a-f]{64}/);
-		const archive = join(root, "pi-linux-x64-gnu-baseline.zip"); execFileSync("zip", ["-qr", archive, "."], { cwd: stage });
 		const bin = join(root, "bin"); mkdirSync(bin); const bun = join(bin, "bun"); writeFileSync(bun, `#!/bin/sh\nexec "${process.execPath}" "$@"\n`); chmodSync(bun, 0o755);
-		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: null, exitSent: true, cleanExit: true }));
+		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-v,ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: null, exitSent: true, cleanExit: true }));
 		const recordPath = join(root, "record.json");
-		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), archive, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_USAGE_CLAIM_MOCK: "1", PI_XZ_TUI_EVIDENCE: evidence, RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
+		mkdirSync(join(root, "smoke-tmp"));
+		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_TUI_EVIDENCE: evidence, TMPDIR: join(root, "smoke-tmp"), RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
 		const record = JSON.parse(readFileSync(recordPath, "utf8"));
-		assert.deepEqual(record.commands.map(({ name }) => name), bunTarget(target).requiredCommands);
-		assert.deepEqual(record.commands.at(-1), { name: "tui-pseudoterminal", command: `external:${evidence}`, status: 0, elapsedMs: 37 });
-		assert.ok(Number.isSafeInteger(record.timingsMs.coldVersion));
-		assert.ok(Number.isSafeInteger(record.timingsMs.version));
-		assert.equal(record.usageClaim.sharedContention, true);
-		assert.equal(record.usageClaim.crashRelease, true);
+		assert.deepEqual(record.commands.map(({ name }) => name), descriptor.requiredCommands);
+		assert.deepEqual(record.commands.at(-2).name, "resource-materialization");
+		assert.deepEqual(record.commands.at(-1).name, "clipboard");
+		assert.equal(record.asset.file, `pi-${target}`);
 		assert.equal(record.clipboard.loadedAndCalled, true);
 		assert.equal(record.clipboard.textRead, true);
 		assert.equal(record.clipboard.imageRead, true);

@@ -52,17 +52,21 @@ function pinnedUses() {
   );
 }
 
-test("upstream sync fetches and merges the xz bundle lifecycle patch", () => {
+test("upstream sync fetches and merges the single-executable patch", () => {
 	assert.match(
 		syncWorkflowText,
-		/\+refs\/heads\/patch\/xz-bundle-lifecycle:refs\/remotes\/origin\/patch\/xz-bundle-lifecycle/,
+		/\+refs\/heads\/patch\/single-executable:refs\/remotes\/origin\/patch\/single-executable/,
 	);
 	// The merge itself is owned by the replay script; here we prove the
 	// workflow feeds the patch's frozen SHA into it.
-	assert.match(syncWorkflowText, /xz-bundle-lifecycle \\\n/);
+	assert.match(syncWorkflowText, /single-executable \\\n/);
 	assert.match(syncWorkflowText, /rebuild_args\+=\(--patch "\$ref=\$\(git rev-parse \"origin\/patch\/\$ref\"\)"\)/);
-	assertPatchIntegrated(syncScript, "xz-bundle-lifecycle");
-	assert.doesNotMatch(syncWorkflowText, /patch\/(?:native-wrapper-release|update-clean|bundle-usage-claims)\b/);
+	assertPatchIntegrated(syncScript, "single-executable");
+	// Superseded ZIP-bundle lifecycle patches stay retired.
+	assert.doesNotMatch(
+		syncWorkflowText,
+		/patch\/(?:native-wrapper-release|update-clean|bundle-usage-claims|xz-bundle-lifecycle|freebsd-launcher|use-embedded-bun-package-manager|git-package-storage|changelog-prerelease|self-update-managed-by)\b/,
+	);
 	assert.doesNotMatch(syncScript, /resolve-release-self-update-squash-conflicts/);
 });
 
@@ -431,32 +435,15 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.doesNotMatch(workflowText, /smoke-unix-tui\.py/);
   assert.doesNotMatch(workflowText, /AppActivate|SendKeys|Docker allocated TTY|fabricated/);
   assert.match(workflowText, /e2e-binary-self-update\.mjs/);
-  // xz-release-update, win32-filesystem-snapshot and package-command-paths tests are
-  // covered by the coding-agent auto-discovery run in the sync workflow.
-  assert.match(updateHarness, /PI_XZ_LATEST_RELEASE_URL: `\$\{releaseBase\}latest-release\.json`/);
-  assert.match(updateHarness, /digest: `sha256:\$\{servedBundle\.sha256\}`/);
-  assert.match(updateHarness, /const activatedBundle = join\(install, "bundles", expectedVersion\)/);
-  assert.match(updateHarness, /createHash\("sha256"\)\.update\(readFileSync\(wrapper\)\)\.digest\("hex"\) !== wrapperSha256/);
-  assert.match(updateHarness, /Identical POSIX root wrapper was replaced/);
-  assert.match(updateHarness, /await run\(join\(managedPreviousBundle, target\.wrapper\), \["update", "--self", "--force"\]/);
-  assert.match(updateHarness, /Managed previous bundle did not start through its own launcher/);
-  assert.doesNotMatch(updateHarness, /published a root launcher|POSIX root wrapper was not atomically replaced/);
-  assert.doesNotMatch(updateHarness, /join\(install, "(?:current|previous)"\)/);
-  for (const failure of [
-    "missing-helper",
-    "corrupt-helper",
-    "opposite-architecture-helper",
-    "malformed-result-helper",
-    "api-mismatch-helper",
-  ]) assert.match(updateHarness, new RegExp(`"${failure}",`));
-  assert.match(workflowText, /PI_WIN32_SNAPSHOT_UNC_ROOT/);
-  assert.match(workflowText, /PI_WIN32_SNAPSHOT_OPPOSITE_HELPER/);
-  assert.match(workflowText, /PI_WIN32_SNAPSHOT_API_MISMATCH_HELPER/);
-  assert.match(workflowText, /PI_WIN32_SNAPSHOT_MALFORMED_RESULT_HELPER/);
-  assert.match(workflowText, /malformed-result\.node" 1 1/);
-  assert.match(updateHarness, /escaped the isolated helper probe into a destination bundle/);
-  assert.match(updateHarness, /update retry retained no quarantined rejected bundle/);
-  assert.match(updateHarness, /assets: \[/);
+  // The single-executable E2E serves manifest, SHA256SUMS, and the raw asset
+  // from a local HTTP server and exercises `pi update --self` end to end.
+  assert.match(updateHarness, /PI_XZ_RELEASE_BASE_URL/);
+  assert.match(updateHarness, /manifestPayload/);
+  assert.match(updateHarness, /update", "--self"\]/);
+  assert.match(updateHarness, /update", "--clean"\]/);
+  assert.match(updateHarness, /corrupt asset unexpectedly activated|corrupt update replaced the running executable/);
+  assert.match(updateHarness, /update --clean did not remove the strict-version backup/);
+  assert.match(updateHarness, /update --clean removed the running executable/);
   assert.match(updateHarness, /rmSync\(work, \{ recursive: true, force: true, maxRetries: 60, retryDelay: 500 \}\)/);
   assert.deepEqual(workflow.jobs["publish-release"].needs, "update-release-candidate");
 });
@@ -503,7 +490,7 @@ test("Linux archive smoke provisions a headless display without bypassing clipbo
 
 test("final native smoke proves every executable contains bytecode", () => {
   const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
-  assert.match(smoke, /run\("bytecode", nativeExecutable/);
+  assert.match(smoke, /run\("bytecode", executable/);
   assert.match(smoke, /BUN_JSC_verboseDiskCache: "1"/);
   assert.match(smoke, /\[Disk Cache\] Cache hit for sourceCode/);
   assert.match(smoke, /did not load its entrypoint from embedded bytecode/);
@@ -546,31 +533,15 @@ test("stages upstream musl helpers with provenance and uses optimized Bun 1.4.2"
   assert.match(libraries, /APK digest mismatch/);
   assert.match(libraries, /musl library digest mismatch/);
   const packager = readFileSync(join(ROOT, "scripts", "build-binaries.sh"), "utf8");
-  assert.match(packager, /build-win32-filesystem-snapshot\.sh/);
-  assert.match(packager, /filesystemHelperDir/);
-  assert.match(packager, /filesystemHelperFile/);
-  const sourceArchive = readFileSync(join(ROOT, "scripts", "create-source-archive.sh"), "utf8");
-  for (const required of [
-    "scripts/build-win32-filesystem-snapshot.sh",
-    "scripts/test-win32-filesystem-snapshot.mjs",
-    "scripts/test-win32-filesystem-snapshot-loader.mjs",
-    "native/pi-filesystem-snapshot.c",
-  ]) assert.ok(sourceArchive.includes(`\"${required}\"`), `source archive missing ${required}`);
-  const releaseContract = readFileSync(join(ROOT, "scripts", "lib", "github-release.mjs"), "utf8");
-  assert.match(releaseContract, /info\.filesystemHelperDir/);
-  assert.match(releaseContract, /info\.filesystemHelperFile/);
   assert.match(packager, /--hydrate-target-deps/);
   assert.match(packager, /bun-targets\.mjs --build-flags/);
-  assert.match(packager, /command -v cygpath/);
-  assert.match(packager, /7z a -bd -tzip -mm=Deflate/);
-  assert.match(packager, /normalize-windows-zip\.mjs "\$archive_path"/);
-  assert.match(packager, /zip -qr/);
-  assert.match(packager, /rm -f "\$archive_path"/);
+  // The release artifact is the raw `pi-<target>` executable; no archives are
+  // produced, so no zip/7z/normalize tooling remains in the packager.
+  assert.doesNotMatch(packager, /7z |normalize-windows-zip|zip -q|cygpath -w/);
   // macOS runners ship bash 3.2 without mapfile; keep flag reading portable.
   assert.doesNotMatch(packager, /^\s*mapfile\s/m);
   assert.match(packager, /verify-musl-provenance\.mjs/);
-  assert.match(packager, /cp "\$CLIPBOARD_MUSL_DIR\/provenance\.json" "\$target_dir\/clipboard-native-provenance\.json"/);
-  assert.match(packager, /cp \.\.\/\.\.\/LICENSE "\$target_dir\/native\/LICENSE"/);
+  assert.match(packager, /clipboard-native-provenance\.json/);
 });
 
 test("publication attests final subjects before draft publication and keeps audit list separate", () => {
@@ -588,9 +559,10 @@ test("publication attests final subjects before draft publication and keeps audi
   );
   assert.match(workflowText, /actions\/attest-build-provenance@[0-9a-f]{40}/);
   for (const subject of [
-    "*.zip",
+    "pi-*",
     "release-manifest.json",
     "binary-acceptance.json",
+    "THIRD_PARTY_NOTICES.md",
     "SHA256SUMS",
   ]) {
     assert.ok(
@@ -606,7 +578,7 @@ test("publication attests final subjects before draft publication and keeps audi
   assert.match(workflowText, /GH_CONFIG_DIR="\$empty_gh_config" GH_TOKEN= GITHUB_TOKEN=/);
   assert.doesNotMatch(workflowText, /mapfile|readarray/);
   assert.match(workflowText, /while IFS= read -r subject/);
-  assert.match(workflowText, /test "\$subject_count" -eq 17/);
+  assert.match(workflowText, /test "\$subject_count" -eq 18/);
   assert.match(workflowText, /gh attestation verify/);
   assert.match(workflowText, /--bundle "\$bundle"/);
   assert.match(workflowText, /--source-digest "\$GITHUB_SHA"/);
@@ -677,14 +649,23 @@ test("upstream sync smoke packages and executes only the hydrated Linux host tar
     assert.ok(smokeStep.run.includes(argument), `missing sync packaging argument: ${argument}`);
   }
   assert.equal((smokeStep.run.match(/--platform /g) ?? []).length, 1);
-  assert.match(smokeStep.run, /test -s "\$archive"/);
+  assert.match(smokeStep.run, /executable="\$release_dir\/pi-linux-x64-gnu-modern"/);
+  assert.match(smokeStep.run, /test -s "\$executable"/);
   assert.match(
     smokeStep.run,
-    /smoke-binary-release\.mjs[\s\S]*"\$archive"[\s\S]*linux-x64-gnu-modern[\s\S]*"\$version"/,
+    /smoke-binary-release\.mjs[\s\S]*"\$executable"[\s\S]*linux-x64-gnu-modern[\s\S]*"\$version"/,
   );
   assert.doesNotMatch(smokeStep.run, /npm (ci|install)/);
   assert.doesNotMatch(syncWorkflowText, /prepare-github-release\.mjs/);
   assert.doesNotMatch(syncWorkflowText, /verify-github-release\.mjs local/);
+});
+
+test("smoke harness consumes the raw executable and materializes its resource cache", () => {
+  const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
+  assert.match(smoke, /copyFileSync\(asset, executable\)/);
+  assert.match(smoke, /PI_XZ_TUI_PASTE_PROBE/);
+  assert.match(smoke, /pi-resources-\$\{userInfo\(\)\.uid\}/);
+  assert.doesNotMatch(smoke, /unzip|Expand-Archive|extracted|target\.wrapper|usage-claim|win32-filesystem-snapshot/);
 });
 
 test("FreeBSD guest verifies the exact checked-out commit with Git", () => {

@@ -35,13 +35,12 @@ function readManifest(path) {
   }
   const manifest = JSON.parse(readFileSync(path, "utf8"));
   if (
-    manifest.schemaVersion !== 5 ||
+    manifest.schemaVersion !== 6 ||
     manifest.repository !== EXPECTED_REPOSITORY ||
     typeof manifest.distributionVersion !== "string" ||
     typeof manifest.tag !== "string" ||
     manifest.tag !== `xz-v${manifest.distributionVersion}` ||
     manifest.packaging !== "binary" ||
-    manifest.layoutVersion !== 2 ||
     typeof manifest.bundles !== "object" ||
     manifest.bundles === null ||
     Array.isArray(manifest.bundles) ||
@@ -69,6 +68,7 @@ function releaseAssetPaths(releaseDir, manifest) {
     ...Object.values(manifest.bundles).map((bundle) => bundle.file),
     "release-manifest.json",
     "binary-acceptance.json",
+    "THIRD_PARTY_NOTICES.md",
     "SHA256SUMS",
   ];
   const subjectPaths = expectedSubjects.map((line) => join(releaseDir, line));

@@ -2,7 +2,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { binaryArchiveName, stableStringify } from "./lib/github-release.mjs";
+import { stableStringify } from "./lib/github-release.mjs";
 
 const [releaseManifestArg, outputArg] = process.argv.slice(2);
 if (!releaseManifestArg || !outputArg) {
@@ -21,18 +21,19 @@ const architecture = Object.fromEntries(
 		["arm64", "windows-arm64"],
 	].map(([scoopArch, target]) => {
 		const bundle = releaseManifest.bundles?.[target];
-		const file = binaryArchiveName(target);
+		const file = `pi-${target}.exe`;
 		if (bundle?.file !== file || !/^[0-9a-f]{64}$/.test(bundle.sha256 ?? "")) {
 			throw new Error(`Invalid ${target} bundle metadata`);
 		}
-		return [scoopArch, { url: `${releaseUrl}/${file}`, hash: bundle.sha256 }];
+		// The asset is the raw executable: scoop downloads it under that name and
+		// the bin entry shims it as `pi` (no extraction).
+		return [scoopArch, { url: `${releaseUrl}/${file}`, hash: bundle.sha256, bin: [[file, "pi"]] }];
 	}),
 );
 
 // Mark the installation as scoop-managed by dropping an empty
 // .scoop.managed.lock next to the executable. `pi update --self` detects the
 // *.managed.lock marker, refuses to replace the binary, and points at scoop.
-// The zip itself stays channel-neutral for users who download it directly.
 const postInstall = ["New-Item -Force -ItemType File (Join-Path $dir '.scoop.managed.lock') | Out-Null"];
 
 writeFileSync(
@@ -43,7 +44,6 @@ writeFileSync(
 		homepage: "https://github.com/xz-dev/pi",
 		license: "MIT",
 		architecture,
-		bin: "pi.exe",
 		post_install: postInstall,
 	}),
 );

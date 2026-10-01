@@ -10,8 +10,9 @@ test("real package installation gates the final Linux release archive", () => {
   const gate = steps.find(step => step.name === "Verify real installed extension packages without external runtimes");
   assert.equal(gate.if, "matrix.target == 'linux-x64-gnu-modern'");
   assert.match(gate.run, /release-manifest\.json/);
-  assert.match(gate.run, /unzip -q "\$candidate\/\$archive"/);
-  assert.match(gate.run, /e2e-embedded-package-manager\.mjs "\$extracted\/pi"/);
+  // Single raw executable: the release asset itself is the entrypoint; nothing is extracted.
+  assert.doesNotMatch(gate.run, /unzip|Expand-Archive/);
+  assert.match(gate.run, /e2e-embedded-package-manager\.mjs "\$candidate\/\$archive"/);
   assert.equal(gate["continue-on-error"], undefined);
   assert.ok(workflow.jobs["acceptance-record"].needs.includes("accept-release-candidate"));
 });
