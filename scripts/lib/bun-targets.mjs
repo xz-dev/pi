@@ -32,8 +32,8 @@ export function bunBuildFlags(id, buildHost = currentBuildHost()) {
 	return BUN_BUILD_FLAGS;
 }
 export const SMOKE_LIMITS = Object.freeze({
-	archiveBytes: 100 * 1024 * 1024,
-	extractedBytes: 250 * 1024 * 1024,
+	// Raw single-executable release asset (~115 MiB today, runtime + embedded resources).
+	assetBytes: 160 * 1024 * 1024,
 	coldVersionMs: 5000,
 	versionMs: 2500,
 	helpMs: 3000,

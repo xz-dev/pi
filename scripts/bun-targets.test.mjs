@@ -102,8 +102,7 @@ test("only FreeBSD arm64 is emulated, and only its timing budgets scale", () => 
 	const scaled = smokeLimits("freebsd-arm64");
 	assert.equal(scaled.coldVersionMs, SMOKE_LIMITS.coldVersionMs * EMULATED_SMOKE_SLOWDOWN);
 	assert.equal(scaled.clipboardMs, SMOKE_LIMITS.clipboardMs * EMULATED_SMOKE_SLOWDOWN);
-	assert.equal(scaled.archiveBytes, SMOKE_LIMITS.archiveBytes);
-	assert.equal(scaled.extractedBytes, SMOKE_LIMITS.extractedBytes);
+	assert.equal(scaled.assetBytes, SMOKE_LIMITS.assetBytes);
 });
 
 test("Linux descriptors include GNU and musl native clipboard packages for both architectures", () => {

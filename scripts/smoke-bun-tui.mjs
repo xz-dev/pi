@@ -28,6 +28,7 @@ let benchmarkCompleted = startupBenchmark ? false : null;
 const terminalClosure = Promise.withResolvers();
 let observedOutput = false;
 let exitSent = false;
+let pasteTimer;
 let interruptTimer;
 let exitTimer;
 let timeoutTimer;
@@ -50,9 +51,13 @@ const child = Bun.spawn([executable], {
 			}
 			if (observedOutput) return;
 			observedOutput = true;
-			if (pasteProbe) terminal.write("\x16");
+			// The first output byte can arrive before the editor handles input, so a
+			// single early ctrl+v may be dropped. Repeat it until the interrupt;
+			// extra pastes are harmless.
+			if (pasteProbe) pasteTimer = setInterval(() => terminal.write("\x16"), 100);
 			if (!startupBenchmark) {
 				interruptTimer = setTimeout(() => {
+					clearInterval(pasteTimer);
 					terminal.write("\x03");
 					exitTimer = setTimeout(() => {
 						exitSent = true;
@@ -99,6 +104,7 @@ try {
 	console.error(error instanceof Error ? error.message : String(error));
 	process.exitCode = 1;
 } finally {
+	clearInterval(pasteTimer);
 	clearTimeout(interruptTimer);
 	clearTimeout(exitTimer);
 	clearTimeout(timeoutTimer);
