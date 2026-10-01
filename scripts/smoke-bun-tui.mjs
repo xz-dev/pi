@@ -52,9 +52,9 @@ const child = Bun.spawn([executable], {
 			if (observedOutput) return;
 			observedOutput = true;
 			// The first output byte can arrive before the editor handles input, so a
-			// single early ctrl+v may be dropped. Repeat it until the interrupt;
-			// extra pastes are harmless.
-			if (pasteProbe) pasteTimer = setInterval(() => terminal.write("\x16"), 100);
+			// single early ctrl+v may be dropped. Retry a few times, spaced so native
+			// clipboard reads never overlap (overlapping macOS reads crashed).
+			if (pasteProbe) pasteTimer = setInterval(() => terminal.write("\x16"), timeoutMs / 28);
 			if (!startupBenchmark) {
 				interruptTimer = setTimeout(() => {
 					clearInterval(pasteTimer);

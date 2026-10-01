@@ -132,7 +132,10 @@ esac
 `); chmodSync(pi, 0o755);
 		const preload = join(root, "native-fixture.cjs");
 		writeFileSync(preload, "require.extensions['.node'] = (module, filename) => module._compile(require('node:fs').readFileSync(filename, 'utf8'), filename);\n");
-		const bin = join(root, "bin"); mkdirSync(bin); const bun = join(bin, "bun"); writeFileSync(bun, `#!/bin/sh\nexec "${process.execPath}" "$@"\n`); chmodSync(bun, 0o755);
+		const bin = join(root, "bin"); mkdirSync(bin); const bun = join(bin, "bun");
+		// The in-display paste probe runs `bun smoke-bun-tui.mjs <pi>`; a fixture pi
+		// materializes on any invocation, so run it directly instead of a PTY.
+		writeFileSync(bun, `#!/bin/sh\ncase "$1" in *smoke-bun-tui.mjs) exec "$2";; esac\nexec "${process.execPath}" "$@"\n`); chmodSync(bun, 0o755);
 		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-v,ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: null, exitSent: true, cleanExit: true }));
 		const recordPath = join(root, "record.json");
 		mkdirSync(join(root, "smoke-tmp"));
