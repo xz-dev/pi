@@ -148,6 +148,7 @@ CHAIN_EDGES=(
 	managed-tool-executions:esc-abort
 	esc-abort:manual-retry
 	manual-retry:slow-hook-tui-only
+	slow-hook-tui-only:defer-threshold-compaction
 )
 
 print_marker() {
