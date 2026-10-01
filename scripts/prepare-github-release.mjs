@@ -1,25 +1,24 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import {
 	ATTESTATION_SIGNER_REF,
 	ATTESTATION_SIGNER_WORKFLOW,
 	ATTESTATION_SUBJECTS_FILENAME,
 	BINARY_PLATFORMS,
-	BUNDLE_LAYOUT_VERSION,
 	DISTRIBUTION,
 	ENTRY_PACKAGE,
 	MANIFEST_SCHEMA_VERSION,
 	PACKAGING_BINARY,
 	REPOSITORY,
-	assertBinaryBundleInventory,
+	assertExecutableAsset,
 	binaryArchiveName,
-	binaryRequiredPaths,
 	forkDistributionVersion,
 	formatSha256Sums,
-	readBundlePackageJson,
+	platformNativeInfo,
 	resolveFullCommit,
 	run,
 	sha256File,
@@ -31,6 +30,7 @@ const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 const MANIFEST_FILENAME = "release-manifest.json";
 const SUMS_FILENAME = "SHA256SUMS";
 const ACCEPTANCE_FILENAME = "binary-acceptance.json";
+const NOTICES_FILENAME = "THIRD_PARTY_NOTICES.md";
 
 function usage() {
 	return [
@@ -39,8 +39,13 @@ function usage() {
 		"  --out <dir>         external temporary output directory (required)",
 		"  --skip-deps         skip installing cross-platform native bindings (local speed; CI builds all)",
 		"  --skip-build        skip the npm package build (use when dist/ is already built)",
-		`  --platform <name>   build only one target (default: all ${BINARY_PLATFORMS.length} canonical targets)`,
-		"  --prebuilt <dir>    assemble an exact full candidate from matrix-built archives",
+		`  --platform <name>   build only selected targets (repeatable; default: all ${BINARY_PLATFORMS.length} canonical targets)`,
+		"  --prebuilt <dir>    assemble a candidate from matrix-built raw executables",
+		"  --distribution-version <v>  expected probed version (default: derived from GITHUB_RUN_* + commit)",
+		"  --commit <sha>      manifest commit (default: HEAD); needed for locally versioned fixtures",
+		"",
+		"  With --prebuilt and no --platform, the directory must contain every canonical",
+		"  executable; combine --prebuilt with --platform to verify a subset locally.",
 	].join("\n");
 }
 
@@ -50,14 +55,18 @@ function parseArgs(argv) {
 	let skipDeps = false;
 	let skipBuild = false;
 	let prebuiltDir;
+	let distributionVersion;
+	let commit;
 	const platforms = [];
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
-		if (arg === "--out" || arg === "--platform" || arg === "--prebuilt") {
+		if (arg === "--out" || arg === "--platform" || arg === "--prebuilt" || arg === "--distribution-version" || arg === "--commit") {
 			const value = args[index + 1];
 			if (!value || value.startsWith("--")) throw new Error(`Missing value for ${arg}\n${usage()}`);
 			if (arg === "--out") outDir = value;
 			else if (arg === "--prebuilt") prebuiltDir = resolve(value);
+			else if (arg === "--distribution-version") distributionVersion = value;
+			else if (arg === "--commit") commit = value;
 			else platforms.push(value);
 			index += 1;
 		} else if (arg === "--skip-deps") skipDeps = true;
@@ -80,22 +89,58 @@ function parseArgs(argv) {
 			throw new Error(`Invalid platform ${platform}; expected one of ${BINARY_PLATFORMS.join(", ")}`);
 		}
 	}
-	if (prebuiltDir && platforms.length > 0) throw new Error("--prebuilt cannot be combined with --platform");
-	return { outDir: resolved, skipDeps, skipBuild, platforms: selected, prebuiltDir };
+	return { outDir: resolved, skipDeps, skipBuild, platforms: selected, prebuiltDir, distributionVersion, commit };
 }
 
 function writeJson(path, value) {
 	writeFileSync(path, stableStringify(value));
 }
 
+function hostOs() {
+	if (process.platform === "darwin") return "darwin";
+	if (process.platform === "win32") return "windows";
+	return "linux";
+}
+
+/**
+ * Read the package metadata embedded into a compiled candidate by running
+ * `<exe> --version` under an isolated HOME with PI_OFFLINE=1. Foreign
+ * executables (Windows on Linux, macOS anywhere else, FreeBSD, arm64 on x64)
+ * cannot run on the host; their presence and non-emptiness are asserted and
+ * the manifest sha256 still binds their bytes.
+ */
+function probeCandidate(executablePath, platform) {
+	assertExecutableAsset(executablePath, platform);
+	const target = platformNativeInfo(platform);
+	const runnable = target.os === hostOs() && target.arch === (process.arch === "arm64" ? "arm64" : "x64") && (target.libc ?? "gnu") !== "musl";
+	if (!runnable) return undefined;
+	const home = mkdtempSync(join(tmpdir(), "pi-release-probe-"));
+	try {
+		const version = run(executablePath, ["--version"], {
+			capture: true,
+			env: { HOME: home, USERPROFILE: home, PATH: process.env.PATH ?? "", PI_OFFLINE: "1", NODE_ENV: "production" },
+		}).trim();
+		if (!/^\d+\.\d+\.\d+-xz\.\d+\.\d+\.g[0-9a-f]{8}$/.test(version)) {
+			throw new Error(`${platform} executable --version returned unexpected output: ${JSON.stringify(version)}`);
+		}
+		return version;
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+}
+
 function main() {
-	const { outDir, skipDeps, skipBuild, platforms, prebuiltDir } = parseArgs(process.argv);
+	const { outDir, skipDeps, skipBuild, platforms, prebuiltDir, distributionVersion: requestedVersion, commit: requestedCommit } = parseArgs(process.argv);
 	const rootPackageJson = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
 	if (rootPackageJson.name !== "pi-monorepo") throw new Error("Run this script from the repository root");
 	const entryPackageJson = JSON.parse(readFileSync(join(REPO_ROOT, "packages", "coding-agent", "package.json"), "utf8"));
 	const apiVersion = entryPackageJson.version;
-	const distributionVersion = forkDistributionVersion(apiVersion);
-	const commit = resolveFullCommit();
+	const distributionVersion = requestedVersion ?? forkDistributionVersion(apiVersion);
+	if (!/^\d+\.\d+\.\d+-xz\.\d+\.\d+\.g[0-9a-f]{8}$/.test(distributionVersion)) {
+		throw new Error(`Invalid distribution version: ${distributionVersion}`);
+	}
+	const commit = requestedCommit ?? resolveFullCommit();
+	if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error(`Invalid commit: ${commit}`);
 	const tag = `xz-v${distributionVersion}`;
 
 	rmSync(outDir, { force: true, recursive: true });
@@ -116,30 +161,31 @@ function main() {
 	if (!prebuiltDir) run("bash", buildArgs, { cwd: REPO_ROOT });
 
 	const bundles = {};
-	const requiredPaths = {};
 	for (const platform of platforms) {
-		const archiveName = binaryArchiveName(platform);
-		const archivePath = join(workDir, archiveName);
-		if (!existsSync(archivePath)) throw new Error(`Missing built bundle archive: ${archivePath}`);
-		assertBinaryBundleInventory(archivePath, platform);
-		const bundledPackageJson = readBundlePackageJson(archivePath, platform);
-		if (bundledPackageJson.name !== ENTRY_PACKAGE) throw new Error(`${platform} bundle has unexpected package name`);
-		if (bundledPackageJson.version !== distributionVersion) throw new Error(`${platform} bundle has unexpected version`);
-		if (bundledPackageJson.piConfig?.distribution !== DISTRIBUTION) {
-			throw new Error(`${platform} bundle missing piConfig.distribution=${DISTRIBUTION}`);
+		const assetName = binaryArchiveName(platform);
+		const executablePath = join(workDir, assetName);
+		if (!existsSync(executablePath)) throw new Error(`Missing built release executable: ${executablePath}`);
+		const probedVersion = probeCandidate(executablePath, platform);
+		if (probedVersion !== undefined && probedVersion !== distributionVersion) {
+			throw new Error(`${platform} executable reports ${probedVersion}, expected ${distributionVersion}`);
 		}
-		if (bundledPackageJson.piConfig?.usageClaimProtocol !== 1) {
-			throw new Error(`${platform} bundle missing piConfig.usageClaimProtocol=1`);
-		}
-		const destination = join(outDir, archiveName);
-		renameSync(archivePath, destination);
+		const destination = join(outDir, assetName);
+		// --prebuilt inputs are matrix artifacts: copy so the input directory stays
+		// intact for repeated local verification runs.
+		if (prebuiltDir) copyFileSync(executablePath, destination);
+		else renameSync(executablePath, destination);
 		bundles[platform] = {
-			file: archiveName,
+			file: assetName,
 			bytes: readFileSync(destination).byteLength,
 			sha256: sha256File(destination),
 		};
-		requiredPaths[platform] = binaryRequiredPaths(platform);
 	}
+
+	// One release-level license notice for the whole dependency closure; the
+	// single-file executables embed everything, so there is no per-target bundle
+	// to carry it.
+	run("node", [join(SCRIPT_DIR, "generate-third-party-notices.mjs"), join(outDir, NOTICES_FILENAME)], { cwd: REPO_ROOT });
+	const notices = { file: NOTICES_FILENAME, bytes: readFileSync(join(outDir, NOTICES_FILENAME)).byteLength, sha256: sha256File(join(outDir, NOTICES_FILENAME)) };
 
 	const manifest = {
 		schemaVersion: MANIFEST_SCHEMA_VERSION,
@@ -149,9 +195,7 @@ function main() {
 		apiVersion,
 		commit,
 		packaging: PACKAGING_BINARY,
-		layoutVersion: BUNDLE_LAYOUT_VERSION,
 		bundles,
-		requiredPaths,
 		acceptance: { file: ACCEPTANCE_FILENAME, targetCount: BINARY_PLATFORMS.length },
 		attestation: {
 			repository: REPOSITORY,
@@ -166,6 +210,7 @@ function main() {
 	const checksummedAssets = [
 		...Object.values(bundles).map((entry) => entry.file),
 		MANIFEST_FILENAME,
+		NOTICES_FILENAME,
 	];
 	const sumsPath = join(outDir, SUMS_FILENAME);
 	writeFileSync(
@@ -180,7 +225,8 @@ function main() {
 	writeFileSync(join(outDir, "tag"), `${tag}\n`);
 
 	console.log(`Prepared GitHub Release ${tag} (${PACKAGING_BINARY})`);
-	console.log(`Bundles: ${platforms.length}`);
+	console.log(`Executables: ${platforms.length}`);
+	console.log(`Notices: ${notices.sha256}`);
 	console.log(manifestPath);
 	console.log(sumsPath);
 	console.log(subjectsPath);

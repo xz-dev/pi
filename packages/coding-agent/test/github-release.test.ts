@@ -1,12 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 
-const ENTRY_PACKAGE = "@earendil-works/pi-coding-agent";
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 const PREPARE_SCRIPT = join(REPO_ROOT, "scripts", "prepare-github-release.mjs");
 const VERIFY_SCRIPT = join(REPO_ROOT, "scripts", "verify-github-release.mjs");
@@ -54,38 +53,20 @@ function run(command: string, args: string[], cwd = REPO_ROOT) {
 	return result;
 }
 
-async function writePrebuiltFixture(directory: string, version: string) {
-	const lib = await loadLib();
+/**
+ * Write one raw-executable fixture per target. Each file is a POSIX shell
+ * script printing the requested version for `--version`, which is what
+ * prepare-github-release.mjs probes. Windows `.exe` names get the same script
+ * body; the probe only runs host-native targets.
+ */
+function writePrebuiltFixture(directory: string, version: string) {
 	for (const target of TARGETS) {
-		const root = join(directory, "fixture", target);
-		const info = lib.platformNativeInfo(target);
-		const requiredPaths: string[] = lib.binaryRequiredPaths(target);
-		for (const required of requiredPaths) {
-			const path = join(root, required);
-			if (required === "pi" || required === "pi.exe") continue;
-			if (requiredPaths.some((candidate) => candidate.startsWith(`${required}/`))) {
-				mkdirSync(path, { recursive: true });
-			} else {
-				mkdirSync(dirname(path), { recursive: true });
-				writeFileSync(
-					path,
-					required === "package.json"
-						? `${JSON.stringify({ name: ENTRY_PACKAGE, version, piConfig: { distribution: "xz-dev", releaseTarget: target, usageClaimProtocol: 1 } })}\n`
-						: `${required}\n`,
-				);
-			}
-		}
-		const executable = join(root, info.executable);
+		const file = join(directory, `pi-${target}${target.startsWith("windows-") ? ".exe" : ""}`);
 		writeFileSync(
-			executable,
-			`#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' '${version}'; else printf 'pi fixture help\\n'; fi\n`,
+			file,
+			`#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' '${version}'; else printf 'pi fixture help\\nUsage: pi\\n'; fi\n`,
 		);
-		chmodSync(executable, 0o755);
-		const wrapper = join(root, info.wrapper);
-		writeFileSync(wrapper, `#!/bin/sh\nexec "$(dirname "$0")/${info.executable}" "$@"\n`);
-		chmodSync(wrapper, 0o755);
-		const archive = join(directory, lib.binaryArchiveName(target));
-		run("zip", ["-q", "-r", archive, "."], root);
+		chmodSync(file, 0o755);
 	}
 }
 
@@ -96,23 +77,16 @@ function addAcceptanceEvidence(
 		bundles: Record<string, { file: string; bytes: number; sha256: string }>;
 	},
 ) {
-	const records = TARGETS.map((target) => {
-		const archive = join(releaseDir, manifest.bundles[target].file);
-		const noticeDirectory = temporaryDirectory("pi-release-notice-fixture-");
-		run("unzip", ["-q", archive, "THIRD_PARTY_NOTICES.md", "-d", noticeDirectory]);
-		const notice = join(noticeDirectory, "THIRD_PARTY_NOTICES.md");
-		return {
-			schemaVersion: 1,
-			target,
-			archive: manifest.bundles[target],
-			runner: { osArchitecture: target.includes("arm64") ? "arm64" : "x64" },
-			// Only FreeBSD arm64 is accepted under QEMU TCG emulation.
-			executor: { emulated: target === "freebsd-arm64" },
-			tui: { observedOutput: true, cleanExit: true },
-			clipboard: { loadedAndCalled: true },
-			thirdPartyNotices: { file: "THIRD_PARTY_NOTICES.md", sha256: sha256(notice), bytes: statSync(notice).size },
-		};
-	});
+	const records = TARGETS.map((target) => ({
+		schemaVersion: 1,
+		target,
+		asset: manifest.bundles[target],
+		runner: { osArchitecture: target.includes("arm64") ? "arm64" : "x64" },
+		// Only FreeBSD arm64 is accepted under QEMU TCG emulation.
+		executor: { emulated: target === "freebsd-arm64" },
+		tui: { observedOutput: true, cleanExit: true },
+		clipboard: { loadedAndCalled: true },
+	}));
 	const manifestPath = join(releaseDir, "release-manifest.json");
 	const acceptancePath = join(releaseDir, "binary-acceptance.json");
 	writeFileSync(
@@ -123,7 +97,7 @@ function addAcceptanceEvidence(
 				manifest: {
 					file: "release-manifest.json",
 					sha256: sha256(manifestPath),
-					schemaVersion: 5,
+					schemaVersion: 6,
 					commit: manifest.commit,
 				},
 				targetCount: TARGETS.length,
@@ -143,41 +117,36 @@ function addAcceptanceEvidence(
 }
 
 describe("GitHub Release binary packaging helpers", () => {
-	test("defines the fourteen canonical target bundles and the layout version", async () => {
+	test("defines the fourteen canonical raw executables", async () => {
 		const lib = await loadLib();
 		expect(lib.BINARY_PLATFORMS).toEqual(TARGETS);
-		expect(lib.MANIFEST_SCHEMA_VERSION).toBe(5);
-		expect(lib.BUNDLE_LAYOUT_VERSION).toBe(2);
+		expect(lib.MANIFEST_SCHEMA_VERSION).toBe(6);
+		expect(lib.BUNDLE_LAYOUT_VERSION).toBeUndefined();
 		expect(lib.PACKAGING_BINARY).toBe("binary");
 		expect(lib.BINARY_PLATFORMS).toHaveLength(14);
-		expect(lib.binaryArchiveName("linux-x64-gnu-modern")).toBe("pi-linux-x64-gnu-modern.zip");
-		expect(lib.binaryArchiveName("windows-arm64")).toBe("pi-windows-arm64.zip");
+		expect(lib.binaryArchiveName("linux-x64-gnu-modern")).toBe("pi-linux-x64-gnu-modern");
+		expect(lib.binaryArchiveName("windows-arm64")).toBe("pi-windows-arm64.exe");
 	});
 
-	test("provides the machine-checkable required-path inventory per platform", async () => {
+	test("executable asset check requires a regular nonzero executable file", async () => {
 		const lib = await loadLib();
-		for (const platform of lib.BINARY_PLATFORMS) {
-			const inventory = lib.binaryRequiredPaths(platform);
-			const info = lib.platformNativeInfo(platform);
-			expect(inventory).toContain(info.executable);
-			expect(inventory).toContain(info.wrapper);
-			expect(inventory).toContain("package.json");
-			expect(inventory).toContain("photon_rs_bg.wasm");
-			expect(inventory).toContain("theme");
-			expect(inventory).toContain("theme/dark.json");
-			expect(inventory).toContain("assets");
-			expect(inventory).toContain("export-html");
-			expect(inventory).toContain("docs");
-			expect(inventory).toContain("examples");
-			expect(inventory).toContain("native/LICENSE");
-			expect(inventory).toContain(info.nativeHelperDir);
-			expect(inventory).toContain(`${info.nativeHelperDir}/${info.nativeHelperFile}`);
-			expect(inventory.some((path: string) => path.includes("node_modules/@mariozechner/clipboard"))).toBe(false);
-			if (platform.includes("-musl")) {
-				expect(inventory).toContain("clipboard-native-provenance.json");
-			}
-			expect(inventory).toEqual(expect.arrayContaining([...inventory]));
-		}
+		const dir = temporaryDirectory("pi-executable-check-");
+		const posix = join(dir, "pi-linux-x64-gnu-baseline");
+		writeFileSync(posix, "x\n");
+		chmodSync(posix, 0o644);
+		expect(() => lib.assertExecutableAsset(posix, "linux-x64-gnu-baseline")).toThrow(/execute bit/);
+		chmodSync(posix, 0o755);
+		expect(() => lib.assertExecutableAsset(posix, "linux-x64-gnu-baseline")).not.toThrow();
+		const empty = join(dir, "pi-linux-x64-gnu-modern");
+		writeFileSync(empty, "");
+		chmodSync(empty, 0o755);
+		expect(() => lib.assertExecutableAsset(empty, "linux-x64-gnu-modern")).toThrow(/empty/);
+		const windows = join(dir, "pi-windows-x64-modern.exe");
+		writeFileSync(windows, "MZ");
+		// Windows executables do not require the POSIX x bit.
+		expect(() => lib.assertExecutableAsset(windows, "windows-x64-modern")).not.toThrow();
+		mkdirSync(join(dir, "pi-darwin-arm64"));
+		expect(() => lib.assertExecutableAsset(join(dir, "pi-darwin-arm64"), "darwin-arm64")).toThrow(/regular file/);
 	});
 
 	test("all platforms declare the matching native platform helper", async () => {
@@ -194,7 +163,7 @@ describe("GitHub Release binary packaging helpers", () => {
 	});
 });
 
-describe("GitHub Release preparation (binary bundles)", () => {
+describe("GitHub Release preparation (raw executables)", () => {
 	test("refuses destructive output paths inside the repository", () => {
 		const result = spawnSync("node", [PREPARE_SCRIPT, "--out", join(REPO_ROOT, "release-output")], {
 			cwd: REPO_ROOT,
@@ -204,7 +173,7 @@ describe("GitHub Release preparation (binary bundles)", () => {
 		expect(`${result.stdout}\n${result.stderr}`).toMatch(/external temporary directory/);
 	});
 
-	test("assembles the exact schema-v5 Release from fourteen prebuilt archives", async () => {
+	test("assembles the exact schema-v6 Release from fourteen prebuilt executables", async () => {
 		const prebuilt = temporaryDirectory("pi-release-prebuilt-");
 		const output = temporaryDirectory("pi-release-output-");
 		const head = run("git", ["rev-parse", "HEAD"]).stdout.trim();
@@ -212,28 +181,35 @@ describe("GitHub Release preparation (binary bundles)", () => {
 			readFileSync(join(REPO_ROOT, "packages", "coding-agent", "package.json"), "utf8"),
 		).version;
 		const version = `${apiVersion}-xz.501.1.g${head.slice(0, 8)}`;
-		await writePrebuiltFixture(prebuilt, version);
-		const prepared = spawnSync("node", [PREPARE_SCRIPT, "--out", output, "--prebuilt", prebuilt], {
-			cwd: REPO_ROOT,
-			encoding: "utf8",
-			env: { ...process.env, GITHUB_RUN_NUMBER: "501", GITHUB_RUN_ATTEMPT: "1", GITHUB_SHA: head },
-		});
+		writePrebuiltFixture(prebuilt, version);
+		const prepared = spawnSync(
+			"node",
+			[PREPARE_SCRIPT, "--out", output, "--prebuilt", prebuilt, ...TARGETS.flatMap((t) => ["--platform", t])],
+			{
+				cwd: REPO_ROOT,
+				encoding: "utf8",
+				env: { ...process.env, GITHUB_RUN_NUMBER: "501", GITHUB_RUN_ATTEMPT: "1", GITHUB_SHA: head },
+			},
+		);
 		expect(prepared.status, `${prepared.stdout}\n${prepared.stderr}`).toBe(0);
 		const manifest = JSON.parse(readFileSync(join(output, "release-manifest.json"), "utf8"));
-		expect(manifest.schemaVersion).toBe(5);
+		expect(manifest.schemaVersion).toBe(6);
 		expect(Object.keys(manifest.bundles)).toEqual(TARGETS);
+		expect(manifest.layoutVersion).toBeUndefined();
 		expect(manifest.acceptance).toEqual({ file: "binary-acceptance.json", targetCount: TARGETS.length });
 		const lib = await loadLib();
 		const sums = lib.parseSha256Sums(readFileSync(join(output, "SHA256SUMS"), "utf8"));
-		expect(sums.size).toBe(TARGETS.length + 1);
+		// Executables + manifest + THIRD_PARTY_NOTICES.md
+		expect(sums.size).toBe(TARGETS.length + 2);
 		for (const target of TARGETS) {
 			const bundle = manifest.bundles[target];
 			expect(bundle.file).toBe(lib.binaryArchiveName(target));
 			expect(sums.get(bundle.file)).toBe(sha256(join(output, bundle.file)));
 		}
+		expect(sums.get("THIRD_PARTY_NOTICES.md")).toBe(sha256(join(output, "THIRD_PARTY_NOTICES.md")));
 	});
 
-	test("local verifier validates the full candidate and smoke-tests a host-native archive", async () => {
+	test("local verifier validates the full candidate and smoke-tests a host-native executable", async () => {
 		const prebuilt = temporaryDirectory("pi-release-verify-prebuilt-");
 		const output = temporaryDirectory("pi-release-verify-output-");
 		const head = run("git", ["rev-parse", "HEAD"]).stdout.trim();
@@ -241,12 +217,16 @@ describe("GitHub Release preparation (binary bundles)", () => {
 			readFileSync(join(REPO_ROOT, "packages", "coding-agent", "package.json"), "utf8"),
 		).version;
 		const version = `${apiVersion}-xz.502.1.g${head.slice(0, 8)}`;
-		await writePrebuiltFixture(prebuilt, version);
-		const prepared = spawnSync("node", [PREPARE_SCRIPT, "--out", output, "--prebuilt", prebuilt], {
-			cwd: REPO_ROOT,
-			encoding: "utf8",
-			env: { ...process.env, GITHUB_RUN_NUMBER: "502", GITHUB_RUN_ATTEMPT: "1", GITHUB_SHA: head },
-		});
+		writePrebuiltFixture(prebuilt, version);
+		const prepared = spawnSync(
+			"node",
+			[PREPARE_SCRIPT, "--out", output, "--prebuilt", prebuilt, ...TARGETS.flatMap((t) => ["--platform", t])],
+			{
+				cwd: REPO_ROOT,
+				encoding: "utf8",
+				env: { ...process.env, GITHUB_RUN_NUMBER: "502", GITHUB_RUN_ATTEMPT: "1", GITHUB_SHA: head },
+			},
+		);
 		expect(prepared.status, `${prepared.stdout}\n${prepared.stderr}`).toBe(0);
 		const manifest = JSON.parse(readFileSync(join(output, "release-manifest.json"), "utf8"));
 		addAcceptanceEvidence(output, manifest);
@@ -256,7 +236,7 @@ describe("GitHub Release preparation (binary bundles)", () => {
 			env: { ...process.env, PI_XZ_VERIFY_TARGET: "linux-x64-gnu-modern" },
 		});
 		expect(verified.status, `${verified.stdout}\n${verified.stderr}`).toBe(0);
-		expect(verified.stdout).toContain(`Host-native bundle smoke ok: ${version}`);
+		expect(verified.stdout).toContain(`Host-native executable smoke ok: ${version}`);
 		expect(verified.stdout).toContain("local: exact Release assets and binary contract verified");
 	}, 60_000);
 });

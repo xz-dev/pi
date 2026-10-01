@@ -4,10 +4,9 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const [rootArg, outputArg, lockArg] = process.argv.slice(2);
-if (!rootArg || !outputArg) throw new Error("Usage: generate-third-party-notices.mjs <bundle-root> <output> [package-lock.json]");
+const [outputArg, lockArg] = process.argv.slice(2);
+if (!outputArg) throw new Error("Usage: generate-third-party-notices.mjs <output> [package-lock.json]");
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const root = resolve(rootArg);
 const output = resolve(outputArg);
 const lockPath = resolve(lockArg ?? join(repoRoot, "package-lock.json"));
 const lock = JSON.parse(readFileSync(lockPath, "utf8"));
@@ -52,18 +51,21 @@ const packages = [...closure].filter((path) => path.startsWith("node_modules/"))
 	return { path, name: packageName(path), version: metadata.version, license: metadata.license, sourceDirectory: join(repoRoot, path) };
 }).sort((a, b) => `${a.path}@${a.version}`.localeCompare(`${b.path}@${b.version}`));
 if (packages.length === 0) throw new Error("No locked runtime dependencies found");
-const nativeRoot = join(root, "native");
+// Release-level notice: single-file executables embed the platform native
+// helpers, so the packaged-native component is inventoried from the
+// checked-out prebuilds rather than from a staged bundle directory. Helper
+// digests use paths relative to the repo root.
+const nativeRoot = join(repoRoot, "packages", "tui", "native");
 if (existsSync(nativeRoot)) {
 	const helpers = readdirSync(nativeRoot, { recursive: true, withFileTypes: true })
-		.filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
-		.map((entry) => join(entry.parentPath ?? entry.path, entry.name))
+		.filter((item) => item.isFile() && item.name.endsWith(".node"))
+		.map((item) => join(item.parentPath ?? item.path, item.name))
 		.sort();
 	if (helpers.length > 0) {
-		if (!existsSync(join(nativeRoot, "LICENSE"))) throw new Error("Packaged native helpers are missing native/LICENSE");
 		packages.push({
 			path: "native", name: "@earendil-works/pi-tui", version: lock.packages["packages/tui"]?.version ?? lock.version, license: "MIT",
-			sourceDirectory: nativeRoot, packagedNative: true,
-			helpers: helpers.map((file) => `${file.slice(root.length + 1).replaceAll("\\", "/")}: ${sha256(readFileSync(file))}`),
+			sourceDirectory: repoRoot, packagedNative: true,
+			helpers: helpers.map((file) => `${file.slice(repoRoot.length + 1).replaceAll("\\", "/")}: ${sha256(readFileSync(file))}`),
 		});
 	}
 }

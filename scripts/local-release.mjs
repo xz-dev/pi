@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -29,10 +29,14 @@ Options:
 }
 
 function currentBinaryPlatform() {
-	if (process.platform === "win32") return process.arch === "arm64" ? "windows-arm64" : "windows-x64";
-	if (process.platform === "darwin") return process.arch === "arm64" ? "darwin-arm64" : "darwin-x64";
-	if (process.platform === "linux") return process.arch === "arm64" ? "linux-arm64" : "linux-x64";
+	if (process.platform === "win32") return process.arch === "arm64" ? "windows-arm64" : "windows-x64-modern";
+	if (process.platform === "darwin") return process.arch === "arm64" ? "darwin-arm64" : "darwin-x64-modern";
+	if (process.platform === "linux") return process.arch === "arm64" ? "linux-arm64-gnu" : "linux-x64-gnu-modern";
 	throw new Error(`Unsupported binary platform: ${process.platform} ${process.arch}`);
+}
+
+function binaryAssetName(platform) {
+	return `pi-${platform}${platform.startsWith("windows-") ? ".exe" : ""}`;
 }
 
 function buildBunBinaryRelease(targetDirectory, archiveDirectory) {
@@ -47,9 +51,12 @@ function buildBunBinaryRelease(targetDirectory, archiveDirectory) {
 		binaryBuildDirectory,
 	], { stdio: "inherit" });
 	rmSync(targetDirectory, { force: true, recursive: true });
-	cpSync(join(binaryBuildDirectory, platform), targetDirectory, { recursive: true });
-	const archiveName = platform.startsWith("windows-") ? `pi-${platform}.zip` : `pi-${platform}.tar.gz`;
-	cpSync(join(binaryBuildDirectory, archiveName), join(archiveDirectory, archiveName));
+	// The release artifact is the raw executable; install it under the public
+	// `pi`/`pi.exe` entrypoint name.
+	const asset = join(binaryBuildDirectory, binaryAssetName(platform));
+	mkdirSync(targetDirectory, { recursive: true });
+	cpSync(asset, join(targetDirectory, platform.startsWith("windows-") ? "pi.exe" : "pi"));
+	cpSync(asset, join(archiveDirectory, binaryAssetName(platform)));
 	return platform;
 }
 
@@ -150,7 +157,7 @@ if (!options.skipInstall) {
 	if (!options.skipBinary) {
 		console.log("\nLocal Bun binary release:");
 		console.log(`  ${binaryDirectory}`);
-		console.log(`  ${join(outDir, `pi-${binaryPlatform}.${String(binaryPlatform).startsWith("windows-") ? "zip" : "tar.gz"}`)}`);
+		console.log(`  ${join(outDir, binaryAssetName(binaryPlatform))}`);
 		console.log("\nRun the local Bun binary release from outside the repository:");
 		console.log(`  ${join(binaryDirectory, String(binaryPlatform).startsWith("windows-") ? "pi.exe" : "pi")} --help`);
 	}

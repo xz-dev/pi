@@ -26,10 +26,10 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 
 ### Features
 
-- Run the native FreeBSD amd64 and arm64 ZIPs with CLI, TUI, extension loading, self-update, and kernel-held bundle cleanup locks.
+- Run the native FreeBSD amd64 and arm64 executables with CLI, TUI, extension loading, self-update, and cleanup of obsolete backup copies.
   - Use case: Use Pi on FreeBSD without a Linux compatibility layer or a separately installed JavaScript runtime.
   - Limits: FreeBSD 14.3 or newer. The arm64 ZIP is accepted in an emulated (QEMU TCG) guest because GitHub has no arm64 KVM host. Install `fd-find` and `ripgrep` for find/grep tools. X11 clipboard reads require `libxcb`; Wayland uses `wl-clipboard`, and SSH/headless copy uses OSC 52.
-  - Patch branches: [`patch/freebsd-support`](https://github.com/xz-dev/pi/tree/patch/freebsd-support), [`patch/freebsd-launcher`](https://github.com/xz-dev/pi/tree/patch/freebsd-launcher)
+  - Patch branches: [`patch/freebsd-support`](https://github.com/xz-dev/pi/tree/patch/freebsd-support), [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 - Detach eligible long-running AI tool calls into session-owned managed executions, with `tool_task` controls for status, bounded waits, and cancellation requests while preserving exactly one result for each original tool call.
   - Use case: Let Pi continue reasoning while opted-in shell or extension work runs, without turning untrusted tool output into a steering message or losing cancellation/lifecycle ownership.
   - Patch branch: [`patch/managed-tool-executions`](https://github.com/xz-dev/pi/tree/patch/managed-tool-executions)
@@ -65,11 +65,11 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
   - Details: [Automatic compaction](packages/coding-agent/docs/compaction.md#when-it-triggers)
   - Patch branch: [`patch/defer-threshold-compaction`](https://github.com/xz-dev/pi/tree/patch/defer-threshold-compaction)
 
-- Fix standalone extension installation and updates failing when an external package manager is unavailable by using the Bun embedded in the xz-dev bundle. Explicit `npmCommand` settings take precedence; otherwise package operations use public `pi` on `PATH`, without separately installing Node.js, npm, or Bun.
+- Fix standalone extension installation and updates failing when an external package manager is unavailable by using the Bun embedded in the xz-dev bundle. Explicit `npmCommand` settings take precedence; otherwise package operations spawn the running Pi executable itself, so they work when Pi is launched by absolute path without `pi` on `PATH`, and without separately installing Node.js, npm, or Bun.
   - Use case: Install a Git extension with runtime dependencies on a machine that only has Pi and Git. Managed npm updates retain version selectors and exact pins. If metadata lookup fails, Pi warns about possible downgrade and continues; successful queries still skip equal or older targets.
   - Limits: Official Bun 1.4.2 requires a project manifest for metadata queries. Registry configuration, lockfiles, dependency scripts, and native modules are not guaranteed to behave like npm; Pi does not broaden script trust or install native build tools automatically.
   - Details: [Package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection)
-  - Patch branch: [`patch/use-embedded-bun-package-manager`](https://github.com/xz-dev/pi/tree/patch/use-embedded-bun-package-manager)
+  - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 - Send the full request instead of a cached OpenAI Codex Responses WebSocket continuation when the input delta is empty.
   - Use case: Retry an unchanged request without reusing a stale continuation that contains no new input.
   - Patch branch: [`patch/ws-cached-empty-delta`](https://github.com/xz-dev/pi/tree/patch/ws-cached-empty-delta)
@@ -86,8 +86,8 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
   - Use case: Recover control when Esc is pressed during a hook, provider setup, stream, or listener that does not settle.
   - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
 - Refuse `pi update --self` for channel-managed installations. A package manager marks its install by writing an empty `.<channel>.managed.lock` file next to the executable; `pi update --self` detects any `*.managed.lock` marker before any release lookup, refuses to replace the binary offline, and points the user at the owning channel.
-  - Use case: Stop Scoop or a Gentoo ebuild install from fighting the package manager's own upgrades, while keeping the direct-download Release zip channel-neutral.
-  - Patch branch: [`patch/self-update-managed-by`](https://github.com/xz-dev/pi/tree/patch/self-update-managed-by)
+  - Use case: Stop Scoop or a Gentoo ebuild install from fighting the package manager's own upgrades, while keeping the direct-download Release executable channel-neutral.
+  - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 - Preserve the `/model` picker's highlighted row when a background model catalog refresh completes while the picker is open. The selection is restored by provider and model id after the list rebuild; a removed model falls back to the existing current-model highlight. Mirrors the scoped-models selector behavior.
   - Use case: Browse the model list and press refresh-in-progress without the cursor snapping back to the first row mid-selection.
   - Patch branch: [`patch/model-selector-refresh-selection`](https://github.com/xz-dev/pi/tree/patch/model-selector-refresh-selection)
@@ -110,35 +110,35 @@ The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://
 
 - Keep the fork/pre-release changelog baseline, display, and version handling correct across downstream release cycles.
   - Use case: Keep downstream prerelease display and changelog lookup correct when package and release versions differ.
-  - Patch branch: [`patch/changelog-prerelease`](https://github.com/xz-dev/pi/tree/patch/changelog-prerelease)
-- Remove old managed binary bundles with `pi update --clean` while preserving the executing version, the currently installed launcher target, and every participating bundle with a live kernel-held usage claim.
-  - Use case: Free disk after several `pi update --self` cycles without deleting resources still needed by interactive, print, RPC, background, or subagent processes. Cleanup warns for recognized remote filesystems and continues; generic FUSE is not blocked or warned solely by type.
-  - Patch branch: [`patch/xz-bundle-lifecycle`](https://github.com/xz-dev/pi/tree/patch/xz-bundle-lifecycle)
+  - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
+- Remove old executable backups with `pi update --clean`. Only regular files named exactly `pi-<distribution version>` (`.exe` on Windows) next to the running executable are deleted; the running executable, symlinks, directories, and other files are left alone, and files that cannot be deleted (for example a still-running backup on Windows) are kept and reported.
+  - Use case: Free disk after several `pi update --self` cycles.
+  - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 
 ## Installation
 
-xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 14 ZIP bundles: FreeBSD amd64 and arm64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64. The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. Each ZIP contains `pi` plus `pi-native` (`.exe` on Windows) and all version-matched runtime assets. No Node.js, Bun, npm, package manager, or generated installer script is required.
+xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 14 raw executables: FreeBSD amd64 and arm64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64, named `pi-<target>` (`pi-<target>.exe` on Windows). The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. Each downloaded file is the complete single-file executable; there is no archive to extract, no wrapper, and no companion `pi-native` binary. No Node.js, Bun, npm, package manager, or generated installer script is required.
 
-Keep the extracted ZIP contents together; the launcher alone is not a single-file distribution. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
+The executable materializes its embedded runtime assets (docs, themes, native clipboard helper) into a per-user tmpdir cache at `os.tmpdir()/pi-resources-<uid>/<target>/<version>` on first use; a nonempty cache directory is reused as-is. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
 
 ### Linux and macOS
 
 ```bash
-# Download the matching pi-<target>.zip from the latest Release, then:
-unzip pi-<target>.zip -d pi
-chmod +x pi/pi pi/pi-native
-./pi/pi --version
+# Download the matching pi-<target> from the latest Release, then:
+chmod +x pi-<target>
+./pi-<target> --version
+# Optionally install it under the public name:
+mv pi-<target> ~/.local/bin/pi
 ```
 
 ### FreeBSD
 
-Download `pi-freebsd-x64.zip` (amd64) or `pi-freebsd-arm64.zip` (arm64) on FreeBSD 14.3 or newer, then:
+Download `pi-freebsd-x64` (amd64) or `pi-freebsd-arm64` (arm64) on FreeBSD 14.3 or newer, then:
 
 ```sh
-pkg install unzip fd-find ripgrep
-unzip pi-freebsd-<arch>.zip -d pi
-chmod +x pi/pi pi/pi-native
-./pi/pi --version
+pkg install fd-find ripgrep
+chmod +x pi-freebsd-<arch>
+./pi-freebsd-<arch> --version
 ```
 
 `fd-find` is the Rust search tool, not FreeBSD's unrelated `fd` package. Bash is optional: command tools fall back to `/bin/sh`. No Node.js or Bun installation is needed. Desktop clipboard reads require `pkg install libxcb xclip` for X11, or `pkg install wl-clipboard` for Wayland. Without a display, copy uses terminal OSC 52; availability depends on the terminal.
@@ -154,25 +154,25 @@ scoop install xz-dev/pi
 
 Scoop installs the x64 `modern` asset, or the native arm64 asset on Windows arm64. The x64 asset uses the same runtime-dispatched Bun target as the `baseline` alias. Update with `scoop update pi`.
 
-The Scoop install writes an empty `.scoop.managed.lock` next to the executable, so `pi update --self` refuses and points at `scoop update pi` instead; scoop owns the upgrade. Direct ZIP downloads carry no lock file and keep self-update enabled.
+The Scoop install writes an empty `.scoop.managed.lock` next to the executable, so `pi update --self` refuses and points at `scoop update pi` instead; scoop owns the upgrade. Direct executable downloads carry no lock file and keep self-update enabled.
 
 ### Windows PowerShell
 
 ```powershell
-# Download the matching pi-<target>.zip from the latest Release, then:
-Expand-Archive .\pi-<target>.zip -DestinationPath .\pi
-.\pi\pi.exe --version
+# Download the matching pi-<target>.exe from the latest Release, then rename or
+# run it in place:
+.\pi-<target>.exe --version
 ```
 
 ### Exact Release installation
 
-Download `pi-<target>.zip` from the exact `xz-v<VERSION>` Release instead of Latest, then extract it using the same commands above.
+Download `pi-<target>` (`pi-<target>.exe` on Windows) from the exact `xz-v<VERSION>` Release instead of Latest, then run it using the same commands above.
 
 Release assets include `SHA256SUMS` and GitHub build-provenance attestations for independent verification.
 
 ### Update
 
-An extracted binary updates itself directly from the matching target ZIP:
+An installed executable updates itself directly from the matching target asset:
 
 ```bash
 pi update --self
@@ -186,9 +186,9 @@ pi update --extensions
 
 For standalone extension operations, keep public `pi` on `PATH`; launching by absolute path alone does not satisfy this requirement. Git sources also require Git. See [package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection) for overrides and compatibility limits.
 
-The first update converts the extracted directory into a managed layout: the complete ZIP is staged under `bundles/<version>`, then `current` is atomically replaced. On POSIX, the root wrapper is also atomically refreshed. On Windows, `pi.exe` remains stable, waits for `pi-native.exe`, and returns its exit status without overwriting the running wrapper. A new invocation reads `current` and starts the activated bundle.
+On update, the running executable moves itself to a strict-version backup `pi-<old-version>` (`pi-<old-version>.exe` on Windows), downloads and sha256-verifies the new raw executable, then atomically replaces the public path. A stale backup is refreshed by downloading the matching old asset on the next update. `pi update --clean` removes only `pi-<version>` backups whose names match an exact semver; any other file next to the executable is left untouched.
 
-`pi update --clean` validates each supported bundle generation and takes an exclusive kernel-held retirement claim before quarantining or deleting it. A running Pi process holds a shared claim for its bundle lifetime, so cleanup retains that version until its last participating process exits; crash and forced termination release claims through the OS. The executing version and every bundle matching the installed launcher are retained independently. Known NFS/SMB/CIFS/Ceph/AFS/NCP/9P filesystems produce a warning and cleanup continues using the actual lock result; generic FUSE is neither blocked nor warned solely by type. Invalid, old-protocol, or otherwise unverifiable bundle directories remain untouched, as do `.update-*`, `.cleanup-*`, and `.update-rejected-*` maintenance paths.
+Users upgrading from the old ZIP bundle layout (`pi` + `pi-native` + loose assets) need a one-time manual migration: delete the old extracted directory and download the single `pi-<target>` file instead. Old-layout installations cannot self-update onto the new format.
 
 ### Source checkout
 

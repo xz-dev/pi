@@ -29,11 +29,8 @@ const env = {
   GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", JITI_FS_CACHE: "false", TERM: "dumb",
 };
 const hash = file => createHash("sha256").update(readFileSync(file)).digest("hex");
-const native = join(dirname(entry), "pi-native");
 const receipt = {
   complete: false, entry, entrySha256: hash(entry),
-  nativeSha256: existsSync(native) ? hash(native) : null,
-  packageSha256: hash(join(dirname(entry), "package.json")),
   platform: process.platform, architecture: process.arch, checks: [],
 };
 function save() { writeFileSync(join(root, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n"); }
@@ -220,7 +217,6 @@ try {
   }
   await verifyNoDowngrade();
   assert.equal(hash(entry), receipt.entrySha256, "candidate changed during acceptance");
-  if (receipt.nativeSha256) assert.equal(hash(native), receipt.nativeSha256);
   receipt.complete = true; save();
   console.log(`PASS installed package lifecycle: ${basename(entry)}; ${root}`);
 } catch (error) {

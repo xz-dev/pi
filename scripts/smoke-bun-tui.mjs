@@ -10,6 +10,9 @@ const started = performance.now();
 const timeoutMs = Number(process.env.PI_XZ_TUI_TIMEOUT_MS ?? 7000);
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error(`Invalid PI_XZ_TUI_TIMEOUT_MS: ${process.env.PI_XZ_TUI_TIMEOUT_MS}`);
 const startupBenchmark = ["1", "true", "yes"].includes((process.env.PI_STARTUP_BENCHMARK ?? "").toLowerCase());
+// PI_XZ_TUI_PASTE_PROBE sends ctrl+v after output settles so the session issues
+// a real clipboard read before exit (resource materialization evidence).
+const pasteProbe = ["1", "true", "yes"].includes((process.env.PI_XZ_TUI_PASTE_PROBE ?? "").toLowerCase());
 const startupBenchmarkCompleteMarker = "__PI_STARTUP_BENCHMARK_COMPLETE__";
 const startupBenchmarkStagePattern = /__PI_STARTUP_BENCHMARK_STAGE__:(main-entered|session-manager-ready|runtime-ready|input-ready|interactive-created|init-entered|tools-ready|tui-started|theme-applied|session-rebound|providers-counted)/g;
 const markerTailLength = Math.max(startupBenchmarkCompleteMarker.length, "__PI_STARTUP_BENCHMARK_STAGE__:session-manager-ready".length) - 1;
@@ -47,6 +50,7 @@ const child = Bun.spawn([executable], {
 			}
 			if (observedOutput) return;
 			observedOutput = true;
+			if (pasteProbe) terminal.write("\x16");
 			if (!startupBenchmark) {
 				interruptTimer = setTimeout(() => {
 					terminal.write("\x03");
@@ -80,7 +84,7 @@ try {
 		harness: process.platform === "win32" ? "Bun.Terminal ConPTY" : "Bun.Terminal PTY",
 		elapsedMs: Math.round(performance.now() - started),
 		outputBytes,
-		input: startupBenchmark ? "startup-benchmark" : "ctrl-c,ctrl-d",
+		input: startupBenchmark ? "startup-benchmark" : pasteProbe ? "ctrl-v,ctrl-c,ctrl-d" : "ctrl-c,ctrl-d",
 		childExitCode: exitCode,
 		terminalClosed: true,
 		terminalExitCode,

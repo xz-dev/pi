@@ -40,21 +40,16 @@ jobs:
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/freebsd-support:refs/remotes/origin/patch/freebsd-support \
-            +refs/heads/patch/freebsd-launcher:refs/remotes/origin/patch/freebsd-launcher \
-            +refs/heads/patch/xz-bundle-lifecycle:refs/remotes/origin/patch/xz-bundle-lifecycle \
-            +refs/heads/patch/use-embedded-bun-package-manager:refs/remotes/origin/patch/use-embedded-bun-package-manager \
-            +refs/heads/patch/git-package-storage:refs/remotes/origin/patch/git-package-storage \
+            +refs/heads/patch/single-executable:refs/remotes/origin/patch/single-executable \
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
             +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
             +refs/heads/patch/manual-retry:refs/remotes/origin/patch/manual-retry \
             +refs/heads/patch/startup-submit-readiness:refs/remotes/origin/patch/startup-submit-readiness \
-            +refs/heads/patch/changelog-prerelease:refs/remotes/origin/patch/changelog-prerelease \
             +refs/heads/patch/skill-overrides:refs/remotes/origin/patch/skill-overrides \
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
-            +refs/heads/patch/self-update-managed-by:refs/remotes/origin/patch/self-update-managed-by \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
@@ -81,21 +76,16 @@ jobs:
             model-refresh-session-rebind \
             startup-benchmark-exit \
             freebsd-support \
-            freebsd-launcher \
-            xz-bundle-lifecycle \
-            use-embedded-bun-package-manager \
-            git-package-storage \
+            single-executable \
             agent-run-failure-seam \
             managed-tool-executions \
             esc-abort \
             manual-retry \
             startup-submit-readiness \
-            changelog-prerelease \
             skill-overrides \
             retry-non-retryable-patterns \
             slow-hook-tui-only \
             ws-cached-empty-delta \
-            self-update-managed-by \
             model-selector-refresh-selection \
             ai-drop-empty-messages \
             quarantine-auth-storage-flake \
@@ -268,8 +258,8 @@ jobs:
             --platform linux-x64-gnu-modern \
             --out "$release_dir" \
             --distribution-version "$version"
-          archive="$release_dir/pi-linux-x64-gnu-modern.zip"
-          test -s "$archive"
+          executable="$release_dir/pi-linux-x64-gnu-modern"
+          test -s "$executable"
           Xvfb :99 -screen 0 1024x768x24 -nolisten tcp -ac >"$RUNNER_TEMP/pi-host-xvfb.log" 2>&1 &
           xvfb_pid=$!
           for _ in {1..50}; do
@@ -278,7 +268,7 @@ jobs:
           done
           test -S /tmp/.X11-unix/X99
           DISPLAY=:99 node scripts/smoke-binary-release.mjs \
-            "$archive" \
+            "$executable" \
             linux-x64-gnu-modern \
             "$version" \
             "$release_dir/linux-x64-gnu-modern-smoke.json"

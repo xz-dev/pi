@@ -1,37 +1,34 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 function fixture() {
-	const root = mkdtempSync(join(tmpdir(), "pi-notices-")); const bundle = join(root, "bundle");
-	mkdirSync(join(bundle, "native", "linux", "prebuilds", "linux-x64"), { recursive: true });
-	writeFileSync(join(bundle, "native", "linux", "prebuilds", "linux-x64", "linux-platform-x11.node"), "fixture native helper");
-	writeFileSync(join(bundle, "native", "LICENSE"), "fixture license\n");
-	writeFileSync(join(bundle, "native", "NOTICE.md"), "fixture notice\n");
+	const root = mkdtempSync(join(tmpdir(), "pi-notices-"));
 	const lock = { version: "1.0.0", lockfileVersion: 3, packages: { "packages/coding-agent": { name: "@earendil-works/pi-coding-agent", dependencies: { alpha: "1.0.0", "proper-lockfile": "4.1.2", "p-retry": "4.6.2" }, optionalDependencies: { "@mariozechner/clipboard": "1.0.0" } }, "node_modules/alpha": { version: "1.0.0", license: "ISC", dependencies: { beta: "2.0.0" } }, "node_modules/beta": { version: "2.0.0", license: "MIT" }, "node_modules/@mariozechner/clipboard": { version: "1.0.0", license: "MIT" }, "node_modules/proper-lockfile": { version: "4.1.2", license: "MIT", dependencies: { retry: "0.12.0" } }, "node_modules/proper-lockfile/node_modules/retry": { version: "0.12.0", license: "MIT" }, "node_modules/p-retry": { version: "4.6.2", license: "MIT", dependencies: { retry: "0.13.1", "@types/retry": "0.12.0" } }, "node_modules/p-retry/node_modules/@types/retry": { version: "0.12.0", license: "MIT" }, "node_modules/retry": { version: "0.13.1", license: "MIT" }, "node_modules/@types/retry": { version: "0.12.5", license: "MIT" } } };
-	const lockPath = join(root, "package-lock.json"); writeFileSync(lockPath, JSON.stringify(lock)); return { root, bundle, lockPath, output: join(root, "notices.md") };
+	const lockPath = join(root, "package-lock.json"); writeFileSync(lockPath, JSON.stringify(lock)); return { root, lockPath, output: join(root, "notices.md") };
 }
 
 test("notices deterministically cover exact runtime closure and packaged natives", () => {
 	const value = fixture(); try {
-		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.bundle, value.output, value.lockPath]); const first = readFileSync(value.output);
-		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.bundle, value.output, value.lockPath]); const second = readFileSync(value.output);
+		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.output, value.lockPath]); const first = readFileSync(value.output);
+		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.output, value.lockPath]); const second = readFileSync(value.output);
 		assert.deepEqual(second, first); const text = first.toString();
-		for (const expected of ["## node_modules/alpha@1.0.0\nLicense: ISC", "## node_modules/beta@2.0.0\nLicense: MIT", "## node_modules/@mariozechner/clipboard@1.0.0\nLicense: MIT", "## native@1.0.0\nLicense: MIT (packaged native)"]) assert.ok(text.includes(expected));
-		assert.match(text, /Helper SHA-256: native\/linux\/prebuilds\/linux-x64\/linux-platform-x11\.node: [0-9a-f]{64}/);
-		assert.match(text, /### LICENSE\nLicense SHA-256: [0-9a-f]{64}\n\n```text\nfixture license\n```/);
-		assert.match(text, /### NOTICE\.md\nLicense SHA-256: [0-9a-f]{64}\n\n```text\nfixture notice\n```/);
-		assert.ok(text.indexOf("### LICENSE") < text.indexOf("### NOTICE.md"));
+		for (const expected of ["## node_modules/alpha@1.0.0\nLicense: ISC", "## node_modules/beta@2.0.0\nLicense: MIT", "## node_modules/@mariozechner/clipboard@1.0.0\nLicense: MIT"]) assert.ok(text.includes(expected));
+		// Native helpers are inventoried from the checked-out prebuilds.
+		assert.match(text, /## native@[^\n]+\nLicense: MIT \(packaged native\)/);
+		assert.match(text, /Helper SHA-256: packages\/tui\/native\/linux\/prebuilds\/linux-x64\/linux-platform-x11\.node: [0-9a-f]{64}/);
+		// The root LICENSE provides the legal text for the packaged native entry.
+		assert.match(text, /### LICENSE\nLicense SHA-256: [0-9a-f]{64}\n\n```text\n/);
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 
 test("real ignore dependency preserves LICENSE-MIT attribution instead of unrelated generic MIT text", () => {
 	const output = join(tmpdir(), `pi-ignore-notices-${process.pid}.md`);
 	try {
-		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), join(import.meta.dirname, "..", "packages", "coding-agent"), output]);
+		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), output]);
 		const text = readFileSync(output, "utf8");
 		const ignoreHeading = text.match(/^## node_modules\/ignore@[^\n]+$/m);
 		assert.ok(ignoreHeading, "ignore dependency section is present");
@@ -44,7 +41,7 @@ test("real ignore dependency preserves LICENSE-MIT attribution instead of unrela
 
 test("nested runtime versions are inventoried by exact lockfile path, never flattened to top-level", () => {
 	const value = fixture(); try {
-		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.bundle, value.output, value.lockPath]);
+		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.output, value.lockPath]);
 		const text = readFileSync(value.output).toString();
 		// exact nested lockfile paths carry their own runtime versions
 		for (const expected of ["## node_modules/proper-lockfile/node_modules/retry@0.12.0\nLicense: MIT", "## node_modules/p-retry/node_modules/@types/retry@0.12.0\nLicense: MIT"]) assert.ok(text.includes(expected));
