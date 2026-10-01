@@ -3,7 +3,7 @@
  */
 
 import { getSystemMessageText } from "@earendil-works/pi-ai";
-import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
+import { ensureMaterializedDocs, getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
@@ -150,6 +150,10 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
 		promptSections.tools = `${tools}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.`;
 		promptSections.rules = buildRules(selectedTools, toolGuidelines, promptGuidelines);
+		// The docs section points external programs (rg, editors) at real paths, so
+		// in a single-executable build it materializes the docs tree before naming
+		// it. `/$bunfs` paths cannot be opened by external tools.
+		ensureMaterializedDocs();
 		promptSections.docs = `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: ${getReadmePath()}
 - Additional docs: ${getDocsPath()}
