@@ -42,8 +42,9 @@ export const SMOKE_LIMITS = Object.freeze({
 	clipboardMs: 10_000,
 });
 // FreeBSD arm64 has no GitHub-hosted KVM host, so its guest runs under QEMU TCG on x64.
-// ponytail: one fixed slowdown factor for every timing budget; tune from measured TCG runs.
-export const EMULATED_SMOKE_SLOWDOWN = 30;
+// Measured TCG trial (run 36830530643): TUI 46.8 s against the 7 s native budget (6.7x);
+// every other command stayed under 0.5x. 15x keeps ~2x headroom on the tightest budget.
+export const EMULATED_SMOKE_SLOWDOWN = 15;
 /** Timing budgets scale for emulated acceptance; size budgets never do. */
 export function smokeLimits(id) {
 	if (!bunTarget(id).emulated) return SMOKE_LIMITS;

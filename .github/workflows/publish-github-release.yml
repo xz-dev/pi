@@ -112,7 +112,7 @@ jobs:
         include:
           - { target: freebsd-x64, arch: x86_64, mem: 6144, timeout: 120 }
           # No GitHub-hosted KVM host for arm64 guests: QEMU TCG emulation, scaled smoke budgets.
-          - { target: freebsd-arm64, arch: aarch64, mem: 8192, timeout: 360 }
+          - { target: freebsd-arm64, arch: aarch64, mem: 8192, timeout: 60 }
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.timeout }}
     permissions: { contents: read }
