@@ -2,7 +2,15 @@
 
 This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
-Supported OS: Linux (glibc/musl, x64/arm64), macOS (x64/arm64), Windows (x64/arm64), FreeBSD (amd64). See [Installation](#installation).
+Release platforms (one ZIP each, see [Installation](#installation)):
+
+| OS | Release assets |
+| --- | --- |
+| Linux glibc | `linux-x64-gnu-baseline`, `linux-x64-gnu-modern`, `linux-arm64-gnu` |
+| Linux musl | `linux-x64-musl-baseline`, `linux-x64-musl-modern`, `linux-arm64-musl` |
+| macOS | `darwin-x64-baseline`, `darwin-x64-modern`, `darwin-arm64` |
+| Windows | `windows-x64-baseline`, `windows-x64-modern`, `windows-arm64` |
+| FreeBSD 14.3+ | `freebsd-x64` |
 
 > [!NOTE]
 > 🌟 Star this fork to show your support for its direction and encourage change in upstream Pi.
