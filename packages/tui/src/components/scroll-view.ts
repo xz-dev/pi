@@ -156,6 +156,8 @@ export class ScrollView extends Container {
 		const start = this.followingEnd ? maxScrollTop : this.currentScrollTop;
 		const next = Math.max(0, Math.min(maxScrollTop, start + requested));
 		const moved = next - start;
+		// An upward gesture at the start is not a request to resume end-following.
+		if (requested < 0 && moved === 0) return requested;
 		const wasFollowingEnd = this.followingEnd;
 		this.currentScrollTop = next;
 		this.followingEnd = this.followEnd && next === maxScrollTop;
@@ -166,6 +168,7 @@ export class ScrollView extends Container {
 	}
 
 	scrollToStart(): void {
+		if (this.currentScrollTop === 0 && !this.followingEnd) return;
 		const changed =
 			this.currentScrollTop !== 0 ||
 			this.followingEnd !== (this.followEnd && this.contentHeight <= this.currentViewportHeight);
