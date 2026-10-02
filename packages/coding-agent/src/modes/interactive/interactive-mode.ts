@@ -481,6 +481,8 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private submittedInput: string | undefined;
+	/** Show the submitted text only while compaction delays its delivery. */
+	private showSubmittedInput = false;
 	private pendingUserInputs: string[] = [];
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
 	private activeWorkingIndicatorEmbedded = false;
@@ -1271,27 +1273,28 @@ export class InteractiveMode {
 
 	private async promptWithPendingDisplay(text: string, images?: ImageContent[]): Promise<void> {
 		this.submittedInput = text;
-		this.updatePendingMessagesDisplay();
-		this.ui.requestRender();
 		try {
 			await this.session.prompt(text, { images });
 		} catch (error) {
 			this.restoreSubmittedInput();
 			throw error;
 		} finally {
-			this.submittedInput = undefined;
-			this.updatePendingMessagesDisplay();
-			this.ui.requestRender();
+			this.clearSubmittedInput();
 		}
+	}
+
+	private clearSubmittedInput(): void {
+		this.submittedInput = undefined;
+		this.showSubmittedInput = false;
+		this.updatePendingMessagesDisplay();
+		this.ui.requestRender();
 	}
 
 	private restoreSubmittedInput(): void {
 		if (this.submittedInput === undefined) return;
 		const editorText = this.editor.getExpandedText?.() ?? this.editor.getText();
 		this.editor.setText([this.submittedInput, editorText].filter((text) => text.trim()).join("\n\n"));
-		this.submittedInput = undefined;
-		this.updatePendingMessagesDisplay();
-		this.ui.requestRender();
+		this.clearSubmittedInput();
 	}
 
 	private async checkForPackageUpdates(): Promise<string[]> {
@@ -3581,6 +3584,7 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
 					this.submittedInput = undefined;
+					this.showSubmittedInput = false;
 					this.addMessageToChat(event.message);
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
@@ -3764,6 +3768,11 @@ export class InteractiveMode {
 					this.session.abortCompaction();
 				};
 				this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason));
+				// Compaction runs before the submitted input is delivered; keep the text visible meanwhile.
+				if (this.submittedInput !== undefined) {
+					this.showSubmittedInput = true;
+					this.updatePendingMessagesDisplay();
+				}
 				this.ui.requestRender();
 				break;
 			}
@@ -4836,7 +4845,7 @@ export class InteractiveMode {
 
 	private updatePendingMessagesDisplay(): void {
 		this.pendingMessagesContainer.clear();
-		if (this.submittedInput) {
+		if (this.showSubmittedInput && this.submittedInput) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
 			this.pendingMessagesContainer.addChild(
 				new TruncatedText(theme.fg("dim", `Pending: ${this.submittedInput}`), 1, 0),
