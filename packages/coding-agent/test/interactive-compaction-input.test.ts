@@ -10,6 +10,7 @@ const prototype = InteractiveMode.prototype as unknown as {
 	promptWithPendingDisplay(this: object, text: string, images?: ImageContent[]): Promise<void>;
 	updatePendingMessagesDisplay(this: object): void;
 	restoreSubmittedInput(this: object): void;
+	clearSubmittedInput(this: object): void;
 	handleEvent(this: object, event: AgentSessionEvent): Promise<void>;
 };
 
@@ -21,6 +22,7 @@ describe("compaction input display", () => {
 		const fake = {
 			isInitialized: true,
 			submittedInput: undefined as string | undefined,
+			showSubmittedInput: false,
 			pendingMessagesContainer,
 			editor,
 			ui: { requestRender: vi.fn() },
@@ -31,6 +33,9 @@ describe("compaction input display", () => {
 			},
 			restoreSubmittedInput() {
 				prototype.restoreSubmittedInput.call(this);
+			},
+			clearSubmittedInput() {
+				prototype.clearSubmittedInput.call(this);
 			},
 			session: {
 				prompt: async () => {
@@ -49,23 +54,23 @@ describe("compaction input display", () => {
 		expect(pendingMessagesContainer.render(80).join("\n")).not.toContain("saved input");
 	});
 
-	it("shows submitted text as pending until user start, after compaction summary", async () => {
-		initTheme("dark");
-		let release = () => {};
-		const pending = new Promise<void>((resolve) => {
-			release = resolve;
-		});
+	function compactionFake(prompt: () => Promise<void>) {
 		const chat: string[] = [];
 		const pendingMessagesContainer = new Container();
 		const fake = {
 			isInitialized: true,
 			submittedInput: undefined as string | undefined,
+			showSubmittedInput: false,
 			pendingMessagesContainer,
+			defaultEditor: { onEscape: undefined },
 			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
-			session: { prompt: () => pending },
+			session: { prompt, abortCompaction: vi.fn() },
 			getAllQueuedMessages: () => ({ steering: [], followUp: [] }),
 			updatePendingMessagesDisplay() {
 				prototype.updatePendingMessagesDisplay.call(this);
+			},
+			clearSubmittedInput() {
+				prototype.clearSubmittedInput.call(this);
 			},
 			footer: { invalidate: vi.fn() },
 			settingsManager: { getShowTerminalProgress: () => false },
@@ -79,10 +84,42 @@ describe("compaction input display", () => {
 			addMessageToChat: (message: { role: string }) => {
 				chat.push(message.role);
 			},
+			showStatusIndicator: vi.fn(),
 			clearStatusIndicator: vi.fn(),
 			flushCompactionQueue: vi.fn(),
 		};
+		return { fake, chat, pendingMessagesContainer };
+	}
+
+	it("does not show pending text for a plain submit", async () => {
+		initTheme("dark");
+		let release = () => {};
+		const pending = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { fake, pendingMessagesContainer } = compactionFake(() => pending);
+		const prompt = prototype.promptWithPendingDisplay.call(fake, "quick input");
+		expect(pendingMessagesContainer.render(80).join("\n")).not.toContain("quick input");
+		await prototype.handleEvent.call(fake, {
+			type: "message_start",
+			message: { role: "user", content: "quick input", timestamp: Date.now() },
+		});
+		expect(pendingMessagesContainer.render(80).join("\n")).not.toContain("quick input");
+		release();
+		await prompt;
+		expect(fake.submittedInput).toBeUndefined();
+	});
+
+	it("shows submitted text as pending from compaction start until user start, after compaction summary", async () => {
+		initTheme("dark");
+		let release = () => {};
+		const pending = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { fake, chat, pendingMessagesContainer } = compactionFake(() => pending);
 		const prompt = prototype.promptWithPendingDisplay.call(fake, "incoming input");
+		expect(pendingMessagesContainer.render(80).join("\n")).not.toContain("incoming input");
+		await prototype.handleEvent.call(fake, { type: "compaction_start", reason: "threshold" });
 		expect(pendingMessagesContainer.render(80).join("\n")).toContain("Pending: incoming input");
 		await prototype.handleEvent.call(fake, {
 			type: "compaction_end",
