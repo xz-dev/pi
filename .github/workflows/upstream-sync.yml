@@ -55,6 +55,7 @@ jobs:
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
             +refs/heads/patch/env-overrides:refs/remotes/origin/patch/env-overrides \
             +refs/heads/patch/defer-threshold-compaction:refs/remotes/origin/patch/defer-threshold-compaction \
+            +refs/heads/patch/compact-input-dock:refs/remotes/origin/patch/compact-input-dock \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort
 
           # Driver source: the replay script and its small union helper come
@@ -91,6 +92,7 @@ jobs:
             quarantine-auth-storage-flake \
             env-overrides \
             defer-threshold-compaction \
+            compact-input-dock \
             model-thinking-sort \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
@@ -205,7 +207,10 @@ jobs:
               --testNamePattern "$(node ../../scripts/catalog-drift-test-pattern.mjs)"
           )
           node --test --test-reporter=dot \
-            packages/tui/test/tui-render.test.ts
+            packages/tui/test/tui-render.test.ts \
+            packages/tui/test/tui-alt-screen.test.ts \
+            packages/tui/test/layout.test.ts \
+            packages/tui/test/editor.test.ts
 
       - name: Smoke test packed npm release
         run: |
