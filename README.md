@@ -26,6 +26,11 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 
 ### Features
 
+- Let extensions inspect and clear a Codex session's sticky SSE fallback through `getOpenAICodexWebSocketDebugStatsLazy(sessionId)` and `resetOpenAICodexWebSocketDebugStatsLazy(sessionId?)` from `@earendil-works/pi-ai/compat` (also exposed by the extension runtime's `pi-ai` alias).
+  - Use case: An extension can re-enable WebSocket attempts after a transient socket or proxy failure without restarting the Pi session.
+  - Limits: Recovery is opt-in and extension-controlled. Pi adds no automatic retry or cooldown; reset also clears debug counters, and omitting the session ID resets all sessions.
+  - Patch branch: [`patch/codex-websocket-recovery`](https://github.com/xz-dev/pi/tree/patch/codex-websocket-recovery)
+
 - Run the native FreeBSD amd64 and arm64 executables with CLI, TUI, extension loading, self-update, and cleanup of obsolete backup copies.
   - Use case: Use Pi on FreeBSD without a Linux compatibility layer or a separately installed JavaScript runtime.
   - Limits: FreeBSD 14.3 or newer. The arm64 ZIP is accepted in an emulated (QEMU TCG) guest because GitHub has no arm64 KVM host. Install `fd-find` and `ripgrep` for find/grep tools. X11 clipboard reads require `libxcb`; Wayland uses `wl-clipboard`, and SSH/headless copy uses OSC 52.
