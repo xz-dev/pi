@@ -8,7 +8,7 @@ import { CustomEditor } from "../src/modes/interactive/components/custom-editor.
 import { WorkingStatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
 
 describe("chat viewport", () => {
-	test("keeps a three-row input dock while reading, until explicitly returning to latest", async () => {
+	test.each([8, 30])("keeps the reading dock compact (%i rows)", async (rows) => {
 		const previousKeys = getKeybindings();
 		const keys = new KeybindingsManager();
 		setKeybindings(keys);
@@ -17,7 +17,7 @@ describe("chat viewport", () => {
 			wheelScrollLines: 1,
 			scrollToEndIndicator: () => "Jump to latest",
 		});
-		const document = new Text(Array.from({ length: 30 }, (_, i) => `message ${i}`).join("\n"), 0, 0);
+		const document = new Text(Array.from({ length: rows }, (_, i) => `message ${i}`).join("\n"), 0, 0);
 		const editor = new CustomEditor(ui, defaultEditorTheme, keys, { embedWorkingStatus: true });
 		editor.setText("first draft line\nsecond draft line\nthird draft line");
 		const status = new WorkingStatusIndicator(ui, "Working", undefined, (text) => text);
@@ -51,8 +51,15 @@ describe("chat viewport", () => {
 				expect(screen[11]).toMatch(/^─+$/);
 				expect(screen.join("\n")).not.toMatch(/model footer|widget|queued preview/);
 			}
+			// Upward intent must not restore the dock even when shrinking it makes all messages fit.
+			for (const input of ["\x1b[<64;1;1M", "\x1b[5~", "\x1b[H"]) {
+				terminal.sendInput(input);
+				await terminal.waitForRender();
+				expect(terminal.getViewport()[9]).toContain("Working");
+				expect(terminal.getViewport().join("\n")).not.toContain("model footer");
+			}
 			const readingLine = terminal.getViewport()[0];
-			document.setText(Array.from({ length: 35 }, (_, i) => `message ${i}`).join("\n"));
+			document.setText(Array.from({ length: rows + 5 }, (_, i) => `message ${i}`).join("\n"));
 			ui.requestRender();
 			await terminal.waitForRender();
 			expect(terminal.getViewport()[0]).toBe(readingLine);
