@@ -399,7 +399,7 @@ Options:
   -a, --approve           Trust project-local files for this command
   -na, --no-approve       Ignore project-local files for this command
   --force                 Reinstall pi even if the current version is latest
-  --clean                 Detach stale complete bundles for removal; preserve in-use, current, and launcher-matched versions
+  --clean                 Remove old pi-<version> executable backups next to the running pi
 
 Short forms:
   ${APP_NAME} update                Update pi only
