@@ -189,6 +189,17 @@ export type PrepareRequest = (
 	signal?: AbortSignal,
 ) => AgentRequestUpdate | void | Promise<AgentRequestUpdate | undefined> | Promise<void>;
 
+/** Input batch available before its message lifecycle events or context append. */
+export interface PrepareInputContext extends PrepareRequestContext {
+	messages: AgentMessage[];
+}
+
+/** Prepare context/model before delivering input. The hook must honor the abort signal. */
+export type PrepareInput = (
+	input: PrepareInputContext,
+	signal?: AbortSignal,
+) => AgentRequestUpdate | void | Promise<AgentRequestUpdate | undefined> | Promise<void>;
+
 export interface PrepareNextTurnContext extends AgentTurnContext {}
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
@@ -263,6 +274,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * hard exits.
 	 */
 	finishTurn?: FinishTurn;
+
+	/** Called once for each non-empty input batch, before message_start/message_end and append. */
+	prepareInput?: PrepareInput;
 
 	/**
 	 * Called immediately before every conversational provider request, including the first.
