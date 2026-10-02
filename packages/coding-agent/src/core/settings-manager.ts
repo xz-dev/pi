@@ -82,6 +82,11 @@ export type MermaidRenderingMode = "off" | "final" | "streaming";
 export const CACHE_WARMING_MODES = ["off", "streaming", "idle"] as const;
 export type CacheWarmingMode = (typeof CACHE_WARMING_MODES)[number];
 
+export interface ModelCatalogSettings {
+	/** Timeout in milliseconds for model-catalog refresh operations (negative disables, 0 aborts immediately). Default: 60_000. */
+	refreshTimeoutMs?: number;
+}
+
 export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
 	mermaid?: MermaidRenderingMode; // default: "streaming"
@@ -181,6 +186,7 @@ export interface Settings {
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	cacheWarming?: CacheWarmingMode; // default: "streaming"; global only because each refresh costs money
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+	models?: ModelCatalogSettings;
 	tuiMode?: TuiMode; // default: "fullscreen"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular TUI mode
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
@@ -1041,6 +1047,28 @@ export class SettingsManager {
 
 	getWebSocketConnectTimeoutMs(): number | undefined {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
+	}
+
+	/** Returns undefined when the timeout is disabled (negative setting). */
+	getModelRefreshTimeoutMs(): number | undefined {
+		const value = this.settings.models?.refreshTimeoutMs;
+		if (value === undefined) return 60_000;
+		if (typeof value !== "number" || !Number.isFinite(value)) {
+			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(value)}`);
+		}
+		return value < 0 ? undefined : Math.floor(value);
+	}
+
+	setModelRefreshTimeoutMs(timeoutMs: number): void {
+		if (!Number.isFinite(timeoutMs)) {
+			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(timeoutMs)}`);
+		}
+		if (!this.globalSettings.models) {
+			this.globalSettings.models = {};
+		}
+		this.globalSettings.models.refreshTimeoutMs = Math.floor(timeoutMs);
+		this.markModified("models", "refreshTimeoutMs");
+		this.save();
 	}
 
 	getHideThinkingBlock(): boolean {
