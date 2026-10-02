@@ -124,6 +124,7 @@ PATCH_ORDER=(
 	env-overrides
 	freebsd-support
 	defer-threshold-compaction
+	compact-input-dock
 	model-thinking-sort
 )
 
