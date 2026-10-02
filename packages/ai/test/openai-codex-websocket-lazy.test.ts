@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	getOpenAICodexWebSocketDebugStatsLazy,
-	resetOpenAICodexWebSocketDebugStatsLazy,
-} from "../src/api/openai-codex-responses.lazy.ts";
-import {
 	closeOpenAICodexWebSocketSessions,
 	resetOpenAICodexWebSocketDebugStats,
-	stream as streamOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
+import {
+	getOpenAICodexWebSocketDebugStatsLazy,
+	openAICodexResponsesApi,
+	resetOpenAICodexWebSocketDebugStatsLazy,
+} from "../src/compat.ts";
 import type { Model } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -27,8 +27,9 @@ function mockToken(): string {
 
 const completed = { type: "response.completed", response: { id: "resp", status: "completed", output: [] } };
 
+// Regression coverage for xz-dev/pi#8.
 describe("lazy Codex WebSocket state accessors", () => {
-	it("observe and reset the session SSE fallback of the Codex module", async () => {
+	it.each(["session", "all"])("observes fallback and resets %s through the public compat entry", async (scope) => {
 		const fetchMock = vi.fn(async () => new Response(`data: ${JSON.stringify(completed)}\n\n`, { status: 200 }));
 		vi.stubGlobal("fetch", fetchMock);
 		let failSends = true;
@@ -85,29 +86,44 @@ describe("lazy Codex WebSocket state accessors", () => {
 			maxTokens: 128000,
 		};
 		const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] });
-		const run = () =>
-			streamOpenAICodexResponses(model, context, {
-				apiKey: mockToken(),
-				sessionId: "lazy-session",
-				transport: "auto",
-			}).result();
+		const api = openAICodexResponsesApi();
+		const run = (sessionId = "lazy-session") =>
+			api
+				.stream(model, context, {
+					apiKey: mockToken(),
+					sessionId,
+					transport: "auto",
+				})
+				.result();
 
 		expect((await run()).stopReason).toBe("stop");
-		expect(await getOpenAICodexWebSocketDebugStatsLazy("lazy-session")).toMatchObject({
-			websocketFailures: 1,
-			websocketFallbackActive: true,
-		});
+		expect((await run("other-session")).stopReason).toBe("stop");
+		for (const sessionId of ["lazy-session", "other-session"]) {
+			expect(await getOpenAICodexWebSocketDebugStatsLazy(sessionId)).toMatchObject({
+				websocketFailures: 1,
+				websocketFallbackActive: true,
+			});
+		}
 
-		// Without a reset the session stays on SSE.
+		// Without a reset the session stays on SSE, even after the transport recovers.
 		failSends = false;
-		await run();
-		expect(websocketRequests).toBe(1);
-		expect(fetchMock).toHaveBeenCalledTimes(2);
-
-		await resetOpenAICodexWebSocketDebugStatsLazy("lazy-session");
-		expect(await getOpenAICodexWebSocketDebugStatsLazy("lazy-session")).toBeUndefined();
 		expect((await run()).stopReason).toBe("stop");
 		expect(websocketRequests).toBe(2);
-		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+
+		if (scope === "all") {
+			await resetOpenAICodexWebSocketDebugStatsLazy();
+		} else {
+			await resetOpenAICodexWebSocketDebugStatsLazy("lazy-session");
+		}
+		expect(await getOpenAICodexWebSocketDebugStatsLazy("lazy-session")).toBeUndefined();
+		expect((await run()).stopReason).toBe("stop");
+		expect(websocketRequests).toBe(3);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+
+		// A scoped reset preserves the other session's fallback; reset-all clears it.
+		expect((await run("other-session")).stopReason).toBe("stop");
+		expect(websocketRequests).toBe(scope === "all" ? 4 : 3);
+		expect(fetchMock).toHaveBeenCalledTimes(scope === "all" ? 3 : 4);
 	});
 });
