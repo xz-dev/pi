@@ -16,8 +16,10 @@
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
-import { BUN_TARGET_IDS, bunTarget } from "./bun-targets.mjs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { BUN_TARGET_IDS, bunTarget, packagedArchiveName, packagedExecutableName } from "./bun-targets.mjs";
+
+export { packagedArchiveName };
 
 export const ENTRY_PACKAGE = "@earendil-works/pi-coding-agent";
 export const DISTRIBUTION = "xz-dev";
@@ -148,6 +150,70 @@ export function parseSha256Sums(text) {
 		entries.set(match[2], match[1]);
 	}
 	return entries;
+}
+
+const TAR_BLOCK = 512;
+
+function tarField(header, offset, length, value) {
+	const bytes = Buffer.from(value, "utf8");
+	if (bytes.length > length) throw new Error(`tar header field too long: ${value}`);
+	bytes.copy(header, offset);
+}
+
+function tarOctal(header, offset, length, value) {
+	tarField(header, offset, length, `${value.toString(8).padStart(length - 1, "0")}\0`);
+}
+
+/** One-entry ustar archive holding `body` as a 0755 regular file owned by 0:0. */
+function singleFileTar(name, body, mtimeSeconds) {
+	const header = Buffer.alloc(TAR_BLOCK);
+	tarField(header, 0, 100, name);
+	tarOctal(header, 100, 8, 0o755);
+	tarOctal(header, 108, 8, 0);
+	tarOctal(header, 116, 8, 0);
+	tarOctal(header, 124, 12, body.length);
+	tarOctal(header, 136, 12, mtimeSeconds);
+	header.fill(0x20, 148, 156);
+	tarField(header, 156, 1, "0");
+	tarField(header, 257, 6, "ustar\0");
+	tarField(header, 263, 2, "00");
+	let checksum = 0;
+	for (const byte of header) checksum += byte;
+	tarField(header, 148, 8, `${checksum.toString(8).padStart(6, "0")}\0 `);
+	const padding = (TAR_BLOCK - (body.length % TAR_BLOCK)) % TAR_BLOCK;
+	return Buffer.concat([header, body, Buffer.alloc(padding + 2 * TAR_BLOCK)]);
+}
+
+/**
+ * Write the optional smaller download `pi-<target>.tar.xz`: a single `pi`
+ * (`pi.exe` on Windows) entry with the exact executable bytes. The tar header
+ * is written here so GNU, BSD and Windows runners produce the same layout.
+ */
+export function writePackagedArchive(executablePath, archivePath, platform) {
+	const tar = singleFileTar(packagedExecutableName(platform), readFileSync(executablePath), Math.floor(statSync(executablePath).mtimeMs / 1000));
+	const result = spawnSync("xz", ["-9", "-T0", "--block-size=32MiB", "-c"], { input: tar, maxBuffer: 4 * 1024 * 1024 * 1024 });
+	if (result.status !== 0) throw new Error(`xz failed for ${archivePath}: ${result.error?.message ?? result.stderr?.toString() ?? ""}`);
+	writeFileSync(archivePath, result.stdout);
+}
+
+/** Assert the archive holds exactly one 0755 `pi`/`pi.exe` entry whose bytes hash to `executableSha256`. */
+export function assertPackagedArchive(archivePath, platform, executableSha256) {
+	const result = spawnSync("xz", ["-dc", archivePath], { maxBuffer: 4 * 1024 * 1024 * 1024 });
+	if (result.status !== 0) throw new Error(`xz could not decompress ${archivePath}: ${result.error?.message ?? result.stderr?.toString() ?? ""}`);
+	const tar = result.stdout;
+	const header = tar.subarray(0, TAR_BLOCK);
+	const field = (offset, length) => header.subarray(offset, offset + length).toString("utf8").replace(/\0.*$/s, "");
+	const size = Number.parseInt(field(124, 12), 8);
+	if (field(0, 100) !== packagedExecutableName(platform) || field(156, 1) !== "0" || Number.parseInt(field(100, 8), 8) !== 0o755 || !Number.isSafeInteger(size) || size <= 0) {
+		throw new Error(`${archivePath} must contain exactly one 0755 ${packagedExecutableName(platform)} entry`);
+	}
+	const dataEnd = TAR_BLOCK + size;
+	if (tar.length !== dataEnd + ((TAR_BLOCK - (size % TAR_BLOCK)) % TAR_BLOCK) + 2 * TAR_BLOCK || tar.subarray(dataEnd).some((byte) => byte !== 0)) {
+		throw new Error(`${archivePath} contains entries beyond the executable`);
+	}
+	if (createHash("sha256").update(tar.subarray(TAR_BLOCK, dataEnd)).digest("hex") !== executableSha256) {
+		throw new Error(`${archivePath} executable does not match the raw release asset`);
+	}
 }
 
 export function stableStringify(value) {

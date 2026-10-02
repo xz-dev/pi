@@ -199,13 +199,23 @@ describe("GitHub Release preparation (raw executables)", () => {
 		expect(manifest.acceptance).toEqual({ file: "binary-acceptance.json", targetCount: TARGETS.length });
 		const lib = await loadLib();
 		const sums = lib.parseSha256Sums(readFileSync(join(output, "SHA256SUMS"), "utf8"));
-		// Executables + manifest + THIRD_PARTY_NOTICES.md
-		expect(sums.size).toBe(TARGETS.length + 2);
+		// Executables + tar.xz archives + manifest + THIRD_PARTY_NOTICES.md
+		expect(sums.size).toBe(TARGETS.length * 2 + 2);
 		for (const target of TARGETS) {
 			const bundle = manifest.bundles[target];
 			expect(bundle.file).toBe(lib.binaryArchiveName(target));
 			expect(sums.get(bundle.file)).toBe(sha256(join(output, bundle.file)));
+			const archive = lib.packagedArchiveName(target);
+			expect(archive).toBe(`pi-${target}.tar.xz`);
+			expect(sums.get(archive)).toBe(sha256(join(output, archive)));
+			expect(() => lib.assertPackagedArchive(join(output, archive), target, bundle.sha256)).not.toThrow();
 		}
+		// The archive extracts with the system tar to the exact executable bytes.
+		const extracted = temporaryDirectory("pi-release-extract-");
+		run("tar", ["-xJf", join(output, "pi-linux-x64-gnu-modern.tar.xz"), "-C", extracted]);
+		expect(sha256(join(extracted, "pi"))).toBe(manifest.bundles["linux-x64-gnu-modern"].sha256);
+		run("tar", ["-xJf", join(output, "pi-windows-arm64.tar.xz"), "-C", extracted]);
+		expect(sha256(join(extracted, "pi.exe"))).toBe(manifest.bundles["windows-arm64"].sha256);
 		expect(sums.get("THIRD_PARTY_NOTICES.md")).toBe(sha256(join(output, "THIRD_PARTY_NOTICES.md")));
 	});
 

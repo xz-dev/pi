@@ -168,6 +168,8 @@ The Scoop install writes an empty `.scoop.managed.lock` next to the executable, 
 
 Download `pi-<target>` (`pi-<target>.exe` on Windows) from the exact `xz-v<VERSION>` Release instead of Latest, then run it using the same commands above.
 
+Each Release also ships `pi-<target>.tar.xz`, a smaller download (about one third of the size) holding only that executable as `pi` (`pi.exe` on Windows). Extract it with `tar -xJf pi-<target>.tar.xz`; this needs `xz` support in `tar` (macOS, FreeBSD, Alpine and Gentoo have it by default; minimal Debian/Ubuntu need `xz-utils`; on Windows use the raw `.exe` or 7-Zip). `pi update --self` and Scoop always use the raw executable.
+
 Release assets include `SHA256SUMS` and GitHub build-provenance attestations for independent verification.
 
 ### Update

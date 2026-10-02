@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { BUN_TARGET_IDS, binaryArchiveName } from "./lib/bun-targets.mjs";
+import { BUN_TARGET_IDS, binaryArchiveName, packagedArchiveName } from "./lib/bun-targets.mjs";
 import { publishGitHubRelease } from "./publish-github-release.mjs";
 
 const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -33,6 +33,7 @@ function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "pi-release-publisher-"));
   const files = new Map([
     ...BUNDLE_FILES.map((file) => [file, Buffer.from(`executable:${file}`)]),
+    ...PLATFORMS.map((platform) => [packagedArchiveName(platform), Buffer.from(`archive:${platform}`)]),
     ["release-manifest.json", Buffer.from("")],
     ["SHA256SUMS", Buffer.from("sums")],
     ["binary-acceptance.json", Buffer.from("acceptance")],
@@ -190,6 +191,9 @@ test("creates a draft, uploads every executable asset plus subjects, then publis
     );
     for (const file of BUNDLE_FILES) {
       assert.ok(assets.has(file), `missing uploaded executable ${file}`);
+    }
+    for (const platform of PLATFORMS) {
+      assert.ok(assets.has(packagedArchiveName(platform)), `missing uploaded archive for ${platform}`);
     }
     assert.ok(events.indexOf("latest-ref-recheck") < events.indexOf("publish"));
     assert.ok(events.indexOf("upload:attestation-subjects.jsonl") < events.indexOf("latest-ref-recheck"));
