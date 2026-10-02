@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -74,13 +74,13 @@ function addAcceptanceEvidence(
 	releaseDir: string,
 	manifest: {
 		commit: string;
-		bundles: Record<string, { file: string; bytes: number; sha256: string }>;
+		bundles: Record<string, { executable: { file: string; bytes: number; sha256: string } }>;
 	},
 ) {
 	const records = TARGETS.map((target) => ({
 		schemaVersion: 1,
 		target,
-		asset: manifest.bundles[target],
+		asset: manifest.bundles[target].executable,
 		runner: { osArchitecture: target.includes("arm64") ? "arm64" : "x64" },
 		// Only FreeBSD arm64 is accepted under QEMU TCG emulation.
 		executor: { emulated: target === "freebsd-arm64" },
@@ -97,7 +97,7 @@ function addAcceptanceEvidence(
 				manifest: {
 					file: "release-manifest.json",
 					sha256: sha256(manifestPath),
-					schemaVersion: 6,
+					schemaVersion: 7,
 					commit: manifest.commit,
 				},
 				targetCount: TARGETS.length,
@@ -120,12 +120,16 @@ describe("GitHub Release binary packaging helpers", () => {
 	test("defines the fourteen canonical raw executables", async () => {
 		const lib = await loadLib();
 		expect(lib.BINARY_PLATFORMS).toEqual(TARGETS);
-		expect(lib.MANIFEST_SCHEMA_VERSION).toBe(6);
+		expect(lib.MANIFEST_SCHEMA_VERSION).toBe(7);
 		expect(lib.BUNDLE_LAYOUT_VERSION).toBeUndefined();
 		expect(lib.PACKAGING_BINARY).toBe("binary");
 		expect(lib.BINARY_PLATFORMS).toHaveLength(14);
 		expect(lib.binaryArchiveName("linux-x64-gnu-modern")).toBe("pi-linux-x64-gnu-modern");
 		expect(lib.binaryArchiveName("windows-arm64")).toBe("pi-windows-arm64.exe");
+		expect(lib.releaseArchiveName("linux-x64-gnu-modern")).toBe("pi-linux-x64-gnu-modern.zip");
+		expect(lib.releaseArchiveName("windows-arm64")).toBe("pi-windows-arm64.zip");
+		expect(lib.releaseEntryName("windows-arm64")).toBe("pi.exe");
+		expect(lib.releaseEntryName("darwin-arm64")).toBe("pi");
 	});
 
 	test("executable asset check requires a regular nonzero executable file", async () => {
@@ -163,6 +167,24 @@ describe("GitHub Release binary packaging helpers", () => {
 	});
 });
 
+describe("GitHub Release ZIP archive", () => {
+	test("round-trips one 0755 entry and rejects every other shape", async () => {
+		const lib = await loadLib();
+		const body = Buffer.from("#!/bin/sh\necho pi\n".repeat(1000));
+		const archive: Buffer = lib.createReleaseArchive("pi", body);
+		expect(lib.readReleaseArchive(archive, "pi").equals(body)).toBe(true);
+		expect(() => lib.readReleaseArchive(archive, "pi.exe")).toThrow();
+		expect(() => lib.readReleaseArchive(Buffer.concat([archive, Buffer.from("x")]), "pi")).toThrow(/end record/);
+		expect(() => lib.readReleaseArchive(archive.subarray(0, 40), "pi")).toThrow(/truncated/);
+		const corrupt = Buffer.from(archive);
+		corrupt[40] ^= 0xff;
+		expect(() => lib.readReleaseArchive(corrupt, "pi")).toThrow();
+		const stored = Buffer.from(archive);
+		stored.writeUInt16LE(0, 8);
+		expect(() => lib.readReleaseArchive(stored, "pi")).toThrow(/local entry/);
+	});
+});
+
 describe("GitHub Release preparation (raw executables)", () => {
 	test("refuses destructive output paths inside the repository", () => {
 		const result = spawnSync("node", [PREPARE_SCRIPT, "--out", join(REPO_ROOT, "release-output")], {
@@ -173,7 +195,7 @@ describe("GitHub Release preparation (raw executables)", () => {
 		expect(`${result.stdout}\n${result.stderr}`).toMatch(/external temporary directory/);
 	});
 
-	test("assembles the exact schema-v6 Release from fourteen prebuilt executables", async () => {
+	test("assembles the exact schema-v7 ZIP Release from fourteen prebuilt executables", async () => {
 		const prebuilt = temporaryDirectory("pi-release-prebuilt-");
 		const output = temporaryDirectory("pi-release-output-");
 		const head = run("git", ["rev-parse", "HEAD"]).stdout.trim();
@@ -193,29 +215,31 @@ describe("GitHub Release preparation (raw executables)", () => {
 		);
 		expect(prepared.status, `${prepared.stdout}\n${prepared.stderr}`).toBe(0);
 		const manifest = JSON.parse(readFileSync(join(output, "release-manifest.json"), "utf8"));
-		expect(manifest.schemaVersion).toBe(6);
+		expect(manifest.schemaVersion).toBe(7);
 		expect(Object.keys(manifest.bundles)).toEqual(TARGETS);
 		expect(manifest.layoutVersion).toBeUndefined();
 		expect(manifest.acceptance).toEqual({ file: "binary-acceptance.json", targetCount: TARGETS.length });
 		const lib = await loadLib();
 		const sums = lib.parseSha256Sums(readFileSync(join(output, "SHA256SUMS"), "utf8"));
-		// Executables + tar.xz archives + manifest + THIRD_PARTY_NOTICES.md
-		expect(sums.size).toBe(TARGETS.length * 2 + 2);
+		// ZIP archives + manifest + THIRD_PARTY_NOTICES.md; raw executables are not Release assets.
+		expect(sums.size).toBe(TARGETS.length + 2);
 		for (const target of TARGETS) {
 			const bundle = manifest.bundles[target];
-			expect(bundle.file).toBe(lib.binaryArchiveName(target));
+			expect(bundle.file).toBe(`pi-${target}.zip`);
 			expect(sums.get(bundle.file)).toBe(sha256(join(output, bundle.file)));
-			const archive = lib.packagedArchiveName(target);
-			expect(archive).toBe(`pi-${target}.tar.xz`);
-			expect(sums.get(archive)).toBe(sha256(join(output, archive)));
-			expect(() => lib.assertPackagedArchive(join(output, archive), target, bundle.sha256)).not.toThrow();
+			expect(bundle.executable.file).toBe(lib.binaryArchiveName(target));
+			expect(sums.has(bundle.executable.file)).toBe(false);
+			const inner = lib.readTargetArchive(join(output, bundle.file), target);
+			expect(createHash("sha256").update(inner).digest("hex")).toBe(bundle.executable.sha256);
+			expect(inner.equals(readFileSync(join(prebuilt, bundle.executable.file)))).toBe(true);
 		}
-		// The archive extracts with the system tar to the exact executable bytes.
+		// The ZIP extracts with the system unzip to the exact executable, mode 0755.
 		const extracted = temporaryDirectory("pi-release-extract-");
-		run("tar", ["-xJf", join(output, "pi-linux-x64-gnu-modern.tar.xz"), "-C", extracted]);
-		expect(sha256(join(extracted, "pi"))).toBe(manifest.bundles["linux-x64-gnu-modern"].sha256);
-		run("tar", ["-xJf", join(output, "pi-windows-arm64.tar.xz"), "-C", extracted]);
-		expect(sha256(join(extracted, "pi.exe"))).toBe(manifest.bundles["windows-arm64"].sha256);
+		run("unzip", ["-q", join(output, "pi-linux-x64-gnu-modern.zip"), "-d", extracted]);
+		expect(sha256(join(extracted, "pi"))).toBe(manifest.bundles["linux-x64-gnu-modern"].executable.sha256);
+		expect(statSync(join(extracted, "pi")).mode & 0o777).toBe(0o755);
+		run("unzip", ["-q", join(output, "pi-windows-arm64.zip"), "-d", extracted]);
+		expect(sha256(join(extracted, "pi.exe"))).toBe(manifest.bundles["windows-arm64"].executable.sha256);
 		expect(sums.get("THIRD_PARTY_NOTICES.md")).toBe(sha256(join(output, "THIRD_PARTY_NOTICES.md")));
 	});
 

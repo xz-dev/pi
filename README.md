@@ -2,7 +2,7 @@
 
 This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
-Release platforms (one raw executable each, see [Installation](#installation)):
+Release platforms (one `pi-<target>.zip` each, see [Installation](#installation)):
 
 | OS | Release assets |
 | --- | --- |
@@ -117,28 +117,28 @@ The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://
 
 ## Installation
 
-xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 14 raw executables: FreeBSD amd64 and arm64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64, named `pi-<target>` (`pi-<target>.exe` on Windows). The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. Each downloaded file is the complete single-file executable; there is no archive to extract, no wrapper, and no companion `pi-native` binary. No Node.js, Bun, npm, package manager, or generated installer script is required.
+xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 14 ZIP archives: FreeBSD amd64 and arm64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64, named `pi-<target>.zip`. Each ZIP holds exactly one file, the single-file executable `pi` (`pi.exe` on Windows). The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. The extracted executable is the complete product; there is no wrapper and no companion `pi-native` binary. No Node.js, Bun, npm, package manager, or generated installer script is required.
 
 The executable materializes its embedded runtime assets (docs, themes, native clipboard helper) into a per-user tmpdir cache at `os.tmpdir()/pi-resources-<uid>/<target>/<version>` on first use; a nonempty cache directory is reused as-is. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
 
 ### Linux and macOS
 
 ```bash
-# Download the matching pi-<target> from the latest Release, then:
-chmod +x pi-<target>
-./pi-<target> --version
-# Optionally install it under the public name:
-mv pi-<target> ~/.local/bin/pi
+# Download the matching pi-<target>.zip from the latest Release, then:
+unzip pi-<target>.zip
+./pi --version
+# Optionally install it on PATH:
+mv pi ~/.local/bin/pi
 ```
 
 ### FreeBSD
 
-Download `pi-freebsd-x64` (amd64) or `pi-freebsd-arm64` (arm64) on FreeBSD 14.3 or newer, then:
+Download `pi-freebsd-x64.zip` (amd64) or `pi-freebsd-arm64.zip` (arm64) on FreeBSD 14.3 or newer, then:
 
 ```sh
 pkg install fd-find ripgrep
-chmod +x pi-freebsd-<arch>
-./pi-freebsd-<arch> --version
+unzip pi-freebsd-<arch>.zip
+./pi --version
 ```
 
 `fd-find` is the Rust search tool, not FreeBSD's unrelated `fd` package. Bash is optional: command tools fall back to `/bin/sh`. No Node.js or Bun installation is needed. Desktop clipboard reads require `pkg install libxcb xclip` for X11, or `pkg install wl-clipboard` for Wayland. Without a display, copy uses terminal OSC 52; availability depends on the terminal.
@@ -152,29 +152,27 @@ git clone --branch scoop --single-branch https://github.com/xz-dev/pi.git $bucke
 scoop install xz-dev/pi
 ```
 
-Scoop installs the x64 `modern` asset, or the native arm64 asset on Windows arm64. The x64 asset uses the same runtime-dispatched Bun target as the `baseline` alias. Update with `scoop update pi`.
+Scoop installs the x64 `modern` ZIP, or the native arm64 ZIP on Windows arm64, and shims the extracted `pi.exe`. The x64 asset uses the same runtime-dispatched Bun target as the `baseline` alias. Update with `scoop update pi`.
 
-The Scoop install writes an empty `.scoop.managed.lock` next to the executable, so `pi update --self` refuses and points at `scoop update pi` instead; scoop owns the upgrade. Direct executable downloads carry no lock file and keep self-update enabled.
+The Scoop install writes an empty `.scoop.managed.lock` next to the executable, so `pi update --self` refuses and points at `scoop update pi` instead; scoop owns the upgrade. Direct ZIP downloads carry no lock file and keep self-update enabled.
 
 ### Windows PowerShell
 
 ```powershell
-# Download the matching pi-<target>.exe from the latest Release, then rename or
-# run it in place:
-.\pi-<target>.exe --version
+# Download the matching pi-<target>.zip from the latest Release, then:
+Expand-Archive pi-<target>.zip -DestinationPath pi
+.\pi\pi.exe --version
 ```
 
 ### Exact Release installation
 
-Download `pi-<target>` (`pi-<target>.exe` on Windows) from the exact `xz-v<VERSION>` Release instead of Latest, then run it using the same commands above.
-
-Each Release also ships `pi-<target>.tar.xz`, a smaller download (about one third of the size) holding only that executable as `pi` (`pi.exe` on Windows). Extract it with `tar -xJf pi-<target>.tar.xz`; this needs `xz` support in `tar` (macOS, FreeBSD, Alpine and Gentoo have it by default; minimal Debian/Ubuntu need `xz-utils`; on Windows use the raw `.exe` or 7-Zip). `pi update --self` and Scoop always use the raw executable.
+Download `pi-<target>.zip` from the exact `xz-v<VERSION>` Release instead of Latest, then extract and run it using the same commands above. Minimal Debian/Ubuntu images need `apt install unzip` first; `bsdtar -xf pi-<target>.zip` also works.
 
 Release assets include `SHA256SUMS` and GitHub build-provenance attestations for independent verification.
 
 ### Update
 
-An installed executable updates itself directly from the matching target asset:
+An installed executable updates itself from the matching `pi-<target>.zip`:
 
 ```bash
 pi update --self
@@ -188,9 +186,9 @@ pi update --extensions
 
 Standalone extension operations spawn the running executable itself, so public `pi` on `PATH` is not required. Git sources also require Git. See [package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection) for overrides and compatibility limits.
 
-On update, the running executable moves itself to a strict-version backup `pi-<old-version>` (`pi-<old-version>.exe` on Windows), downloads and sha256-verifies the new raw executable, then atomically replaces the public path. A stale backup is refreshed by downloading the matching old asset on the next update. `pi update --clean` removes only `pi-<version>` backups whose names match an exact semver; any other file next to the executable is left untouched.
+On update, the running executable moves itself to a strict-version backup `pi-<old-version>` (`pi-<old-version>.exe` on Windows), downloads and sha256-verifies the new ZIP, extracts and verifies the executable inside it, then atomically replaces the public path. A stale backup is refreshed by downloading the matching old asset on the next update. `pi update --clean` removes only `pi-<version>` backups whose names match an exact semver; any other file next to the executable is left untouched.
 
-Users upgrading from the old ZIP bundle layout (`pi` + `pi-native` + loose assets) need a one-time manual migration: delete the old extracted directory and download the single `pi-<target>` file instead. Old-layout installations cannot self-update onto the new format.
+Installations from releases up to `xz-v1.0.0-xz.253` (raw `pi-<target>` downloads) cannot self-update onto ZIP releases: their updater only knows the raw asset and reports an invalid manifest. Reinstall once by downloading and extracting the current `pi-<target>.zip` over the old `pi`; later updates work with `pi update --self` again. Older ZIP bundle installations (`pi` + `pi-native` + loose assets) need the same one-time reinstall and should delete the old extracted directory.
 
 ### Source checkout
 

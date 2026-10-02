@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { BUN_TARGET_IDS, binaryArchiveName, packagedArchiveName } from "./lib/bun-targets.mjs";
+import { BUN_TARGET_IDS, binaryArchiveName, releaseArchiveName } from "./lib/bun-targets.mjs";
 import { publishGitHubRelease } from "./publish-github-release.mjs";
 
 const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -12,7 +12,7 @@ const VERSION = "0.82.1-xz.123.1.gaaaaaaaa";
 const TAG = `xz-v${VERSION}`;
 const PLATFORMS = BUN_TARGET_IDS;
 function bundleFile(platform) {
-  return binaryArchiveName(platform);
+  return releaseArchiveName(platform);
 }
 const BUNDLE_FILES = PLATFORMS.map(bundleFile);
 const ENV = {
@@ -32,15 +32,14 @@ function digest(body) {
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "pi-release-publisher-"));
   const files = new Map([
-    ...BUNDLE_FILES.map((file) => [file, Buffer.from(`executable:${file}`)]),
-    ...PLATFORMS.map((platform) => [packagedArchiveName(platform), Buffer.from(`archive:${platform}`)]),
+    ...BUNDLE_FILES.map((file) => [file, Buffer.from(`archive:${file}`)]),
     ["release-manifest.json", Buffer.from("")],
     ["SHA256SUMS", Buffer.from("sums")],
     ["binary-acceptance.json", Buffer.from("acceptance")],
     ["THIRD_PARTY_NOTICES.md", Buffer.from("# Third-Party Notices\n")],
   ]);
   const manifest = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     repository: "xz-dev/pi",
     tag: TAG,
     distributionVersion: VERSION,
@@ -54,6 +53,7 @@ function fixture() {
           file: bundleFile(platform),
           bytes: files.get(bundleFile(platform)).byteLength,
           sha256: digest(files.get(bundleFile(platform))),
+          executable: { file: binaryArchiveName(platform), bytes: 1, sha256: "c".repeat(64) },
         },
       ]),
     ),
@@ -190,10 +190,10 @@ test("creates a draft, uploads every executable asset plus subjects, then publis
       [...candidate.assetBodies.keys()].sort(),
     );
     for (const file of BUNDLE_FILES) {
-      assert.ok(assets.has(file), `missing uploaded executable ${file}`);
+      assert.ok(assets.has(file), `missing uploaded archive ${file}`);
     }
     for (const platform of PLATFORMS) {
-      assert.ok(assets.has(packagedArchiveName(platform)), `missing uploaded archive for ${platform}`);
+      assert.ok(!assets.has(binaryArchiveName(platform)), `raw executable uploaded for ${platform}`);
     }
     assert.ok(events.indexOf("latest-ref-recheck") < events.indexOf("publish"));
     assert.ok(events.indexOf("upload:attestation-subjects.jsonl") < events.indexOf("latest-ref-recheck"));

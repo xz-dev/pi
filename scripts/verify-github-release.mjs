@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -14,14 +15,15 @@ import {
 	PACKAGING_BINARY,
 	REPOSITORY,
 	assertExecutableAsset,
-	assertPackagedArchive,
 	binaryArchiveName,
-	packagedArchiveName,
+	readTargetArchive,
+	releaseArchiveName,
 	readJson,
 	sha256File,
 } from "./lib/github-release.mjs";
 
 const MANIFEST_FILENAME = "release-manifest.json";
+const sha256Bytes = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const SUMS_FILENAME = "SHA256SUMS";
 const ACCEPTANCE_FILENAME = "binary-acceptance.json";
 const NOTICES_FILENAME = "THIRD_PARTY_NOTICES.md";
@@ -44,7 +46,8 @@ function assertManifest(manifest, requireFullSet) {
 	for (const platform of platforms) {
 		if (!BINARY_PLATFORMS.includes(platform)) throw new Error(`Unexpected bundle platform ${platform}`);
 		const bundle = manifest.bundles[platform];
-		if (!bundle || bundle.file !== binaryArchiveName(platform) || !Number.isSafeInteger(bundle.bytes) || bundle.bytes <= 0 || !/^[0-9a-f]{64}$/.test(bundle.sha256)) throw new Error(`Invalid bundle metadata for ${platform}`);
+		const validIdentity = (entry, file) => entry?.file === file && Number.isSafeInteger(entry.bytes) && entry.bytes > 0 && /^[0-9a-f]{64}$/.test(entry.sha256 ?? "");
+		if (!bundle || Object.keys(bundle).sort().join() !== "bytes,executable,file,sha256" || !validIdentity(bundle, releaseArchiveName(platform)) || !validIdentity(bundle.executable, binaryArchiveName(platform)) || Object.keys(bundle.executable).length !== 3) throw new Error(`Invalid bundle metadata for ${platform}`);
 	}
 	if (manifest.acceptance?.file !== ACCEPTANCE_FILENAME || manifest.acceptance?.targetCount !== BINARY_PLATFORMS.length) throw new Error("Invalid binary acceptance metadata");
 	if (manifest.attestation?.repository !== REPOSITORY || manifest.attestation.signerWorkflow !== `${REPOSITORY}/${ATTESTATION_SIGNER_WORKFLOW}` || manifest.attestation.signerRef !== ATTESTATION_SIGNER_REF || manifest.attestation.denySelfHostedRunners !== true || manifest.attestation.subjectsFile !== ATTESTATION_SUBJECTS_FILENAME) throw new Error("Invalid attestation policy");
@@ -112,17 +115,24 @@ const sums = parseSums(readFileSync(join(releaseDir, SUMS_FILENAME), "utf8"));
 const acceptancePath = join(releaseDir, ACCEPTANCE_FILENAME);
 const assets = [
 	...Object.values(manifest.bundles).map((bundle) => bundle.file),
-	...Object.keys(manifest.bundles).map((platform) => packagedArchiveName(platform)),
 	MANIFEST_FILENAME,
 	NOTICES_FILENAME,
 	...(existsSync(acceptancePath) ? [ACCEPTANCE_FILENAME] : []),
 	SUMS_FILENAME,
 ];
 for (const [platform, bundle] of Object.entries(manifest.bundles)) {
-	const executable = assertAsset(releaseDir, sums, bundle.file, bundle.sha256);
-	if (readFileSync(executable).byteLength !== bundle.bytes) throw new Error(`${bundle.file} byte length mismatch`);
-	assertExecutableAsset(executable, platform);
-	assertPackagedArchive(assertAsset(releaseDir, sums, packagedArchiveName(platform)), platform, bundle.sha256);
+	// The ZIP is the release asset; its single entry must be the exact executable
+	// the candidate smoke-tested (kept beside it, never uploaded).
+	const archive = assertAsset(releaseDir, sums, bundle.file, bundle.sha256);
+	if (readFileSync(archive).byteLength !== bundle.bytes) throw new Error(`${bundle.file} byte length mismatch`);
+	const inner = readTargetArchive(archive, platform);
+	if (inner.byteLength !== bundle.executable.bytes || sha256Bytes(inner) !== bundle.executable.sha256) throw new Error(`${bundle.file} does not contain the accepted executable`);
+	const executable = join(releaseDir, bundle.executable.file);
+	if (sums.has(bundle.executable.file)) throw new Error(`${bundle.executable.file} must not be a Release asset`);
+	if (existsSync(executable)) {
+		if (sha256File(executable) !== bundle.executable.sha256) throw new Error(`${bundle.executable.file} does not match the manifest`);
+		assertExecutableAsset(executable, platform);
+	}
 }
 assertAsset(releaseDir, sums, NOTICES_FILENAME);
 const noticesText = readFileSync(join(releaseDir, NOTICES_FILENAME), "utf8");
@@ -133,14 +143,14 @@ if (existsSync(acceptancePath)) {
 	if (acceptance.schemaVersion !== 1 || acceptance.targetCount !== BINARY_PLATFORMS.length || acceptance.manifest?.sha256 !== sha256File(manifestPath) || acceptance.manifest?.commit !== manifest.commit || !Array.isArray(acceptance.targets) || acceptance.targets.length !== BINARY_PLATFORMS.length) throw new Error("Invalid binary acceptance record");
 	for (const record of acceptance.targets) {
 		const bundle = manifest.bundles[record.target];
-		if (!bundle || record.asset?.file !== bundle.file || record.asset?.sha256 !== bundle.sha256 || record.asset?.bytes !== bundle.bytes) throw new Error(`Invalid acceptance evidence for ${record.target}`);
+		if (!bundle || record.asset?.file !== bundle.executable.file || record.asset?.sha256 !== bundle.executable.sha256 || record.asset?.bytes !== bundle.executable.bytes) throw new Error(`Invalid acceptance evidence for ${record.target}`);
 		if (record.runner?.osArchitecture !== (record.target.includes("arm64") ? "arm64" : "x64") || record.executor?.emulated !== (record.target === "freebsd-arm64")) throw new Error(`Invalid acceptance runner evidence for ${record.target}`);
 		if (record.tui?.observedOutput !== true || record.tui?.cleanExit !== true || record.clipboard?.loadedAndCalled !== true) throw new Error(`Missing bounded TUI/clipboard acceptance for ${record.target}`);
 	}
 }
-if (sums.size !== assets.length - 1) throw new Error(`SHA256SUMS must contain executables, tar.xz archives, manifest, notices${existsSync(acceptancePath) ? ", and acceptance record" : ""} only`);
+if (sums.size !== assets.length - 1) throw new Error(`SHA256SUMS must contain ZIP archives, manifest, notices${existsSync(acceptancePath) ? ", and acceptance record" : ""} only`);
 const subjects = readFileSync(join(releaseDir, ATTESTATION_SUBJECTS_FILENAME), "utf8").trim().split(/\r?\n/).sort();
 if (JSON.stringify(subjects) !== JSON.stringify([...assets].sort()) || subjects.some((subject) => basename(subject) !== subject)) throw new Error("Attestation subjects do not match exact Release assets");
 const platform = hostPlatform();
-if (platform && manifest.bundles[platform]) smokeHostExecutable(join(releaseDir, manifest.bundles[platform].file), platform, manifest.distributionVersion);
+if (platform && manifest.bundles[platform] && existsSync(join(releaseDir, manifest.bundles[platform].executable.file))) smokeHostExecutable(join(releaseDir, manifest.bundles[platform].executable.file), platform, manifest.distributionVersion);
 console.log(`${mode}: exact Release assets and binary contract verified`);

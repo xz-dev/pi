@@ -136,9 +136,9 @@ export const BUN_TARGETS = Object.freeze([
 export const BUN_TARGET_IDS = Object.freeze(BUN_TARGETS.map(({ id }) => id));
 export function bunTarget(id) { const found = BUN_TARGETS.find((entry) => entry.id === id); if (!found) throw new Error(`Unknown Bun Release target: ${id}`); return found; }
 export function binaryArchiveName(id) { const entry = bunTarget(id); return `pi-${id}${entry.os === "windows" ? ".exe" : ""}`; }
-/** Optional smaller download: a tar.xz holding only the executable as `pi` (`pi.exe` on Windows). */
-export function packagedArchiveName(id) { bunTarget(id); return `pi-${id}.tar.xz`; }
-export function packagedExecutableName(id) { return bunTarget(id).os === "windows" ? "pi.exe" : "pi"; }
+/** Release asset for a target: a ZIP holding only the executable, named `pi` (`pi.exe` on Windows). */
+export function releaseArchiveName(id) { bunTarget(id); return `pi-${id}.zip`; }
+export function releaseEntryName(id) { return bunTarget(id).executable; }
 export function githubBuildMatrix() { return { include: BUN_TARGETS.filter(({ os }) => os !== "freebsd").map(({ id, buildRunner, arch, buildRunnerOs, buildRunnerArch }) => ({ id, runner: buildRunner, arch, runnerOs: buildRunnerOs, runnerArch: buildRunnerArch })) }; }
 export function githubSmokeMatrix() {
 	return { include: BUN_TARGETS.filter(({ os }) => os !== "freebsd").map(({ id: target, runner, executor, containerImage }) => ({ target, runner, executor, ...(containerImage ? { containerImage } : {}) })) };

@@ -10,7 +10,7 @@ const TAG = `xz-v${VERSION}`;
 const X64_HASH = "a".repeat(64);
 const ARM64_HASH = "b".repeat(64);
 
-test("creates Scoop manifest for raw Windows executables", () => {
+test("creates Scoop manifest for Windows release ZIPs", () => {
 	const directory = mkdtempSync(join(tmpdir(), "pi-scoop-"));
 	try {
 		const manifestPath = join(directory, "release-manifest.json");
@@ -21,8 +21,8 @@ test("creates Scoop manifest for raw Windows executables", () => {
 				distributionVersion: VERSION,
 				tag: TAG,
 				bundles: {
-					"windows-x64-modern": { file: "pi-windows-x64-modern.exe", sha256: X64_HASH },
-					"windows-arm64": { file: "pi-windows-arm64.exe", sha256: ARM64_HASH },
+					"windows-x64-modern": { file: "pi-windows-x64-modern.zip", sha256: X64_HASH },
+					"windows-arm64": { file: "pi-windows-arm64.zip", sha256: ARM64_HASH },
 				},
 				attestation: { subjectsFile: "attestation-subjects.jsonl" },
 			})}\n`,
@@ -32,16 +32,16 @@ test("creates Scoop manifest for raw Windows executables", () => {
 		const scoop = JSON.parse(readFileSync(outputPath, "utf8"));
 		assert.equal(scoop.version, VERSION);
 		assert.deepEqual(scoop.architecture["64bit"], {
-			url: `https://github.com/xz-dev/pi/releases/download/${TAG}/pi-windows-x64-modern.exe`,
+			url: `https://github.com/xz-dev/pi/releases/download/${TAG}/pi-windows-x64-modern.zip`,
 			hash: X64_HASH,
-			bin: [["pi-windows-x64-modern.exe", "pi"]],
+			bin: "pi.exe",
 		});
 		assert.deepEqual(scoop.architecture.arm64, {
-			url: `https://github.com/xz-dev/pi/releases/download/${TAG}/pi-windows-arm64.exe`,
+			url: `https://github.com/xz-dev/pi/releases/download/${TAG}/pi-windows-arm64.zip`,
 			hash: ARM64_HASH,
-			bin: [["pi-windows-arm64.exe", "pi"]],
+			bin: "pi.exe",
 		});
-		// Raw executable: no extraction step.
+		// The ZIP holds pi.exe at its root: no extract_dir.
 		assert.equal(scoop.extract_dir, undefined);
 		// The install marks itself scoop-managed with an empty lock file, so
 		// `pi update --self` refuses and points at scoop.

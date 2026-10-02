@@ -18,13 +18,13 @@ import {
 	binaryArchiveName,
 	forkDistributionVersion,
 	formatSha256Sums,
-	packagedArchiveName,
 	platformNativeInfo,
+	releaseArchiveName,
 	resolveFullCommit,
 	run,
 	sha256File,
 	stableStringify,
-	writePackagedArchive,
+	writeReleaseArchive,
 } from "./lib/github-release.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -36,12 +36,11 @@ const NOTICES_FILENAME = "THIRD_PARTY_NOTICES.md";
 
 function usage() {
 	return [
-		"Usage: node scripts/prepare-github-release.mjs --out <dir> [--prebuilt <dir>] [--skip-deps] [--skip-build] [--skip-archives] [--platform <target>]",
+		"Usage: node scripts/prepare-github-release.mjs --out <dir> [--prebuilt <dir>] [--skip-deps] [--skip-build] [--platform <target>]",
 		"",
 		"  --out <dir>         external temporary output directory (required)",
 		"  --skip-deps         skip installing cross-platform native bindings (local speed; CI builds all)",
 		"  --skip-build        skip the npm package build (use when dist/ is already built)",
-		"  --skip-archives     skip the optional pi-<target>.tar.xz downloads (per-target acceptance builds)",
 		`  --platform <name>   build only selected targets (repeatable; default: all ${BINARY_PLATFORMS.length} canonical targets)`,
 		"  --prebuilt <dir>    assemble a candidate from matrix-built raw executables",
 		"  --distribution-version <v>  expected probed version (default: derived from GITHUB_RUN_* + commit)",
@@ -57,7 +56,6 @@ function parseArgs(argv) {
 	let outDir;
 	let skipDeps = false;
 	let skipBuild = false;
-	let skipArchives = false;
 	let prebuiltDir;
 	let distributionVersion;
 	let commit;
@@ -75,7 +73,6 @@ function parseArgs(argv) {
 			index += 1;
 		} else if (arg === "--skip-deps") skipDeps = true;
 		else if (arg === "--skip-build") skipBuild = true;
-		else if (arg === "--skip-archives") skipArchives = true;
 		else if (arg === "--help" || arg === "-h") throw new Error(usage());
 		else throw new Error(`Unknown argument: ${arg}\n${usage()}`);
 	}
@@ -94,7 +91,7 @@ function parseArgs(argv) {
 			throw new Error(`Invalid platform ${platform}; expected one of ${BINARY_PLATFORMS.join(", ")}`);
 		}
 	}
-	return { outDir: resolved, skipDeps, skipBuild, skipArchives, platforms: selected, prebuiltDir, distributionVersion, commit };
+	return { outDir: resolved, skipDeps, skipBuild, platforms: selected, prebuiltDir, distributionVersion, commit };
 }
 
 function writeJson(path, value) {
@@ -135,7 +132,7 @@ function probeCandidate(executablePath, platform) {
 }
 
 function main() {
-	const { outDir, skipDeps, skipBuild, skipArchives, platforms, prebuiltDir, distributionVersion: requestedVersion, commit: requestedCommit } = parseArgs(process.argv);
+	const { outDir, skipDeps, skipBuild, platforms, prebuiltDir, distributionVersion: requestedVersion, commit: requestedCommit } = parseArgs(process.argv);
 	const rootPackageJson = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
 	if (rootPackageJson.name !== "pi-monorepo") throw new Error("Run this script from the repository root");
 	const entryPackageJson = JSON.parse(readFileSync(join(REPO_ROOT, "packages", "coding-agent", "package.json"), "utf8"));
@@ -179,14 +176,23 @@ function main() {
 		// intact for repeated local verification runs.
 		if (prebuiltDir) copyFileSync(executablePath, destination);
 		else renameSync(executablePath, destination);
-		bundles[platform] = {
+		const executable = {
 			file: assetName,
 			bytes: readFileSync(destination).byteLength,
 			sha256: sha256File(destination),
 		};
-		// Optional smaller download beside the raw executable; self-update and
-		// package managers keep using the raw asset recorded in the manifest.
-		if (!skipArchives) writePackagedArchive(destination, join(outDir, packagedArchiveName(platform)), platform);
+		// Release asset is the ZIP holding this executable as `pi`/`pi.exe`. The
+		// raw executable stays in the candidate directory only for CI smoke and
+		// acceptance; it is never uploaded.
+		const archiveName = releaseArchiveName(platform);
+		const archivePath = join(outDir, archiveName);
+		writeReleaseArchive(destination, archivePath, platform);
+		bundles[platform] = {
+			file: archiveName,
+			bytes: readFileSync(archivePath).byteLength,
+			sha256: sha256File(archivePath),
+			executable,
+		};
 	}
 
 	// One release-level license notice for the whole dependency closure; the
@@ -215,9 +221,10 @@ function main() {
 	};
 	const manifestPath = join(outDir, MANIFEST_FILENAME);
 	writeJson(manifestPath, manifest);
+	// Only the ZIP archives ship as release assets; the raw executables remain
+	// internal to the candidate.
 	const checksummedAssets = [
 		...Object.values(bundles).map((entry) => entry.file),
-		...(skipArchives ? [] : platforms.map((platform) => packagedArchiveName(platform))),
 		MANIFEST_FILENAME,
 		NOTICES_FILENAME,
 	];

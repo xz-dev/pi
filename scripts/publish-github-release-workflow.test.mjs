@@ -559,7 +559,7 @@ test("publication attests final subjects before draft publication and keeps audi
   );
   assert.match(workflowText, /actions\/attest-build-provenance@[0-9a-f]{40}/);
   for (const subject of [
-    "pi-*",
+    "pi-*.zip",
     "release-manifest.json",
     "binary-acceptance.json",
     "THIRD_PARTY_NOTICES.md",
@@ -578,7 +578,7 @@ test("publication attests final subjects before draft publication and keeps audi
   assert.match(workflowText, /GH_CONFIG_DIR="\$empty_gh_config" GH_TOKEN= GITHUB_TOKEN=/);
   assert.doesNotMatch(workflowText, /mapfile|readarray/);
   assert.match(workflowText, /while IFS= read -r subject/);
-  assert.match(workflowText, /test "\$subject_count" -eq 32/);
+  assert.match(workflowText, /test "\$subject_count" -eq 18/);
   assert.match(workflowText, /gh attestation verify/);
   assert.match(workflowText, /--bundle "\$bundle"/);
   assert.match(workflowText, /--source-digest "\$GITHUB_SHA"/);
