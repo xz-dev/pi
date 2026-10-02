@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -8,6 +8,7 @@ import {
 	getResourceCacheRoot,
 	isEmbeddedAssetPath,
 	isNonEmptyDirectory,
+	materializeNativeAddons,
 	materializeResourceTree,
 } from "../src/config.ts";
 
@@ -130,6 +131,19 @@ describe("materializeResourceTree", () => {
 		});
 		expect(target).toBe(join(cacheRoot, "native", "linux", "prebuilds", "linux-x64"));
 		expect(readFileSync(join(target, "top.txt"), "utf8")).toBe("top");
+	});
+});
+
+describe("materializeNativeAddons", () => {
+	test.each([false, true])("returns unavailable for omitted native assets (stale cache: %s)", (staleCache) => {
+		// gentoo-zh/overlay#14221: USE=-X must retain clipboard fallbacks.
+		expect(existsSync(getEmbeddedAssetPath("native"))).toBe(false);
+		const cacheRoot = makeCacheRoot();
+		if (staleCache) {
+			mkdirSync(join(cacheRoot, "native"));
+			writeFileSync(join(cacheRoot, "native", "old-helper.node"), "old +X build");
+		}
+		expect(materializeNativeAddons(cacheRoot)).toBeUndefined();
 	});
 });
 
