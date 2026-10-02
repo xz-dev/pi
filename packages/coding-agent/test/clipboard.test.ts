@@ -66,6 +66,14 @@ afterEach(() => {
 });
 
 describe("readClipboardText", () => {
+	test("FreeBSD uses the X11 text command before the native fallback", async () => {
+		mocks.platform.mockReturnValue("freebsd");
+		vi.stubEnv("DISPLAY", ":0");
+		mocks.command.mockResolvedValue(Buffer.from("FreeBSD clipboard"));
+		await expect(readClipboardText()).resolves.toBe("FreeBSD clipboard");
+		expect(mocks.command).toHaveBeenCalledWith("xclip", ["-selection", "clipboard", "-out"], { timeoutMs: 5000 });
+		expect(mocks.getNativeClipboard).not.toHaveBeenCalled();
+	});
 	test("awaits native clipboard text and catches rejected reads", async () => {
 		mocks.clipboard.getText.mockResolvedValue("clipboard text");
 		await expect(readClipboardText()).resolves.toBe("clipboard text");
@@ -111,6 +119,12 @@ describe("readClipboardText", () => {
 });
 
 describe("copyToClipboard", () => {
+	test("display-less FreeBSD uses OSC 52 without a native writer", async () => {
+		mocks.platform.mockReturnValue("freebsd");
+		mocks.getNativeClipboard.mockReturnValue(undefined);
+		await copyToClipboard("hello");
+		expect(osc52Writes).toEqual([`\x1b]52;c;${Buffer.from("hello").toString("base64")}\x07`]);
+	});
 	test("local native success skips OSC 52 and commands", async () => {
 		await copyToClipboard("hello");
 		expect(mocks.clipboard.setText).toHaveBeenCalledWith("hello");
