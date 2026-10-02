@@ -15,6 +15,7 @@ import {
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { crc32, deflateRawSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { allowNetwork } from "./test-network-env.ts";
 
@@ -22,8 +23,46 @@ const CURRENT_VERSION = "0.84.1-xz.68.1.g11111111";
 const NEXT_VERSION = "0.84.1-xz.69.1.g22222222";
 const TAG = `xz-v${NEXT_VERSION}`;
 const TARGET = "linux-x64-gnu-modern";
-const ASSET = `pi-${TARGET}`;
-const ASSET_BYTES = new TextEncoder().encode("new-pi-binary-bytes");
+const ASSET = `pi-${TARGET}.zip`;
+const EXECUTABLE_TEXT = "new-pi-binary-bytes";
+const EXECUTABLE_BYTES = new TextEncoder().encode(EXECUTABLE_TEXT);
+const EXECUTABLE_SHA256 = createHash("sha256").update(EXECUTABLE_BYTES).digest("hex");
+
+/** Release ZIP shape produced by scripts/lib/github-release.mjs: one deflated 0755 entry. */
+function releaseZip(entryName: string, body: Uint8Array): Uint8Array {
+	const name = Buffer.from(entryName);
+	const data = deflateRawSync(body);
+	const checksum = crc32(body);
+	const local = Buffer.alloc(30);
+	local.writeUInt32LE(0x04034b50, 0);
+	local.writeUInt16LE(20, 4);
+	local.writeUInt16LE(8, 8);
+	local.writeUInt16LE(0x21, 12);
+	local.writeUInt32LE(checksum, 14);
+	local.writeUInt32LE(data.length, 18);
+	local.writeUInt32LE(body.length, 22);
+	local.writeUInt16LE(name.length, 26);
+	const central = Buffer.alloc(46);
+	central.writeUInt32LE(0x02014b50, 0);
+	central.writeUInt16LE((3 << 8) | 20, 4);
+	central.writeUInt16LE(20, 6);
+	central.writeUInt16LE(8, 10);
+	central.writeUInt16LE(0x21, 14);
+	central.writeUInt32LE(checksum, 16);
+	central.writeUInt32LE(data.length, 20);
+	central.writeUInt32LE(body.length, 24);
+	central.writeUInt16LE(name.length, 28);
+	central.writeUInt32LE(0o100755 * 0x10000, 38);
+	const end = Buffer.alloc(22);
+	end.writeUInt32LE(0x06054b50, 0);
+	end.writeUInt16LE(1, 8);
+	end.writeUInt16LE(1, 10);
+	end.writeUInt32LE(central.length + name.length, 12);
+	end.writeUInt32LE(local.length + name.length + data.length, 16);
+	return new Uint8Array(Buffer.concat([local, name, data, central, name, end]));
+}
+
+const ASSET_BYTES = releaseZip("pi", EXECUTABLE_BYTES);
 const ASSET_SHA256 = createHash("sha256").update(ASSET_BYTES).digest("hex");
 const DIGEST = `sha256:${ASSET_SHA256}`;
 const RELEASE_ORIGIN = "https://github.com";
@@ -34,7 +73,7 @@ const MANIFEST_URL = `${LATEST_BASE}release-manifest.json`;
 
 function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
-		schemaVersion: 6,
+		schemaVersion: 7,
 		repository: "xz-dev/pi",
 		tag: TAG,
 		distributionVersion: NEXT_VERSION,
@@ -42,8 +81,18 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
 		commit: `22222222${"3".repeat(32)}`,
 		packaging: "binary",
 		bundles: {
-			[TARGET]: { file: ASSET, bytes: ASSET_BYTES.byteLength, sha256: ASSET_SHA256 },
-			"windows-arm64": { file: "pi-windows-arm64.exe", bytes: 10, sha256: "4".repeat(64) },
+			[TARGET]: {
+				file: ASSET,
+				bytes: ASSET_BYTES.byteLength,
+				sha256: ASSET_SHA256,
+				executable: { file: `pi-${TARGET}`, bytes: EXECUTABLE_BYTES.byteLength, sha256: EXECUTABLE_SHA256 },
+			},
+			"windows-arm64": {
+				file: "pi-windows-arm64.zip",
+				bytes: 10,
+				sha256: "4".repeat(64),
+				executable: { file: "pi-windows-arm64.exe", bytes: 10, sha256: "5".repeat(64) },
+			},
 		},
 		new_future_field: { ignored: true },
 		...overrides,
@@ -125,7 +174,12 @@ describe("xz-dev Release discovery", () => {
 			tag: TAG,
 			commit: `22222222${"3".repeat(32)}`,
 			exactBaseUrl: EXACT_BASE,
-			bundle: { name: ASSET, digest: DIGEST, size: ASSET_BYTES.byteLength },
+			bundle: {
+				name: ASSET,
+				digest: DIGEST,
+				size: ASSET_BYTES.byteLength,
+				executable: { size: EXECUTABLE_BYTES.byteLength, digest: `sha256:${EXECUTABLE_SHA256}` },
+			},
 		});
 		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([SUMS_URL, MANIFEST_URL]);
 		for (const [, init] of fetchMock.mock.calls) {
@@ -257,12 +311,44 @@ describe("xz-dev Release discovery", () => {
 
 		vi.stubGlobal(
 			"fetch",
-			discoveryFetch(manifest({ bundles: { [TARGET]: { file: ASSET, bytes: 6, sha256: "not-a-digest" } } })),
+			discoveryFetch(
+				manifest({
+					bundles: {
+						[TARGET]: {
+							file: ASSET,
+							bytes: 6,
+							sha256: "not-a-digest",
+							executable: { bytes: 1, sha256: "a".repeat(64) },
+						},
+					},
+				}),
+			),
 		);
 		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/bundle digest/);
 
 		vi.stubGlobal("fetch", discoveryFetch(manifest({ schemaVersion: 5, layoutVersion: 2 })));
 		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/manifest identity/);
+	});
+
+	it("rejects raw-executable schema 6 manifests and ZIP bundles without executable identity", async () => {
+		allowNetwork();
+		const { getLatestXzRelease } = await loadUpdater();
+		vi.stubGlobal(
+			"fetch",
+			discoveryFetch(
+				manifest({
+					schemaVersion: 6,
+					bundles: { [TARGET]: { file: `pi-${TARGET}`, bytes: 6, sha256: "a".repeat(64) } },
+				}),
+			),
+		);
+		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/manifest identity/);
+
+		vi.stubGlobal(
+			"fetch",
+			discoveryFetch(manifest({ bundles: { [TARGET]: { file: ASSET, bytes: 6, sha256: "a".repeat(64) } } })),
+		);
+		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow(/bundle metadata/);
 	});
 });
 
@@ -280,9 +366,7 @@ describe("xz-dev single-file self-update", () => {
 				executablePath,
 				writeProgress: (m) => messages.push(m),
 			});
-			expect(readFileSync(executablePath, "utf8")).toBe(
-				ASSET_BYTES.toString() === "" ? "" : new TextDecoder().decode(ASSET_BYTES),
-			);
+			expect(readFileSync(executablePath, "utf8")).toBe(EXECUTABLE_TEXT);
 			expect(readFileSync(join(root, `pi-${CURRENT_VERSION}`), "utf8")).toBe("old-pi-binary\n");
 			expect(statSync(executablePath).mode & 0o777).toBe(0o755);
 			// No stray staging files or leftover candidate name.
@@ -308,6 +392,53 @@ describe("xz-dev single-file self-update", () => {
 			expect(readdirSync(root)).toEqual(["pi"]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a digest-valid ZIP whose executable or entry does not match the manifest", async () => {
+		allowNetwork();
+		for (const [zip, message] of [
+			[releaseZip("pi", new TextEncoder().encode("tampered-binary-bytes")), /executable does not match/],
+			[releaseZip("pi.exe", EXECUTABLE_BYTES), /must contain only pi|central directory/],
+		] as const) {
+			const root = writeSingleInstall();
+			const executablePath = join(root, "pi");
+			try {
+				const value = manifest({
+					bundles: {
+						[TARGET]: {
+							file: ASSET,
+							bytes: zip.byteLength,
+							sha256: createHash("sha256").update(zip).digest("hex"),
+							executable: {
+								file: `pi-${TARGET}`,
+								bytes: EXECUTABLE_BYTES.byteLength,
+								sha256: EXECUTABLE_SHA256,
+							},
+						},
+					},
+				});
+				const { manifestBytes, sums } = discoveryFiles(value);
+				vi.stubGlobal(
+					"fetch",
+					vi.fn(async (input: string | URL) => {
+						const url = String(input);
+						if (url === SUMS_URL) return new Response(sums);
+						if (url === MANIFEST_URL) return new Response(manifestBytes);
+						if (url === `${EXACT_BASE}${ASSET}`) return new Response(zip);
+						return new Response("not found", { status: 404 });
+					}),
+				);
+				const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(executablePath);
+				const latest = await getLatestXzRelease(CURRENT_VERSION);
+				await expect(
+					runXzSelfUpdate(latest!, CURRENT_VERSION, false, { executablePath, writeProgress: () => {} }),
+				).rejects.toThrow(message);
+				expect(readFileSync(executablePath, "utf8")).toBe("old-pi-binary\n");
+				expect(readdirSync(root)).toEqual(["pi"]);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
 		}
 	});
 
@@ -355,7 +486,7 @@ describe("xz-dev single-file self-update", () => {
 			// `pi` entrypoint is present again with the OLD bytes; candidate remains
 			// (it is verified and may be reused or cleaned by name on a later update).
 			expect(readFileSync(executablePath, "utf8")).toBe("old-pi-binary\n");
-			expect(readFileSync(candidatePath, "utf8")).toBe(new TextDecoder().decode(ASSET_BYTES));
+			expect(readFileSync(candidatePath, "utf8")).toBe(EXECUTABLE_TEXT);
 			expect(readdirSync(root).sort()).toEqual([`pi-${NEXT_VERSION}`, "pi"].sort());
 			expect(calls.map(([s, d]) => `${s}->${d}`)).toEqual([
 				`.pi-${NEXT_VERSION}.${process.pid}.download->pi-${NEXT_VERSION}`,
@@ -435,7 +566,7 @@ describe("xz-dev single-file self-update", () => {
 			// At least one completes; the entrypoint always holds valid bytes.
 			expect(results.some((r) => r === "ok")).toBe(true);
 			const finalBytes = readFileSync(executablePath, "utf8");
-			expect([new TextDecoder().decode(ASSET_BYTES), "old-pi-binary\n"]).toContain(finalBytes);
+			expect([EXECUTABLE_TEXT, "old-pi-binary\n"]).toContain(finalBytes);
 			// No `.download` staging residue.
 			expect(readdirSync(root).filter((n) => n.includes(".download"))).toEqual([]);
 			void seenWrites;
@@ -663,7 +794,7 @@ describe("xz-dev self-update over a local HTTP release server", () => {
 			const latest = await getLatestXzRelease(CURRENT_VERSION);
 			expect(latest).toMatchObject({ version: NEXT_VERSION, tag: TAG });
 			await runXzSelfUpdate(latest!, CURRENT_VERSION, false, { executablePath, writeProgress: () => {} });
-			expect(readFileSync(executablePath, "utf8")).toBe(new TextDecoder().decode(ASSET_BYTES));
+			expect(readFileSync(executablePath, "utf8")).toBe(EXECUTABLE_TEXT);
 			expect(readFileSync(join(root, `pi-${CURRENT_VERSION}`), "utf8")).toBe("old-pi-binary\n");
 			expect(requests.map((u) => u.split("/").pop())).toEqual(["SHA256SUMS", "release-manifest.json", ASSET]);
 		} finally {
