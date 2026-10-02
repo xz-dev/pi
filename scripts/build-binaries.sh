@@ -9,6 +9,7 @@ SKIP_DEPS=false
 SKIP_BUILD=false
 HYDRATE_TARGET_DEPS=false
 OFFLINE_MODEL_DATA=false
+WITHOUT_X11=false
 PLATFORMS_REQUESTED=()
 OUTPUT_DIR=""
 DISTRIBUTION_VERSION=""
@@ -21,6 +22,7 @@ while [[ $# -gt 0 ]]; do
 		--skip-build) SKIP_BUILD=true; shift ;;
 		--hydrate-target-deps) HYDRATE_TARGET_DEPS=true; shift ;;
 		--offline-model-data) OFFLINE_MODEL_DATA=true; shift ;;
+		--without-x11) WITHOUT_X11=true; shift ;;
 		--platform) PLATFORMS_REQUESTED+=("$2"); shift 2 ;;
 		--out) OUTPUT_DIR="$2"; shift 2 ;;
 		--distribution-version) DISTRIBUTION_VERSION="$2"; shift 2 ;;
@@ -56,7 +58,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
 	if [[ "$OFFLINE_MODEL_DATA" == true ]]; then npm run build:offline; else npm run build; fi
 fi
 export NODE_ENV=production
-if [[ -z "$CLIPBOARD_MUSL_DIR" ]] && printf '%s\n' "${PLATFORMS_REQUESTED[@]}" | grep -q -- '-musl'; then
+if [[ "$WITHOUT_X11" == false && -z "$CLIPBOARD_MUSL_DIR" ]] && printf '%s\n' "${PLATFORMS_REQUESTED[@]}" | grep -q -- '-musl'; then
 	echo "musl targets require an architecture-matched --clipboard-musl-dir" >&2
 	exit 1
 fi
@@ -99,9 +101,9 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		--asset=src/core/export-html
 		--asset=../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm
 	)
-	if [[ -n "$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperDir 2>/dev/null)" ]]; then
-		native_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperDir)
-		native_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperFile)
+	native_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperDir 2>/dev/null || true)
+	native_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperFile 2>/dev/null || true)
+	if [[ -n "$native_dir" && ( "$WITHOUT_X11" == false || "$native_file" != *-x11.node ) ]]; then
 		if [[ "$target" == freebsd-* ]]; then
 			bash ../tui/native/freebsd/build.sh
 		fi
