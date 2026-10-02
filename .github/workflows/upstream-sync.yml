@@ -50,6 +50,7 @@ jobs:
             +refs/heads/patch/retry-non-retryable-patterns:refs/remotes/origin/patch/retry-non-retryable-patterns \
             +refs/heads/patch/slow-hook-tui-only:refs/remotes/origin/patch/slow-hook-tui-only \
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
+            +refs/heads/patch/codex-websocket-recovery:refs/remotes/origin/patch/codex-websocket-recovery \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
@@ -87,6 +88,7 @@ jobs:
             retry-non-retryable-patterns \
             slow-hook-tui-only \
             ws-cached-empty-delta \
+            codex-websocket-recovery \
             model-selector-refresh-selection \
             ai-drop-empty-messages \
             quarantine-auth-storage-flake \
@@ -186,6 +188,8 @@ jobs:
             node ../../node_modules/vitest/dist/cli.js --run \
               test/event-stream.test.ts \
               test/openai-responses-compat.test.ts \
+              test/openai-codex-websocket-lazy.test.ts \
+              test/openai-codex-stream.test.ts \
               test/providers.test.ts \
               test/retry.test.ts
           )

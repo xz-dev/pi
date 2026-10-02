@@ -118,6 +118,7 @@ PATCH_ORDER=(
 	retry-non-retryable-patterns
 	slow-hook-tui-only
 	ws-cached-empty-delta
+	codex-websocket-recovery
 	model-selector-refresh-selection
 	ai-drop-empty-messages
 	quarantine-auth-storage-flake
