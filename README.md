@@ -2,7 +2,7 @@
 
 This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
-Release platforms (one ZIP each, see [Installation](#installation)):
+Release platforms (one raw executable each, see [Installation](#installation)):
 
 | OS | Release assets |
 | --- | --- |
@@ -184,7 +184,7 @@ Extension updates are separate:
 pi update --extensions
 ```
 
-For standalone extension operations, keep public `pi` on `PATH`; launching by absolute path alone does not satisfy this requirement. Git sources also require Git. See [package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection) for overrides and compatibility limits.
+Standalone extension operations spawn the running executable itself, so public `pi` on `PATH` is not required. Git sources also require Git. See [package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection) for overrides and compatibility limits.
 
 On update, the running executable moves itself to a strict-version backup `pi-<old-version>` (`pi-<old-version>.exe` on Windows), downloads and sha256-verifies the new raw executable, then atomically replaces the public path. A stale backup is refreshed by downloading the matching old asset on the next update. `pi update --clean` removes only `pi-<version>` backups whose names match an exact semver; any other file next to the executable is left untouched.
 
