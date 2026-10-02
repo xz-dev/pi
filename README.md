@@ -199,6 +199,14 @@ On update, the running executable moves itself to a strict-version backup `pi-<o
 
 Installations from releases up to `xz-v1.0.0-xz.253` (raw `pi-<target>` downloads) cannot self-update onto ZIP releases: their updater only knows the raw asset and reports an invalid manifest. Reinstall once by downloading and extracting the current `pi-<target>.zip` over the old `pi`; later updates work with `pi update --self` again. Older ZIP bundle installations (`pi` + `pi-native` + loose assets) need the same one-time reinstall and should delete the old extracted directory.
 
+### Building without the native X11 helper
+
+For package-manager builds such as Gentoo `USE=-X`, pass `--without-x11` to `scripts/build-binaries.sh`. Linux and FreeBSD executables then omit the native X11 clipboard helper; musl builds also no longer need `--clipboard-musl-dir`. The default build and macOS/Windows native helpers are unchanged. This option does not disable command-line clipboard fallbacks such as `wl-paste` or `xclip`.
+
+```bash
+bash scripts/build-binaries.sh --platform linux-x64-gnu-baseline --without-x11
+```
+
 ### Source checkout
 
 A documented source installation uses the xz-dev checkout and is user-managed:
