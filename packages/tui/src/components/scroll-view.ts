@@ -6,6 +6,8 @@ export type ScrollViewScrollbar = "hidden" | "auto" | "always";
 export interface ScrollViewOptions {
 	axis?: "vertical";
 	follow?: "none" | "end";
+	/** Resume end-following when layout changes place the viewport at the end. Defaults to true. */
+	resumeFollowOnLayout?: boolean;
 	primary?: boolean;
 	overscroll?: "chain" | "contain";
 	scrollbar?: ScrollViewScrollbar;
@@ -22,6 +24,7 @@ export interface ScrollViewScrollToOptions {
 export class ScrollView extends Container {
 	private readonly child: Component;
 	readonly followEnd: boolean;
+	private readonly resumeFollowOnLayout: boolean;
 	readonly primary: boolean;
 	readonly overscroll: "chain" | "contain";
 	readonly scrollbarTrackStyle: (text: string) => string;
@@ -46,6 +49,7 @@ export class ScrollView extends Container {
 		this.child = component;
 		this.children.push(component);
 		this.followEnd = (options.follow ?? "none") === "end";
+		this.resumeFollowOnLayout = options.resumeFollowOnLayout ?? true;
 		this.followingEnd = this.followEnd;
 		this.primary = options.primary ?? false;
 		this.overscroll = options.overscroll ?? "chain";
@@ -194,7 +198,12 @@ export class ScrollView extends Container {
 		if (this.followingEnd) this.currentScrollTop = maxScrollTop;
 		else this.currentScrollTop = Math.max(0, Math.min(this.currentScrollTop, maxScrollTop));
 		if (this.currentScrollTop < maxScrollTop) this.followSuppressedAtEnd = false;
-		if (this.followEnd && this.currentScrollTop === maxScrollTop && !this.followSuppressedAtEnd) {
+		if (
+			this.resumeFollowOnLayout &&
+			this.followEnd &&
+			this.currentScrollTop === maxScrollTop &&
+			!this.followSuppressedAtEnd
+		) {
 			this.followingEnd = true;
 		}
 		if (this.contentHeight <= this.currentViewportHeight) this.hideTransientScrollbar();
