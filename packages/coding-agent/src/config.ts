@@ -201,11 +201,13 @@ export function setMaterializedDocs(docs: MaterializedDocs | undefined): void {
  * Materialize the embedded native addon tree and return the directory that
  * contains the `.node` files. `require` of an embedded `.node` makes Bun
  * unpack it to an unpredictable global temp name, so addons must be loaded
- * from this explicit on-disk path instead.
+ * from this explicit on-disk path instead. Builds may omit native addons.
  */
-export function materializeNativeAddons(cacheRoot?: string): string {
+export function materializeNativeAddons(cacheRoot?: string): string | undefined {
+	const sourceDir = getEmbeddedAssetPath("native");
+	if (!existsSync(sourceDir)) return undefined;
 	return materializeResourceTree({
-		sourceDir: `${EMBEDDED_ASSETS_ROOT}/native`,
+		sourceDir,
 		relativePath: "native",
 		cacheRoot,
 	});
