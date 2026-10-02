@@ -3,6 +3,7 @@ import { chmodSync, existsSync, lstatSync, readdirSync, renameSync, unlinkSync, 
 import { basename, dirname, join } from "node:path";
 import { RELEASE_TARGET } from "../config.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
+import { readReleaseArchive } from "./release-archive.ts";
 
 /** Rename one path, retrying transient Windows sharing violations. */
 function renameSyncRetryable(
@@ -40,7 +41,7 @@ function isTransientWindowsShareViolation(error: unknown): boolean {
 const REPOSITORY = "xz-dev/pi";
 const RELEASE_DOWNLOAD_ORIGIN = "https://github.com";
 const RELEASE_MAX_BYTES = 1024 * 1024;
-const MANIFEST_SCHEMA_VERSION = 6;
+const MANIFEST_SCHEMA_VERSION = 7;
 const MANIFEST_FILENAME = "release-manifest.json";
 const SUMS_FILENAME = "SHA256SUMS";
 const EXECUTABLE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
@@ -54,6 +55,8 @@ interface GitHubReleaseAsset {
 	browser_download_url: string;
 	size: number;
 	digest: string;
+	/** The single executable inside the ZIP asset. */
+	executable: { size: number; digest: string };
 }
 
 export interface XzCleanupOptions {
@@ -182,7 +185,11 @@ function exactBaseUrl(tag: string): string {
 
 function expectedBundleName(target: string): string {
 	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(target)) return fail("Invalid xz-dev Release target metadata");
-	return `pi-${target}${process.platform === "win32" ? ".exe" : ""}`;
+	return `pi-${target}.zip`;
+}
+
+function expectedEntryName(): string {
+	return process.platform === "win32" ? "pi.exe" : "pi";
 }
 
 function parseLatestRelease(value: unknown): XzLatestRelease {
@@ -207,7 +214,9 @@ function parseLatestRelease(value: unknown): XzLatestRelease {
 	const expectedFile = expectedBundleName(RELEASE_TARGET);
 	if (!isRecord(value.bundles)) return fail("Latest xz-dev Release bundles are missing");
 	const bundle = value.bundles[RELEASE_TARGET];
-	if (!isRecord(bundle) || bundle.file !== expectedFile) return fail(`Invalid ${expectedFile} bundle metadata`);
+	if (!isRecord(bundle) || bundle.file !== expectedFile || !isRecord(bundle.executable)) {
+		return fail(`Invalid ${expectedFile} bundle metadata`);
+	}
 	const exactBase = exactBaseUrl(tag);
 	return {
 		version,
@@ -219,6 +228,13 @@ function parseLatestRelease(value: unknown): XzLatestRelease {
 			browser_download_url: `${exactBase}${expectedFile}`,
 			size: requirePositiveSize(bundle.bytes, EXECUTABLE_MAX_BYTES, "bundle size"),
 			digest: requireSha256Digest(`sha256:${requireString(bundle.sha256, "bundle digest")}`, "bundle digest"),
+			executable: {
+				size: requirePositiveSize(bundle.executable.bytes, EXECUTABLE_MAX_BYTES, "executable size"),
+				digest: requireSha256Digest(
+					`sha256:${requireString(bundle.executable.sha256, "executable digest")}`,
+					"executable digest",
+				),
+			},
 		},
 	};
 }
@@ -374,10 +390,10 @@ function writeDownloadProgress(message: string, isTTY = Boolean(process.stdout.i
 }
 
 /**
- * Stream the release executable to `stagingPath`, verifying byte length and
- * sha256 BEFORE the path is finalized. The staging file is written
- * exclusively (no clobber) and deleted on any failure, so a corrupt download
- * can never touch the running executable.
+ * Download the release ZIP, verify its byte length and sha256, extract the
+ * single executable entry and verify its size and sha256, all BEFORE anything
+ * is written. The staging file is written exclusively (no clobber) and deleted
+ * on any failure, so a corrupt download can never touch the running executable.
  */
 async function downloadExecutable(
 	release: XzLatestRelease,
@@ -438,9 +454,17 @@ async function downloadExecutable(
 		showProgress(true);
 		const digest = createHash("sha256").update(bytes).digest("hex");
 		if (`sha256:${digest}` !== release.bundle.digest) return fail(`${release.bundle.name} sha256 mismatch`);
+		const executable = readReleaseArchive(bytes, expectedEntryName(), release.bundle.name);
+		const executableDigest = createHash("sha256").update(executable).digest("hex");
+		if (
+			executable.byteLength !== release.bundle.executable.size ||
+			`sha256:${executableDigest}` !== release.bundle.executable.digest
+		) {
+			return fail(`${release.bundle.name} executable does not match the Release manifest`);
+		}
 		// Write to the staging name first (`flag: "wx"` never clobbers); the
 		// caller renames it onto the final candidate name after this returns.
-		writeFileSync(stagingPath, bytes, { flag: "wx", mode: 0o600 });
+		writeFileSync(stagingPath, executable, { flag: "wx", mode: 0o600 });
 	} finally {
 		clearTimeout(inactivityTimeout);
 		if (progressShown && !options.writeProgress && (options.isTTY ?? process.stdout.isTTY))
