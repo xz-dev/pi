@@ -21,13 +21,13 @@ const architecture = Object.fromEntries(
 		["arm64", "windows-arm64"],
 	].map(([scoopArch, target]) => {
 		const bundle = releaseManifest.bundles?.[target];
-		const file = `pi-${target}.exe`;
+		const file = `pi-${target}.zip`;
 		if (bundle?.file !== file || !/^[0-9a-f]{64}$/.test(bundle.sha256 ?? "")) {
 			throw new Error(`Invalid ${target} bundle metadata`);
 		}
-		// The asset is the raw executable: scoop downloads it under that name and
-		// the bin entry shims it as `pi` (no extraction).
-		return [scoopArch, { url: `${releaseUrl}/${file}`, hash: bundle.sha256, bin: [[file, "pi"]] }];
+		// The asset is a ZIP holding only `pi.exe`; scoop extracts it into the
+		// app directory and shims `pi`.
+		return [scoopArch, { url: `${releaseUrl}/${file}`, hash: bundle.sha256, bin: "pi.exe" }];
 	}),
 );
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Single-executable self-update E2E. Serves release-manifest.json +
-// SHA256SUMS + the raw `pi-<target>` asset from a local HTTP server, installs
+// SHA256SUMS + the `pi-<target>.zip` asset from a local HTTP server, installs
 // an older candidate as `pi`, runs `pi update --self` through
 // PI_XZ_RELEASE_BASE_URL, and asserts the new version activated with the old
 // one retained as a `pi-<old version>` backup. A corrupt asset attempt leaves
@@ -11,17 +11,17 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { binaryArchiveName, bunTarget } from "./lib/bun-targets.mjs";
-import { MANIFEST_SCHEMA_VERSION } from "./lib/github-release.mjs";
+import { bunTarget, releaseArchiveName } from "./lib/bun-targets.mjs";
+import { MANIFEST_SCHEMA_VERSION, readReleaseArchive } from "./lib/github-release.mjs";
 import { run } from "./lib/e2e-command.mjs";
 
 const [candidateArg, targetId, expectedVersion, oldAssetArg] = process.argv.slice(2);
 if (!candidateArg || !targetId || !expectedVersion) {
-	throw new Error("Usage: e2e-binary-self-update.mjs <candidate-dir> <target> <version> [old-executable]");
+	throw new Error("Usage: e2e-binary-self-update.mjs <candidate-dir> <target> <version> [old-release-zip]");
 }
 const candidate = resolve(candidateArg);
 const target = bunTarget(targetId);
-const assetName = binaryArchiveName(targetId);
+const assetName = releaseArchiveName(targetId);
 const assetPath = join(candidate, assetName);
 const work = mkdtempSync(join(tmpdir(), "pi-self-update-e2e-"));
 const install = join(work, "install");
@@ -39,15 +39,16 @@ if (bundle?.file !== assetName || bundle.bytes !== statSync(assetPath).size) {
 const goodBytes = readFileSync(assetPath);
 const goodSha256 = createHash("sha256").update(goodBytes).digest("hex");
 if (bundle.sha256 !== goodSha256) throw new Error("Candidate asset sha256 does not match the manifest");
+const goodExecutable = readReleaseArchive(goodBytes, target.executable, assetName);
 
-// The "old" install needs an executable whose embedded version is older than
-// the candidate: --version reads the embedded package.json. Without one the
-// E2E still exercises the update path but skips backup-content assertions.
-const oldPath = oldAssetArg ? resolve(oldAssetArg) : join(candidate, "old", `pi-${targetId}${exeExt}`);
-const oldBytes = existsSync(oldPath) ? readFileSync(oldPath) : undefined;
+// The "old" install is the previous Release's `pi-<target>.zip`: its embedded
+// updater is the one users actually run, so this proves the published update
+// path works across releases.
+const oldPath = oldAssetArg ? resolve(oldAssetArg) : join(candidate, "old", assetName);
+const oldBytes = existsSync(oldPath) ? readReleaseArchive(readFileSync(oldPath), target.executable, oldPath) : undefined;
 if (!oldBytes && process.env.PI_XZ_E2E_ALLOW_NO_OLD === "1") {
-	// First new-layout release: no previous raw executable exists yet, so the
-	// update path cannot be exercised end-to-end. Later releases always have one.
+	// First ZIP release: the previous Release shipped raw executables, whose
+	// updater cannot install a ZIP, so there is no supported old install.
 	console.log(`Self-update E2E skipped: no previous executable for ${targetId}`);
 	process.exit(0);
 }
@@ -141,6 +142,7 @@ try {
 	console.log(`Updating from local Release: ${targetId} ${expectedVersion}`);
 	await run(executable, ["update", "--self"], env);
 
+	if (!readFileSync(executable).equals(goodExecutable)) throw new Error("updated executable is not the ZIP's executable");
 	const updatedVersion = probe(executable, ["--version"], env);
 	if (updatedVersion !== expectedVersion) {
 		throw new Error(`Updated executable reported ${JSON.stringify(updatedVersion)}, expected ${expectedVersion}`);

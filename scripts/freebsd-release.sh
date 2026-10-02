@@ -28,7 +28,7 @@ export PATH="$work/$bun_asset:$PATH"
 npm ci --ignore-scripts --include=dev
 npm run hydrate:model-data
 npm run build:offline
-node scripts/prepare-github-release.mjs --out "$work/candidate" --skip-build --skip-archives --platform "$target"
+node scripts/prepare-github-release.mjs --out "$work/candidate" --skip-build --platform "$target"
 version=$(node -p 'require(process.argv[1]).distributionVersion' "$work/candidate/release-manifest.json")
 # DISPLAY is deliberately absent for the basic TUI, then set for clipboard reads.
 env -u DISPLAY -u WAYLAND_DISPLAY PI_OFFLINE=1 PI_CODING_AGENT_DIR="$work/agent" TERM=xterm-256color PI_XZ_TUI_TIMEOUT_MS="$interactive_ms" bun scripts/smoke-bun-tui.mjs "$work/candidate/pi-$target"

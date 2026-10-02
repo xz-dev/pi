@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { BUN_TARGETS, SMOKE_LIMITS, binaryArchiveName, smokeLimits } from "./lib/bun-targets.mjs";
+import { BUN_TARGETS, SMOKE_LIMITS, binaryArchiveName, releaseArchiveName, smokeLimits } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 
 const nativeBytes = Buffer.from("native helper fixture");
@@ -64,11 +64,11 @@ function fixture() {
 			sha256: createHash("sha256").update(readFileSync(assetPath)).digest("hex"),
 			bytes: statSync(assetPath).size,
 		};
-		bundles[target.id] = { file: binaryArchiveName(target.id), ...identity };
+		bundles[target.id] = { file: releaseArchiveName(target.id), bytes: 1, sha256: "d".repeat(64), executable: { file: binaryArchiveName(target.id), ...identity } };
 		writeFileSync(join(records, `${target.id}.json`), JSON.stringify(record(target, identity)));
 	}
 	const manifest = {
-		schemaVersion: 6,
+		schemaVersion: 7,
 		commit: "b".repeat(40),
 		bundles,
 		attestation: { subjectsFile: "attestation-subjects.jsonl" },

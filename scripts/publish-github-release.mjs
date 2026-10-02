@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { BUN_TARGET_IDS, binaryArchiveName, packagedArchiveName } from "./lib/bun-targets.mjs";
+import { BUN_TARGET_IDS, releaseArchiveName } from "./lib/bun-targets.mjs";
 
 const EXPECTED_REPOSITORY = "xz-dev/pi";
 const EXPECTED_REF = "refs/heads/main";
@@ -35,7 +35,7 @@ function readManifest(path) {
   }
   const manifest = JSON.parse(readFileSync(path, "utf8"));
   if (
-    manifest.schemaVersion !== 6 ||
+    manifest.schemaVersion !== 7 ||
     manifest.repository !== EXPECTED_REPOSITORY ||
     typeof manifest.distributionVersion !== "string" ||
     typeof manifest.tag !== "string" ||
@@ -45,7 +45,7 @@ function readManifest(path) {
     manifest.bundles === null ||
     Array.isArray(manifest.bundles) ||
     Object.keys(manifest.bundles).length !== BUN_TARGET_IDS.length ||
-    !BUN_TARGET_IDS.every((target) => manifest.bundles[target]?.file === binaryArchiveName(target)) ||
+    !BUN_TARGET_IDS.every((target) => manifest.bundles[target]?.file === releaseArchiveName(target)) ||
     manifest.acceptance?.file !== "binary-acceptance.json" ||
     manifest.acceptance?.targetCount !== BUN_TARGET_IDS.length ||
     manifest.attestation?.subjectsFile !== "attestation-subjects.jsonl" ||
@@ -66,7 +66,6 @@ function releaseAssetPaths(releaseDir, manifest) {
     fail(`Missing or empty attestation bundle: ${subjectsPath}`);
   const expectedSubjects = [
     ...Object.values(manifest.bundles).map((bundle) => bundle.file),
-    ...BUN_TARGET_IDS.map((target) => packagedArchiveName(target)),
     "release-manifest.json",
     "binary-acceptance.json",
     "THIRD_PARTY_NOTICES.md",

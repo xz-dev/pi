@@ -18,7 +18,7 @@ const normalizeRunnerArch = (value) => value === "ARM64" ? "arm64" : value === "
 const assertLimit = (id, name, actual, maximum) => { if (!Number.isSafeInteger(actual) || actual < 0 || actual > maximum) throw new Error(`${id} ${name} ${actual} exceeds authoritative limit ${maximum}`); };
 for (const id of BUN_TARGET_IDS) {
 	const descriptor = bunTarget(id); const record = byTarget.get(id); const bundle = manifest.bundles?.[id]; const SMOKE_LIMITS = smokeLimits(id);
-	if (!bundle || record.schemaVersion !== 1 || record.asset?.file !== bundle.file || record.asset.sha256 !== bundle.sha256 || record.asset.bytes !== bundle.bytes) throw new Error(`${id} asset identity mismatch`);
+	if (!bundle?.executable || record.schemaVersion !== 1 || record.asset?.file !== bundle.executable.file || record.asset.sha256 !== bundle.executable.sha256 || record.asset.bytes !== bundle.executable.bytes) throw new Error(`${id} asset identity mismatch`);
 	if (record.runner?.os !== descriptor.runnerOs || normalizeRunnerArch(record.runner?.arch) !== descriptor.arch || record.runner?.osArchitecture !== descriptor.arch) throw new Error(`${id} runner OS/architecture does not match authoritative descriptor`);
 	if (record.executor?.kind !== descriptor.executor || record.executor?.emulated !== descriptor.emulated) throw new Error(`${id} executor does not match authoritative descriptor`);
 	if ((record.executor.containerDigest ?? null) !== (descriptor.containerImage ?? null)) throw new Error(`${id} container digest does not match authoritative descriptor`);

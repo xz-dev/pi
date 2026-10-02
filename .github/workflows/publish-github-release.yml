@@ -204,7 +204,7 @@ jobs:
             export DISPLAY=:99
           fi
           candidate="$RUNNER_TEMP/pi-github-release"; version=$(node -p 'require(process.argv[1]).distributionVersion' "$candidate/release-manifest.json")
-          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
+          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].executable.file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
           mkdir -p "$RUNNER_TEMP/smoke-record"; node scripts/smoke-binary-release.mjs "$candidate/$archive" '${{ matrix.target }}' "$version" "$RUNNER_TEMP/smoke-record/${{ matrix.target }}.json"
       - name: Verify real installed extension packages without external runtimes
         if: matrix.target == 'linux-x64-gnu-modern'
@@ -212,7 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           candidate="$RUNNER_TEMP/pi-github-release"
-          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
+          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].executable.file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
           node scripts/e2e-embedded-package-manager.mjs "$candidate/$archive" "$RUNNER_TEMP/package-manager-evidence"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && matrix.target == 'linux-x64-gnu-modern'
@@ -235,7 +235,7 @@ jobs:
         run: |
           set -euo pipefail
           candidate="$RUNNER_TEMP/pi-github-release"; version=$(node -p 'require(process.argv[1]).distributionVersion' "$candidate/release-manifest.json")
-          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
+          archive=$(node -e 'const m=require(process.argv[1]);console.log(m.bundles[process.argv[2]].executable.file)' "$candidate/release-manifest.json" '${{ matrix.target }}')
           mkdir -p "$RUNNER_TEMP/smoke-record" "$RUNNER_TEMP/musl-tui" "$RUNNER_TEMP/musl-staging"
           cp "$candidate/$archive" "$RUNNER_TEMP/musl-staging/"
           chmod +x "$RUNNER_TEMP/musl-staging/$archive"
@@ -309,10 +309,10 @@ jobs:
           candidate="$RUNNER_TEMP/pi-github-release"
           version=$(node -p 'require(process.argv[1]).distributionVersion' "$candidate/release-manifest.json")
           mkdir -p "$candidate/old"
-          # The prior release's raw executable is the "old" install. The first
-          # new-layout release has none (old Releases ship ZIPs), so the fetch
-          # may legitimately 404; the E2E then reports a skip.
-          curl -fLsS --retry 2 -o "$candidate/old/pi-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' }}" "https://github.com/xz-dev/pi/releases/latest/download/pi-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' }}" || rm -f "$candidate/old/pi-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' }}"
+          # The prior release's ZIP is the "old" install. The first ZIP release
+          # follows raw-executable releases, so the fetch may legitimately 404;
+          # the E2E then reports a skip.
+          curl -fLsS --retry 2 -o "$candidate/old/pi-${{ matrix.target }}.zip" "https://github.com/xz-dev/pi/releases/latest/download/pi-${{ matrix.target }}.zip" || rm -f "$candidate/old/pi-${{ matrix.target }}.zip"
           node scripts/e2e-binary-self-update.mjs "$candidate" '${{ matrix.target }}' "$version"
       - name: Update an extracted bundle in immutable native musl userspace
         if: matrix.executor == 'pinned-musl-container'
@@ -321,7 +321,7 @@ jobs:
           candidate="$RUNNER_TEMP/pi-github-release"
           version=$(node -p 'require(process.argv[1]).distributionVersion' "$candidate/release-manifest.json")
           mkdir -p "$candidate/old"
-          old_asset="pi-${{ matrix.target }}"
+          old_asset="pi-${{ matrix.target }}.zip"
           curl -fLsS --retry 2 -o "$candidate/old/$old_asset" "https://github.com/xz-dev/pi/releases/latest/download/$old_asset" || rm -f "$candidate/old/$old_asset"
           export PI_XZ_E2E_ALLOW_NO_OLD=1
           container="pi-musl-update-${{ matrix.target }}-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -349,7 +349,7 @@ jobs:
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: |
-            ${{ runner.temp }}/pi-github-release/pi-*
+            ${{ runner.temp }}/pi-github-release/pi-*.zip
             ${{ runner.temp }}/pi-github-release/release-manifest.json
             ${{ runner.temp }}/pi-github-release/binary-acceptance.json
             ${{ runner.temp }}/pi-github-release/THIRD_PARTY_NOTICES.md
@@ -366,7 +366,7 @@ jobs:
             subject_count=$((subject_count + 1))
             gh attestation verify "$candidate/$subject" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
           done < "$subjects"
-          test "$subject_count" -eq 32
+          test "$subject_count" -eq 18
           empty_gh_config="$RUNNER_TEMP/empty-gh-config"; mkdir "$empty_gh_config"; GH_CONFIG_DIR="$empty_gh_config" GH_TOKEN= GITHUB_TOKEN= gh attestation verify "$candidate/binary-acceptance.json" --bundle "$bundle" --repo xz-dev/pi --signer-workflow xz-dev/pi/.github/workflows/publish-github-release.yml --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners --format json > "$RUNNER_TEMP/public-attestation-verification.json"
           cp "$bundle" "$subjects"
       - name: Publish immutable GitHub Release

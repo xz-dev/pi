@@ -17,14 +17,15 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { BUN_TARGET_IDS, bunTarget, packagedArchiveName, packagedExecutableName } from "./bun-targets.mjs";
+import { crc32, deflateRawSync, inflateRawSync } from "node:zlib";
+import { BUN_TARGET_IDS, bunTarget, releaseArchiveName, releaseEntryName } from "./bun-targets.mjs";
 
-export { packagedArchiveName };
+export { releaseArchiveName, releaseEntryName };
 
 export const ENTRY_PACKAGE = "@earendil-works/pi-coding-agent";
 export const DISTRIBUTION = "xz-dev";
 export const REPOSITORY = "xz-dev/pi";
-export const MANIFEST_SCHEMA_VERSION = 6;
+export const MANIFEST_SCHEMA_VERSION = 7;
 export const ATTESTATION_SIGNER_WORKFLOW = ".github/workflows/publish-github-release.yml";
 export const ATTESTATION_SIGNER_REF = "refs/heads/main";
 export const ATTESTATION_SUBJECTS_FILENAME = "attestation-subjects.jsonl";
@@ -152,68 +153,102 @@ export function parseSha256Sums(text) {
 	return entries;
 }
 
-const TAR_BLOCK = 512;
+// Release archive: a single-entry ZIP holding the executable as `pi`
+// (`pi.exe` on Windows), deflated, with a fixed 1980-01-01 timestamp and
+// Unix mode 0755 so `unzip`, `bsdtar`, Explorer and Scoop all restore a
+// runnable file. ZIP64 is never needed: executables stay far below 4 GiB.
+const ZIP_LOCAL = 0x04034b50;
+const ZIP_CENTRAL = 0x02014b50;
+const ZIP_END = 0x06054b50;
+const ZIP_MAX = 0xffffffff;
+const ZIP_DOS_DATE = (0 << 9) | (1 << 5) | 1;
+const ZIP_UNIX_MODE = 0o100755;
 
-function tarField(header, offset, length, value) {
-	const bytes = Buffer.from(value, "utf8");
-	if (bytes.length > length) throw new Error(`tar header field too long: ${value}`);
-	bytes.copy(header, offset);
-}
-
-function tarOctal(header, offset, length, value) {
-	tarField(header, offset, length, `${value.toString(8).padStart(length - 1, "0")}\0`);
-}
-
-/** One-entry ustar archive holding `body` as a 0755 regular file owned by 0:0. */
-function singleFileTar(name, body, mtimeSeconds) {
-	const header = Buffer.alloc(TAR_BLOCK);
-	tarField(header, 0, 100, name);
-	tarOctal(header, 100, 8, 0o755);
-	tarOctal(header, 108, 8, 0);
-	tarOctal(header, 116, 8, 0);
-	tarOctal(header, 124, 12, body.length);
-	tarOctal(header, 136, 12, mtimeSeconds);
-	header.fill(0x20, 148, 156);
-	tarField(header, 156, 1, "0");
-	tarField(header, 257, 6, "ustar\0");
-	tarField(header, 263, 2, "00");
-	let checksum = 0;
-	for (const byte of header) checksum += byte;
-	tarField(header, 148, 8, `${checksum.toString(8).padStart(6, "0")}\0 `);
-	const padding = (TAR_BLOCK - (body.length % TAR_BLOCK)) % TAR_BLOCK;
-	return Buffer.concat([header, body, Buffer.alloc(padding + 2 * TAR_BLOCK)]);
+export function createReleaseArchive(entryName, body) {
+	if (body.length >= ZIP_MAX) throw new Error(`${entryName} is too large for a ZIP release archive`);
+	const name = Buffer.from(entryName, "utf8");
+	const data = deflateRawSync(body, { level: 9 });
+	if (data.length >= ZIP_MAX) throw new Error(`${entryName} compressed data is too large`);
+	const checksum = crc32(body);
+	const local = Buffer.alloc(30);
+	local.writeUInt32LE(ZIP_LOCAL, 0);
+	local.writeUInt16LE(20, 4);
+	local.writeUInt16LE(0, 6);
+	local.writeUInt16LE(8, 8);
+	local.writeUInt16LE(0, 10);
+	local.writeUInt16LE(ZIP_DOS_DATE, 12);
+	local.writeUInt32LE(checksum, 14);
+	local.writeUInt32LE(data.length, 18);
+	local.writeUInt32LE(body.length, 22);
+	local.writeUInt16LE(name.length, 26);
+	local.writeUInt16LE(0, 28);
+	const central = Buffer.alloc(46);
+	central.writeUInt32LE(ZIP_CENTRAL, 0);
+	central.writeUInt16LE((3 << 8) | 20, 4);
+	central.writeUInt16LE(20, 6);
+	central.writeUInt16LE(0, 8);
+	central.writeUInt16LE(8, 10);
+	central.writeUInt16LE(0, 12);
+	central.writeUInt16LE(ZIP_DOS_DATE, 14);
+	central.writeUInt32LE(checksum, 16);
+	central.writeUInt32LE(data.length, 20);
+	central.writeUInt32LE(body.length, 24);
+	central.writeUInt16LE(name.length, 28);
+	central.writeUInt32LE(ZIP_UNIX_MODE * 0x10000, 38);
+	central.writeUInt32LE(0, 42);
+	const centralOffset = local.length + name.length + data.length;
+	const end = Buffer.alloc(22);
+	end.writeUInt32LE(ZIP_END, 0);
+	end.writeUInt16LE(1, 8);
+	end.writeUInt16LE(1, 10);
+	end.writeUInt32LE(central.length + name.length, 12);
+	end.writeUInt32LE(centralOffset, 16);
+	return Buffer.concat([local, name, data, central, name, end]);
 }
 
 /**
- * Write the optional smaller download `pi-<target>.tar.xz`: a single `pi`
- * (`pi.exe` on Windows) entry with the exact executable bytes. The tar header
- * is written here so GNU, BSD and Windows runners produce the same layout.
+ * Read a release archive written by createReleaseArchive and return the
+ * executable bytes. Anything else (more entries, another name, other
+ * compression, data descriptors, trailing bytes, CRC or size mismatch) throws.
  */
-export function writePackagedArchive(executablePath, archivePath, platform) {
-	const tar = singleFileTar(packagedExecutableName(platform), readFileSync(executablePath), Math.floor(statSync(executablePath).mtimeMs / 1000));
-	const result = spawnSync("xz", ["-9", "-T0", "--block-size=32MiB", "-c"], { input: tar, maxBuffer: 4 * 1024 * 1024 * 1024 });
-	if (result.status !== 0) throw new Error(`xz failed for ${archivePath}: ${result.error?.message ?? result.stderr?.toString() ?? ""}`);
-	writeFileSync(archivePath, result.stdout);
+export function readReleaseArchive(archive, entryName, label = "release archive") {
+	const fail = (reason) => {
+		throw new Error(`${label} ${reason}`);
+	};
+	const name = Buffer.from(entryName, "utf8");
+	if (archive.length < 30 + 46 + 22 + 2 * name.length) fail("is truncated");
+	const endOffset = archive.length - 22;
+	if (archive.readUInt32LE(endOffset) !== ZIP_END || archive.readUInt16LE(endOffset + 20) !== 0) fail("has no plain end record");
+	if (archive.readUInt16LE(endOffset + 4) !== 0 || archive.readUInt16LE(endOffset + 6) !== 0 || archive.readUInt16LE(endOffset + 8) !== 1 || archive.readUInt16LE(endOffset + 10) !== 1) fail("must contain exactly one entry");
+	const centralSize = archive.readUInt32LE(endOffset + 12);
+	const centralOffset = archive.readUInt32LE(endOffset + 16);
+	if (centralSize !== 46 + name.length || centralOffset + centralSize !== endOffset) fail("central directory is malformed");
+	const central = archive.subarray(centralOffset, endOffset);
+	if (central.readUInt32LE(0) !== ZIP_CENTRAL || central.readUInt16LE(8) !== 0 || central.readUInt16LE(10) !== 8) fail("entry must be plain deflate");
+	if (central.readUInt16LE(28) !== name.length || central.readUInt16LE(30) !== 0 || central.readUInt16LE(32) !== 0 || central.readUInt32LE(42) !== 0) fail("central entry layout is unexpected");
+	if (!central.subarray(46).equals(name)) fail(`must contain only ${entryName}`);
+	const checksum = central.readUInt32LE(16);
+	const compressedSize = central.readUInt32LE(20);
+	const size = central.readUInt32LE(24);
+	if ((central.readUInt32LE(38) >>> 16) !== ZIP_UNIX_MODE) fail(`${entryName} must be a 0755 regular file`);
+	if (archive.readUInt32LE(0) !== ZIP_LOCAL || archive.readUInt16LE(6) !== 0 || archive.readUInt16LE(8) !== 8 || archive.readUInt16LE(26) !== name.length || archive.readUInt16LE(28) !== 0) fail("local entry layout is unexpected");
+	if (archive.readUInt32LE(14) !== checksum || archive.readUInt32LE(18) !== compressedSize || archive.readUInt32LE(22) !== size) fail("local and central entries disagree");
+	if (!archive.subarray(30, 30 + name.length).equals(name)) fail(`must contain only ${entryName}`);
+	const dataStart = 30 + name.length;
+	if (dataStart + compressedSize !== centralOffset) fail("has bytes outside the entry");
+	const body = inflateRawSync(archive.subarray(dataStart, centralOffset), { maxOutputLength: size });
+	if (body.length !== size || crc32(body) !== checksum) fail(`${entryName} failed size or CRC verification`);
+	return body;
 }
 
-/** Assert the archive holds exactly one 0755 `pi`/`pi.exe` entry whose bytes hash to `executableSha256`. */
-export function assertPackagedArchive(archivePath, platform, executableSha256) {
-	const result = spawnSync("xz", ["-dc", archivePath], { maxBuffer: 4 * 1024 * 1024 * 1024 });
-	if (result.status !== 0) throw new Error(`xz could not decompress ${archivePath}: ${result.error?.message ?? result.stderr?.toString() ?? ""}`);
-	const tar = result.stdout;
-	const header = tar.subarray(0, TAR_BLOCK);
-	const field = (offset, length) => header.subarray(offset, offset + length).toString("utf8").replace(/\0.*$/s, "");
-	const size = Number.parseInt(field(124, 12), 8);
-	if (field(0, 100) !== packagedExecutableName(platform) || field(156, 1) !== "0" || Number.parseInt(field(100, 8), 8) !== 0o755 || !Number.isSafeInteger(size) || size <= 0) {
-		throw new Error(`${archivePath} must contain exactly one 0755 ${packagedExecutableName(platform)} entry`);
-	}
-	const dataEnd = TAR_BLOCK + size;
-	if (tar.length !== dataEnd + ((TAR_BLOCK - (size % TAR_BLOCK)) % TAR_BLOCK) + 2 * TAR_BLOCK || tar.subarray(dataEnd).some((byte) => byte !== 0)) {
-		throw new Error(`${archivePath} contains entries beyond the executable`);
-	}
-	if (createHash("sha256").update(tar.subarray(TAR_BLOCK, dataEnd)).digest("hex") !== executableSha256) {
-		throw new Error(`${archivePath} executable does not match the raw release asset`);
-	}
+/** Write `pi-<target>.zip` for one raw executable. */
+export function writeReleaseArchive(executablePath, archivePath, platform) {
+	writeFileSync(archivePath, createReleaseArchive(releaseEntryName(platform), readFileSync(executablePath)));
+}
+
+/** Return the verified executable bytes inside a target's release archive. */
+export function readTargetArchive(archivePath, platform) {
+	return readReleaseArchive(readFileSync(archivePath), releaseEntryName(platform), archivePath);
 }
 
 export function stableStringify(value) {
