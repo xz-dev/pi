@@ -1,5 +1,14 @@
-import { type Component, Container, ScrollView, type ScrollViewScrollbar, VStack } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	ScrollView,
+	type ScrollViewScrollbar,
+	VStack,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { CustomEditor } from "./components/custom-editor.ts";
+import { scrollToEndLabel } from "./components/keybinding-hints.ts";
+import { theme } from "./theme/theme.ts";
 
 export interface ChatViewportOptions {
 	readonly document: Component;
@@ -21,10 +30,24 @@ export interface ChatViewport {
 
 /** Shared fullscreen transcript and fixed input-dock layout. */
 export function createChatViewport(options: ChatViewportOptions): ChatViewport {
+	let expanded = false;
+	const toggleLabel = () => (expanded ? "[Collapse input]" : "[Expand input]");
 	const transcript = new ScrollView(options.document, {
 		follow: "end",
 		// Growing the transcript when the dock shrinks must not resume following.
 		resumeFollowOnLayout: false,
+		onFollowChange: () => {
+			expanded = false;
+		},
+		scrollbackAction: () =>
+			getCompactEditor()
+				? {
+						label: theme.bg("selectedBg", theme.fg("text", toggleLabel())),
+						onClick: () => {
+							expanded = !expanded;
+						},
+					}
+				: undefined,
 		primary: true,
 		overscroll: "chain",
 		scrollbar: options.scrollbar ?? "auto",
@@ -38,10 +61,10 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 			? editor
 			: undefined;
 	};
-	const showExtras = () => transcript.isFollowingEnd || !getCompactEditor();
+	const showExtras = () => transcript.isFollowingEnd || expanded || !getCompactEditor();
 	const editorView = new (class extends Container {
 		override render(width: number): string[] {
-			const editor = transcript.isFollowingEnd ? undefined : getCompactEditor();
+			const editor = transcript.isFollowingEnd || expanded ? undefined : getCompactEditor();
 			if (!editor) return super.render(width);
 			const previousLimit = editor.maxVisibleLines;
 			editor.maxVisibleLines = 1;
@@ -67,10 +90,24 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 			: [{ component: options.widgetsBelow, shrink: 1, minSize: 0, visible: showExtras }]),
 		{ component: options.footer, shrink: 1, minSize: 0, visible: showExtras },
 	]);
+	const needsStackedControls = ({ width, height }: { width: number; height: number }) => {
+		// Below five rows, keep the original transcript row and three-row editor first.
+		if (height < 5 || transcript.isFollowingEnd || !getCompactEditor()) return false;
+		const availableWidth = width - (transcript.isScrollbarVisible ? 1 : 0);
+		return visibleWidth(toggleLabel()) + 1 + visibleWidth(scrollToEndLabel()) > availableWidth;
+	};
 	return {
 		transcript,
 		root: new VStack([
-			{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+			{
+				component: transcript,
+				basis: 0,
+				grow: 1,
+				shrink: 1,
+				minSize: 1,
+				visible: (viewport) => !needsStackedControls(viewport),
+			},
+			{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 2, visible: needsStackedControls },
 			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
 		]),
 	};

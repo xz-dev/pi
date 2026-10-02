@@ -1,13 +1,16 @@
 import { Container, getKeybindings, setKeybindings, Text, TuiAltScreen } from "@earendil-works/pi-tui";
-import { describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import { defaultEditorTheme } from "../../tui/test/test-themes.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { createChatViewport } from "../src/modes/interactive/chat-viewport.ts";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import { WorkingStatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { createInteractiveTui } from "../src/modes/interactive/tui-renderer.ts";
 
 describe("chat viewport", () => {
+	beforeEach(() => initTheme("dark"));
 	test.each([8, 30])("keeps the reading dock compact (%i rows)", async (rows) => {
 		const previousKeys = getKeybindings();
 		const keys = new KeybindingsManager();
@@ -57,6 +60,17 @@ describe("chat viewport", () => {
 				await terminal.waitForRender();
 				expect(terminal.getViewport()[9]).toContain("Working");
 				expect(terminal.getViewport().join("\n")).not.toContain("model footer");
+			}
+			// Manual expansion also stays detached when the short transcript fits after collapse.
+			for (const label of ["[Expand input]", "[Collapse input]"]) {
+				const screen = terminal.getViewport();
+				const row = screen.findIndex((line) => line.includes(label));
+				expect(row).toBeGreaterThanOrEqual(0);
+				terminal.sendInput(`\x1b[<0;1;${row + 1}M`);
+				terminal.sendInput(`\x1b[<0;1;${row + 1}m`);
+				await terminal.waitForRender();
+				expect(ui.isFollowingOutput).toBe(false);
+				expect(terminal.getViewport().join("\n").includes("model footer")).toBe(label === "[Expand input]");
 			}
 			const readingLine = terminal.getViewport()[0];
 			document.setText(Array.from({ length: rows + 5 }, (_, i) => `message ${i}`).join("\n"));
@@ -116,6 +130,7 @@ describe("chat viewport", () => {
 			ui.requestRender();
 			await terminal.waitForRender();
 			expect(terminal.getViewport().join("\n")).toContain("selector four");
+			expect(terminal.getViewport().join("\n")).not.toMatch(/\[(?:Expand|Collapse) input\]/);
 			expect(terminal.getViewport().join("\n")).toContain("model footer");
 			editorSlot.clear();
 			editorSlot.addChild(editor);
@@ -137,6 +152,7 @@ describe("chat viewport", () => {
 			terminal.sendInput("/");
 			await terminal.waitForRender();
 			expect(terminal.getViewport().join("\n")).toContain("completion two");
+			expect(terminal.getViewport().join("\n")).not.toMatch(/\[(?:Expand|Collapse) input\]/);
 			terminal.sendInput("\x1b");
 			await terminal.waitForRender();
 			expect(terminal.getViewport()[9]).toContain("Working");
@@ -147,6 +163,166 @@ describe("chat viewport", () => {
 			setKeybindings(previousKeys);
 		}
 	});
+
+	test.each([80, 52, 40, 20])("toggles the reading dock without navigating (%i columns)", async (columns) => {
+		const previousKeys = getKeybindings();
+		const keys = new KeybindingsManager();
+		setKeybindings(keys);
+		const terminal = new VirtualTerminal(columns, 14);
+		const ui = createInteractiveTui({
+			tuiMode: "fullscreen",
+			terminal,
+			showHardwareCursor: false,
+			logDirectory: "/var/tmp",
+		});
+		const document = new Text(Array.from({ length: 50 }, (_, i) => `message ${i}`).join("\n"), 0, 0);
+		const editor = new CustomEditor(ui, defaultEditorTheme, keys, { embedWorkingStatus: true });
+		const draft = "first draft\nsecond draft\nthird draft";
+		editor.setText(draft);
+		const viewport = createChatViewport({
+			document,
+			pendingMessages: new Text("queued preview", 0, 0),
+			status: new Container(),
+			editor,
+			widgetsAbove: new Text("above widget", 0, 0),
+			footer: new Text("model footer", 0, 0),
+		});
+		ui.setLayoutRoot(viewport.root);
+		ui.setFocus(editor);
+		const click = (label: string) => {
+			const screen = terminal.getViewport();
+			const row = screen.findIndex((line) => line.includes(label));
+			expect(row, `Missing ${label}:\n${screen.join("\n")}`).toBeGreaterThanOrEqual(0);
+			const column = screen[row].indexOf(label);
+			terminal.sendInput(`\x1b[<0;${column + 1};${row + 1}M`);
+			terminal.sendInput(`\x1b[<0;${column + 1};${row + 1}m`);
+		};
+		const expectControls = (label: string, stacked: boolean) => {
+			const screen = terminal.getViewport();
+			const row = screen.findIndex((line) => line.includes(label));
+			expect(row).toBeGreaterThanOrEqual(0);
+			expect(screen[row].indexOf(label)).toBe(0);
+			expect(screen.findIndex((line) => line.includes("Jump to latest"))).toBe(row + (stacked ? 1 : 0));
+			expect(ui.isFollowingOutput).toBe(false);
+			expect(editor.getText()).toBe(draft);
+			expect(ui.getFocusedComponent()).toBe(editor);
+		};
+		ui.start();
+		try {
+			await terminal.waitForRender();
+			ui.scrollBy(-20);
+			await terminal.waitForRender();
+			const readingLine = terminal.getViewport()[0].match(/^message \d+/)![0];
+			expectControls("[Expand input]", columns < 52);
+			expect(terminal.getViewport().join("\n")).not.toContain("model footer");
+			click("[Expand input]");
+			await terminal.waitForRender();
+			expectControls("[Collapse input]", columns < 52);
+			expect(terminal.getViewport().join("\n")).toContain("model footer");
+			expect(terminal.getViewport()[0]).toContain(readingLine);
+			click("[Collapse input]");
+			await terminal.waitForRender();
+			expectControls("[Expand input]", columns < 52);
+			expect(terminal.getViewport().join("\n")).not.toContain("model footer");
+			expect(terminal.getViewport()[0]).toContain(readingLine);
+			click("[Expand input]");
+			await terminal.waitForRender();
+			// Streaming and wide/narrow resizing preserve the manual choice and rebuild hit targets.
+			document.setText(Array.from({ length: 55 }, (_, i) => `message ${i}`).join("\n"));
+			ui.requestRender();
+			await terminal.waitForRender();
+			for (const width of [40, 80]) {
+				terminal.resize(width, 14);
+				await terminal.waitForRender();
+				expectControls("[Collapse input]", width === 40);
+				expect(terminal.getViewport()[0]).toContain(readingLine);
+				click("[Collapse input]");
+				await terminal.waitForRender();
+				expectControls("[Expand input]", width === 40);
+				click("[Expand input]");
+				await terminal.waitForRender();
+			}
+			// A new episode resets even if latest and scrollback occur before the next frame.
+			terminal.sendInput("\x1b[F");
+			terminal.sendInput("\x1b[5~");
+			await terminal.waitForRender();
+			expectControls("[Expand input]", false);
+			click("[Expand input]");
+			await terminal.waitForRender();
+			terminal.resize(40, 5);
+			await terminal.waitForRender();
+			expectControls("[Collapse input]", true);
+			click("[Collapse input]");
+			await terminal.waitForRender();
+			expectControls("[Expand input]", true);
+			// Jump remains a separate target on the lower row, including after height changes.
+			click("Jump to latest");
+			await terminal.waitForRender();
+			expect(ui.isFollowingOutput).toBe(true);
+			expect(terminal.getViewport().join("\n")).not.toMatch(/\[(?:Expand|Collapse) input\]/);
+			terminal.resize(80, 14);
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("model footer");
+			terminal.sendInput("\x1b[5~");
+			await terminal.waitForRender();
+			expectControls("[Expand input]", false);
+		} finally {
+			ui.stop();
+			setKeybindings(previousKeys);
+		}
+	});
+
+	test.each([
+		{ columns: 80, rows: 5, scrollback: false },
+		{ columns: 40, rows: 5, scrollback: false },
+		{ columns: 80, rows: 3, scrollback: false },
+		{ columns: 80, rows: 4, scrollback: true },
+		{ columns: 40, rows: 4, scrollback: true },
+	])(
+		"preserves constrained dock space ($columns x $rows, scrollback=$scrollback)",
+		async ({ columns, rows, scrollback }) => {
+			const previousKeys = getKeybindings();
+			const keys = new KeybindingsManager();
+			setKeybindings(keys);
+			const terminal = new VirtualTerminal(columns, rows);
+			const ui = createInteractiveTui({
+				tuiMode: "fullscreen",
+				terminal,
+				showHardwareCursor: false,
+				logDirectory: "/var/tmp",
+			});
+			const editor = new CustomEditor(ui, defaultEditorTheme, keys, { embedWorkingStatus: true });
+			editor.setText("MY DRAFT");
+			const viewport = createChatViewport({
+				document: new Text(Array.from({ length: 30 }, (_, i) => `message ${i}`).join("\n"), 0, 0),
+				pendingMessages: new Container(),
+				status: new Container(),
+				editor,
+				footer: new Text("model footer", 0, 0),
+			});
+			ui.setLayoutRoot(viewport.root);
+			ui.setFocus(editor);
+			ui.start();
+			try {
+				await terminal.waitForRender();
+				if (scrollback) {
+					ui.scrollBy(-10);
+					await terminal.waitForRender();
+				}
+				const screen = terminal.getViewport();
+				expect(screen.join("\n")).toContain("MY DRAFT");
+				if (rows === 5) expect(screen[4]).toContain("model footer");
+				if (scrollback) {
+					expect(screen[3]).toMatch(/^─+$/);
+					expect(ui.isFollowingOutput).toBe(false);
+					if (columns === 80) expect(screen[0]).toContain("[Expand input]");
+				}
+			} finally {
+				ui.stop();
+				setKeybindings(previousKeys);
+			}
+		},
+	);
 
 	test("defaults the transcript scrollbar to auto and accepts overrides", () => {
 		const automatic = createChatViewport({
