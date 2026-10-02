@@ -11,3 +11,5 @@ sends thinking enabled for OpenCode Go Kimi K2.6 when thinking is enabled
 sends max_tokens for OpenCode completions models
 includes only high plus off for OpenCode Go Kimi K2.6
 built-in chat providers have defaults in their generated catalogs
+# together/deepseek-ai/DeepSeek-V4-Pro (dropped from models.dev):
+models Together reasoning controls from the Together API surface
