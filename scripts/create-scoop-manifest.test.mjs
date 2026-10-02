@@ -1,0 +1,54 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+const VERSION = "0.84.1-xz.88.1.g9a4c0822";
+const TAG = `xz-v${VERSION}`;
+const X64_HASH = "a".repeat(64);
+const ARM64_HASH = "b".repeat(64);
+
+test("creates Scoop manifest for raw Windows executables", () => {
+	const directory = mkdtempSync(join(tmpdir(), "pi-scoop-"));
+	try {
+		const manifestPath = join(directory, "release-manifest.json");
+		const outputPath = join(directory, "pi.json");
+		writeFileSync(
+			manifestPath,
+			`${JSON.stringify({
+				distributionVersion: VERSION,
+				tag: TAG,
+				bundles: {
+					"windows-x64-modern": { file: "pi-windows-x64-modern.exe", sha256: X64_HASH },
+					"windows-arm64": { file: "pi-windows-arm64.exe", sha256: ARM64_HASH },
+				},
+				attestation: { subjectsFile: "attestation-subjects.jsonl" },
+			})}\n`,
+		);
+		execFileSync(process.execPath, [join(import.meta.dirname, "create-scoop-manifest.mjs"), manifestPath, outputPath]);
+
+		const scoop = JSON.parse(readFileSync(outputPath, "utf8"));
+		assert.equal(scoop.version, VERSION);
+		assert.deepEqual(scoop.architecture["64bit"], {
+			url: `https://github.com/xz-dev/pi/releases/download/${TAG}/pi-windows-x64-modern.exe`,
+			hash: X64_HASH,
+			bin: [["pi-windows-x64-modern.exe", "pi"]],
+		});
+		assert.deepEqual(scoop.architecture.arm64, {
+			url: `https://github.com/xz-dev/pi/releases/download/${TAG}/pi-windows-arm64.exe`,
+			hash: ARM64_HASH,
+			bin: [["pi-windows-arm64.exe", "pi"]],
+		});
+		// Raw executable: no extraction step.
+		assert.equal(scoop.extract_dir, undefined);
+		// The install marks itself scoop-managed with an empty lock file, so
+		// `pi update --self` refuses and points at scoop.
+		assert.deepEqual(scoop.post_install, [
+			"New-Item -Force -ItemType File (Join-Path $dir '.scoop.managed.lock') | Out-Null",
+		]);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
