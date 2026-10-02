@@ -54,6 +54,9 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 - Set `LC_ALL=C.UTF-8`, `LANG=C.UTF-8`, `LANGUAGE=en` at startup so tools, MCP servers, and extension subprocesses run with an English locale while Pi's own UI locale stays unchanged. Override with global `envOverrides` (`KEY=VALUE` list, replaces the default); `[]` disables.
   - Use case: Keep tool output the model reads in English on a non-English desktop.
   - Patch branch: [`patch/env-overrides`](https://github.com/xz-dev/pi/tree/patch/env-overrides)
+- In fullscreen mode, scrolling back through the conversation temporarily reduces the fixed input area to three rows: the Working/status border, one editable draft line, and the bottom border. Returning to the latest message restores widgets, queued-message previews, and the footer. Incoming output does not expand the input area or discard the draft.
+  - Use case: Read history on a short terminal without the fixed input area taking most of the screen. Scroll to the end, press `End`, or click `Jump to latest message` to restore the full layout.
+  - Patch branch: [`patch/compact-input-dock`](https://github.com/xz-dev/pi/tree/patch/compact-input-dock)
 - List models with a configured override first in `/settings` -> Default thinking level per model, with configured and unconfigured models each sorted by `provider/model-id`; the current model is preselected instead of pinned to the top.
   - Use case: See and edit saved per-model thinking levels without scanning the whole model list.
   - Patch branch: [`patch/model-thinking-sort`](https://github.com/xz-dev/pi/tree/patch/model-thinking-sort)
