@@ -14,7 +14,9 @@ import {
 	PACKAGING_BINARY,
 	REPOSITORY,
 	assertExecutableAsset,
+	assertPackagedArchive,
 	binaryArchiveName,
+	packagedArchiveName,
 	readJson,
 	sha256File,
 } from "./lib/github-release.mjs";
@@ -110,6 +112,7 @@ const sums = parseSums(readFileSync(join(releaseDir, SUMS_FILENAME), "utf8"));
 const acceptancePath = join(releaseDir, ACCEPTANCE_FILENAME);
 const assets = [
 	...Object.values(manifest.bundles).map((bundle) => bundle.file),
+	...Object.keys(manifest.bundles).map((platform) => packagedArchiveName(platform)),
 	MANIFEST_FILENAME,
 	NOTICES_FILENAME,
 	...(existsSync(acceptancePath) ? [ACCEPTANCE_FILENAME] : []),
@@ -119,6 +122,7 @@ for (const [platform, bundle] of Object.entries(manifest.bundles)) {
 	const executable = assertAsset(releaseDir, sums, bundle.file, bundle.sha256);
 	if (readFileSync(executable).byteLength !== bundle.bytes) throw new Error(`${bundle.file} byte length mismatch`);
 	assertExecutableAsset(executable, platform);
+	assertPackagedArchive(assertAsset(releaseDir, sums, packagedArchiveName(platform)), platform, bundle.sha256);
 }
 assertAsset(releaseDir, sums, NOTICES_FILENAME);
 const noticesText = readFileSync(join(releaseDir, NOTICES_FILENAME), "utf8");
@@ -134,7 +138,7 @@ if (existsSync(acceptancePath)) {
 		if (record.tui?.observedOutput !== true || record.tui?.cleanExit !== true || record.clipboard?.loadedAndCalled !== true) throw new Error(`Missing bounded TUI/clipboard acceptance for ${record.target}`);
 	}
 }
-if (sums.size !== assets.length - 1) throw new Error(`SHA256SUMS must contain executables, manifest, notices${existsSync(acceptancePath) ? ", and acceptance record" : ""} only`);
+if (sums.size !== assets.length - 1) throw new Error(`SHA256SUMS must contain executables, tar.xz archives, manifest, notices${existsSync(acceptancePath) ? ", and acceptance record" : ""} only`);
 const subjects = readFileSync(join(releaseDir, ATTESTATION_SUBJECTS_FILENAME), "utf8").trim().split(/\r?\n/).sort();
 if (JSON.stringify(subjects) !== JSON.stringify([...assets].sort()) || subjects.some((subject) => basename(subject) !== subject)) throw new Error("Attestation subjects do not match exact Release assets");
 const platform = hostPlatform();

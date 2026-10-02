@@ -578,7 +578,7 @@ test("publication attests final subjects before draft publication and keeps audi
   assert.match(workflowText, /GH_CONFIG_DIR="\$empty_gh_config" GH_TOKEN= GITHUB_TOKEN=/);
   assert.doesNotMatch(workflowText, /mapfile|readarray/);
   assert.match(workflowText, /while IFS= read -r subject/);
-  assert.match(workflowText, /test "\$subject_count" -eq 18/);
+  assert.match(workflowText, /test "\$subject_count" -eq 32/);
   assert.match(workflowText, /gh attestation verify/);
   assert.match(workflowText, /--bundle "\$bundle"/);
   assert.match(workflowText, /--source-digest "\$GITHUB_SHA"/);
