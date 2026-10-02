@@ -19,7 +19,7 @@ const MATERIALIZED_NATIVE_DIR_KEY = Symbol.for("@earendil-works/pi-coding-agent:
 function getMaterializedNativeDir(): string | undefined {
 	if (!isBunBinary) return undefined;
 	const provider = (globalThis as Record<symbol, unknown>)[MATERIALIZED_NATIVE_DIR_KEY];
-	return typeof provider === "function" ? (provider as () => string)() : undefined;
+	return typeof provider === "function" ? (provider as () => string | undefined)() : undefined;
 }
 
 export interface NativeModuleCandidateOptions {
