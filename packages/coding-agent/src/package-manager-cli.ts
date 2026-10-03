@@ -827,6 +827,7 @@ async function createCommandSettingsManager(options: {
 			hasUI: appMode === "interactive",
 		}),
 		onExtensionError: (message) => projectTrustWarnings.push(message),
+		getSlowHookThresholdMs: (kind) => settingsManager.getSlowHookThresholdMs(kind),
 	});
 	settingsManager.setProjectTrusted(projectTrusted);
 	return { settingsManager, projectTrustWarnings };
