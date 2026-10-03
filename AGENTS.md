@@ -119,7 +119,8 @@ If rebase conflicts occur:
 
 - Resolve conflicts only in files you modified.
 - If a conflict is in a file you did not modify, abort and ask the user.
-- Never force push.
+
+Force pushes are allowed in this downstream repository; the upstream blanket prohibition does not apply. For authorized downstream maintenance, prefer `git push --force-with-lease=<ref>:<expected-old-sha>` and retain the old tip before rewriting history. Stop on a lease mismatch rather than overwriting concurrent work.
 
 ## Issues and PRs
 
