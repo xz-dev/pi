@@ -342,7 +342,7 @@ Update pi, installed packages, or model catalogs.
 Options:
   --self                  Update pi only (default when no target is given)
   --extensions            Update installed packages only
-  --models                Refresh model catalogs only
+  --models                Refresh Pi-managed catalogs without loading extensions
   --all                   Update pi and installed packages
   --extension <source>    Update one package only
   -a, --approve           Trust project-local files for this command
@@ -352,7 +352,7 @@ Options:
 Short forms:
   ${APP_NAME} update                Update pi only
   ${APP_NAME} update --all          Update pi and all extensions
-  ${APP_NAME} update --models       Refresh model catalogs only
+  ${APP_NAME} update --models       Refresh Pi-managed catalogs without loading extensions
   ${APP_NAME} update <source>       Update one package
   ${APP_NAME} update pi             Update pi only (self works as alias to pi)
 `);
@@ -580,9 +580,9 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 	return target.type === "all" || target.type === "extensions";
 }
 
-async function refreshModelCatalogs(agentDir: string): Promise<void> {
+async function refreshModelCatalogs(agentDir: string, refreshTimeoutMs: number | undefined): Promise<void> {
 	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), 15_000);
+	const timeout = refreshTimeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), refreshTimeoutMs);
 	try {
 		const modelRuntime = await ModelRuntime.create({
 			authPath: join(agentDir, "auth.json"),
@@ -917,7 +917,8 @@ export async function handlePackageCommand(
 
 	if (options.command === "update" && options.updateTarget?.type === "models") {
 		try {
-			await refreshModelCatalogs(getAgentDir());
+			const settingsManager = SettingsManager.create(process.cwd(), getAgentDir(), { projectTrusted: false });
+			await refreshModelCatalogs(getAgentDir(), settingsManager.getModelRefreshTimeoutMs());
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : "Unknown model catalog refresh error";
 			console.error(chalk.red(`Error: ${message}`));
