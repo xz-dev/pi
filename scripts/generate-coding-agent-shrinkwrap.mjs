@@ -3,7 +3,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_ALLOWED_INSTALL_SCRIPT_PACKAGES } from "./lib/install-lifecycle-policy.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
@@ -12,7 +11,11 @@ const rootLockfilePath = join(repoRoot, "package-lock.json");
 const shrinkwrapPath = join(codingAgentDir, "npm-shrinkwrap.json");
 const internalPackagePrefix = "@earendil-works/pi-";
 const internalPackageNames = new Set(["@earendil-works/chord"]);
-const allowedInstallScriptPackages = DEFAULT_ALLOWED_INSTALL_SCRIPT_PACKAGES;
+const allowedInstallScriptPackages = new Map([
+	["@google/genai@2.21.0", "preinstall is a no-op in the published package"],
+	["esbuild@0.28.2", "postinstall selects and verifies the platform-specific esbuild binary"],
+	["protobufjs@7.6.6", "postinstall only warns about protobufjs version scheme mismatches"],
+]);
 
 const args = new Set(process.argv.slice(2));
 const checkOnly = args.has("--check");
