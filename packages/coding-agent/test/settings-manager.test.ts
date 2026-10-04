@@ -410,6 +410,19 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("models.refreshTimeoutMs", () => {
+		it("defaults to 60s, treats negative as disabled and 0 as immediate", () => {
+			expect(SettingsManager.inMemory().getModelRefreshTimeoutMs()).toBe(60_000);
+			expect(
+				SettingsManager.inMemory({ models: { refreshTimeoutMs: -1 } }).getModelRefreshTimeoutMs(),
+			).toBeUndefined();
+			expect(SettingsManager.inMemory({ models: { refreshTimeoutMs: 0 } }).getModelRefreshTimeoutMs()).toBe(0);
+			expect(SettingsManager.inMemory({ models: { refreshTimeoutMs: 1500.7 } }).getModelRefreshTimeoutMs()).toBe(
+				1500,
+			);
+		});
+	});
+
 	describe("cacheWarming", () => {
 		it("defaults to streaming and ignores project settings", () => {
 			expect(SettingsManager.create(projectDir, agentDir).getCacheWarmingMode()).toBe("streaming");

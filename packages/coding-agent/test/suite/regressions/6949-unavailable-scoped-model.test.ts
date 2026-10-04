@@ -24,10 +24,16 @@ function createInteractiveContext(options: {
 			},
 			scopedModels: options.scopedModels ?? [],
 			setScopedModels,
+			settingsManager: {
+				getEnabledModels: () => options.enabledModelIds,
+				setEnabledModels: vi.fn(),
+				getModelRefreshTimeoutMs: () => 15_000,
+			},
 		},
 		settingsManager: {
 			getEnabledModels: () => options.enabledModelIds,
 			setEnabledModels: vi.fn(),
+			getModelRefreshTimeoutMs: () => 15_000,
 		},
 		showStatus: vi.fn(),
 		showSelector: (factory: (done: () => void) => { component: ScopedModelsSelectorComponent }) => {
