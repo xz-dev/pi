@@ -1,3 +1,4 @@
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
@@ -142,5 +143,64 @@ describe("SettingsSelectorComponent", () => {
 		output = stripAnsi(list.render(120).join("\n"));
 		expect(output).toContain("  ✓ medium");
 		expect(output).toContain("→   high");
+	});
+
+	describe("per-model thinking model picker order", () => {
+		const model = (provider: string, id: string) => ({ provider, id, reasoning: true }) as unknown as Model<Api>;
+		const models = [
+			model("openai", "gpt-5"),
+			model("zai", "glm-4"),
+			model("anthropic", "claude-a"),
+			model("anthropic", "claude-b"),
+		];
+
+		const open = (modelThinkingLevels: Record<string, string>) => {
+			const config = {
+				defaultModel: "anthropic/claude-a",
+				currentModel: models[0],
+				availableDefaultModels: models,
+				thinkingLevel: "high",
+				modelThinkingLevels,
+			} as unknown as SettingsConfig;
+			const list = new SettingsSelectorComponent(config, {
+				onCancel: () => {},
+				onModelThinkingLevelChange: () => {},
+				onModelThinkingLevelRemove: () => {},
+			} as unknown as SettingsCallbacks).getSettingsList();
+			list.selectItem("model-thinking");
+			list.handleInput("\r");
+			return list;
+		};
+
+		const rows = (list: ReturnType<typeof open>) =>
+			stripAnsi(list.render(120).join("\n"))
+				.split("\n")
+				.map((line) => /^(→)?\s*(\S+) \[(\S+)\]/.exec(line))
+				.filter((match) => match !== null)
+				.map((match) => `${match[1] ? ">" : ""}${match[3]}/${match[2]}`);
+
+		it("lists configured models first, both groups alphabetical, current model highlighted in place", () => {
+			const list = open({ "zai/glm-4": "low", "anthropic/claude-b": "high" });
+			expect(rows(list)).toEqual(["anthropic/claude-b", "zai/glm-4", "anthropic/claude-a", ">openai/gpt-5"]);
+		});
+
+		it("regroups models after setting and clearing overrides in the same submenu", () => {
+			const list = open({ "zai/glm-4": "low" });
+			expect(rows(list)).toEqual(["zai/glm-4", "anthropic/claude-a", "anthropic/claude-b", ">openai/gpt-5"]);
+
+			// Set a level for the highlighted current model (openai/gpt-5).
+			list.handleInput("\r");
+			list.handleInput("\r");
+			expect(rows(list)).toEqual([">openai/gpt-5", "zai/glm-4", "anthropic/claude-a", "anthropic/claude-b"]);
+
+			// Clear the override for zai/glm-4: pick it, then move from the preselected level to "(clear override)".
+			list.handleInput("\x1b[B");
+			list.handleInput("\r");
+			for (let i = 0; i < 10 && !/→\s+\(clear override\)/.test(stripAnsi(list.render(120).join("\n"))); i++) {
+				list.handleInput("\x1b[B");
+			}
+			list.handleInput("\r");
+			expect(rows(list)).toEqual([">openai/gpt-5", "anthropic/claude-a", "anthropic/claude-b", "zai/glm-4"]);
+		});
 	});
 });
