@@ -1,4 +1,14 @@
-import { type Component, ScrollView, type ScrollViewScrollbar, VStack } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	ScrollView,
+	type ScrollViewScrollbar,
+	VStack,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
+import { CustomEditor } from "./components/custom-editor.ts";
+import { scrollToEndLabel } from "./components/keybinding-hints.ts";
+import { theme } from "./theme/theme.ts";
 
 export interface ChatViewportOptions {
 	readonly document: Component;
@@ -20,27 +30,80 @@ export interface ChatViewport {
 
 /** Shared fullscreen transcript and fixed input-dock layout. */
 export function createChatViewport(options: ChatViewportOptions): ChatViewport {
+	let expanded = false;
+	const toggleLabel = () => (expanded ? "[Collapse input]" : "[Expand input]");
 	const transcript = new ScrollView(options.document, {
 		follow: "end",
+		// Growing the transcript when the dock shrinks must not resume following.
+		resumeFollowOnLayout: false,
+		onFollowChange: () => {
+			expanded = false;
+		},
+		scrollbackAction: () => ({
+			label: theme.bg("selectedBg", theme.fg("text", toggleLabel())),
+			onClick: () => {
+				expanded = !expanded;
+			},
+		}),
 		primary: true,
 		overscroll: "chain",
 		scrollbar: options.scrollbar ?? "auto",
 		...(options.scrollbarTrackStyle === undefined ? {} : { scrollbarTrackStyle: options.scrollbarTrackStyle }),
 		...(options.scrollbarThumbStyle === undefined ? {} : { scrollbarThumbStyle: options.scrollbarThumbStyle }),
 	});
+	const getCompactEditor = (): CustomEditor | undefined => {
+		const slot = options.editor;
+		const editor = slot instanceof Container && slot.children.length === 1 ? slot.children[0] : slot;
+		return editor instanceof CustomEditor && !editor.isShowingAutocomplete() ? editor : undefined;
+	};
+	const showExtras = () => transcript.isFollowingEnd || expanded;
+	const showDock = () => showExtras() || getCompactEditor() !== undefined;
+	const editorView = new (class extends Container {
+		override render(width: number): string[] {
+			const editor = transcript.isFollowingEnd || expanded ? undefined : getCompactEditor();
+			if (!editor) return super.render(width);
+			const previousLimit = editor.maxVisibleLines;
+			editor.maxVisibleLines = 1;
+			try {
+				// Render the real containers so mouse hit-testing uses the same geometry.
+				return super.render(width);
+			} finally {
+				// Other presentations (including regular mode) retain their normal height.
+				editor.maxVisibleLines = previousLimit;
+			}
+		}
+	})();
+	editorView.addChild(options.editor);
 	const dock = new VStack([
-		{ component: options.pendingMessages, shrink: 1, minSize: 0 },
-		{ component: options.status, shrink: 1, minSize: 0 },
-		...(options.widgetsAbove === undefined ? [] : [{ component: options.widgetsAbove, shrink: 1, minSize: 0 }]),
-		{ component: options.editor, shrink: 1, minSize: 3 },
-		...(options.widgetsBelow === undefined ? [] : [{ component: options.widgetsBelow, shrink: 1, minSize: 0 }]),
-		{ component: options.footer, shrink: 1, minSize: 0 },
+		{ component: options.pendingMessages, shrink: 1, minSize: 0, visible: showExtras },
+		{ component: options.status, shrink: 1, minSize: 0, visible: showExtras },
+		...(options.widgetsAbove === undefined
+			? []
+			: [{ component: options.widgetsAbove, shrink: 1, minSize: 0, visible: showExtras }]),
+		{ component: editorView, shrink: 1, minSize: 3 },
+		...(options.widgetsBelow === undefined
+			? []
+			: [{ component: options.widgetsBelow, shrink: 1, minSize: 0, visible: showExtras }]),
+		{ component: options.footer, shrink: 1, minSize: 0, visible: showExtras },
 	]);
+	const needsStackedControls = ({ width, height }: { width: number; height: number }) => {
+		if (height < 2 || transcript.isFollowingEnd) return false;
+		const availableWidth = width - (transcript.isScrollbarVisible ? 1 : 0);
+		return visibleWidth(toggleLabel()) + 1 + visibleWidth(scrollToEndLabel()) > availableWidth;
+	};
 	return {
 		transcript,
 		root: new VStack([
-			{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+			{
+				component: transcript,
+				basis: 0,
+				grow: 1,
+				shrink: 1,
+				minSize: 1,
+				visible: (viewport) => !needsStackedControls(viewport),
+			},
+			{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 2, visible: needsStackedControls },
+			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1, visible: showDock },
 		]),
 	};
 }
