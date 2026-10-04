@@ -6,6 +6,7 @@ import {
 } from "./alt-screen-search.ts";
 import { AltScreenFlashContainer } from "./components/alt-screen-flash.ts";
 import { ScrollView } from "./components/scroll-view.ts";
+import { visibleStackEntries } from "./components/stack.ts";
 import { getKeybindings } from "./keybindings.ts";
 import { isKeyRelease } from "./keys.ts";
 import {
@@ -143,6 +144,7 @@ interface ScrollToEndIndicatorRect {
 	row: number;
 	column: number;
 	width: number;
+	onClick?: () => void;
 }
 
 type SearchSelectionMode = "query" | "retain" | "next" | "previous";
@@ -227,6 +229,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private scrollbarDrag?: ScrollbarDrag;
 	private scrollbarHover?: ScrollView;
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
+	private scrollbackActionRect?: ScrollToEndIndicatorRect;
 	private activeSearch?: ActiveSearch;
 	private pressedUrl?: string;
 	private selectionDragged = false;
@@ -783,7 +786,26 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (!isRelease) this.scrollToBottom();
 			return { consume: true };
 		}
+		if (this.isFocusedInputHidden()) return { consume: true };
 		return undefined;
+	}
+
+	private isFocusedInputHidden(): boolean {
+		const focused = this.getFocusedComponent();
+		if (!focused || !this.layoutRoot || this.isOverlayFocused()) return false;
+		const viewport = { width: this.terminal.columns, height: this.terminal.rows };
+		const visit = (component: Component, hidden = false): boolean => {
+			if (component === focused) return hidden;
+			const node = getLayoutNode(component);
+			if (node?.type === "scroll") return visit(node.component, hidden);
+			if (node) {
+				const visible = new Set(visibleStackEntries(node.entries, viewport).map((entry) => entry.component));
+				return node.entries.some((entry) => visit(entry.component, hidden || !visible.has(entry.component)));
+			}
+			return hidden && component instanceof Container && component.children.some((child) => visit(child, true));
+		};
+		// Read live visibility so a scroll and Enter in the same input batch cannot submit a hidden panel.
+		return visit(this.layoutRoot);
 	}
 
 	private decodeMouseButton(button: number): TuiMouseButton {
@@ -1018,6 +1040,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		) {
 			return false;
 		}
+		if (this.isFocusedInputHidden()) return true;
 		try {
 			this.onRightClickPaste();
 		} catch {
@@ -1027,11 +1050,19 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private handleScrollToEndIndicatorMouseEvent(event: SgrMouseEvent): boolean {
-		const rect = this.scrollToEndIndicatorRect;
-		if (!rect || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
-		if (event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) return false;
-		this.scrollToBottom();
-		return true;
+		if (event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
+		for (const rect of [this.scrollbackActionRect, this.scrollToEndIndicatorRect]) {
+			if (!rect || event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) continue;
+			this.clearTextSelection();
+			if (rect.onClick) {
+				rect.onClick();
+				this.requestRender();
+			} else {
+				this.scrollToBottom();
+			}
+			return true;
+		}
+		return false;
 	}
 
 	private getScrollbarTargetAt(x: number, y: number, includeHiddenAuto = false): ScrollbarTarget | undefined {
@@ -1633,6 +1664,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private compositeScrollToEndIndicator(screen: string[], layout: LayoutFrame, width: number): string[] {
 		this.scrollToEndIndicatorRect = undefined;
+		this.scrollbackActionRect = undefined;
 		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
 		if (!this.scrollToEndIndicator || !scrollView.followEnd || scrollView.isFollowingEnd) return screen;
 		const box = getScrollViewBox(layout, scrollView);
@@ -1641,17 +1673,29 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const row = clip.y + clip.height - 1;
 		if (row >= screen.length || isImageLine(screen[row] ?? "")) return screen;
 		const scrollbarColumn = box ? getScrollbarGeometry(box)?.column : undefined;
-		const label = truncateToWidth(this.scrollToEndIndicator(), clip.width, "");
-		const labelWidth = visibleWidth(label);
-		const column = clip.x + Math.floor((clip.width - labelWidth) / 2);
 		const rightEdge = scrollbarColumn ?? clip.x + clip.width;
-		const availableWidth = Math.max(0, rightEdge - column);
-		const text = truncateToWidth(label, availableWidth, "");
-		const textWidth = visibleWidth(text);
-		if (textWidth === 0) return screen;
+		const availableWidth = Math.max(0, rightEdge - clip.x);
+		const label = truncateToWidth(this.scrollToEndIndicator(), availableWidth, "");
+		const labelWidth = visibleWidth(label);
+		const action = scrollView.scrollbackAction?.();
+		const actionText = truncateToWidth(action?.label ?? "", availableWidth, "");
+		const actionWidth = visibleWidth(actionText);
+		const stacked = actionWidth > 0 && actionWidth + 1 + labelWidth > availableWidth;
+		const column =
+			clip.x +
+			Math.min(
+				availableWidth - labelWidth,
+				Math.max(Math.floor((clip.width - labelWidth) / 2), !stacked && actionWidth > 0 ? actionWidth + 1 : 0),
+			);
+		if (labelWidth === 0) return screen;
 		const result = [...screen];
-		result[row] = compositeTuiLine(result[row] ?? "", text, column, textWidth, width);
-		this.scrollToEndIndicatorRect = { row, column, width: textWidth };
+		const actionRow = stacked ? row - 1 : row;
+		if (action && actionWidth > 0 && actionRow >= clip.y && !isImageLine(result[actionRow] ?? "")) {
+			result[actionRow] = compositeTuiLine(result[actionRow] ?? "", actionText, clip.x, actionWidth, width);
+			this.scrollbackActionRect = { row: actionRow, column: clip.x, width: actionWidth, onClick: action.onClick };
+		}
+		result[row] = compositeTuiLine(result[row] ?? "", label, column, labelWidth, width);
+		this.scrollToEndIndicatorRect = { row, column, width: labelWidth };
 		return result;
 	}
 
