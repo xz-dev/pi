@@ -458,6 +458,19 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it("rejects update --clean combined with another update target", async () => {
+		const create = vi.spyOn(ModelRuntime, "create");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(runPackageCommandDirectly(["update", "--clean", "--models"])).resolves.toBeUndefined();
+
+		expect(create).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"--clean cannot be combined with another update target",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("refreshes only model catalogs with update --models", async () => {
 		const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
 		const create = vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh } as unknown as ModelRuntime);
@@ -612,6 +625,29 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 			expect(stderr).toContain("Missing install source.");
 			expect(stderr).toContain("Usage: pi install <source> [-l]");
 			expect(stderr).not.toContain("at ");
+			expect(process.exitCode).toBe(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("refuses self-update for a channel-managed install before any release lookup", async () => {
+		const lockDir = join(tempDir, "channel-install");
+		mkdirSync(lockDir, { recursive: true });
+		writeFileSync(join(lockDir, ".scoop.managed.lock"), "");
+		process.env.PI_PACKAGE_DIR = lockDir;
+		const fetchMock = vi.fn(async () => Response.json({ version: VERSION }));
+		vi.stubGlobal("fetch", fetchMock);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
+
+			// The refusal must happen offline, before any release/version lookup.
+			expect(fetchMock).not.toHaveBeenCalled();
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("managed by scoop");
+			expect(stderr).toContain("self-update is disabled");
 			expect(process.exitCode).toBe(1);
 		} finally {
 			errorSpy.mockRestore();
