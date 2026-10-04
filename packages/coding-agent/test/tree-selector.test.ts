@@ -1,4 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
@@ -85,6 +86,24 @@ function toolCallOnlyAssistant(id: string, parentId: string | null): SessionMess
 	};
 }
 
+function toolResult(id: string, parentId: string, toolCallId: string): SessionMessageEntry {
+	const message: ToolResultMessage = {
+		role: "toolResult",
+		toolCallId,
+		toolName: "read",
+		content: [{ type: "text", text: "result" }],
+		isError: false,
+		timestamp: Date.now(),
+	};
+	return {
+		type: "message",
+		id,
+		parentId,
+		timestamp: new Date().toISOString(),
+		message,
+	};
+}
+
 // Helper to create a model_change entry
 function modelChange(id: string, parentId: string | null): ModelChangeEntry {
 	return {
@@ -126,6 +145,31 @@ function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
 }
 
 describe("TreeSelectorComponent", () => {
+	describe("all filter protocol entries", () => {
+		test("exposes tool-call-only assistant and toolResult nodes", () => {
+			const entries = [
+				userMessage("user-1", null, "hello"),
+				toolCallOnlyAssistant("tool-call", "user-1"),
+				toolResult("tool-result", "tool-call", "tc-tool-call"),
+			];
+			const selector = new TreeSelectorComponent(
+				buildTree(entries),
+				"tool-result",
+				24,
+				() => {},
+				() => {},
+			);
+			const list = selector.getTreeList();
+
+			selector.handleInput("\x01"); // Ctrl+A: all filter
+			const rendered = stripVTControlCharacters(list.render(200).join("\n"));
+
+			expect(rendered).toContain("read");
+			expect(rendered).toContain("(3/3) [all]");
+			expect(list.getSelectedNode()?.entry.id).toBe("tool-result");
+		});
+	});
+
 	describe("initial selection with metadata entries", () => {
 		test("focuses nearest visible ancestor when currentLeafId is a model_change with sibling branch", () => {
 			// Tree structure:
