@@ -6,6 +6,7 @@ import {
 } from "./alt-screen-search.ts";
 import { AltScreenFlashContainer } from "./components/alt-screen-flash.ts";
 import { ScrollView } from "./components/scroll-view.ts";
+import { visibleStackEntries } from "./components/stack.ts";
 import { getKeybindings } from "./keybindings.ts";
 import { isKeyRelease } from "./keys.ts";
 import {
@@ -793,7 +794,26 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (!isRelease) this.scrollToBottom();
 			return { consume: true };
 		}
+		if (this.isFocusedInputHidden()) return { consume: true };
 		return undefined;
+	}
+
+	private isFocusedInputHidden(): boolean {
+		const focused = this.getFocusedComponent();
+		if (!focused || !this.layoutRoot || this.isOverlayFocused()) return false;
+		const viewport = { width: this.terminal.columns, height: this.terminal.rows };
+		const visit = (component: Component, hidden = false): boolean => {
+			if (component === focused) return hidden;
+			const node = getLayoutNode(component);
+			if (node?.type === "scroll") return visit(node.component, hidden);
+			if (node) {
+				const visible = new Set(visibleStackEntries(node.entries, viewport).map((entry) => entry.component));
+				return node.entries.some((entry) => visit(entry.component, hidden || !visible.has(entry.component)));
+			}
+			return hidden && component instanceof Container && component.children.some((child) => visit(child, true));
+		};
+		// Read live visibility so a scroll and Enter in the same input batch cannot submit a hidden panel.
+		return visit(this.layoutRoot);
 	}
 
 	private decodeMouseButton(button: number): TuiMouseButton {
@@ -1028,6 +1048,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		) {
 			return false;
 		}
+		if (this.isFocusedInputHidden()) return true;
 		try {
 			this.onRightClickPaste();
 		} catch {

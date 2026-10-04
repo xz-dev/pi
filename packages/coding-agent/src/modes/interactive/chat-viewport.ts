@@ -39,15 +39,12 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 		onFollowChange: () => {
 			expanded = false;
 		},
-		scrollbackAction: () =>
-			getCompactEditor()
-				? {
-						label: theme.bg("selectedBg", theme.fg("text", toggleLabel())),
-						onClick: () => {
-							expanded = !expanded;
-						},
-					}
-				: undefined,
+		scrollbackAction: () => ({
+			label: theme.bg("selectedBg", theme.fg("text", toggleLabel())),
+			onClick: () => {
+				expanded = !expanded;
+			},
+		}),
 		primary: true,
 		overscroll: "chain",
 		scrollbar: options.scrollbar ?? "auto",
@@ -57,11 +54,10 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 	const getCompactEditor = (): CustomEditor | undefined => {
 		const slot = options.editor;
 		const editor = slot instanceof Container && slot.children.length === 1 ? slot.children[0] : slot;
-		return editor instanceof CustomEditor && editor.embedWorkingStatus && !editor.isShowingAutocomplete()
-			? editor
-			: undefined;
+		return editor instanceof CustomEditor && !editor.isShowingAutocomplete() ? editor : undefined;
 	};
-	const showExtras = () => transcript.isFollowingEnd || expanded || !getCompactEditor();
+	const showExtras = () => transcript.isFollowingEnd || expanded;
+	const showDock = () => showExtras() || getCompactEditor() !== undefined;
 	const editorView = new (class extends Container {
 		override render(width: number): string[] {
 			const editor = transcript.isFollowingEnd || expanded ? undefined : getCompactEditor();
@@ -91,8 +87,7 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 		{ component: options.footer, shrink: 1, minSize: 0, visible: showExtras },
 	]);
 	const needsStackedControls = ({ width, height }: { width: number; height: number }) => {
-		// Below five rows, keep the original transcript row and three-row editor first.
-		if (height < 5 || transcript.isFollowingEnd || !getCompactEditor()) return false;
+		if (height < 2 || transcript.isFollowingEnd) return false;
 		const availableWidth = width - (transcript.isScrollbarVisible ? 1 : 0);
 		return visibleWidth(toggleLabel()) + 1 + visibleWidth(scrollToEndLabel()) > availableWidth;
 	};
@@ -108,7 +103,7 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 				visible: (viewport) => !needsStackedControls(viewport),
 			},
 			{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 2, visible: needsStackedControls },
-			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1, visible: showDock },
 		]),
 	};
 }
