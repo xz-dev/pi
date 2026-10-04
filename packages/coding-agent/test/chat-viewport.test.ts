@@ -1,4 +1,4 @@
-import { Container, getKeybindings, setKeybindings, Text, TuiAltScreen } from "@earendil-works/pi-tui";
+import { Container, getKeybindings, Input, setKeybindings, Text, TuiAltScreen } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, test } from "vitest";
 import { defaultEditorTheme } from "../../tui/test/test-themes.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
@@ -124,14 +124,15 @@ describe("chat viewport", () => {
 			}
 			terminal.sendInput("\x1b[<64;1;1M");
 			await terminal.waitForRender();
-			// A selector or opaque extension editor must keep its full rendering.
+			// Replacement panels follow the same scrollback collapse state as the editor.
 			editorSlot.clear();
 			editorSlot.addChild(new Text("selector one\nselector two\nselector three\nselector four", 0, 0));
 			ui.requestRender();
 			await terminal.waitForRender();
-			expect(terminal.getViewport().join("\n")).toContain("selector four");
-			expect(terminal.getViewport().join("\n")).not.toMatch(/\[(?:Expand|Collapse) input\]/);
-			expect(terminal.getViewport().join("\n")).toContain("model footer");
+			expect(terminal.getViewport().join("\n")).not.toContain("selector four");
+			expect(terminal.getViewport().join("\n")).toContain("[Expand input]");
+			expect(terminal.getViewport().join("\n")).toContain("Jump to latest");
+			expect(terminal.getViewport().join("\n")).not.toContain("model footer");
 			editorSlot.clear();
 			editorSlot.addChild(editor);
 			editor.setAutocompleteProvider({
@@ -151,14 +152,113 @@ describe("chat viewport", () => {
 			editor.setText("");
 			terminal.sendInput("/");
 			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).not.toContain("completion two");
+			expect(terminal.getViewport().join("\n")).toContain("[Expand input]");
+			const expandRow = terminal.getViewport().findIndex((line) => line.includes("[Expand input]"));
+			terminal.sendInput(`\x1b[<0;1;${expandRow + 1}M`);
+			terminal.sendInput(`\x1b[<0;1;${expandRow + 1}m`);
+			await terminal.waitForRender();
 			expect(terminal.getViewport().join("\n")).toContain("completion two");
-			expect(terminal.getViewport().join("\n")).not.toMatch(/\[(?:Expand|Collapse) input\]/);
+			expect(terminal.getViewport().join("\n")).toContain("[Collapse input]");
 			terminal.sendInput("\x1b");
+			terminal.sendInput("\x1b[F");
+			terminal.sendInput("\x1b[5~");
 			await terminal.waitForRender();
 			expect(terminal.getViewport()[9]).toContain("Working");
 			expect(terminal.getViewport().join("\n")).not.toContain("model footer");
 		} finally {
 			status.dispose();
+			ui.stop();
+			setKeybindings(previousKeys);
+		}
+	});
+
+	test.each([80, 40])("hides custom panels without losing or submitting answers (%i columns)", async (columns) => {
+		const previousKeys = getKeybindings();
+		setKeybindings(new KeybindingsManager());
+		const terminal = new VirtualTerminal(columns, 14);
+		const ui = createInteractiveTui({
+			tuiMode: "fullscreen",
+			terminal,
+			showHardwareCursor: false,
+			logDirectory: "/var/tmp",
+		});
+		const input = new Input();
+		input.handleInput("saved answer");
+		const submitted: string[] = [];
+		input.onSubmit = (answer) => submitted.push(answer);
+		// ctx.ui.custom mounts and focuses a component in the editor slot, as ask does.
+		const panel = new (class extends Container {
+			handleInput(data: string): void {
+				input.handleInput(data);
+			}
+		})();
+		panel.addChild(new Text("Question\nOption one\nOption two", 0, 0));
+		panel.addChild(input);
+		const editorSlot = new Container();
+		editorSlot.addChild(panel);
+		const viewport = createChatViewport({
+			document: new Text(Array.from({ length: 50 }, (_, i) => `message ${i}`).join("\n"), 0, 0),
+			pendingMessages: new Container(),
+			status: new Container(),
+			editor: editorSlot,
+			footer: new Text("model footer", 0, 0),
+		});
+		ui.setLayoutRoot(viewport.root);
+		ui.setFocus(panel);
+		const click = (label: string) => {
+			const screen = terminal.getViewport();
+			const row = screen.findIndex((line) => line.includes(label));
+			expect(row, screen.join("\n")).toBeGreaterThanOrEqual(0);
+			const column = screen[row].indexOf(label);
+			terminal.sendInput(`\x1b[<0;${column + 1};${row + 1}M`);
+			terminal.sendInput(`\x1b[<0;${column + 1};${row + 1}m`);
+		};
+		ui.start();
+		try {
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("saved answer");
+			terminal.sendInput("\x1b[5~");
+			// Hidden controls must not process keys, even before the next frame.
+			terminal.sendInput("\r");
+			terminal.sendInput("X");
+			await terminal.waitForRender();
+			expect(submitted).toEqual([]);
+			expect(input.getValue()).toBe("saved answer");
+			const screen = terminal.getViewport().join("\n");
+			expect(screen).toContain("[Expand input]");
+			expect(screen).toContain("Jump to latest");
+			expect(screen).not.toMatch(/Question|Option|saved answer|model footer/);
+			const readingLine = terminal.getViewport()[0];
+			click("[Expand input]");
+			await terminal.waitForRender();
+			expect(ui.isFollowingOutput).toBe(false);
+			expect(terminal.getViewport()[0]).toBe(readingLine);
+			expect(terminal.getViewport().join("\n")).toContain("saved answer");
+			expect(terminal.getViewport().join("\n")).toContain("Jump to latest");
+			terminal.sendInput("!");
+			await terminal.waitForRender();
+			expect(input.getValue()).toBe("saved answer!");
+			click("[Collapse input]");
+			await terminal.waitForRender();
+			terminal.resize(columns, 2);
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("[Expand input]");
+			expect(terminal.getViewport().join("\n")).toContain("Jump to latest");
+			terminal.resize(columns, 14);
+			await terminal.waitForRender();
+			click("Jump to latest");
+			await terminal.waitForRender();
+			expect(ui.isFollowingOutput).toBe(true);
+			expect(terminal.getViewport().join("\n")).toContain("saved answer!");
+			expect(terminal.getViewport().join("\n")).not.toMatch(/\[(?:Expand|Collapse) input\]/);
+			terminal.sendInput("\r");
+			expect(submitted).toEqual(["saved answer!"]);
+			terminal.sendInput("\x1b[5~");
+			terminal.sendInput("\x1b[F");
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("saved answer!");
+		} finally {
 			ui.stop();
 			setKeybindings(previousKeys);
 		}
@@ -313,9 +413,10 @@ describe("chat viewport", () => {
 				expect(screen.join("\n")).toContain("MY DRAFT");
 				if (rows === 5) expect(screen[4]).toContain("model footer");
 				if (scrollback) {
-					expect(screen[3]).toMatch(/^─+$/);
+					if (columns === 80) expect(screen[3]).toMatch(/^─+$/);
 					expect(ui.isFollowingOutput).toBe(false);
-					if (columns === 80) expect(screen[0]).toContain("[Expand input]");
+					expect(screen.join("\n")).toContain("[Expand input]");
+					expect(screen.join("\n")).toContain("Jump to latest");
 				}
 			} finally {
 				ui.stop();
