@@ -1019,7 +1019,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		for (const scrollView of this.currentLayout ? getScrollViewsAt(this.currentLayout, event.x, event.y) : []) {
 			seen.add(scrollView);
 			remaining = scrollView.scrollBy(remaining);
-			if (remaining === 0 || scrollView.overscroll === "contain") break;
+			if (scrollView.overscroll === "contain" && this.currentLayout) {
+				const box = getScrollViewBox(this.currentLayout, scrollView);
+				if ((box?.children[0]?.rect.height ?? 0) > scrollView.viewportHeight) remaining = 0;
+			}
+			if (remaining === 0) break;
 		}
 		const primary = this.getPrimaryScrollView();
 		if (remaining !== 0 && !seen.has(primary)) primary.scrollBy(remaining);

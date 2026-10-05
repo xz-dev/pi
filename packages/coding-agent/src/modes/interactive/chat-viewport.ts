@@ -54,7 +54,7 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 	const getCompactEditor = (): CustomEditor | undefined => {
 		const slot = options.editor;
 		const editor = slot instanceof Container && slot.children.length === 1 ? slot.children[0] : slot;
-		return editor instanceof CustomEditor && !editor.isShowingAutocomplete() ? editor : undefined;
+		return editor instanceof CustomEditor ? editor : undefined;
 	};
 	const showExtras = () => transcript.isFollowingEnd || expanded;
 	const showDock = () => showExtras() || getCompactEditor() !== undefined;
@@ -74,17 +74,24 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 		}
 	})();
 	editorView.addChild(options.editor);
+	const scrollWidgets = (component: Component) =>
+		new ScrollView(component, {
+			overscroll: "contain",
+			scrollbar: options.scrollbar ?? "auto",
+			...(options.scrollbarTrackStyle === undefined ? {} : { scrollbarTrackStyle: options.scrollbarTrackStyle }),
+			...(options.scrollbarThumbStyle === undefined ? {} : { scrollbarThumbStyle: options.scrollbarThumbStyle }),
+		});
 	const dock = new VStack([
 		{ component: options.pendingMessages, shrink: 1, minSize: 0, visible: showExtras },
 		{ component: options.status, shrink: 1, minSize: 0, visible: showExtras },
 		...(options.widgetsAbove === undefined
 			? []
-			: [{ component: options.widgetsAbove, shrink: 1, minSize: 0, visible: showExtras }]),
+			: [{ component: scrollWidgets(options.widgetsAbove), shrink: 1, minSize: 0, visible: showExtras }]),
 		{ component: editorView, shrink: 1, minSize: 3 },
 		...(options.widgetsBelow === undefined
 			? []
-			: [{ component: options.widgetsBelow, shrink: 1, minSize: 0, visible: showExtras }]),
-		{ component: options.footer, shrink: 1, minSize: 0, visible: showExtras },
+			: [{ component: scrollWidgets(options.widgetsBelow), shrink: 1, minSize: 0, visible: showExtras }]),
+		{ component: options.footer, shrink: 0, minSize: 0, visible: showExtras },
 	]);
 	const needsStackedControls = ({ width, height }: { width: number; height: number }) => {
 		if (height < 2 || transcript.isFollowingEnd) return false;
