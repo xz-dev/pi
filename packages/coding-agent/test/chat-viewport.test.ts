@@ -58,7 +58,7 @@ describe("chat viewport", () => {
 				expect(screen.join("\n")).not.toMatch(/model footer|widget|queued preview/);
 			}
 			// Upward intent must not restore the dock even when shrinking it makes all messages fit.
-			for (const input of ["\x1b[<64;1;1M", "\x1b[5~", "\x1b[H"]) {
+			for (const input of ["\x1b[<64;1;1M", "\x1b[5~", "\x1b[1;5H"]) {
 				terminal.sendInput(input);
 				await terminal.waitForRender();
 				expect(terminal.getViewport()[9]).toContain("Working");
@@ -105,7 +105,7 @@ describe("chat viewport", () => {
 			expect(terminal.getViewport()[12]).toContain("Xsecond draft line pasted");
 			terminal.resize(60, 12);
 			await terminal.waitForRender();
-			terminal.sendInput("\x1b[F");
+			terminal.sendInput("\x1b[1;5F");
 			await terminal.waitForRender();
 			expect(terminal.getViewport().join("\n")).toContain("model footer");
 			expect(terminal.getViewport().join("\n")).toContain("above widget");
@@ -170,7 +170,7 @@ describe("chat viewport", () => {
 			expect(terminal.getViewport().join("\n")).toContain("completion two");
 			expect(terminal.getViewport().join("\n")).toContain("[Collapse input]");
 			terminal.sendInput("\x1b");
-			terminal.sendInput("\x1b[F");
+			terminal.sendInput("\x1b[1;5F");
 			terminal.sendInput("\x1b[5~");
 			await terminal.waitForRender();
 			expect(terminal.getViewport()[9]).toContain("Working");
@@ -264,7 +264,7 @@ describe("chat viewport", () => {
 			terminal.sendInput("\r");
 			expect(submitted).toEqual(["saved answer!"]);
 			terminal.sendInput("\x1b[5~");
-			terminal.sendInput("\x1b[F");
+			terminal.sendInput("\x1b[1;5F");
 			await terminal.waitForRender();
 			expect(terminal.getViewport().join("\n")).toContain("saved answer!");
 		} finally {
@@ -273,7 +273,7 @@ describe("chat viewport", () => {
 		}
 	});
 
-	test.each([80, 52, 40, 20])("toggles the reading dock without navigating (%i columns)", async (columns) => {
+	test.each([80, 55, 40, 20])("toggles the reading dock without navigating (%i columns)", async (columns) => {
 		const previousKeys = getKeybindings();
 		const keys = new KeybindingsManager();
 		setKeybindings(keys);
@@ -322,16 +322,16 @@ describe("chat viewport", () => {
 			ui.scrollBy(-20);
 			await terminal.waitForRender();
 			const readingLine = terminal.getViewport()[0].match(/^message \d+/)![0];
-			expectControls("[Expand input]", columns < 52);
+			expectControls("[Expand input]", columns < 55);
 			expect(terminal.getViewport().join("\n")).not.toContain("model footer");
 			click("[Expand input]");
 			await terminal.waitForRender();
-			expectControls("[Collapse input]", columns < 52);
+			expectControls("[Collapse input]", columns < 55);
 			expect(terminal.getViewport().join("\n")).toContain("model footer");
 			expect(terminal.getViewport()[0]).toContain(readingLine);
 			click("[Collapse input]");
 			await terminal.waitForRender();
-			expectControls("[Expand input]", columns < 52);
+			expectControls("[Expand input]", columns < 55);
 			expect(terminal.getViewport().join("\n")).not.toContain("model footer");
 			expect(terminal.getViewport()[0]).toContain(readingLine);
 			click("[Expand input]");
@@ -352,7 +352,7 @@ describe("chat viewport", () => {
 				await terminal.waitForRender();
 			}
 			// A new episode resets even if latest and scrollback occur before the next frame.
-			terminal.sendInput("\x1b[F");
+			terminal.sendInput("\x1b[1;5F");
 			terminal.sendInput("\x1b[5~");
 			await terminal.waitForRender();
 			expectControls("[Expand input]", false);
