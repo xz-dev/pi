@@ -11,7 +11,10 @@ import { createInteractiveTui } from "../src/modes/interactive/tui-renderer.ts";
 
 describe("chat viewport", () => {
 	beforeEach(() => initTheme("dark"));
-	test.each([8, 30])("keeps the reading dock compact (%i rows)", async (rows) => {
+	test.each([
+		{ rows: 8, prefix: "/" },
+		{ rows: 30, prefix: "@" },
+	])("keeps the reading dock compact ($rows rows, $prefix completions)", async ({ rows, prefix }) => {
 		const previousKeys = getKeybindings();
 		const keys = new KeybindingsManager();
 		setKeybindings(keys);
@@ -137,10 +140,10 @@ describe("chat viewport", () => {
 			editorSlot.addChild(editor);
 			editor.setAutocompleteProvider({
 				getSuggestions: async () => ({
-					prefix: "/",
+					prefix,
 					items: [
-						{ value: "/one", label: "completion one" },
-						{ value: "/two", label: "completion two" },
+						{ value: `${prefix}one`, label: "completion one" },
+						{ value: `${prefix}two`, label: "completion two" },
 					],
 				}),
 				applyCompletion: (_lines, _line, _col, item) => ({
@@ -150,10 +153,16 @@ describe("chat viewport", () => {
 				}),
 			});
 			editor.setText("");
-			terminal.sendInput("/");
+			terminal.sendInput(prefix);
+			await expect.poll(() => editor.isShowingAutocomplete()).toBe(true);
 			await terminal.waitForRender();
-			expect(terminal.getViewport().join("\n")).not.toContain("completion two");
-			expect(terminal.getViewport().join("\n")).toContain("[Expand input]");
+			const completionScreen = terminal.getViewport().join("\n");
+			expect(completionScreen).toContain(prefix);
+			expect(completionScreen).toContain("completion two");
+			expect(completionScreen).not.toMatch(/model footer|widget|queued preview/);
+			expect(ui.isFollowingOutput).toBe(false);
+			expect(ui.getFocusedComponent()).toBe(editor);
+			expect(completionScreen).toContain("[Expand input]");
 			const expandRow = terminal.getViewport().findIndex((line) => line.includes("[Expand input]"));
 			terminal.sendInput(`\x1b[<0;1;${expandRow + 1}M`);
 			terminal.sendInput(`\x1b[<0;1;${expandRow + 1}m`);
@@ -424,6 +433,69 @@ describe("chat viewport", () => {
 			}
 		},
 	);
+
+	test("scrolls constrained widgets without losing the editor, footer, or transcript position", async () => {
+		const previousKeys = getKeybindings();
+		const keys = new KeybindingsManager();
+		setKeybindings(keys);
+		const terminal = new VirtualTerminal(60, 22);
+		const ui = new TuiAltScreen(terminal, false, "/var/tmp", { wheelScrollLines: 1 });
+		const editor = new CustomEditor(ui, defaultEditorTheme, keys);
+		editor.setText("MY DRAFT");
+		const viewport = createChatViewport({
+			document: new Text(Array.from({ length: 50 }, (_, i) => `message ${i}`).join("\n"), 0, 0),
+			pendingMessages: new Container(),
+			status: new Container(),
+			editor,
+			widgetsAbove: new Text(Array.from({ length: 11 }, (_, i) => `above ${i}`).join("\n"), 0, 0),
+			widgetsBelow: new Text(Array.from({ length: 7 }, (_, i) => `below ${i}`).join("\n"), 0, 0),
+			footer: new Text("footer 0\nfooter 1\nfooter 2", 0, 0),
+		});
+		ui.setLayoutRoot(viewport.root);
+		ui.setFocus(editor);
+		const wheel = async (prefix: string, button: 64 | 65) => {
+			const row = terminal.getViewport().findIndex((line) => line.startsWith(prefix));
+			expect(row).toBeGreaterThanOrEqual(0);
+			for (let i = 0; i < 20; i++) terminal.sendInput(`\x1b[<${button};1;${row + 1}M`);
+			await terminal.waitForRender();
+			expect(ui.isFollowingOutput).toBe(true);
+			expect(terminal.getViewport().join("\n")).toContain("MY DRAFT");
+			expect(terminal.getViewport().join("\n")).toContain("footer 2");
+		};
+		ui.start();
+		try {
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("footer 2");
+			expect(terminal.getViewport().join("\n")).not.toContain("above 10");
+			expect(terminal.getViewport().join("\n")).not.toContain("below 6");
+			// A wheel gesture at a widget boundary must not collapse the input dock.
+			await wheel("above ", 64);
+			await wheel("above ", 65);
+			expect(terminal.getViewport().join("\n")).toContain("above 10");
+			await wheel("below ", 65);
+			expect(terminal.getViewport().join("\n")).toContain("below 6");
+			await wheel("above ", 64);
+			await wheel("below ", 64);
+			terminal.resize(60, 49);
+			await terminal.waitForRender();
+			const screen = terminal.getViewport().join("\n");
+			for (const line of ["above 0", "above 10", "below 0", "below 6", "MY DRAFT", "footer 2"]) {
+				expect(screen).toContain(line);
+			}
+			expect(ui.isFollowingOutput).toBe(true);
+			// When widgets fit, their area retains the original transcript scrolling behavior.
+			const row = terminal.getViewport().findIndex((line) => line.startsWith("above "));
+			expect(row).toBeGreaterThanOrEqual(0);
+			terminal.sendInput(`\x1b[<64;1;${row + 1}M`);
+			await terminal.waitForRender();
+			expect(ui.isFollowingOutput).toBe(false);
+			expect(terminal.getViewport().join("\n")).toContain("MY DRAFT");
+			expect(terminal.getViewport().join("\n")).not.toMatch(/above|below|footer/);
+		} finally {
+			ui.stop();
+			setKeybindings(previousKeys);
+		}
+	});
 
 	test("defaults the transcript scrollbar to auto and accepts overrides", () => {
 		const automatic = createChatViewport({
