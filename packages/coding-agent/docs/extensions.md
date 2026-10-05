@@ -59,6 +59,8 @@ Do not start processes, sockets, watchers, or timers in the factory because some
 Start long-lived resources from `session_start` or from the command or tool that needs them.
 Close session-scoped resources from an idempotent `session_shutdown` handler.
 
+In interactive TUI, Pi shows slow extension handlers as transient notices when the matching threshold is `>= 0`: `slowSyncHookThresholdMs` for handlers that return a plain value, `slowAsyncHookThresholdMs` for handlers that return a promise (both default `-1`, disabled). Timing diagnostics are not saved to the session, model context, RPC/print events, or disk. During shutdown, the current handler is shown while Pi waits; fast handlers are cleared and only slow handlers remain on the terminal. Outside interactive TUI, these diagnostics are dropped.
+
 A run proceeds from input and `before_agent_start`, through model, message, and tool events, to `agent_end`.
 Automatic retries, recovery, compaction, or queued work can continue afterward.
 <a id="agent_start--agent_end--agent_before_settle--agent_settled"></a>
