@@ -559,7 +559,7 @@ describe("agentLoop with AgentMessage", () => {
 		let streamCalls = 0;
 		const stream = agentLoop([createUserMessage("run echo")], context, config, controller.signal, () => {
 			const call = streamCalls++;
-			const mockStream = new MockAssistantStream();
+			const mockStream = createAssistantMessageEventStream();
 			queueMicrotask(() => {
 				const message =
 					call === 0

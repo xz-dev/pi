@@ -483,7 +483,7 @@ describe("Agent", () => {
 
 	it("should abort a stuck lifecycle listener and clear streaming state", async () => {
 		const agent = new Agent({
-			streamFn: () => new MockAssistantStream(),
+			streamFn: () => createAssistantMessageEventStream(),
 		});
 		let listenerStarted = false;
 
@@ -510,7 +510,7 @@ describe("Agent", () => {
 		it(`should terminalize once when aborting a stuck ${stuckEvent} listener`, async () => {
 			const agent = new Agent({
 				streamFn: () => {
-					const stream = new MockAssistantStream();
+					const stream = createAssistantMessageEventStream();
 					queueMicrotask(() => {
 						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
 					});
@@ -567,7 +567,7 @@ describe("Agent", () => {
 			initialState: { tools: [tool] },
 			streamFn: () => {
 				providerCalls++;
-				const stream = new MockAssistantStream();
+				const stream = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({
 						type: "done",
@@ -607,7 +607,7 @@ describe("Agent", () => {
 		it(`should deliver an abort-interrupted ${interruptedEvent} once to later listeners`, async () => {
 			const agent = new Agent({
 				streamFn: () => {
-					const stream = new MockAssistantStream();
+					const stream = createAssistantMessageEventStream();
 					queueMicrotask(() => {
 						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
 					});
@@ -652,7 +652,7 @@ describe("Agent", () => {
 			it(`should preserve a non-abort ${failureMode} from a ${terminalEvent} listener`, async () => {
 				const agent = new Agent({
 					streamFn: () => {
-						const stream = new MockAssistantStream();
+						const stream = createAssistantMessageEventStream();
 						queueMicrotask(() => {
 							stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
 						});
@@ -696,7 +696,7 @@ describe("Agent", () => {
 
 		try {
 			const agent = new Agent({
-				streamFn: () => new MockAssistantStream(),
+				streamFn: () => createAssistantMessageEventStream(),
 			});
 
 			const recorded: string[] = [];
@@ -753,7 +753,7 @@ describe("Agent", () => {
 			transformContext: () => new Promise(() => {}),
 			streamFn: () => {
 				providerCalled = true;
-				const stream = new MockAssistantStream();
+				const stream = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
 				});
@@ -795,7 +795,7 @@ describe("Agent", () => {
 		const agent = new Agent({
 			streamFn: () => {
 				streamCreated = true;
-				return new MockAssistantStream();
+				return createAssistantMessageEventStream();
 			},
 		});
 
@@ -826,7 +826,7 @@ describe("Agent", () => {
 				convertToLlm: () => [{ role: "user", content: "hello", timestamp: Date.now() }],
 			},
 			controller.signal,
-			() => new MockAssistantStream(),
+			() => createAssistantMessageEventStream(),
 		);
 
 		void (async () => {
