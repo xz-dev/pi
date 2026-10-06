@@ -936,28 +936,6 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
-	/** Returns undefined when the timeout is disabled (negative setting). */
-	getModelRefreshTimeoutMs(): number | undefined {
-		const value = this.settings.models?.refreshTimeoutMs;
-		if (value === undefined) return SETTINGS_DEFAULTS.models.refreshTimeoutMs;
-		if (typeof value !== "number" || !Number.isFinite(value)) {
-			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(value)}`);
-		}
-		return value < 0 ? undefined : Math.floor(value);
-	}
-
-	setModelRefreshTimeoutMs(timeoutMs: number): void {
-		if (!Number.isFinite(timeoutMs)) {
-			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(timeoutMs)}`);
-		}
-		if (!this.globalSettings.models) {
-			this.globalSettings.models = {};
-		}
-		this.globalSettings.models.refreshTimeoutMs = Math.floor(timeoutMs);
-		this.markModified("models", "refreshTimeoutMs");
-		this.save();
-	}
-
 	getHideThinkingBlock(): boolean {
 		return this.settings.hideThinkingBlock ?? SETTINGS_DEFAULTS.hideThinkingBlock;
 	}
@@ -1341,6 +1319,28 @@ export class SettingsManager {
 		}
 		this.globalSettings.images.blockImages = blocked;
 		this.markModified("images", "blockImages");
+		this.save();
+	}
+
+	/** Returns undefined when the timeout is disabled (negative setting). */
+	getModelRefreshTimeoutMs(): number | undefined {
+		const value = this.settings.models?.refreshTimeoutMs;
+		if (value === undefined) return SETTINGS_DEFAULTS.models.refreshTimeoutMs;
+		if (typeof value !== "number" || !Number.isFinite(value)) {
+			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(value)}`);
+		}
+		return value < 0 ? undefined : Math.floor(value);
+	}
+
+	setModelRefreshTimeoutMs(timeoutMs: number): void {
+		if (!Number.isFinite(timeoutMs)) {
+			throw new Error(`Invalid models.refreshTimeoutMs setting: ${String(timeoutMs)}`);
+		}
+		if (!this.globalSettings.models) {
+			this.globalSettings.models = {};
+		}
+		this.globalSettings.models.refreshTimeoutMs = Math.floor(timeoutMs);
+		this.markModified("models", "refreshTimeoutMs");
 		this.save();
 	}
 
