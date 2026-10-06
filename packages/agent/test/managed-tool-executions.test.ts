@@ -1,4 +1,4 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream } from "@earendil-works/pi-ai/compat";
+import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,19 +9,6 @@ import {
 	type ManagedExecutionCancelResult,
 	type StreamFn,
 } from "../src/index.ts";
-
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
 
 type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
@@ -178,7 +165,7 @@ function createHangTool(name: string): {
 function streamToolCallsThenStop(calls: ToolCallContent[]): StreamFn {
 	let turn = 0;
 	return () => {
-		const stream = new MockAssistantStream();
+		const stream = createAssistantMessageEventStream();
 		const currentTurn = turn++;
 		queueMicrotask(() => {
 			if (currentTurn === 0) {
