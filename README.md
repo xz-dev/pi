@@ -63,6 +63,11 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
   - Use case: Read history while an ask questionnaire is open, then expand it or return to latest to continue with the saved answers.
   - Limits: Hidden panels do not receive typing, Enter, or right-click paste. Stacked controls need at least two terminal rows; short layouts may clip editor borders to keep both controls visible.
   - Patch branch: [`patch/compact-input-dock`](https://github.com/xz-dev/pi/tree/patch/compact-input-dock)
+- Preview thinking in one streaming line by default, following the newest text without growing the transcript. When that thinking block ends, the folded row returns to the static thinking label. `Ctrl+T` cycles preview, full text, and static-folded styles; `Ctrl+O` also expands or folds thinking with tool output.
+  - Use case: Follow long reasoning without losing the answer below it, and open the full reasoning only when needed.
+  - Limits: Fullscreen mouse clicks toggle individual thinking blocks during or after streaming, and their state survives completion. A later global display action reapplies its state. Regular terminal mode uses keyboard controls and leaves mouse selection to the terminal. This changes presentation, not the model's thinking effort or saved reasoning.
+  - Details: [Thinking display settings](packages/coding-agent/docs/settings.md#model-and-thinking), [Keybindings](packages/coding-agent/docs/keybindings.md#models-and-thinking)
+  - Patch branch: [`patch/thinking-preview`](https://github.com/xz-dev/pi/tree/patch/thinking-preview)
 - List models with a configured override first in `/settings` -> Default thinking level per model, with configured and unconfigured models each sorted by `provider/model-id`; the current model is preselected instead of pinned to the top.
   - Use case: See and edit saved per-model thinking levels without scanning the whole model list.
   - Patch branch: [`patch/model-thinking-sort`](https://github.com/xz-dev/pi/tree/patch/model-thinking-sort)
