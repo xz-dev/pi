@@ -1,20 +1,7 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream } from "@earendil-works/pi-ai/compat";
+import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { expect, it } from "vitest";
 import { Agent, type AgentEvent, type AgentTool, type StreamFn } from "../src/index.ts";
-
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
 
 function createDeferred<T>() {
 	let resolve!: (value: T | PromiseLike<T>) => void;
@@ -38,7 +25,7 @@ function createUsage() {
 function streamIgnoringToolCall(): StreamFn {
 	let turn = 0;
 	return () => {
-		const stream = new MockAssistantStream();
+		const stream = createAssistantMessageEventStream();
 		const currentTurn = turn++;
 		queueMicrotask(() => {
 			const reason = currentTurn === 0 ? "toolUse" : "stop";
