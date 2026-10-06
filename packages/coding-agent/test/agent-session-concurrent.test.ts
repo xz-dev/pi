@@ -178,7 +178,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 			streamFn: () => {
 				providerCalled = true;
-				const stream = new MockAssistantStream();
+				const stream = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
 				});
@@ -236,7 +236,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },
 			streamFn: () => {
-				const stream = new MockAssistantStream();
+				const stream = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("private") });
 				});
@@ -326,7 +326,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					tools: [],
 				},
 				streamFn: () => {
-					const stream = new MockAssistantStream();
+					const stream = createAssistantMessageEventStream();
 					queueMicrotask(() => {
 						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
 					});
@@ -402,7 +402,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },
 			streamFn: () => {
-				const stream = new MockAssistantStream();
+				const stream = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
 				});
