@@ -22,6 +22,7 @@ import type {
 	SessionShareDestination,
 	Settings,
 	ThinkingBudgetsSettings,
+	ThinkingDisplayMode,
 	TransportSetting,
 	TuiMode,
 	WarningSettings,
@@ -48,6 +49,7 @@ export type {
 	Settings,
 	TerminalSettings,
 	ThinkingBudgetsSettings,
+	ThinkingDisplayMode,
 	TransportSetting,
 	TuiMode,
 	WarningSettings,
@@ -422,6 +424,14 @@ export class SettingsManager {
 			};
 		}
 		delete settings.showCacheMissNotices;
+
+		// Migrate hideThinkingBlock boolean -> thinkingDisplay enum
+		if ("hideThinkingBlock" in settings && !("thinkingDisplay" in settings)) {
+			if (typeof settings.hideThinkingBlock === "boolean") {
+				settings.thinkingDisplay = settings.hideThinkingBlock ? "collapsed" : "expanded";
+			}
+			delete settings.hideThinkingBlock;
+		}
 
 		// Migrate old skills object format to new array format
 		if (
@@ -979,8 +989,15 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
-	getHideThinkingBlock(): boolean {
-		return this.settings.hideThinkingBlock ?? SETTINGS_DEFAULTS.hideThinkingBlock;
+	getThinkingDisplayMode(): ThinkingDisplayMode {
+		const mode = this.settings.thinkingDisplay;
+		return mode === "preview" || mode === "expanded" || mode === "collapsed" ? mode : "preview";
+	}
+
+	setThinkingDisplayMode(mode: ThinkingDisplayMode): void {
+		this.globalSettings.thinkingDisplay = mode;
+		this.markModified("thinkingDisplay");
+		this.save();
 	}
 
 	getExternalEditorCommand(): string {
@@ -993,12 +1010,6 @@ export class SettingsManager {
 			return environmentEditor;
 		}
 		return process.platform === "win32" ? "notepad" : "nano";
-	}
-
-	setHideThinkingBlock(hide: boolean): void {
-		this.globalSettings.hideThinkingBlock = hide;
-		this.markModified("hideThinkingBlock");
-		this.save();
 	}
 
 	getShellPath(): string | undefined {
