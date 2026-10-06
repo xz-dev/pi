@@ -126,6 +126,7 @@ PATCH_ORDER=(
 	freebsd-support
 	defer-threshold-compaction
 	compact-input-dock
+	thinking-preview
 	model-thinking-sort
 )
 

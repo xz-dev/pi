@@ -57,6 +57,7 @@ jobs:
             +refs/heads/patch/env-overrides:refs/remotes/origin/patch/env-overrides \
             +refs/heads/patch/defer-threshold-compaction:refs/remotes/origin/patch/defer-threshold-compaction \
             +refs/heads/patch/compact-input-dock:refs/remotes/origin/patch/compact-input-dock \
+            +refs/heads/patch/thinking-preview:refs/remotes/origin/patch/thinking-preview \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort
 
           # Driver source: the replay script and its small union helper come
@@ -95,6 +96,7 @@ jobs:
             env-overrides \
             defer-threshold-compaction \
             compact-input-dock \
+            thinking-preview \
             model-thinking-sort \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
