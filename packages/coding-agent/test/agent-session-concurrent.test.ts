@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
+import { getCurrentTools, toToolDeclaration } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
@@ -782,6 +783,8 @@ describe("AgentSession concurrent prompt guard", () => {
 	});
 
 	it("should persist message_end events in order with slow extension handlers", async () => {
+		const requestLoadouts: ReturnType<typeof getCurrentTools>[] = [];
+		const executableLoadouts: ReturnType<typeof getCurrentTools>[] = [];
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const tool = {
 			name: "dummy",
@@ -810,6 +813,8 @@ describe("AgentSession concurrent prompt guard", () => {
 			streamFn: async (_model, context) => {
 				const stream = createAssistantMessageEventStream();
 				queueMicrotask(() => {
+					requestLoadouts.push(getCurrentTools(context.messages));
+					executableLoadouts.push(agent.state.tools.map(toToolDeclaration));
 					const hasToolResult = context.messages.some((message) => message.role === "toolResult");
 
 					if (hasToolResult) {
@@ -922,13 +927,20 @@ describe("AgentSession concurrent prompt guard", () => {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 
 		const messageEntries = sessionManager.getEntries().filter((entry) => entry.type === "message");
-		expect(messageEntries.map((entry) => entry.message.role)).toEqual([
-			"system",
-			"user",
-			"assistant",
-			"toolResult",
-			"system",
-			"assistant",
-		]);
+		// This standalone Agent starts with an unpersisted tool declaration. The canonical
+		// session must declare dummy before its first request, not one request late.
+		expect(requestLoadouts).toEqual(executableLoadouts);
+		expect(requestLoadouts).toEqual([[toToolDeclaration(tool)], [toToolDeclaration(tool)]]);
+		expect(
+			messageEntries.filter((entry) => entry.message.role !== "system").map((entry) => entry.message.role),
+		).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		const dummyDeclarations = messageEntries.filter(
+			(entry) =>
+				entry.message.role === "system" && entry.message.toolsAdded?.some((declared) => declared.name === "dummy"),
+		);
+		expect(dummyDeclarations).toHaveLength(1);
+		expect(messageEntries.indexOf(dummyDeclarations[0])).toBeLessThan(
+			messageEntries.findIndex((entry) => entry.message.role === "assistant"),
+		);
 	});
 });
