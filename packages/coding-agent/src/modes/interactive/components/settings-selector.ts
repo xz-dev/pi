@@ -21,6 +21,7 @@ import {
 	type FullscreenExitOutput,
 	type MermaidRenderingMode,
 	type QuietStartup,
+	type ThinkingDisplayMode,
 	type TuiMode,
 	type WarningSettings,
 } from "../../../core/settings-manager.ts";
@@ -78,7 +79,7 @@ export interface SettingsConfig {
 	currentTheme: string;
 	terminalTheme: TerminalTheme;
 	availableThemes: string[];
-	hideThinkingBlock: boolean;
+	thinkingDisplayMode: ThinkingDisplayMode;
 	mermaidRenderingMode: MermaidRenderingMode;
 	showCacheMissNotices: boolean;
 	collapseChangelog: boolean;
@@ -117,7 +118,7 @@ export interface SettingsCallbacks {
 	onModelThinkingLevelRemove: (provider: string, modelId: string) => void;
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
-	onHideThinkingBlockChange: (hidden: boolean) => void;
+	onThinkingDisplayModeChange: (mode: ThinkingDisplayMode) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onShowCacheMissNoticesChange: (shown: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
@@ -471,6 +472,7 @@ export class SettingsSelectorComponent extends Container {
 		const supportsImages = getCapabilities().images;
 		const followUpKey = keyDisplayText("app.message.followUp");
 		const cycleThinkingKey = keyDisplayText("app.thinking.cycle");
+		const toggleThinkingKey = keyDisplayText("app.thinking.toggle");
 		let currentWarnings = { ...config.warnings };
 		const currentModelThinkingLevels = { ...config.modelThinkingLevels };
 		const defaultModelByValue = new Map(
@@ -526,11 +528,11 @@ export class SettingsSelectorComponent extends Container {
 				values: [...CACHE_WARMING_MODES],
 			},
 			{
-				id: "hide-thinking",
-				label: "Hide thinking",
-				description: "Hide thinking blocks in assistant responses",
-				currentValue: config.hideThinkingBlock ? "true" : "false",
-				values: ["true", "false"],
+				id: "thinking-display",
+				label: "Thinking display",
+				description: `preview: last reasoning line while streaming · expanded: full text · collapsed: label. ${toggleThinkingKey} cycles.`,
+				currentValue: config.thinkingDisplayMode,
+				values: ["preview", "expanded", "collapsed"],
 			},
 			{
 				id: "mermaid-rendering",
@@ -910,8 +912,8 @@ export class SettingsSelectorComponent extends Container {
 					case "cache-warming-mode":
 						callbacks.onCacheWarmingModeChange(newValue as CacheWarmingMode);
 						break;
-					case "hide-thinking":
-						callbacks.onHideThinkingBlockChange(newValue === "true");
+					case "thinking-display":
+						callbacks.onThinkingDisplayModeChange(newValue as ThinkingDisplayMode);
 						break;
 					case "mermaid-rendering":
 						callbacks.onMermaidRenderingModeChange(newValue as MermaidRenderingMode);
