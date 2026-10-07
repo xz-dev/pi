@@ -1,5 +1,6 @@
 import { compare, valid } from "semver";
-import { DISTRIBUTION, detectInstallMethod, PACKAGE_NAME } from "../config.ts";
+import { DISTRIBUTION, detectInstallMethod, getAgentDir, PACKAGE_NAME } from "../config.ts";
+import { SettingsManager } from "../core/settings-manager.ts";
 import { fetchWithRetry } from "./management-http.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 import { getLatestXzRelease } from "./xz-release-update.ts";
@@ -59,7 +60,10 @@ export async function getLatestPiRelease(
 		if (detectInstallMethod() !== "bun-binary") {
 			return undefined;
 		}
-		const release = await getLatestXzRelease(currentVersion, options);
+		const mirrors = SettingsManager.create(process.cwd(), getAgentDir(), {
+			projectTrusted: false,
+		}).getUpdateMirrors();
+		const release = await getLatestXzRelease(currentVersion, { ...options, mirrors });
 		return release ? { version: release.version } : undefined;
 	}
 
