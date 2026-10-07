@@ -566,6 +566,11 @@ async function promptForMissingSessionCwd(
 	]);
 }
 
+function modelRefreshTimeoutSignal(settingsManager: SettingsManager): AbortSignal | undefined {
+	const timeoutMs = settingsManager.getModelRefreshTimeoutMs();
+	return timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
+}
+
 export interface MainOptions {
 	extensionFactories?: InlineExtension[];
 }
@@ -626,6 +631,10 @@ export async function main(args: string[], options?: MainOptions) {
 		if (parsed.diagnostics.some((d) => d.type === "error")) {
 			process.exit(1);
 		}
+	}
+	if (parsed.refreshModels && offlineMode) {
+		console.error(chalk.red("Error: --refresh cannot be used with --offline or PI_OFFLINE."));
+		process.exit(1);
 	}
 	time("parseArgs");
 
@@ -750,7 +759,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
-			modelRuntimeSignal: AbortSignal.timeout(15_000),
+			modelRuntimeTimeoutMs: runtimeSettingsManager.getModelRefreshTimeoutMs(),
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
 				? {
@@ -810,7 +819,9 @@ export async function main(args: string[], options?: MainOptions) {
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0
-				? await resolveModelScope(modelPatterns, modelRuntime, { signal: AbortSignal.timeout(15_000) })
+				? await resolveModelScope(modelPatterns, modelRuntime, {
+						signal: modelRefreshTimeoutSignal(settingsManager),
+					})
 				: [];
 		const {
 			options: sessionOptions,
@@ -883,9 +894,38 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (parsed.listModels !== undefined) {
 		reportDiagnostics(startupSettingsDiagnostics);
+		let refreshFailed = false;
+		if (parsed.refreshModels) {
+			reportDiagnostics(runtime.diagnostics);
+			if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+				if (runtime.diagnostics.some((diagnostic) => diagnostic.message.includes("Failed to load extension"))) {
+					console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
+				}
+				refreshFailed = true;
+			}
+			try {
+				const result = await modelRuntime.refresh({
+					allowNetwork: true,
+					force: true,
+					signal: modelRefreshTimeoutSignal(settingsManager),
+				});
+				if (result.aborted) {
+					console.error(chalk.red("Error: Model catalog refresh timed out; showing cached models."));
+					refreshFailed = true;
+				}
+				for (const [provider, error] of result.errors) {
+					console.error(chalk.red(`Error: ${provider}: ${error.message}; showing cached models.`));
+					refreshFailed = true;
+				}
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : "Unknown model catalog refresh error";
+				console.error(chalk.red(`Error: ${message}; showing cached models.`));
+				refreshFailed = true;
+			}
+		}
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
-		await listModels(modelRuntime, searchPattern, AbortSignal.timeout(15_000));
-		process.exit(0);
+		await listModels(modelRuntime, searchPattern, modelRefreshTimeoutSignal(settingsManager));
+		process.exit(refreshFailed ? 1 : 0);
 	}
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
@@ -938,7 +978,8 @@ export async function main(args: string[], options?: MainOptions) {
 	// RPC refreshes catalogs here in the background; interactive mode starts its refresh after TUI initialization.
 	if (!offlineMode && appMode === "rpc") {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 15_000);
+		const timeoutMs = settingsManager.getModelRefreshTimeoutMs();
+		const timeout = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
 		void modelRuntime
 			.refresh({ signal: controller.signal })
 			.catch(() => {})
