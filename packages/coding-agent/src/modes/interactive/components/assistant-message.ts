@@ -6,7 +6,7 @@ import {
 	type MarkdownTheme,
 	MouseRegion,
 	Spacer,
-	sliceByColumn,
+	stripTerminalSequences,
 	Text,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -22,23 +22,30 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 export type { ThinkingDisplayMode };
 
 /**
- * Single-row thinking preview used while a reasoning run is still streaming.
- * Applies the thinking markdown transform at render time (with the real
- * available width, so width-sensitive transformers behave like full Markdown),
- * then shows the tail of the last non-empty transformed line, clipped to the
- * available width using terminal-column accounting (ANSI, wide chars).
+ * One styled reasoning row: the live logical line's tail or the completed run's
+ * first-line summary. Markdown owns parsing, styles, and column-safe clipping.
  */
 class ThinkingPreviewText implements Component {
 	private readonly text: string;
 	private readonly paddingX: number;
+	private readonly markdownTheme: MarkdownTheme;
 	private readonly transform: (markdown: string, availableWidth: number) => string;
+	private readonly anchor: "first" | "last";
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
-	constructor(text: string, paddingX = 1, transform: (markdown: string, availableWidth: number) => string) {
+	constructor(
+		text: string,
+		paddingX: number,
+		markdownTheme: MarkdownTheme,
+		transform: (markdown: string, availableWidth: number) => string,
+		anchor: "first" | "last",
+	) {
 		this.text = text;
 		this.paddingX = paddingX;
+		this.markdownTheme = markdownTheme;
 		this.transform = transform;
+		this.anchor = anchor;
 	}
 
 	invalidate(): void {
@@ -58,15 +65,20 @@ class ThinkingPreviewText implements Component {
 		}
 		const paddingX = Math.min(this.paddingX, Math.max(0, Math.floor((width - 1) / 2)));
 		const availableWidth = Math.max(1, width - paddingX * 2);
-		const transformed = this.transform(this.text, availableWidth);
-		const transformedLines = transformed.split("\n").filter((line) => line.trim().length > 0);
-		const lastLine = (transformedLines.at(-1) ?? "").trim();
-		const styled = theme.italic(theme.fg("thinkingText", lastLine));
-		const clipped =
-			visibleWidth(styled) > availableWidth
-				? sliceByColumn(styled, visibleWidth(styled) - availableWidth, availableWidth, true)
-				: styled;
-		const line = `${" ".repeat(paddingX)}${clipped}\x1b[0m${" ".repeat(paddingX)}`;
+		const rendered = new Markdown(
+			this.text,
+			0,
+			0,
+			{ ...this.markdownTheme, codeBlockBorder: () => "" },
+			{ color: (text) => theme.fg("thinkingText", text), italic: true },
+			{ transform: this.transform, overflow: this.anchor === "last" ? "clip-start" : "clip-end" },
+		).render(availableWidth);
+		// A single-row preview cannot display terminal image rows.
+		const textLines = rendered.filter(
+			(line) => stripTerminalSequences(line).trim() && !line.includes("\x1b_G") && !line.includes("\x1b]1337;"),
+		);
+		const content = textLines.at(this.anchor === "last" ? -1 : 0)?.trimEnd() ?? "";
+		const line = `${" ".repeat(paddingX)}${content}\x1b[0m${" ".repeat(paddingX)}`;
 		const paddingNeeded = Math.max(0, width - visibleWidth(line));
 		const result = [line + " ".repeat(paddingNeeded)];
 		this.cachedWidth = width;
@@ -238,8 +250,8 @@ export class AssistantMessageComponent extends Container {
 					this.activeThinkingContentIndex !== null &&
 					this.activeThinkingContentIndex >= runStartIndex &&
 					this.activeThinkingContentIndex <= runEndIndex;
-				// Any folded live run shows the preview row; explicit expansion wins.
-				const showPreview = this.thinkingDisplayMode === "preview" && runIsLive && !expanded;
+				// Folded preview-mode runs show the live tail or their completed first-line summary.
+				const showPreview = this.thinkingDisplayMode === "preview" && !expanded;
 
 				let thinkingComponent: Component;
 				if (showPreview) {
@@ -248,7 +260,13 @@ export class AssistantMessageComponent extends Container {
 						this.isStreaming,
 						this.markdownTransformers,
 					);
-					thinkingComponent = new ThinkingPreviewText(thinkingBlocks.join("\n\n"), this.outputPad, transform);
+					thinkingComponent = new ThinkingPreviewText(
+						thinkingBlocks.join("\n\n"),
+						this.outputPad,
+						this.markdownTheme,
+						transform,
+						runIsLive ? "last" : "first",
+					);
 				} else if (expanded) {
 					thinkingComponent = new Markdown(
 						thinkingBlocks.join("\n\n"),
