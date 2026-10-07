@@ -156,6 +156,7 @@ export interface Settings {
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
+	updateMirrors?: string[]; // Global only: ordered replacements for https://github.com during Release downloads
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
 	enableAnalytics?: boolean; // default: false - opt-in analytics data sharing
@@ -1154,6 +1155,16 @@ export class SettingsManager {
 	setNpmCommand(command: string[] | undefined): void {
 		this.globalSettings.npmCommand = command ? [...command] : undefined;
 		this.markModified("npmCommand");
+		this.save();
+	}
+
+	getUpdateMirrors(): string[] | undefined {
+		return this.globalSettings.updateMirrors?.slice();
+	}
+
+	setUpdateMirrors(mirrors: string[] | undefined): void {
+		this.globalSettings.updateMirrors = mirrors?.slice();
+		this.markModified("updateMirrors");
 		this.save();
 	}
 
