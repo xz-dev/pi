@@ -39,5 +39,5 @@ test -S /tmp/.X11-unix/X99
 export DISPLAY=:99
 mkdir -p .artifacts/freebsd-release
 node scripts/smoke-binary-release.mjs "$work/candidate/pi-$target" "$target" "$version" ".artifacts/freebsd-release/$target.json"
-PI_XZ_E2E_ALLOW_NO_OLD=1 node scripts/e2e-binary-self-update.mjs "$work/candidate" "$target" "$version"
+# Signed self-update E2E runs in update-freebsd-release-candidate after attestation.
 cp "$work/candidate/pi-$target" .artifacts/freebsd-release/

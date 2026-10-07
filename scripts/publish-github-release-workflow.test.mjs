@@ -341,8 +341,9 @@ test("Release publication workflow has trusted triggers, exact checkout, and lea
   assert.deepEqual(workflow.jobs["update-release-candidate"].permissions, {
     contents: "read",
   });
-  assert.deepEqual(workflow.jobs["publish-release"].permissions, {
-    contents: "write",
+  assert.deepEqual(workflow.jobs["publish-release"].permissions, { contents: "write" });
+  assert.deepEqual(workflow.jobs["attest-release-candidate"].permissions, {
+    contents: "read",
     "id-token": "write",
     attestations: "write",
   });
@@ -445,7 +446,28 @@ test("acceptance matrix is generated from explicit per-target smoke descriptors"
   assert.match(updateHarness, /update --clean did not remove the strict-version backup/);
   assert.match(updateHarness, /update --clean removed the running executable/);
   assert.match(updateHarness, /rmSync\(work, \{ recursive: true, force: true, maxRetries: 60, retryDelay: 500 \}\)/);
-  assert.deepEqual(workflow.jobs["publish-release"].needs, "update-release-candidate");
+  assert.deepEqual(workflow.jobs["publish-release"].needs, ["update-release-candidate", "update-freebsd-release-candidate"]);
+  assert.deepEqual(workflow.jobs["update-release-candidate"].needs, ["release-matrix", "attest-release-candidate"]);
+  assert.equal(workflow.jobs["update-freebsd-release-candidate"].needs, "attest-release-candidate");
+  assert.equal(workflow.jobs["attest-release-candidate"].needs, "acceptance-record");
+  const publicationVerification = workflow.jobs["publish-release"].steps.find((step) => step.name === "Reverify signed Release subjects before publication");
+  assert.match(publicationVerification.run, /gh attestation verify/);
+  assert.match(publicationVerification.run, /--bundle "\$candidate\/attestation-subjects\.jsonl"/);
+  assert.match(publicationVerification.run, /test "\$subject_count" -eq 18/);
+  // The packaging verifier consumes a filename list, not the staged signed JSONL bundle.
+  assert.ok(!workflow.jobs["publish-release"].steps.some((step) => step.run?.includes("verify-github-release.mjs all")));
+  assert.equal(workflow.jobs["attest-release-candidate"].if, "github.ref == 'refs/heads/main'");
+  for (const name of ["update-release-candidate", "update-freebsd-release-candidate", "publish-release"]) {
+    const download = workflow.jobs[name].steps.find((step) => step.uses?.startsWith("actions/download-artifact@"));
+    assert.equal(download.with.name, "github-release-attested-${{ github.sha }}");
+  }
+  assert.match(updateHarness, /manifest: manifestBytes/);
+  assert.match(updateHarness, /attestation-subjects\.jsonl/);
+  assert.match(updateHarness, /missing proof/);
+  assert.match(updateHarness, /forged proof/);
+  assert.match(updateHarness, /rewritten manifest and checksums/);
+  assert.match(updateHarness, /"--force", "--mirror-url"/);
+  assert.match(workflow.jobs["update-freebsd-release-candidate"].steps.at(-1).with.run, /e2e-binary-self-update\.mjs/);
 });
 
 test("Linux archive smoke provisions a headless display without bypassing clipboard", () => {
