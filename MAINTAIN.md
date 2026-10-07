@@ -29,6 +29,8 @@ Scheduled runs and ordinary `workflow_dispatch` runs always select the current u
 
 ## Local commits on `ci`
 
+Commit signing is off for this project: `commit.gpgsign=false` is set repository-locally (including each isolated clone/worktree of this repository); do not change global Git signing config. This is unrelated to release Sigstore/OIDC attestation and publication verification, which remain mandatory. Keep the no-auth-bypass rule for actual credentials: never alter Git identity to evade checks.
+
 The pre-commit hook runs repo-wide `npm run check`, including `tsgo`. Provider model data is gitignored and hydrated from a changing catalog, so fixture model IDs can differ from the IDs represented by that data. Generated `main` uses a different upstream baseline; its check result must be measured separately, not inferred from a check in the `ci` checkout.
 
 When an explicitly authorized commit touches `ci`-owned files:
