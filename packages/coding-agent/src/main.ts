@@ -50,6 +50,7 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
+import { applyEnvOverrides } from "./core/env-overrides.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
@@ -611,6 +612,10 @@ export async function main(args: string[], options?: MainOptions) {
 	const agentDir = getAgentDir();
 	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
+	// Child processes (tools, MCP servers, extension spawns) inherit these; pi's own Intl locale is fixed at startup.
+	for (const entry of applyEnvOverrides(bootstrapSettingsManager.getGlobalSettings().envOverrides)) {
+		console.error(chalk.yellow(`Warning: ignoring invalid envOverrides entry (expected KEY=VALUE): ${entry}`));
+	}
 	configureHttpDispatcher();
 
 	if (await handlePackageCommand(args, { extensionFactories })) {
