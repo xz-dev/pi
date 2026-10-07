@@ -3,7 +3,14 @@ import markedCjkFriendly from "marked-cjk-friendly";
 import { renderLatex } from "../latex.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, cjkPunctuationRegex, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import {
+	applyBackgroundToLine,
+	cjkPunctuationRegex,
+	flattenLines,
+	sliceByColumn,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -281,6 +288,8 @@ export interface MarkdownTheme {
 }
 
 export interface MarkdownOptions {
+	/** Wrap logical lines (default), or clip their start/end to keep content within the available width. */
+	overflow?: "wrap" | "clip-start" | "clip-end";
 	/** Preserve source list markers instead of normalizing them. */
 	preserveOrderedListMarkers?: boolean;
 	/** Preserve source backslash escapes instead of normalizing escaped punctuation. */
@@ -459,7 +468,7 @@ export class Markdown implements Component {
 				lines.push(line);
 				continue;
 			}
-			for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
+			for (const wrappedLine of this.layoutLine(line, contentWidth)) {
 				const lineWithMargins = leftMargin + wrappedLine + rightMargin;
 				if (bgFn) {
 					lines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
@@ -475,6 +484,17 @@ export class Markdown implements Component {
 		block.lines = lines;
 		block.width = width;
 		block.nextTokenType = nextTokenType;
+	}
+
+	private layoutLine(text: string, width: number): string[] {
+		if (!this.options.overflow || this.options.overflow === "wrap") {
+			return wrapTextWithAnsi(text, width);
+		}
+		// Preserve hard line breaks and their ANSI state without soft wrapping before clipping.
+		return wrapTextWithAnsi(text, Infinity).map((line) => {
+			const start = this.options.overflow === "clip-start" ? Math.max(0, visibleWidth(line) - width) : 0;
+			return sliceByColumn(line, start, width, true);
+		});
 	}
 
 	/**
@@ -632,7 +652,8 @@ export class Markdown implements Component {
 
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
-				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
+				const openingBorder = this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`);
+				if (openingBorder) lines.push(openingBorder);
 				if (this.theme.highlightCode) {
 					const key = `${token.lang ?? ""}\0${token.text}`;
 					let highlighted = this.blockHighlightedCode?.get(key);
@@ -650,7 +671,8 @@ export class Markdown implements Component {
 						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
 					}
 				}
-				lines.push(this.theme.codeBlockBorder("```"));
+				const closingBorder = this.theme.codeBlockBorder("```");
+				if (closingBorder) lines.push(closingBorder);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}
@@ -727,7 +749,7 @@ export class Markdown implements Component {
 
 				for (const quoteLine of renderedQuoteLines) {
 					const styledLine = applyQuoteStyle(quoteLine);
-					const wrappedLines = wrapTextWithAnsi(styledLine, quoteContentWidth);
+					const wrappedLines = this.layoutLine(styledLine, quoteContentWidth);
 					for (const wrappedLine of wrappedLines) {
 						lines.push(this.theme.quoteBorder("│ ") + wrappedLine);
 					}
@@ -931,7 +953,7 @@ export class Markdown implements Component {
 
 				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext);
 				for (const line of itemLines) {
-					for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
+					for (const wrappedLine of this.layoutLine(line, itemWidth)) {
 						const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;
 						lines.push(linePrefix + wrappedLine);
 						renderedAnyLine = true;
@@ -973,7 +995,7 @@ export class Markdown implements Component {
 	 * consistently with the rest of the renderer.
 	 */
 	private wrapCellText(text: string, maxWidth: number, stylePrefix = ""): string[] {
-		const lines = wrapTextWithAnsi(text, Math.max(1, maxWidth));
+		const lines = this.layoutLine(text, Math.max(1, maxWidth));
 		return lines.map((line, index) => {
 			// Reset text styles after each non-final fragment, then restore the surrounding style before padding and borders.
 			const styleReset = index < lines.length - 1 ? "\x1b[22;23;24;25;27;28;29;39m" : "";
@@ -1004,7 +1026,7 @@ export class Markdown implements Component {
 		const availableForCells = availableWidth - borderOverhead;
 		if (availableForCells < numCols) {
 			// Too narrow to render a stable table. Fall back to raw markdown.
-			const fallbackLines = token.raw ? wrapTextWithAnsi(token.raw, availableWidth) : [];
+			const fallbackLines = token.raw ? this.layoutLine(token.raw, availableWidth) : [];
 			if (nextTokenType && nextTokenType !== "space") {
 				fallbackLines.push("");
 			}
