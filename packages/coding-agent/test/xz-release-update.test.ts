@@ -14,9 +14,11 @@ import {
 } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { crc32, deflateRawSync } from "node:zlib";
+import chalk from "chalk";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import fixture from "./fixtures/xz-release-attestation.json" with { type: "json" };
 import { allowNetwork } from "./test-network-env.ts";
 
 const CURRENT_VERSION = "0.84.1-xz.68.1.g11111111";
@@ -66,10 +68,12 @@ const ASSET_BYTES = releaseZip("pi", EXECUTABLE_BYTES);
 const ASSET_SHA256 = createHash("sha256").update(ASSET_BYTES).digest("hex");
 const DIGEST = `sha256:${ASSET_SHA256}`;
 const RELEASE_ORIGIN = "https://github.com";
+const MIRRORS = ["https://gh-proxy.com/https://github.com", "https://ghfast.top/https://github.com", RELEASE_ORIGIN];
 const LATEST_BASE = `${RELEASE_ORIGIN}/xz-dev/pi/releases/latest/download/`;
 const EXACT_BASE = `https://github.com/xz-dev/pi/releases/download/${TAG}/`;
 const SUMS_URL = `${LATEST_BASE}SHA256SUMS`;
 const MANIFEST_URL = `${LATEST_BASE}release-manifest.json`;
+const ATTESTATION_URL = `${EXACT_BASE}attestation-subjects.jsonl`;
 
 function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -108,9 +112,10 @@ function discoveryFiles(value: Record<string, unknown> = manifest()): { manifest
 	};
 }
 
-function discoveryFetch(value: Record<string, unknown> = manifest()) {
+function discoveryFetch(value: Record<string, unknown> = manifest(), proof: string | null = "{}") {
 	const { manifestBytes, sums } = discoveryFiles(value);
 	return vi.fn(async (input: string | URL, _init?: RequestInit) => {
+		if (String(input) === ATTESTATION_URL && proof !== null) return new Response(proof);
 		if (String(input) === SUMS_URL) return new Response(sums);
 		if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
 		return new Response("not found", { status: 404 });
@@ -122,11 +127,21 @@ function initSignal(fetchMock: ReturnType<typeof vi.fn>, url: string): AbortSign
 	return call?.[1]?.signal ?? undefined;
 }
 
-async function loadUpdater(executablePath = process.execPath) {
+async function loadUpdater(executablePath = process.execPath, realAttestations = false) {
 	vi.resetModules();
+	// Filesystem/transport tests use synthetic ZIPs; authenticity tests below use real signed bytes.
+	if (realAttestations) vi.doUnmock("../src/utils/release-attestation.ts");
+	else vi.doMock("../src/utils/release-attestation.ts", () => ({ verifyReleaseAttestation: vi.fn() }));
 	vi.doMock("../src/config.ts", async () => {
 		const actual = await vi.importActual<typeof import("../src/config.ts")>("../src/config.ts");
-		return { ...actual, RELEASE_TARGET: TARGET };
+		return {
+			...actual,
+			RELEASE_TARGET: TARGET,
+			DISTRIBUTION: "xz-dev",
+			VERSION: CURRENT_VERSION,
+			detectInstallMethod: () => "bun-binary",
+			getInstallDir: () => dirname(executablePath),
+		};
 	});
 	vi.doMock("node:process", async () => {
 		const actual = await vi.importActual<typeof import("node:process")>("node:process");
@@ -148,12 +163,14 @@ function fullFetch(assetBody: Uint8Array | string = ASSET_BYTES) {
 		const url = String(input);
 		if (url === SUMS_URL) return new Response(sums);
 		if (url === MANIFEST_URL) return new Response(manifestBytes);
+		if (url === ATTESTATION_URL) return new Response("{}");
 		if (url === `${EXACT_BASE}${ASSET}`) return new Response(assetBody);
 		return new Response("not found", { status: 404 });
 	});
 }
 
 afterEach(() => {
+	vi.doUnmock("../src/utils/release-attestation.ts");
 	vi.doUnmock("../src/config.ts");
 	vi.doUnmock("node:process");
 	vi.resetModules();
@@ -181,10 +198,17 @@ describe("xz-dev Release discovery", () => {
 				executable: { size: EXECUTABLE_BYTES.byteLength, digest: `sha256:${EXECUTABLE_SHA256}` },
 			},
 		});
-		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([SUMS_URL, MANIFEST_URL]);
+		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([SUMS_URL, MANIFEST_URL, ATTESTATION_URL]);
 		for (const [, init] of fetchMock.mock.calls) {
 			expect(new Headers(init?.headers).has("authorization")).toBe(false);
 		}
+	});
+
+	it("rejects an otherwise checksum-valid release when its signature proof is missing", async () => {
+		allowNetwork();
+		vi.stubGlobal("fetch", discoveryFetch(manifest(), null));
+		const { getLatestXzRelease } = await loadUpdater(process.execPath, true);
+		await expect(getLatestXzRelease(CURRENT_VERSION)).rejects.toThrow("HTTP 404");
 	});
 
 	it("restarts discovery from SHA256SUMS after a manifest body transport failure", async () => {
@@ -216,6 +240,7 @@ describe("xz-dev Release discovery", () => {
 			MANIFEST_URL,
 			SUMS_URL,
 			MANIFEST_URL,
+			ATTESTATION_URL,
 		]);
 	});
 
@@ -377,6 +402,51 @@ describe("xz-dev single-file self-update", () => {
 		}
 	});
 
+	it("force-reinstalls the same version with different verified bytes and retains the installed bytes as backup", async () => {
+		allowNetwork();
+		const oldBytes = "damaged installed bytes\n";
+		const root = writeSingleInstall(oldBytes);
+		const executablePath = join(root, "pi");
+		try {
+			vi.stubGlobal("fetch", fullFetch());
+			const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(executablePath);
+			const latest = await getLatestXzRelease(NEXT_VERSION);
+			await runXzSelfUpdate(latest!, NEXT_VERSION, true, { executablePath, writeProgress: () => {} });
+			expect(readFileSync(executablePath, "utf8")).toBe(EXECUTABLE_TEXT);
+			expect(readFileSync(join(root, `pi-${NEXT_VERSION}`), "utf8")).toBe(oldBytes);
+			expect(readdirSync(root).sort()).toEqual(["pi", `pi-${NEXT_VERSION}`].sort());
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rolls back a failed same-version force activation without leaving temporary candidates", async () => {
+		allowNetwork();
+		const oldBytes = "old same-version bytes\n";
+		const root = writeSingleInstall(oldBytes);
+		const executablePath = join(root, "pi");
+		try {
+			vi.stubGlobal("fetch", fullFetch());
+			const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(executablePath);
+			const latest = await getLatestXzRelease(NEXT_VERSION);
+			await expect(
+				runXzSelfUpdate(latest!, NEXT_VERSION, true, {
+					executablePath,
+					writeProgress: () => {},
+					renameSync: (source, destination) => {
+						if (destination === executablePath)
+							throw Object.assign(new Error("activation failed"), { code: "EXDEV" });
+						renameSync(source, destination);
+					},
+				}),
+			).rejects.toThrow("activation failed");
+			expect(readFileSync(executablePath, "utf8")).toBe(oldBytes);
+			expect(readdirSync(root)).toEqual(["pi"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("leaves the executable byte-identical and no staging file when sha256 mismatches", async () => {
 		allowNetwork();
 		const root = writeSingleInstall();
@@ -425,6 +495,7 @@ describe("xz-dev single-file self-update", () => {
 						const url = String(input);
 						if (url === SUMS_URL) return new Response(sums);
 						if (url === MANIFEST_URL) return new Response(manifestBytes);
+						if (url === ATTESTATION_URL) return new Response("{}");
 						if (url === `${EXACT_BASE}${ASSET}`) return new Response(zip);
 						return new Response("not found", { status: 404 });
 					}),
@@ -529,6 +600,7 @@ describe("xz-dev single-file self-update", () => {
 					const url = String(input);
 					if (url === SUMS_URL) return new Response(sums);
 					if (url === MANIFEST_URL) return new Response(manifestBytes);
+					if (url === ATTESTATION_URL) return new Response("{}");
 					if (url === `${EXACT_BASE}${ASSET}`) {
 						return new Response(
 							new ReadableStream({
@@ -583,6 +655,7 @@ describe("xz-dev single-file self-update", () => {
 		const fetchMock = vi.fn(async (input: string | URL) => {
 			if (String(input) === SUMS_URL) return new Response(sums);
 			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+			if (String(input) === ATTESTATION_URL) return new Response("{}");
 			return new Response("unavailable", { status: 503 });
 		});
 		vi.stubGlobal("fetch", fetchMock);
@@ -598,6 +671,7 @@ describe("xz-dev single-file self-update", () => {
 			expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
 				SUMS_URL,
 				MANIFEST_URL,
+				ATTESTATION_URL,
 				`${EXACT_BASE}${ASSET}`,
 			]);
 			expect(readFileSync(executablePath, "utf8")).toBe("old-pi-binary\n");
@@ -615,6 +689,7 @@ describe("xz-dev single-file self-update", () => {
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
 			if (String(input) === SUMS_URL) return new Response(sums);
 			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+			if (String(input) === ATTESTATION_URL) return new Response("{}");
 			if (String(input) === `${EXACT_BASE}${ASSET}`) {
 				const signal = init?.signal;
 				return new Response(
@@ -658,6 +733,7 @@ describe("xz-dev single-file self-update", () => {
 		const fetchMock = vi.fn(async (input: string | URL) => {
 			if (String(input) === SUMS_URL) return new Response(sums);
 			if (String(input) === MANIFEST_URL) return new Response(manifestBytes);
+			if (String(input) === ATTESTATION_URL) return new Response("{}");
 			if (String(input) === `${EXACT_BASE}${ASSET}`) {
 				return new Response(
 					new ReadableStream({
@@ -778,6 +854,8 @@ describe("xz-dev self-update over a local HTTP release server", () => {
 				response.end(sums);
 			} else if (url.endsWith("/release-manifest.json")) {
 				response.end(manifestBytes);
+			} else if (url.endsWith("/attestation-subjects.jsonl")) {
+				response.end("{}");
 			} else if (url.endsWith(`/${ASSET}`)) {
 				response.setHeader("content-length", ASSET_BYTES.byteLength);
 				response.end(ASSET_BYTES);
@@ -796,11 +874,377 @@ describe("xz-dev self-update over a local HTTP release server", () => {
 			await runXzSelfUpdate(latest!, CURRENT_VERSION, false, { executablePath, writeProgress: () => {} });
 			expect(readFileSync(executablePath, "utf8")).toBe(EXECUTABLE_TEXT);
 			expect(readFileSync(join(root, `pi-${CURRENT_VERSION}`), "utf8")).toBe("old-pi-binary\n");
-			expect(requests.map((u) => u.split("/").pop())).toEqual(["SHA256SUMS", "release-manifest.json", ASSET]);
+			expect(requests.map((u) => u.split("/").pop())).toEqual([
+				"SHA256SUMS",
+				"release-manifest.json",
+				"attestation-subjects.jsonl",
+				ASSET,
+			]);
 		} finally {
 			await new Promise<void>((resolve) => server.close(() => resolve()));
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("xz-dev Release mirrors", () => {
+	it.each([
+		[[], "http://saved.example"],
+		[["--mirror-url", "http://temporary.example"], "http://temporary.example"],
+		[["--no-mirror"], RELEASE_ORIGIN],
+		[["--mirror"], "https://gh-proxy.com/https://github.com"],
+	] as const)("applies CLI flags %j over saved global settings, ignoring project mirrors", async (flags, base) => {
+		allowNetwork();
+		const root = writeSingleInstall();
+		const executablePath = join(root, "pi");
+		const originalExecPath = process.execPath;
+		const agentDir = join(root, "agent");
+		mkdirSync(agentDir);
+		mkdirSync(join(root, ".pi"));
+		const saved = JSON.stringify({ updateMirrors: ["http://saved.example"], theme: "dark" });
+		writeFileSync(join(agentDir, "settings.json"), saved);
+		writeFileSync(join(root, ".pi", "settings.json"), JSON.stringify({ updateMirrors: ["http://project.example"] }));
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+		vi.spyOn(process, "cwd").mockReturnValue(root);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(process.stdout, "write").mockReturnValue(true);
+		const direct = fullFetch();
+		const fetchMock = vi.fn((input: string | URL) => direct(String(input).replace(base, RELEASE_ORIGIN)));
+		vi.stubGlobal("fetch", fetchMock);
+		const originalExitCode = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await loadUpdater(executablePath);
+			const { handlePackageCommand } = await import("../src/package-manager-cli.ts");
+			Object.defineProperty(process, "execPath", { value: executablePath, configurable: true });
+			await handlePackageCommand(["update", "--approve", ...flags]);
+			expect(process.exitCode).toBeUndefined();
+			expect(readFileSync(executablePath, "utf8")).toBe(EXECUTABLE_TEXT);
+			expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(
+				[SUMS_URL, MANIFEST_URL, ATTESTATION_URL, `${EXACT_BASE}${ASSET}`].map((url) =>
+					url.replace(RELEASE_ORIGIN, base),
+				),
+			);
+			expect(readFileSync(join(agentDir, "settings.json"), "utf8")).toBe(saved);
+		} finally {
+			Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
+			process.exitCode = originalExitCode;
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([false, true])("tries repeated custom mirrors with gray failures (all fail: %s)", async (allFail) => {
+		allowNetwork();
+		const root = writeSingleInstall();
+		const executablePath = join(root, "pi");
+		const originalExecPath = process.execPath;
+		const originalExitCode = process.exitCode;
+		const colorLevel = chalk.level;
+		chalk.level = 1;
+		process.exitCode = undefined;
+		vi.stubEnv("PI_CODING_AGENT_DIR", root);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(process.stdout, "write").mockReturnValue(true);
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		const first = "http://first.example";
+		const second = "http://second.example";
+		const direct = fullFetch();
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = String(input);
+			if (allFail || url.startsWith(first)) return new Response("unavailable", { status: 503 });
+			return direct(url.replace(second, RELEASE_ORIGIN));
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			await loadUpdater(executablePath);
+			const { handlePackageCommand } = await import("../src/package-manager-cli.ts");
+			Object.defineProperty(process, "execPath", { value: executablePath, configurable: true });
+			await handlePackageCommand(["update", "--mirror-url", first, "--mirror-url", second]);
+			expect(process.exitCode).toBe(allFail ? 1 : undefined);
+			expect(readFileSync(executablePath, "utf8")).toBe(allFail ? "old-pi-binary\n" : EXECUTABLE_TEXT);
+			const messages = errors.mock.calls.map(([message]) => String(message));
+			expect(messages.slice(0, 2).every((message) => message.startsWith("\u001b[90m"))).toBe(true);
+			expect(messages).toHaveLength(allFail ? 3 : 2);
+			if (allFail) {
+				expect(messages[2]).toContain("Error:");
+				expect(fetchMock).toHaveBeenCalledTimes(2);
+			} else {
+				expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+					SUMS_URL.replace(RELEASE_ORIGIN, first),
+					SUMS_URL.replace(RELEASE_ORIGIN, second),
+					MANIFEST_URL.replace(RELEASE_ORIGIN, second),
+					ATTESTATION_URL.replace(RELEASE_ORIGIN, second),
+					`${EXACT_BASE}${ASSET}`.replace(RELEASE_ORIGIN, first),
+					`${EXACT_BASE}${ASSET}`.replace(RELEASE_ORIGIN, second),
+				]);
+			}
+		} finally {
+			chalk.level = colorLevel;
+			process.exitCode = originalExitCode;
+			Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		["/loop", "Too many GitHub Release redirects", 21],
+		["file:///etc/passwd", "Unsupported GitHub Release redirect protocol", 1],
+	] as const)("rejects unsafe or looping redirects to %s", async (location, error, requests) => {
+		allowNetwork();
+		const fetchMock = vi.fn(async () => new Response(null, { status: 302, headers: { location } }));
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease } = await loadUpdater();
+		await expect(getLatestXzRelease(CURRENT_VERSION, { mirrors: ["http://mirror.example"] })).rejects.toThrow(error);
+		expect(fetchMock).toHaveBeenCalledTimes(requests);
+	});
+
+	it("uses the saved mirror for automatic version checks", async () => {
+		allowNetwork();
+		const root = writeSingleInstall();
+		const mirror = "http://saved.example";
+		writeFileSync(join(root, "settings.json"), JSON.stringify({ updateMirrors: [mirror] }));
+		vi.stubEnv("PI_CODING_AGENT_DIR", root);
+		vi.stubEnv("PI_SKIP_VERSION_CHECK", "");
+		const direct = discoveryFetch();
+		const fetchMock = vi.fn((input: string | URL) => direct(String(input).replace(mirror, RELEASE_ORIGIN)));
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			await loadUpdater();
+			const { checkForNewPiVersion } = await import("../src/utils/version-check.ts");
+			await expect(checkForNewPiVersion(CURRENT_VERSION)).resolves.toEqual({ version: NEXT_VERSION });
+			expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(
+				[SUMS_URL, MANIFEST_URL, ATTESTATION_URL].map((url) => url.replace(RELEASE_ORIGIN, mirror)),
+			);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the installed binary unchanged when every source returns corrupt ZIP bytes", async () => {
+		allowNetwork();
+		const root = writeSingleInstall();
+		try {
+			const fetchMock = fullFetch();
+			vi.stubGlobal("fetch", fetchMock);
+			const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater();
+			const release = await getLatestXzRelease(CURRENT_VERSION);
+			const corruptFetch = vi.fn(async () => new Response(new Uint8Array(ASSET_BYTES.length)));
+			vi.stubGlobal("fetch", corruptFetch);
+			await expect(
+				runXzSelfUpdate(release!, CURRENT_VERSION, false, {
+					mirrors: MIRRORS,
+					executablePath: join(root, "pi"),
+					writeProgress: () => {},
+				}),
+			).rejects.toThrow("sha256 mismatch");
+			expect(corruptFetch).toHaveBeenCalledTimes(3);
+			expect(readFileSync(join(root, "pi"), "utf8")).toBe("old-pi-binary\n");
+			expect(readdirSync(root)).toEqual(["pi"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("follows mirror redirects containing an embedded GitHub URL", async () => {
+		allowNetwork();
+		const root = writeSingleInstall();
+		const { manifestBytes, sums } = discoveryFiles();
+		const requests: string[] = [];
+		const server = createServer((request, response) => {
+			const path = request.url ?? "";
+			requests.push(path);
+			if (path.includes("/latest/download/")) {
+				response.writeHead(302, { location: path.replace("/latest/download/", `/download/${TAG}/`) });
+				response.end();
+			} else if (path.endsWith("/SHA256SUMS")) response.end(sums);
+			else if (path.endsWith("/release-manifest.json")) response.end(manifestBytes);
+			else if (path.endsWith("/attestation-subjects.jsonl")) response.end("{}");
+			else if (path.endsWith(`/${ASSET}`)) response.end(ASSET_BYTES);
+			else {
+				response.statusCode = 404;
+				response.end();
+			}
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("Expected TCP server address");
+		const mirror = `http://127.0.0.1:${address.port}/https://github.com`;
+		try {
+			const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater();
+			const release = await getLatestXzRelease(CURRENT_VERSION, { mirrors: [mirror] });
+			await runXzSelfUpdate(release!, CURRENT_VERSION, false, {
+				mirrors: [mirror],
+				executablePath: join(root, "pi"),
+				writeProgress: () => {},
+			});
+			expect(requests).toContain(`/https://github.com/xz-dev/pi/releases/download/${TAG}/SHA256SUMS`);
+			expect(readFileSync(join(root, "pi"), "utf8")).toBe(EXECUTABLE_TEXT);
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("uses the custom HTTP base for metadata and the exact-tag ZIP", async () => {
+		allowNetwork();
+		const root = writeSingleInstall();
+		const mirror = "http://localhost:8080/proxy";
+		const direct = fullFetch();
+		const fetchMock = vi.fn((input: string | URL) => direct(String(input).replace(mirror, RELEASE_ORIGIN)));
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater();
+			const release = await getLatestXzRelease(CURRENT_VERSION, { mirrors: [mirror] });
+			await runXzSelfUpdate(release!, CURRENT_VERSION, false, {
+				mirrors: [mirror],
+				executablePath: join(root, "pi"),
+				writeProgress: () => {},
+			});
+			expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(
+				[SUMS_URL, MANIFEST_URL, ATTESTATION_URL, `${EXACT_BASE}${ASSET}`].map((url) =>
+					url.replace(RELEASE_ORIGIN, mirror),
+				),
+			);
+			expect(readFileSync(join(root, "pi"), "utf8")).toBe(EXECUTABLE_TEXT);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back in order during discovery and after a corrupt ZIP, keeping the selected tag", async () => {
+		allowNetwork();
+		const root = writeSingleInstall();
+		const direct = fullFetch();
+		const first = "https://gh-proxy.com/https://github.com";
+		const second = "https://ghfast.top/https://github.com";
+		const requests: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL) => {
+				const url = String(input);
+				requests.push(url);
+				if (url.startsWith(first)) return new Response("unavailable", { status: 503 });
+				if (url.startsWith(second) && url.endsWith(ASSET)) return new Response(new Uint8Array(ASSET_BYTES.length));
+				return direct(url.replace(second, RELEASE_ORIGIN));
+			}),
+		);
+		try {
+			const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater();
+			const release = await getLatestXzRelease(CURRENT_VERSION, { mirrors: MIRRORS });
+			await runXzSelfUpdate(release!, CURRENT_VERSION, false, {
+				mirrors: MIRRORS,
+				executablePath: join(root, "pi"),
+				writeProgress: () => {},
+			});
+			expect(requests).toEqual([
+				SUMS_URL.replace(RELEASE_ORIGIN, first),
+				SUMS_URL.replace(RELEASE_ORIGIN, second),
+				MANIFEST_URL.replace(RELEASE_ORIGIN, second),
+				ATTESTATION_URL.replace(RELEASE_ORIGIN, second),
+				`${EXACT_BASE}${ASSET}`.replace(RELEASE_ORIGIN, first),
+				`${EXACT_BASE}${ASSET}`.replace(RELEASE_ORIGIN, second),
+				`${EXACT_BASE}${ASSET}`,
+			]);
+			expect(readFileSync(join(root, "pi"), "utf8")).toBe(EXECUTABLE_TEXT);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("authenticated Release discovery", () => {
+	it.each(["missing proof", "forged proof", "rewritten manifest and checksums", "wrong source commit"])(
+		"refuses %s even with --force, without changing the install",
+		async (attack) => {
+			allowNetwork();
+			const root = writeSingleInstall();
+			const executablePath = join(root, "pi");
+			const originalExitCode = process.exitCode;
+			process.exitCode = 0;
+			vi.stubEnv("PI_CODING_AGENT_DIR", root);
+			vi.spyOn(console, "log").mockImplementation(() => {});
+			const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+			let bytes = Buffer.from(fixture.manifestBase64, "base64");
+			if (attack === "rewritten manifest and checksums" || attack === "wrong source commit") {
+				const value = JSON.parse(bytes.toString("utf8"));
+				if (attack === "wrong source commit") {
+					value.commit = "a".repeat(40);
+					value.distributionVersion = value.distributionVersion.replace(/g[0-9a-f]{8}$/, "gaaaaaaaa");
+					value.tag = `xz-v${value.distributionVersion}`;
+				} else value.bundles[TARGET].sha256 = "0".repeat(64);
+				bytes = Buffer.from(JSON.stringify(value));
+			}
+			const fetchMock = vi.fn(async (input: string | URL) => {
+				const url = String(input);
+				if (url.endsWith("/SHA256SUMS"))
+					return new Response(`${createHash("sha256").update(bytes).digest("hex")}  release-manifest.json\n`);
+				if (url.endsWith("/release-manifest.json")) return new Response(bytes);
+				if (url.endsWith("/attestation-subjects.jsonl"))
+					return attack === "missing proof"
+						? new Response("missing", { status: 404 })
+						: new Response(
+								attack === "forged proof"
+									? "{}"
+									: fixture.attestations.map((b) => JSON.stringify(b)).join("\n"),
+							);
+				throw new Error(`Unexpected ZIP request: ${url}`);
+			});
+			vi.stubGlobal("fetch", fetchMock);
+			try {
+				await loadUpdater(executablePath, true);
+				const { handlePackageCommand } = await import("../src/package-manager-cli.ts");
+				await handlePackageCommand([
+					"update",
+					"--force",
+					"--mirror-url",
+					"http://untrusted.example",
+					"--mirror-url",
+					RELEASE_ORIGIN,
+				]);
+				expect(process.exitCode).toBe(1);
+				expect(errors.mock.calls.flat().join("\n")).toMatch(/attestation|HTTP 404/);
+				expect(fetchMock).toHaveBeenCalledTimes(6);
+				expect(readFileSync(executablePath, "utf8")).toBe("old-pi-binary\n");
+				expect(readdirSync(root)).toEqual(["pi"]);
+			} finally {
+				process.exitCode = originalExitCode;
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("falls back from forged mirrored metadata to a genuinely signed exact-tag release", async () => {
+		allowNetwork();
+		const bytes = Buffer.from(fixture.manifestBase64, "base64");
+		const real = JSON.parse(bytes.toString("utf8"));
+		const failures: string[] = [];
+		const requests: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL) => {
+				const url = String(input);
+				requests.push(url);
+				if (url.endsWith("/SHA256SUMS"))
+					return new Response(`${createHash("sha256").update(bytes).digest("hex")}  release-manifest.json\n`);
+				if (url.endsWith("/release-manifest.json")) return new Response(bytes);
+				return new Response(
+					url.startsWith("http://untrusted.example")
+						? "{}"
+						: fixture.attestations.map((b) => JSON.stringify(b)).join("\n"),
+				);
+			}),
+		);
+		const { getLatestXzRelease } = await loadUpdater(process.execPath, true);
+		await expect(
+			getLatestXzRelease(CURRENT_VERSION, {
+				mirrors: ["http://untrusted.example", RELEASE_ORIGIN],
+				onMirrorError: (message) => failures.push(message),
+			}),
+		).resolves.toMatchObject({ version: real.distributionVersion, commit: real.commit });
+		expect(failures).toHaveLength(1);
+		expect(requests.at(-1)).toBe(
+			`${RELEASE_ORIGIN}/xz-dev/pi/releases/download/${real.tag}/attestation-subjects.jsonl`,
+		);
 	});
 });
 
