@@ -530,7 +530,7 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "thinking-display",
 				label: "Thinking display",
-				description: `preview: tail while streaming, first-line summary after · expanded: full text · collapsed: label. ${toggleThinkingKey} cycles.`,
+				description: `preview: rolling one-line reasoning tail · expanded: full text · collapsed: label. ${toggleThinkingKey} cycles.`,
 				currentValue: config.thinkingDisplayMode,
 				values: ["preview", "expanded", "collapsed"],
 			},
