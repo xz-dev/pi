@@ -202,8 +202,10 @@ describe("thinking preview display", () => {
 			expect(snapshots.some((s) => s.kind === "thinking_delta" && s.text.includes("tail"))).toBe(true);
 			const end = snapshots.find((s) => s.kind === "thinking_end");
 			expect(end).toBeDefined();
-			expect(end?.text).toContain("Thinking...");
+			// Folded preview-mode run keeps its first-line summary, not the tail or the static label.
+			expect(end?.text).toContain("first");
 			expect(end?.text).not.toContain("live tail");
+			expect(end?.text).not.toContain("Thinking...");
 			expect(end?.text).not.toContain("answer");
 			expect(snapshots.at(-1)?.text).toContain("answer");
 		} finally {
@@ -380,7 +382,8 @@ describe("thinking preview display", () => {
 				partial: nextMessage,
 			},
 		});
-		expect(renderText(ctx.streamingComponent)).toContain("Thinking...");
+		expect(renderText(ctx.streamingComponent)).not.toContain("Thinking...");
+		expect(renderText(ctx.streamingComponent)).toContain("new first");
 		expect(renderText(ctx.streamingComponent)).not.toContain("new tail");
 	});
 
