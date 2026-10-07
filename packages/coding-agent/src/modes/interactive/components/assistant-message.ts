@@ -2,6 +2,8 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	type Component,
 	Container,
+	clipLineStart,
+	countVisibleGraphemes,
 	Markdown,
 	type MarkdownTheme,
 	MouseRegion,
@@ -21,16 +23,25 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
 export type { ThinkingDisplayMode };
 
+/** Muted prefix marking omitted thinking content: `… (N chars) ` when it fits, `… ` otherwise. */
+function omissionHintText(hidden: number): string {
+	return `\u2026 (${hidden} chars) `;
+}
+
+const BARE_HINT = "\u2026 ";
+const MINIMAL_HINT = "\u2026";
+
 /**
- * One styled reasoning row: the live logical line's tail or the completed run's
- * first-line summary. Markdown owns parsing, styles, and column-safe clipping.
+ * One styled reasoning row: a rolling tail window over the fully rendered
+ * Markdown buffer. New text pushes old content off the left edge; the muted
+ * `… (N chars)` hint reports hidden rendered-body grapheme clusters. Live and
+ * completed runs use the identical algorithm, so thinking_end changes nothing.
  */
 class ThinkingPreviewText implements Component {
 	private readonly text: string;
 	private readonly paddingX: number;
 	private readonly markdownTheme: MarkdownTheme;
 	private readonly transform: (markdown: string, availableWidth: number) => string;
-	private readonly anchor: "first" | "last";
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
@@ -39,13 +50,11 @@ class ThinkingPreviewText implements Component {
 		paddingX: number,
 		markdownTheme: MarkdownTheme,
 		transform: (markdown: string, availableWidth: number) => string,
-		anchor: "first" | "last",
 	) {
 		this.text = text;
 		this.paddingX = paddingX;
 		this.markdownTheme = markdownTheme;
 		this.transform = transform;
-		this.anchor = anchor;
 	}
 
 	invalidate(): void {
@@ -65,19 +74,68 @@ class ThinkingPreviewText implements Component {
 		}
 		const paddingX = Math.min(this.paddingX, Math.max(0, Math.floor((width - 1) / 2)));
 		const availableWidth = Math.max(1, width - paddingX * 2);
+		// Render the entire buffer with Markdown first; crop styled output below.
 		const rendered = new Markdown(
 			this.text,
 			0,
 			0,
 			{ ...this.markdownTheme, codeBlockBorder: () => "" },
 			{ color: (text) => theme.fg("thinkingText", text), italic: true },
-			{ transform: this.transform, overflow: this.anchor === "last" ? "clip-start" : "clip-end" },
+			{ transform: this.transform, overflow: "preserve" },
 		).render(availableWidth);
 		// A single-row preview cannot display terminal image rows.
-		const textLines = rendered.filter(
-			(line) => stripTerminalSequences(line).trim() && !line.includes("\x1b_G") && !line.includes("\x1b]1337;"),
-		);
-		const content = textLines.at(this.anchor === "last" ? -1 : 0)?.trimEnd() ?? "";
+		let hiddenBefore = 0;
+		const textLines = rendered.filter((line) => !line.includes("\x1b_G") && !line.includes("\x1b]1337;"));
+		const tailIndex = textLines.findLastIndex((line) => stripTerminalSequences(line).trim().length > 0);
+		const tail = textLines[tailIndex] ?? "";
+		for (let i = 0; i < tailIndex; i++) {
+			hiddenBefore += countVisibleGraphemes(textLines[i]);
+		}
+
+		let content: string;
+		const tailWidth = visibleWidth(tail);
+		if (hiddenBefore === 0 && tailWidth <= availableWidth) {
+			// Nothing omitted: show the styled body without a false ellipsis.
+			content = tail;
+		} else {
+			// Pick a self-consistent hint/body pair: hint width depends on the count's
+			// digit length, and the count depends on the kept suffix. Digit length is
+			// monotone in the hidden count, so converge upward; if the counted form
+			// cannot coexist with its own suffix, fall back once to the bare ellipsis.
+			let hint = MINIMAL_HINT;
+			let clipped = clipLineStart(tail, Math.max(0, availableWidth - visibleWidth(hint)));
+			for (;;) {
+				const total = hiddenBefore + clipped.hidden;
+				const candidate = omissionHintText(total);
+				const bodyWidth = availableWidth - visibleWidth(candidate);
+				if (bodyWidth <= 0) {
+					// Even the counted form alone does not fit; go bare.
+					hint = availableWidth >= visibleWidth(BARE_HINT) ? BARE_HINT : MINIMAL_HINT;
+					clipped = clipLineStart(tail, Math.max(0, availableWidth - visibleWidth(hint)));
+					break;
+				}
+				const next = clipLineStart(tail, bodyWidth);
+				if (hiddenBefore + next.hidden === total) {
+					// Self-consistent: the printed count equals the true hidden count.
+					// But if the counted form hides a final wide grapheme that fits with
+					// the bare hint, the newest content wins over the count.
+					const bare = availableWidth >= visibleWidth(BARE_HINT) ? BARE_HINT : MINIMAL_HINT;
+					const bareClipped = clipLineStart(tail, availableWidth - visibleWidth(bare));
+					if (next.width === 0 && bareClipped.width > 0) {
+						hint = bare;
+						clipped = bareClipped;
+					} else {
+						hint = candidate;
+						clipped = next;
+					}
+					break;
+				}
+				hint = candidate;
+				clipped = next;
+			}
+			content = `${theme.fg("muted", hint)}${clipped.text}`;
+		}
+
 		const line = `${" ".repeat(paddingX)}${content}\x1b[0m${" ".repeat(paddingX)}`;
 		const paddingNeeded = Math.max(0, width - visibleWidth(line));
 		const result = [line + " ".repeat(paddingNeeded)];
@@ -217,16 +275,13 @@ export class AssistantMessageComponent extends Container {
 				);
 			} else if (content.type === "thinking") {
 				const thinkingBlocks: string[] = [];
-				const runStartIndex = i;
-				let runEndIndex = i;
 				for (; i < message.content.length; i++) {
 					const thinkingContent = message.content[i];
 					if (thinkingContent.type !== "thinking") {
 						break;
 					}
-					runEndIndex = i;
-					const thinking = thinkingContent.thinking.trim();
-					if (thinking) {
+					const thinking = thinkingContent.thinking;
+					if (thinking.trim()) {
 						thinkingBlocks.push(thinking);
 					}
 				}
@@ -245,12 +300,7 @@ export class AssistantMessageComponent extends Container {
 				const runIndex = thinkingRunIndex++;
 				const override = this.thinkingVisibilityOverrides.get(runIndex);
 				const expanded = override ?? this.thinkingBulkOverride ?? this.thinkingDisplayMode === "expanded";
-				const runIsLive =
-					this.isStreaming &&
-					this.activeThinkingContentIndex !== null &&
-					this.activeThinkingContentIndex >= runStartIndex &&
-					this.activeThinkingContentIndex <= runEndIndex;
-				// Folded preview-mode runs show the live tail or their completed first-line summary.
+				// Folded preview-mode runs show the same rolling tail window while live and after completion.
 				const showPreview = this.thinkingDisplayMode === "preview" && !expanded;
 
 				let thinkingComponent: Component;
@@ -265,11 +315,10 @@ export class AssistantMessageComponent extends Container {
 						this.outputPad,
 						this.markdownTheme,
 						transform,
-						runIsLive ? "last" : "first",
 					);
 				} else if (expanded) {
 					thinkingComponent = new Markdown(
-						thinkingBlocks.join("\n\n"),
+						thinkingBlocks.map((block) => block.trim()).join("\n\n"),
 						this.outputPad,
 						0,
 						this.markdownTheme,
