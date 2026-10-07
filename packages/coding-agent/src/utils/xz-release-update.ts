@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { RELEASE_TARGET } from "../config.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 import { readReleaseArchive } from "./release-archive.ts";
+import { verifyReleaseAttestation } from "./release-attestation.ts";
 
 /** Rename one path, retrying transient Windows sharing violations. */
 function renameSyncRetryable(
@@ -40,10 +41,16 @@ function isTransientWindowsShareViolation(error: unknown): boolean {
 
 const REPOSITORY = "xz-dev/pi";
 const RELEASE_DOWNLOAD_ORIGIN = "https://github.com";
+export const DEFAULT_XZ_RELEASE_MIRRORS = [
+	"https://gh-proxy.com/https://github.com",
+	"https://ghfast.top/https://github.com",
+	RELEASE_DOWNLOAD_ORIGIN,
+] as const;
 const RELEASE_MAX_BYTES = 1024 * 1024;
 const MANIFEST_SCHEMA_VERSION = 7;
 const MANIFEST_FILENAME = "release-manifest.json";
 const SUMS_FILENAME = "SHA256SUMS";
+const ATTESTATION_FILENAME = "attestation-subjects.jsonl";
 const EXECUTABLE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10000;
 const EXECUTABLE_INACTIVITY_TIMEOUT_MS = 30000;
@@ -77,9 +84,31 @@ export interface XzLatestRelease {
 	exactBaseUrl: string;
 }
 
-interface XzReleaseOptions {
+interface XzMirrorOptions {
+	mirrors?: readonly string[];
+	onMirrorError?: (message: string) => void;
+}
+
+interface XzReleaseOptions extends XzMirrorOptions {
 	timeoutMs?: number;
 	retry?: boolean;
+}
+
+async function withReleaseMirrors<T>(options: XzMirrorOptions, operation: (base: string) => Promise<T>): Promise<T> {
+	const bases =
+		process.env.PI_XZ_RELEASE_BASE_URL || !options.mirrors?.length ? [RELEASE_DOWNLOAD_ORIGIN] : options.mirrors;
+	for (const [index, base] of bases.entries()) {
+		try {
+			return await operation(base);
+		} catch (error) {
+			const next = bases[index + 1];
+			options.onMirrorError?.(
+				`Release download from ${base} failed: ${error instanceof Error ? error.message : String(error)}.${next === undefined ? "" : ` Trying ${next}...`}`,
+			);
+			if (next === undefined) throw error;
+		}
+	}
+	throw new Error("No Release download source available");
 }
 
 class RetryableDiscoveryError {
@@ -90,7 +119,7 @@ class RetryableDiscoveryError {
 	}
 }
 
-interface XzSelfUpdateOptions {
+interface XzSelfUpdateOptions extends XzMirrorOptions {
 	executablePath?: string;
 	inactivityTimeoutMs?: number;
 	now?: () => number;
@@ -263,15 +292,31 @@ async function fetchResponse(
 ): Promise<Response> {
 	let response: Response;
 	try {
-		response = await fetch(new URL(url).href, {
-			headers: fetchHeaders(currentVersion, accept),
-			signal: typeof timeout === "number" ? AbortSignal.timeout(timeout) : timeout,
-		});
+		let target = new URL(url);
+		const signal = typeof timeout === "number" ? AbortSignal.timeout(timeout) : timeout;
+		for (let redirects = 0; ; redirects++) {
+			response = await fetch(target.href, {
+				headers: fetchHeaders(currentVersion, accept),
+				signal,
+				redirect: "manual",
+			});
+			const location = response.headers.get("location");
+			if (![301, 302, 303, 307, 308].includes(response.status) || !location) break;
+			await response.body?.cancel();
+			if (redirects >= 20) throw new Error("Too many GitHub Release redirects");
+			// Bun 1.4.2 cannot follow mirror paths such as /https://github.com/...
+			// automatically. Resolve the Location ourselves, retaining the original timeout.
+			target = new URL(location, target);
+			if (target.protocol !== "https:" && target.protocol !== "http:") {
+				throw new Error("Unsupported GitHub Release redirect protocol");
+			}
+		}
 	} catch (error) {
 		if (classifyRetryable) throw new RetryableDiscoveryError(error);
 		throw error;
 	}
 	if (!response.ok) {
+		await response.body?.cancel();
 		const error = new Error(`GitHub Release request failed: HTTP ${response.status}`);
 		if (classifyRetryable && [408, 425, 429, 500, 502, 503, 504].includes(response.status)) {
 			throw new RetryableDiscoveryError(error);
@@ -325,8 +370,12 @@ async function readBoundedResponse(
 	return body;
 }
 
-async function discoverLatestXzRelease(currentVersion: string, timeoutMs: number): Promise<XzLatestRelease> {
-	const latestBase = releaseBaseUrl("latest");
+async function discoverLatestXzRelease(
+	currentVersion: string,
+	timeoutMs: number,
+	base: string,
+): Promise<XzLatestRelease> {
+	const latestBase = releaseBaseUrl("latest").replace(RELEASE_DOWNLOAD_ORIGIN, () => base);
 	const sumsResponse = await fetchResponse(
 		`${latestBase}${SUMS_FILENAME}`,
 		currentVersion,
@@ -352,7 +401,22 @@ async function discoverLatestXzRelease(currentVersion: string, timeoutMs: number
 	} catch {
 		return fail("Invalid xz-dev Release manifest JSON");
 	}
-	return parseLatestRelease(value);
+	const release = parseLatestRelease(value);
+	const attestationResponse = await fetchResponse(
+		`${release.exactBaseUrl.replace(RELEASE_DOWNLOAD_ORIGIN, () => base)}${ATTESTATION_FILENAME}`,
+		currentVersion,
+		timeoutMs,
+		"application/x-ndjson",
+		true,
+	);
+	const attestationBytes = await readBoundedResponse(
+		attestationResponse,
+		RELEASE_MAX_BYTES,
+		"Release attestation",
+		true,
+	);
+	verifyReleaseAttestation(bytes, attestationBytes, release.commit);
+	return release;
 }
 
 export async function getLatestXzRelease(
@@ -361,16 +425,18 @@ export async function getLatestXzRelease(
 ): Promise<XzLatestRelease | undefined> {
 	if (process.env.PI_OFFLINE) return undefined;
 	parseDistributionVersion(currentVersion);
-	const attempts = options.retry ? 3 : 1;
-	for (let attempt = 0; ; attempt++) {
-		try {
-			return await discoverLatestXzRelease(currentVersion, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-		} catch (error) {
-			if (!(error instanceof RetryableDiscoveryError) || attempt + 1 >= attempts) {
-				throw error instanceof RetryableDiscoveryError ? error.error : error;
+	const attempts = options.retry && !options.mirrors?.length ? 3 : 1;
+	return withReleaseMirrors(options, async (base) => {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await discoverLatestXzRelease(currentVersion, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, base);
+			} catch (error) {
+				if (!(error instanceof RetryableDiscoveryError) || attempt + 1 >= attempts) {
+					throw error instanceof RetryableDiscoveryError ? error.error : error;
+				}
 			}
 		}
-	}
+	});
 }
 
 function formatBytes(bytes: number): string {
@@ -392,15 +458,14 @@ function writeDownloadProgress(message: string, isTTY = Boolean(process.stdout.i
 /**
  * Download the release ZIP, verify its byte length and sha256, extract the
  * single executable entry and verify its size and sha256, all BEFORE anything
- * is written. The staging file is written exclusively (no clobber) and deleted
- * on any failure, so a corrupt download can never touch the running executable.
+ * is written. Mirror fallback only retries download/verification, never filesystem operations.
  */
 async function downloadExecutable(
 	release: XzLatestRelease,
 	currentVersion: string,
-	stagingPath: string,
 	options: XzSelfUpdateOptions,
-): Promise<void> {
+	base: string,
+): Promise<Uint8Array> {
 	const expectedBase = exactBaseUrl(release.tag);
 	const expectedFile = RELEASE_TARGET ? expectedBundleName(RELEASE_TARGET) : "";
 	const expectedUrl = `${expectedBase}${expectedFile}`;
@@ -443,7 +508,12 @@ async function downloadExecutable(
 		);
 	};
 	try {
-		const response = await fetchResponse(expectedUrl, currentVersion, controller.signal, "application/octet-stream");
+		const response = await fetchResponse(
+			expectedUrl.replace(RELEASE_DOWNLOAD_ORIGIN, () => base),
+			currentVersion,
+			controller.signal,
+			"application/octet-stream",
+		);
 		showProgress();
 		const bytes = await readBoundedResponse(response, release.bundle.size, release.bundle.name, false, (total) => {
 			resetInactivityTimeout();
@@ -462,9 +532,7 @@ async function downloadExecutable(
 		) {
 			return fail(`${release.bundle.name} executable does not match the Release manifest`);
 		}
-		// Write to the staging name first (`flag: "wx"` never clobbers); the
-		// caller renames it onto the final candidate name after this returns.
-		writeFileSync(stagingPath, executable, { flag: "wx", mode: 0o600 });
+		return executable;
 	} finally {
 		clearTimeout(inactivityTimeout);
 		if (progressShown && !options.writeProgress && (options.isTTY ?? process.stdout.isTTY))
@@ -486,7 +554,12 @@ export async function runXzSelfUpdate(
 	const backupName = `pi-${currentVersion}${extension}`;
 	const candidateName = `pi-${release.version}${extension}`;
 	const backupPath = join(executableDirectory, backupName);
-	const candidatePath = join(executableDirectory, candidateName);
+	const reinstall = candidateName === backupName;
+	// Reinstallation must not place verified bytes in the old executable's backup slot.
+	const candidatePath = join(
+		executableDirectory,
+		reinstall ? `.${candidateName}.${process.pid}.candidate` : candidateName,
+	);
 	// Staging name carries the pid so two concurrent updates never share a
 	// partially written download (design: no update mutex).
 	const stagingPath = join(executableDirectory, `.${candidateName}.${process.pid}.download`);
@@ -521,7 +594,11 @@ export async function runXzSelfUpdate(
 	}
 
 	try {
-		await downloadExecutable(release, currentVersion, stagingPath, options);
+		const executable = await withReleaseMirrors(options, (base) =>
+			downloadExecutable(release, currentVersion, options, base),
+		);
+		// Write exclusively only after verification; local failures must not trigger mirror retries.
+		writeFileSync(stagingPath, executable, { flag: "wx", mode: 0o600 });
 		rename(stagingPath, candidatePath);
 	} catch (error) {
 		try {
@@ -529,7 +606,6 @@ export async function runXzSelfUpdate(
 		} catch {}
 		throw error;
 	}
-	if (process.platform !== "win32") chmodSync(candidatePath, 0o755);
 
 	// Activation: move the running executable aside into its versioned backup
 	// name, then move the verified candidate onto the entrypoint. Both renames
@@ -537,6 +613,7 @@ export async function runXzSelfUpdate(
 	// on Windows (a running binary can be renamed, just not unlinked).
 	let backupMade = false;
 	try {
+		if (process.platform !== "win32") chmodSync(candidatePath, 0o755);
 		rename(executablePath, backupPath);
 		backupMade = true;
 		rename(candidatePath, executablePath);
@@ -546,6 +623,12 @@ export async function runXzSelfUpdate(
 			// bootable, then report the original failure.
 			try {
 				renameSyncRetryable(backupPath, executablePath);
+			} catch {}
+		}
+		// Keep recovery bytes if rollback failed; otherwise discard the temporary reinstall candidate.
+		if (reinstall && existsSync(executablePath)) {
+			try {
+				unlinkSync(candidatePath);
 			} catch {}
 		}
 		throw error;
