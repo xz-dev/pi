@@ -1,6 +1,17 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	MouseRegion,
+	Spacer,
+	sliceByColumn,
+	Text,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import type { ThinkingDisplayMode } from "../../../core/settings-manager.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -8,12 +19,68 @@ const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
+export type { ThinkingDisplayMode };
+
+/**
+ * Single-row thinking preview used while a reasoning run is still streaming.
+ * Applies the thinking markdown transform at render time (with the real
+ * available width, so width-sensitive transformers behave like full Markdown),
+ * then shows the tail of the last non-empty transformed line, clipped to the
+ * available width using terminal-column accounting (ANSI, wide chars).
+ */
+class ThinkingPreviewText implements Component {
+	private readonly text: string;
+	private readonly paddingX: number;
+	private readonly transform: (markdown: string, availableWidth: number) => string;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	constructor(text: string, paddingX = 1, transform: (markdown: string, availableWidth: number) => string) {
+		this.text = text;
+		this.paddingX = paddingX;
+		this.transform = transform;
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+		if (width <= 0) {
+			const result = [""];
+			this.cachedWidth = width;
+			this.cachedLines = result;
+			return result;
+		}
+		const paddingX = Math.min(this.paddingX, Math.max(0, Math.floor((width - 1) / 2)));
+		const availableWidth = Math.max(1, width - paddingX * 2);
+		const transformed = this.transform(this.text, availableWidth);
+		const transformedLines = transformed.split("\n").filter((line) => line.trim().length > 0);
+		const lastLine = (transformedLines.at(-1) ?? "").trim();
+		const styled = theme.italic(theme.fg("thinkingText", lastLine));
+		const clipped =
+			visibleWidth(styled) > availableWidth
+				? sliceByColumn(styled, visibleWidth(styled) - availableWidth, availableWidth, true)
+				: styled;
+		const line = `${" ".repeat(paddingX)}${clipped}\x1b[0m${" ".repeat(paddingX)}`;
+		const paddingNeeded = Math.max(0, width - visibleWidth(line));
+		const result = [line + " ".repeat(paddingNeeded)];
+		this.cachedWidth = width;
+		this.cachedLines = result;
+		return result;
+	}
+}
+
 /**
  * Component that renders a complete assistant message
  */
 export class AssistantMessageComponent extends Container {
 	private contentContainer: Container;
-	private hideThinkingBlock: boolean;
+	private thinkingDisplayMode: ThinkingDisplayMode;
 	private markdownTheme: MarkdownTheme;
 	private hiddenThinkingLabel: string;
 	private outputPad: number;
@@ -22,10 +89,12 @@ export class AssistantMessageComponent extends Container {
 	private hasToolCalls = false;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
+	private thinkingBulkOverride: boolean | null = null;
+	private activeThinkingContentIndex: number | null = null;
 
 	constructor(
 		message?: AssistantMessage,
-		hideThinkingBlock = false,
+		thinkingDisplayMode: ThinkingDisplayMode = "preview",
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
@@ -33,7 +102,7 @@ export class AssistantMessageComponent extends Container {
 	) {
 		super();
 
-		this.hideThinkingBlock = hideThinkingBlock;
+		this.thinkingDisplayMode = thinkingDisplayMode;
 		this.markdownTheme = markdownTheme;
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.outputPad = outputPad;
@@ -55,8 +124,18 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	setHideThinkingBlock(hide: boolean): void {
-		this.hideThinkingBlock = hide;
+	setThinkingDisplayMode(mode: ThinkingDisplayMode): void {
+		this.thinkingDisplayMode = mode;
+		this.thinkingVisibilityOverrides.clear();
+		this.thinkingBulkOverride = null;
+		if (this.lastMessage) {
+			this.updateContent(this.lastMessage);
+		}
+	}
+
+	/** Bulk expand/collapse (Ctrl+O): overrides every run and clears per-run mouse overrides. */
+	setExpanded(expanded: boolean): void {
+		this.thinkingBulkOverride = expanded;
 		this.thinkingVisibilityOverrides.clear();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
@@ -88,9 +167,18 @@ export class AssistantMessageComponent extends Container {
 		return lines;
 	}
 
-	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
+	updateContent(
+		message: AssistantMessage,
+		isStreaming = this.isStreaming,
+		activeThinkingContentIndex: number | null = this.activeThinkingContentIndex,
+	): void {
 		this.lastMessage = message;
 		this.isStreaming = isStreaming;
+		if (!isStreaming) {
+			this.activeThinkingContentIndex = null;
+		} else {
+			this.activeThinkingContentIndex = activeThinkingContentIndex;
+		}
 
 		// Clear content container
 		this.contentContainer.clear();
@@ -117,11 +205,14 @@ export class AssistantMessageComponent extends Container {
 				);
 			} else if (content.type === "thinking") {
 				const thinkingBlocks: string[] = [];
+				const runStartIndex = i;
+				let runEndIndex = i;
 				for (; i < message.content.length; i++) {
 					const thinkingContent = message.content[i];
 					if (thinkingContent.type !== "thinking") {
 						break;
 					}
+					runEndIndex = i;
 					const thinking = thinkingContent.thinking.trim();
 					if (thinking) {
 						thinkingBlocks.push(thinking);
@@ -140,30 +231,53 @@ export class AssistantMessageComponent extends Container {
 					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 				const runIndex = thinkingRunIndex++;
-				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
-				const thinkingComponent = hidden
-					? new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0)
-					: new Markdown(
-							thinkingBlocks.join("\n\n"),
-							this.outputPad,
-							0,
-							this.markdownTheme,
-							{
-								color: (text: string) => theme.fg("thinkingText", text),
-								italic: true,
-							},
-							{
-								transform: createMarkdownTransform(
-									"assistant-thinking",
-									this.isStreaming,
-									this.markdownTransformers,
-								),
-							},
-						);
+				const override = this.thinkingVisibilityOverrides.get(runIndex);
+				const expanded = override ?? this.thinkingBulkOverride ?? this.thinkingDisplayMode === "expanded";
+				const runIsLive =
+					this.isStreaming &&
+					this.activeThinkingContentIndex !== null &&
+					this.activeThinkingContentIndex >= runStartIndex &&
+					this.activeThinkingContentIndex <= runEndIndex;
+				// Any folded live run shows the preview row; explicit expansion wins.
+				const showPreview = this.thinkingDisplayMode === "preview" && runIsLive && !expanded;
+
+				let thinkingComponent: Component;
+				if (showPreview) {
+					const transform = createMarkdownTransform(
+						"assistant-thinking",
+						this.isStreaming,
+						this.markdownTransformers,
+					);
+					thinkingComponent = new ThinkingPreviewText(thinkingBlocks.join("\n\n"), this.outputPad, transform);
+				} else if (expanded) {
+					thinkingComponent = new Markdown(
+						thinkingBlocks.join("\n\n"),
+						this.outputPad,
+						0,
+						this.markdownTheme,
+						{
+							color: (text: string) => theme.fg("thinkingText", text),
+							italic: true,
+						},
+						{
+							transform: createMarkdownTransform(
+								"assistant-thinking",
+								this.isStreaming,
+								this.markdownTransformers,
+							),
+						},
+					);
+				} else {
+					thinkingComponent = new Text(
+						theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)),
+						this.outputPad,
+						0,
+					);
+				}
 				this.contentContainer.addChild(
 					new MouseRegion(thinkingComponent, (event) => {
 						if (event.type !== "click" || event.button !== "left") return undefined;
-						this.thinkingVisibilityOverrides.set(runIndex, !hidden);
+						this.thinkingVisibilityOverrides.set(runIndex, !expanded);
 						if (this.lastMessage) this.updateContent(this.lastMessage);
 						return { handled: true };
 					}),

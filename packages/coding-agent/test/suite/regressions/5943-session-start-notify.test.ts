@@ -50,7 +50,7 @@ type RebindContext = {
 };
 
 type ReloadCommandContext = {
-	hideThinkingBlock: boolean;
+	thinkingDisplayMode: "preview" | "expanded" | "collapsed";
 	session: {
 		isStreaming: boolean;
 		isCompacting: boolean;
@@ -61,7 +61,7 @@ type ReloadCommandContext = {
 	};
 	settingsManager: {
 		getHttpIdleTimeoutMs: () => number;
-		getHideThinkingBlock: () => boolean;
+		getThinkingDisplayMode: () => "preview" | "expanded" | "collapsed";
 		getOutputPad: () => 0 | 1;
 		getEditorPaddingX: () => number;
 		getAutocompleteMaxVisible: () => number;
@@ -119,7 +119,7 @@ type ReloadCommandContextOverrides = Omit<
 function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {}): ReloadCommandContext {
 	const editor = overrides.editor ?? {};
 	return {
-		hideThinkingBlock: overrides.hideThinkingBlock ?? false,
+		thinkingDisplayMode: overrides.thinkingDisplayMode ?? "preview",
 		session: {
 			isStreaming: false,
 			isCompacting: false,
@@ -133,7 +133,7 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 		},
 		settingsManager: {
 			getHttpIdleTimeoutMs: () => 0,
-			getHideThinkingBlock: () => false,
+			getThinkingDisplayMode: () => "preview",
 			getOutputPad: () => 1,
 			getEditorPaddingX: () => 1,
 			getAutocompleteMaxVisible: () => 10,
@@ -412,28 +412,28 @@ describe("regression #5943: session_start transient UI", () => {
 		}
 	});
 
-	it("refreshes hideThinkingBlock before rebuilding chat during reload", async () => {
+	it("refreshes thinkingDisplayMode before rebuilding chat during reload", async () => {
 		initTheme("dark", false);
 		const events: string[] = [];
 		let context: ReloadCommandContext;
 		context = createReloadCommandContext({
-			settingsManager: { getHideThinkingBlock: () => true },
+			settingsManager: { getThinkingDisplayMode: () => "collapsed" },
 			session: {
 				reload: async (options) => {
 					events.push("reload");
 					await options?.beforeSessionStart?.();
-					events.push(`start:${context.hideThinkingBlock}`);
+					events.push(`start:${context.thinkingDisplayMode}`);
 				},
 			},
 			rebuildChatFromMessages: () => {
-				events.push(`rebuild:${context.hideThinkingBlock}`);
+				events.push(`rebuild:${context.thinkingDisplayMode}`);
 			},
 		});
 
 		await interactiveModePrototype.handleReloadCommand.call(context);
 
-		expect(context.hideThinkingBlock).toBe(true);
-		expect(events).toEqual(["reload", "rebuild:true", "start:true"]);
+		expect(context.thinkingDisplayMode).toBe("collapsed");
+		expect(events).toEqual(["reload", "rebuild:collapsed", "start:collapsed"]);
 	});
 
 	it("keeps the reload blocker focused until async reload completes", async () => {
