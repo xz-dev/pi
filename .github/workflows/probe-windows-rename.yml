@@ -1,0 +1,98 @@
+name: "Probe Windows launcher rename semantics"
+
+# Verifies the Windows-specific assumptions behind the version-embedded
+# launcher activation and cleanup on a real Windows runner:
+#   1. A running exe can be renamed (moved into its version bundle directory).
+#   2. Deleting a running exe fails, so cleanup of locked files must be skipped.
+#   3. A new exe can be renamed into the vacated launcher path while the old
+#      process is still running.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-windows-rename:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Probe rename, delete, and replace-while-running
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $root = Join-Path $env:RUNNER_TEMP ("pi-rename-probe-" + [guid]::NewGuid().ToString("N"))
+          $bundles = Join-Path $root "bundles\v1"
+          New-Item -ItemType Directory -Path $bundles -Force | Out-Null
+          $launcher = Join-Path $root "pi.exe"
+          Copy-Item (Join-Path $env:SystemRoot "System32\cmd.exe") $launcher
+
+          # Start the launcher copy; it runs (waits) while we mutate it.
+          $proc = Start-Process -FilePath $launcher -ArgumentList "/c","pause" -PassThru -WindowStyle Hidden
+          try {
+            if ($proc.HasExited) { throw "probe process exited immediately" }
+
+            # 1. Renaming a running exe must succeed.
+            $moved = Join-Path $bundles "pi.exe"
+            Move-Item -LiteralPath $launcher -Destination $moved
+            if (Test-Path -LiteralPath $launcher) { throw "rename: old launcher still present" }
+            if (-not (Test-Path -LiteralPath $moved)) { throw "rename: moved launcher missing" }
+
+            # 2. Deleting the running (renamed) exe must fail -> cleanup skips it.
+            $deleteSucceeded = $true
+            try { Remove-Item -LiteralPath $moved -Force -ErrorAction Stop } catch { $deleteSucceeded = $false }
+            if ($deleteSucceeded) { throw "delete: running exe was deleted; skip-on-locked assumption invalid" }
+
+            # 3. A new launcher can take the vacated path while the old runs.
+            $next = Join-Path $root "pi-next.exe"
+            Copy-Item (Join-Path $env:SystemRoot "System32\where.exe") $next
+            Move-Item -LiteralPath $next -Destination $launcher
+            if (-not (Test-Path -LiteralPath $launcher)) { throw "replace: new launcher missing" }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Milliseconds 500
+            # After exit, the old launcher inside the bundle must be deletable.
+            try { Remove-Item -LiteralPath $moved -Force -ErrorAction Stop } catch { throw "post-exit delete failed" }
+          }
+          Write-Output "probe: all Windows rename semantics confirmed"
+
+      - name: Probe rename with a Node-inherited handle
+        shell: pwsh
+        run: |
+          # Reproduces the Publish GitHub Release EPERM flake: a Node child
+          # spawned with windowsHide inherits duplicated parent handles in
+          # recent libuv; does such a duplicated FILE_SHARE_DELETE handle make
+          # rename of the containing directory fail with EPERM, and is the
+          # failure transient (handle closes) or permanent?
+          $ErrorActionPreference = "Continue"
+          $root = Join-Path $env:RUNNER_TEMP ("pi-handle-inherit-probe-" + [guid]::NewGuid().ToString("N"))
+          $bundle = Join-Path $root "bundles\v1"
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          $guard = Join-Path $bundle "usage.lock"
+          Set-Content -LiteralPath $guard -Value "P" -NoNewline
+          $scriptPath = Join-Path $root "probe.mjs"
+          @'
+          import { openSync } from "node:fs";
+          import { spawn } from "node:child_process";
+          const guard = process.argv[2];
+          const fd = openSync(guard, "r");
+          const child = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 20000)"], {
+            windowsHide: true,
+            stdio: ["ignore", "ignore", "ignore"],
+          });
+          setTimeout(() => {
+            child.kill();
+            process.exit(0);
+          }, 20000);
+          '@ | Set-Content -LiteralPath $scriptPath
+          $node = Start-Process -FilePath "node" -ArgumentList $scriptPath, $guard -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 2
+          try {
+            Move-Item -LiteralPath $bundle -Destination "$bundle-moved"
+            Write-Output "RESULT: rename-with-inherited-handle SUCCEEDED (handle inheritance does not block rename)"
+          } catch {
+            Write-Output "RESULT: rename-with-inherited-handle FAILED: $($_.Exception.Message)"
+          }
+          if ($node -and -not $node.HasExited) { Stop-Process -Id $node.Id -Force -ErrorAction SilentlyContinue }
