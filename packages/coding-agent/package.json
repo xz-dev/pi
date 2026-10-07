@@ -55,6 +55,9 @@
 		"@earendil-works/pi-codemode": "^1.1.0",
 		"@earendil-works/pi-mcp": "^1.1.0",
 		"@earendil-works/pi-tui": "^1.1.0",
+		"@sigstore/bundle": "5.0.0",
+		"@sigstore/protobuf-specs": "0.5.2",
+		"@sigstore/verify": "4.1.2",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"brace-expansion": "5.0.12",
 		"chalk": "6.0.0",
@@ -105,6 +108,6 @@
 		"directory": "packages/coding-agent"
 	},
 	"engines": {
-		"node": ">=22.19.0"
+		"node": "^22.22.2 || ^24.15.0 || >=26.0.0"
 	}
 }

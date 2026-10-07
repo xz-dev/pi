@@ -1020,6 +1020,16 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getUpdateMirrors(): string[] | undefined {
+		return this.globalSettings.updateMirrors?.slice();
+	}
+
+	setUpdateMirrors(mirrors: string[] | undefined): void {
+		this.globalSettings.updateMirrors = mirrors?.slice();
+		this.markModified("updateMirrors");
+		this.save();
+	}
+
 	getCollapseChangelog(): boolean {
 		return this.settings.collapseChangelog ?? SETTINGS_DEFAULTS.collapseChangelog;
 	}

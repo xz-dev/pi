@@ -44,7 +44,12 @@ import {
 	cleanupWindowsSelfUpdateQuarantine,
 	quarantineWindowsNativeDependencies,
 } from "./utils/windows-self-update.ts";
-import { cleanXzBackups, getLatestXzRelease, runXzSelfUpdate } from "./utils/xz-release-update.ts";
+import {
+	cleanXzBackups,
+	DEFAULT_XZ_RELEASE_MIRRORS,
+	getLatestXzRelease,
+	runXzSelfUpdate,
+} from "./utils/xz-release-update.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -295,6 +300,8 @@ interface PackageCommandOptions {
 	local: boolean;
 	force: boolean;
 	clean: boolean;
+	mirrors?: string[];
+	permanent: boolean;
 	projectTrustOverride?: boolean;
 	help: boolean;
 	invalidOption?: string;
@@ -320,7 +327,7 @@ function getPackageCommandUsage(command: PackageCommand): string {
 		case "remove":
 			return `${APP_NAME} remove <source> [-l] [--approve|--no-approve]`;
 		case "update":
-			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force|--clean]`;
+			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force|--clean] [--mirror|--mirror-url <url>|--no-mirror] [--permanent]`;
 		case "list":
 			return `${APP_NAME} list [--approve|--no-approve]`;
 	}
@@ -400,6 +407,10 @@ Options:
   -na, --no-approve       Ignore project-local files for this command
   --force                 Reinstall pi even if the current version is latest
   --clean                 Remove old pi-<version> executable backups next to the running pi
+  --mirror                Try GH-Proxy, GHFast, then GitHub for xz-dev Release downloads
+  --mirror-url <url>       Append a custom base replacing https://github.com (repeatable)
+  --no-mirror              Use direct GitHub instead of the saved mirror setting
+  --permanent              Only save/clear the mirror choice globally; do not update
 
 Short forms:
   ${APP_NAME} update                Update pi only
@@ -439,6 +450,9 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let local = false;
 	let force = false;
 	let clean = false;
+	let mirrors: string[] | undefined;
+	let mirrorFlag: string | undefined;
+	let permanent = false;
 	let projectTrustOverride: boolean | undefined;
 	let help = false;
 	let invalidOption: string | undefined;
@@ -532,6 +546,36 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			continue;
 		}
 
+		if (arg === "--permanent") {
+			if (command === "update") permanent = true;
+			else invalidOption = invalidOption ?? arg;
+			continue;
+		}
+
+		if (arg === "--mirror" || arg === "--mirror-url" || arg === "--no-mirror") {
+			if (command !== "update") {
+				invalidOption = invalidOption ?? arg;
+				continue;
+			}
+			if (mirrorFlag !== undefined && (arg !== "--mirror-url" || mirrorFlag !== arg)) {
+				conflictingOptions = conflictingOptions ?? "--mirror, --mirror-url, and --no-mirror cannot be combined";
+			}
+			mirrorFlag = arg;
+			if (arg === "--mirror-url") {
+				const value = rest[index + 1];
+				if (value === undefined || value.startsWith("-")) {
+					missingOptionValue = missingOptionValue ?? arg;
+				} else {
+					mirrors ??= [];
+					mirrors.push(value);
+					index++;
+				}
+			} else {
+				mirrors = arg === "--mirror" ? [...DEFAULT_XZ_RELEASE_MIRRORS] : [];
+			}
+			continue;
+		}
+
 		if (arg === "--extension") {
 			if (command !== "update") {
 				invalidOption = invalidOption ?? arg;
@@ -619,6 +663,13 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			updateTarget = { type: "self" };
 			showExtensionsSkippedNote = true;
 		}
+		if (mirrors !== undefined && (clean || !updateTargetIncludesSelf(updateTarget))) {
+			conflictingOptions = conflictingOptions ?? "Mirror options only apply to Pi self-updates";
+		}
+		if (permanent && (mirrors === undefined || clean || force || updateTarget.type !== "self")) {
+			conflictingOptions =
+				conflictingOptions ?? "--permanent requires a mirror choice and cannot be combined with other operations";
+		}
 	}
 
 	return {
@@ -629,6 +680,8 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		local,
 		force,
 		clean,
+		mirrors,
+		permanent,
 		projectTrustOverride,
 		help,
 		invalidOption,
@@ -981,6 +1034,20 @@ export async function handlePackageCommand(
 		return true;
 	}
 
+	if (options.permanent) {
+		const settingsManager = SettingsManager.create(process.cwd(), getAgentDir(), { projectTrusted: false });
+		settingsManager.setUpdateMirrors(options.mirrors?.length ? options.mirrors : undefined);
+		await settingsManager.flush();
+		const errors = settingsManager.drainErrors();
+		if (errors.length > 0) {
+			for (const { error } of errors) console.error(chalk.red(`Could not save mirror setting: ${error.message}`));
+			process.exitCode = 1;
+		} else {
+			console.log(chalk.green("Mirror setting saved globally. No update performed."));
+		}
+		return true;
+	}
+
 	if (options.command === "update" && options.clean) {
 		try {
 			const { removed, retained } = cleanXzBackups();
@@ -1131,7 +1198,11 @@ export async function handlePackageCommand(
 					}
 					if (DISTRIBUTION === "xz-dev" && PACKAGE_NAME === "@earendil-works/pi-coding-agent") {
 						if (detectInstallMethod() === "bun-binary") {
-							const latestRelease = await getLatestXzRelease(VERSION, { retry: true });
+							const mirrorOptions = {
+								mirrors: options.mirrors ?? settingsManager.getUpdateMirrors(),
+								onMirrorError: (message: string) => console.error(chalk.gray(message)),
+							};
+							const latestRelease = await getLatestXzRelease(VERSION, { retry: true, ...mirrorOptions });
 							if (!latestRelease) {
 								throw new Error(`Could not determine latest ${APP_NAME} version.`);
 							}
@@ -1140,7 +1211,7 @@ export async function handlePackageCommand(
 								return true;
 							}
 							console.log(chalk.dim(`Updating ${APP_NAME} from the xz-dev Release...`));
-							await runXzSelfUpdate(latestRelease, VERSION, options.force);
+							await runXzSelfUpdate(latestRelease, VERSION, options.force, mirrorOptions);
 							console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${latestRelease.version}`));
 							console.log(
 								chalk.dim(

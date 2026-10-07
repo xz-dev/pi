@@ -458,6 +458,76 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it.each([
+		[
+			["--mirror"],
+			["https://gh-proxy.com/https://github.com", "https://ghfast.top/https://github.com", "https://github.com"],
+		],
+		[["--mirror-url", "http://localhost:8080"], ["http://localhost:8080"]],
+		[["--mirror-url", "not a URL"], ["not a URL"]],
+		[
+			["--mirror-url", "http://first.local", "--mirror-url", "https://second.example"],
+			["http://first.local", "https://second.example"],
+		],
+		[["--no-mirror"], undefined],
+	] as const)("saves mirror choice %j without updating or accessing the network", async (flags, expected) => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ theme: "dark", updateMirrors: ["https://old.example"] }));
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const update = vi.spyOn(DefaultPackageManager.prototype, "update");
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", ...flags, "--permanent"]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(update).not.toHaveBeenCalled();
+		expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+			theme: "dark",
+			...(expected === undefined ? {} : { updateMirrors: expected }),
+		});
+	});
+
+	it("reports a failed mirror save without overwriting malformed settings", async () => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, "{broken");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--mirror", "--permanent"]);
+
+		expect(process.exitCode).toBe(1);
+		expect(readFileSync(settingsPath, "utf8")).toBe("{broken");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.flat().join("\n")).toContain("Could not save mirror setting");
+		expect(logSpy).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["--permanent"],
+		["--mirror-url"],
+		["--mirror", "--no-mirror"],
+		["--mirror", "--mirror-url", "http://localhost"],
+		["--mirror", "--clean"],
+		["--mirror", "--models"],
+		["--mirror", "--extensions"],
+		["--mirror", "--permanent", "--all"],
+		["--mirror", "--permanent", "--force"],
+	])("rejects invalid mirror option combination %j without side effects", async (...flags) => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, "{}");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		await runPackageCommandDirectly(["update", ...flags]);
+		expect(process.exitCode).toBe(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(readFileSync(settingsPath, "utf8")).toBe("{}");
+	});
+
 	it("rejects update --clean combined with another update target", async () => {
 		const create = vi.spyOn(ModelRuntime, "create");
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
