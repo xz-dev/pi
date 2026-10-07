@@ -118,6 +118,9 @@ export type DefaultProjectTrust = "ask" | "always" | "never";
 /** true hides all startup output, "header" keeps only the startup header. */
 export type QuietStartup = boolean | "header";
 
+/** How assistant thinking blocks are displayed in the transcript. */
+export type ThinkingDisplayMode = "preview" | "expanded" | "collapsed";
+
 export type TransportSetting = Transport;
 
 export interface SkillOverride {
@@ -163,7 +166,7 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
-	hideThinkingBlock?: boolean;
+	thinkingDisplay?: ThinkingDisplayMode; // default: "preview"
 	showCacheMissNotices?: boolean; // default: false - show cache cost and provider recovery notices
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
@@ -575,6 +578,14 @@ export class SettingsManager {
 		if (!("transport" in settings) && typeof settings.websockets === "boolean") {
 			settings.transport = settings.websockets ? "websocket" : "sse";
 			delete settings.websockets;
+		}
+
+		// Migrate hideThinkingBlock boolean -> thinkingDisplay enum
+		if ("hideThinkingBlock" in settings && !("thinkingDisplay" in settings)) {
+			if (typeof settings.hideThinkingBlock === "boolean") {
+				settings.thinkingDisplay = settings.hideThinkingBlock ? "collapsed" : "expanded";
+			}
+			delete settings.hideThinkingBlock;
 		}
 
 		// Migrate old skills object format to new array format
@@ -1182,8 +1193,15 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
-	getHideThinkingBlock(): boolean {
-		return this.settings.hideThinkingBlock ?? false;
+	getThinkingDisplayMode(): ThinkingDisplayMode {
+		const mode = this.settings.thinkingDisplay;
+		return mode === "preview" || mode === "expanded" || mode === "collapsed" ? mode : "preview";
+	}
+
+	setThinkingDisplayMode(mode: ThinkingDisplayMode): void {
+		this.globalSettings.thinkingDisplay = mode;
+		this.markModified("thinkingDisplay");
+		this.save();
 	}
 
 	getShowCacheMissNotices(): boolean {
@@ -1200,12 +1218,6 @@ export class SettingsManager {
 			return environmentEditor;
 		}
 		return process.platform === "win32" ? "notepad" : "nano";
-	}
-
-	setHideThinkingBlock(hide: boolean): void {
-		this.globalSettings.hideThinkingBlock = hide;
-		this.markModified("hideThinkingBlock");
-		this.save();
 	}
 
 	setShowCacheMissNotices(show: boolean): void {
