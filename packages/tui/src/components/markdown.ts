@@ -288,8 +288,8 @@ export interface MarkdownTheme {
 }
 
 export interface MarkdownOptions {
-	/** Wrap logical lines (default), or clip their start/end to keep content within the available width. */
-	overflow?: "wrap" | "clip-start" | "clip-end";
+	/** Wrap/clip lines, or preserve unwrapped body rows without generated padding or table borders. */
+	overflow?: "wrap" | "clip-start" | "clip-end" | "preserve";
 	/** Preserve source list markers instead of normalizing them. */
 	preserveOrderedListMarkers?: boolean;
 	/** Preserve source backslash escapes instead of normalizing escaped punctuation. */
@@ -429,6 +429,13 @@ export class Markdown implements Component {
 			}
 		}
 
+		if (this.options.overflow === "preserve") {
+			this.cachedText = this.text;
+			this.cachedWidth = width;
+			this.cachedLines = contentLines;
+			return contentLines;
+		}
+
 		// Add top/bottom padding (empty lines)
 		const bgFn = this.defaultTextStyle?.bgColor;
 		const emptyLine = " ".repeat(width);
@@ -469,6 +476,10 @@ export class Markdown implements Component {
 				continue;
 			}
 			for (const wrappedLine of this.layoutLine(line, contentWidth)) {
+				if (this.options.overflow === "preserve") {
+					lines.push(wrappedLine);
+					continue;
+				}
 				const lineWithMargins = leftMargin + wrappedLine + rightMargin;
 				if (bgFn) {
 					lines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
@@ -487,6 +498,10 @@ export class Markdown implements Component {
 	}
 
 	private layoutLine(text: string, width: number): string[] {
+		if (this.options.overflow === "preserve") {
+			// Keep hard line breaks and their ANSI state without soft wrapping or clipping.
+			return wrapTextWithAnsi(text, Infinity);
+		}
 		if (!this.options.overflow || this.options.overflow === "wrap") {
 			return wrapTextWithAnsi(text, width);
 		}
@@ -651,7 +666,9 @@ export class Markdown implements Component {
 			}
 
 			case "code": {
-				const indent = this.theme.codeBlockIndent ?? "  ";
+				// "preserve" consumers crop the styled rows themselves; skip renderer-added
+				// indentation so it cannot be mistaken for body content.
+				const indent = this.options.overflow === "preserve" ? "" : (this.theme.codeBlockIndent ?? "  ");
 				const openingBorder = this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`);
 				if (openingBorder) lines.push(openingBorder);
 				if (this.theme.highlightCode) {
@@ -923,7 +940,9 @@ export class Markdown implements Component {
 	 */
 	private renderList(token: Tokens.List, depth: number, width: number, styleContext?: InlineStyleContext): string[] {
 		const lines: string[] = [];
-		const indent = "    ".repeat(depth);
+		// "preserve" consumers crop styled rows themselves; drop layout indentation so
+		// it cannot be mistaken for body content.
+		const indent = this.options.overflow === "preserve" ? "" : "    ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = typeof token.start === "number" ? token.start : 1;
 
@@ -940,7 +959,8 @@ export class Markdown implements Component {
 			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
 			const marker = bullet + taskMarker;
 			const firstPrefix = indent + this.theme.listBullet(marker);
-			const continuationPrefix = indent + " ".repeat(visibleWidth(marker));
+			const continuationPrefix =
+				this.options.overflow === "preserve" ? "" : indent + " ".repeat(visibleWidth(marker));
 			const itemWidth = Math.max(1, width - visibleWidth(firstPrefix));
 			let renderedAnyLine = false;
 
@@ -1017,6 +1037,21 @@ export class Markdown implements Component {
 		const numCols = token.header.length;
 
 		if (numCols === 0) {
+			return lines;
+		}
+
+		if (this.options.overflow === "preserve") {
+			// Keep styled cell content in row order, separated by a visible marker.
+			// Alignment spaces and box borders are layout, not reasoning content.
+			lines.push(
+				token.header
+					.map((cell) => this.theme.bold(this.renderInlineTokens(cell.tokens || [], styleContext)))
+					.join("│"),
+			);
+			for (const row of token.rows) {
+				lines.push(row.map((cell) => this.renderInlineTokens(cell.tokens || [], styleContext)).join("│"));
+			}
+			if (nextTokenType && nextTokenType !== "space") lines.push("");
 			return lines;
 		}
 
