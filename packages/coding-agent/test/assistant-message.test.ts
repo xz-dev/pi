@@ -1,10 +1,20 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
+import { Chalk } from "chalk";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { getMarkdownTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+
+// Force decoration ANSI codes on: the real theme gates bold/italic on terminal color
+// support, which is off under the offline test env.
+const probeChalk = new Chalk({ level: 3 });
+const thinkingMarkdownTheme = {
+	...getMarkdownTheme(),
+	bold: (text: string) => probeChalk.bold(text),
+	italic: (text: string) => probeChalk.italic(text),
+};
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -128,40 +138,69 @@ describe("AssistantMessageComponent", () => {
 		expect(collapsed).toContain("second reasoning");
 	});
 
-	test("preview style shows the latest reasoning line while streaming and the label once thinking ends", () => {
+	test("preview style renders Markdown styles while streaming and keeps the first-line summary after thinking ends", () => {
 		initTheme("dark");
 
-		const streaming = new AssistantMessageComponent(undefined, "preview");
+		const streaming = new AssistantMessageComponent(undefined, "preview", thinkingMarkdownTheme);
 		streaming.updateContent(
-			createAssistantMessage([{ type: "thinking", thinking: "first thought\nsecond thought tail" }]),
+			createAssistantMessage([
+				{ type: "thinking", thinking: "summary **lead** here\nsecond thought tail **bold** `code`" },
+			]),
 			true,
 			0,
 		);
-		const streamingLines = streaming.render(40).map((line) => stripAnsi(line));
-		expect(streamingLines.some((line) => line.includes("second thought tail"))).toBe(true);
-		expect(streamingLines.some((line) => line.includes("first thought"))).toBe(false);
-		expect(streamingLines.some((line) => line.includes("Thinking..."))).toBe(false);
+		const streamingLines = streaming.render(80);
+		const liveRow = streamingLines.find((line) => stripAnsi(line).includes("second thought tail")) ?? "";
+		expect(stripAnsi(streamingLines.join("\n"))).not.toContain("summary");
+		expect(stripAnsi(liveRow)).not.toContain("**");
+		expect(stripAnsi(liveRow)).not.toContain("`");
+		expect(liveRow).toMatch(/\x1b\[1m(?:\x1b\[[\d;]*m)*bold/);
+		expect(liveRow).toContain(theme.fg("mdCode", "code"));
 
-		// thinking_end (no active thinking index) freezes the run into the static label.
+		// thinking_end (no active thinking index) folds the run to its styled first-line summary.
 		streaming.updateContent(
-			createAssistantMessage([{ type: "thinking", thinking: "first thought\nsecond thought tail" }]),
+			createAssistantMessage([
+				{ type: "thinking", thinking: "summary **lead** here\nsecond thought tail **bold** `code`" },
+			]),
 			true,
 			null,
 		);
-		const endedLines = streaming.render(40).map((line) => stripAnsi(line));
-		expect(endedLines.some((line) => line.includes("Thinking..."))).toBe(true);
-		expect(endedLines.some((line) => line.includes("second thought tail"))).toBe(false);
+		const endedLines = streaming.render(80);
+		const endedRow = endedLines.find((line) => stripAnsi(line).includes("summary")) ?? "";
+		expect(stripAnsi(endedRow)).toContain("summary lead here");
+		expect(stripAnsi(endedRow)).not.toContain("**");
+		expect(endedRow).toMatch(/\x1b\[1m(?:\x1b\[[\d;]*m)*lead/);
+		expect(stripAnsi(endedLines.join("\n"))).not.toContain("second thought tail");
+		expect(stripAnsi(endedLines.join("\n"))).not.toContain("Thinking...");
+
+		// Settled preview shows the head of a first line that overflows the width.
+		const longFirst = new AssistantMessageComponent(undefined, "preview", thinkingMarkdownTheme);
+		longFirst.updateContent(
+			createAssistantMessage([{ type: "thinking", thinking: `${"x".repeat(120)} head-end\nshort tail` }]),
+			false,
+		);
+		const longLines = longFirst.render(40).map((line) => stripAnsi(line));
+		const longRow = longLines.find((line) => line.includes("x")) ?? "";
+		expect(longRow).toContain("x");
+		expect(longRow).not.toContain("head-end");
+		expect(longRow).not.toContain("short tail");
 
 		const finished = new AssistantMessageComponent(
 			createAssistantMessage([
-				{ type: "thinking", thinking: "done reasoning" },
+				{ type: "thinking", thinking: "done **bold** reasoning `code`" },
 				{ type: "text", text: "answer" },
 			]),
 			"preview",
+			thinkingMarkdownTheme,
 		);
-		const finishedLines = finished.render(40).map((line) => stripAnsi(line));
-		expect(finishedLines.some((line) => line.includes("Thinking..."))).toBe(true);
-		expect(finishedLines.some((line) => line.includes("done reasoning"))).toBe(false);
+		const finishedLines = finished.render(80);
+		const finishedRow = finishedLines.find((line) => stripAnsi(line).includes("done")) ?? "";
+		expect(stripAnsi(finishedRow)).toContain("done bold reasoning code");
+		expect(stripAnsi(finishedRow)).not.toContain("**");
+		expect(stripAnsi(finishedRow)).not.toContain("`");
+		expect(finishedRow).toMatch(/\x1b\[1m(?:\x1b\[[\d;]*m)*bold/);
+		expect(finishedRow).toContain(theme.fg("mdCode", "code"));
+		expect(stripAnsi(finishedLines.join("\n"))).not.toContain("Thinking...");
 	});
 
 	test("preview row follows the tail of a long reasoning line within terminal columns", () => {
@@ -182,6 +221,120 @@ describe("AssistantMessageComponent", () => {
 		expect(visibleWidth(previewLine ?? "")).toBeLessThanOrEqual(width);
 		// Single preview row plus the leading spacer.
 		expect(lines.filter((line) => line.trim().length > 0)).toHaveLength(1);
+	});
+
+	test("mouse and bulk folds retain completed summaries without expanding the body", () => {
+		initTheme("dark");
+		const width = 80;
+		const clickRow = (component: AssistantMessageComponent, needle: string) => {
+			const lines = component.render(width);
+			const y = lines.findIndex((line) => stripAnsi(line).includes(needle));
+			expect(y).toBeGreaterThanOrEqual(0);
+			expect(
+				component.handleMouse({
+					type: "click",
+					button: "left",
+					x: 1,
+					y,
+					screenX: 1,
+					screenY: y,
+					width,
+					height: lines.length,
+					shift: false,
+					alt: false,
+					ctrl: false,
+					clickCount: 1,
+				})?.handled,
+			).toBe(true);
+		};
+		const message = createAssistantMessage([{ type: "thinking", thinking: "summary line\nsecond tail" }]);
+		for (const bulk of [false, true]) {
+			const component = new AssistantMessageComponent(undefined, "preview");
+			component.updateContent(message, true, 0);
+			component.setExpanded(true);
+			if (bulk) component.setExpanded(false);
+			else clickRow(component, "summary line");
+			expect(stripAnsi(component.render(width).join("\n"))).toContain("second tail");
+			component.updateContent(message, true, null);
+			component.updateContent(message, false);
+			let rendered = stripAnsi(component.render(width).join("\n"));
+			expect(rendered).toContain("summary line");
+			expect(rendered).not.toContain("second tail");
+			expect(rendered).not.toContain("Thinking...");
+			clickRow(component, "summary line");
+			expect(stripAnsi(component.render(width).join("\n"))).toContain("second tail");
+			clickRow(component, "summary line");
+			rendered = stripAnsi(component.render(width).join("\n"));
+			expect(rendered).toContain("summary line");
+			expect(rendered).not.toContain("second tail");
+		}
+	});
+
+	test("preview keeps the complete logical tail across wrapping boundaries", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(undefined, "preview", thinkingMarkdownTheme, "Thinking...", 0);
+		for (const length of [17, 18, 19, 36, 37]) {
+			for (const wide of [false, true]) {
+				const text = wide ? "中".repeat(length) : "1234567890".repeat(4).slice(0, length);
+				for (const markdown of [text, `**${text}**`]) {
+					component.updateContent(createAssistantMessage([{ type: "thinking", thinking: markdown }]), true, 0);
+					expect(stripAnsi(component.render(18).join("\n")).trim()).toBe(text.slice(wide ? -9 : -18));
+				}
+			}
+		}
+	});
+
+	test("preview preserves literal Markdown symbols and omits only code block decoration", () => {
+		initTheme("dark");
+		for (const [text, expected] of [
+			["`#`", "#"],
+			["\\#", "#"],
+			["```\n###\n```", "###"],
+			["> ```ts\n> const answer = 42;\n> ```", "const answer = 42;"],
+			["- ```ts\n  const answer = 42;\n  ```", "const answer = 42;"],
+		]) {
+			for (const live of [true, false]) {
+				const component = new AssistantMessageComponent(undefined, "preview");
+				component.updateContent(
+					createAssistantMessage([{ type: "thinking", thinking: text }]),
+					live,
+					live ? 0 : null,
+				);
+				const rendered = stripAnsi(component.render(80).join("\n")).trim();
+				expect(rendered).toContain(expected);
+				expect(rendered).not.toContain("```");
+			}
+		}
+	});
+
+	test("preview restores thinking text styling after inline code", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(undefined, "preview", thinkingMarkdownTheme);
+		const message = createAssistantMessage([{ type: "thinking", thinking: "prefix `code` suffix" }]);
+		for (const live of [true, false]) {
+			component.updateContent(message, live, live ? 0 : null);
+			const rendered = component.render(80).join("\n");
+			expect(rendered).toContain(theme.fg("mdCode", "code"));
+			expect(rendered).toContain(theme.fg("thinkingText", " suffix"));
+		}
+	});
+
+	test("completed summaries stay visible while a later folded run streams", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(undefined, "preview");
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "first summary\nfirst body" },
+			{ type: "text", text: "answer" },
+			{ type: "thinking", thinking: "second summary\nsecond tail" },
+		]);
+		component.setExpanded(false);
+		for (const active of [null, 2, null]) {
+			component.updateContent(message, true, active);
+			const rendered = stripAnsi(component.render(80).join("\n"));
+			expect(rendered).toContain("first summary");
+			expect(rendered).not.toContain("first body");
+			expect(rendered).toContain(active === 2 ? "second tail" : "second summary");
+		}
 	});
 
 	test("preview respects thinking markdown transformers before picking the latest line", () => {
@@ -324,14 +477,15 @@ describe("AssistantMessageComponent", () => {
 		expect(rendered).toContain("live tail");
 		expect(rendered).not.toContain("earlier");
 
-		// thinking_end freezes the folded run into the label.
+		// thinking_end restores the first-line summary without expanding the folded run.
 		component.updateContent(
 			createAssistantMessage([{ type: "thinking", thinking: "earlier\nlive tail" }]),
 			true,
 			null,
 		);
 		rendered = stripAnsi(component.render(80).join("\n"));
-		expect(rendered).toContain("Thinking...");
+		expect(rendered).toContain("earlier");
+		expect(rendered).not.toContain("Thinking...");
 		expect(rendered).not.toContain("live tail");
 	});
 
