@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
+import { satisfies } from "semver";
 import { parse } from "yaml";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -355,21 +356,32 @@ test("Release publication workflow has trusted triggers, exact checkout, and lea
   assert.match(workflowText, /git rev-parse HEAD[^\n]*GITHUB_SHA/);
   assert.match(workflowText, /git status --porcelain=v1 --untracked-files=all/);
   // Runtime engines require ^22.22.2 || ^24.15.0 || >=26.0.0: every release job's
-  // setup-node must select a supported Node (a bare "22" can resolve to a cached
-  // version below the floor), and the FreeBSD pkg node22 guest asserts the floor.
+  // setup-node selects ^22.22.2 — the supported floor on the existing Node 22
+  // major. ">=22.22.2" would wrongly admit unsupported 23.x, 24.0–24.14, and 25.
   for (const [name, job] of Object.entries(workflow.jobs)) {
     for (const step of job.steps ?? []) {
       if (typeof step.uses === "string" && step.uses.startsWith("actions/setup-node@")) {
-        assert.equal(step.with?.["node-version"], ">=22.22.2", `${name} must select Node >=22.22.2`);
+        assert.equal(step.with?.["node-version"], "^22.22.2", `${name} must select Node ^22.22.2`);
       }
     }
   }
+  // Prove the engines range admits the floor and rejects below-floor and
+  // unsupported majors, rather than asserting a raw version string.
+  const enginesRange = "^22.22.2 || ^24.15.0 || >=26.0.0";
+  for (const supported of ["22.22.2", "22.99.0", "24.15.0", "24.16.1", "26.0.0", "27.0.0"]) {
+    assert.ok(satisfies(supported, enginesRange), `${supported} must satisfy engines`);
+    assert.ok(satisfies(supported, "^22.22.2") === supported.startsWith("22."), `setup-node ^22.22.2 admits only 22.x: ${supported}`);
+  }
+  for (const rejected of ["22.22.1", "22.0.0", "23.0.0", "23.99.9", "24.0.0", "24.14.9", "25.0.0"]) {
+    assert.ok(!satisfies(rejected, enginesRange), `${rejected} must not satisfy engines`);
+    assert.ok(!satisfies(rejected, "^22.22.2"), `setup-node ^22.22.2 must reject ${rejected}`);
+  }
   for (const name of ["build-freebsd", "update-freebsd-release-candidate"]) {
     const guest = workflow.jobs[name].steps.find((step) => step.uses?.startsWith("vmactions/freebsd-vm@"));
-    assert.match(guest?.with?.run ?? "", /22\.22\.2/, `${name} FreeBSD guest must enforce the Node floor`);
+    assert.match(guest?.with?.run ?? "", /22\.22\.2 \|\| \^24\.15\.0 \|\| >=26\.0\.0/, `${name} FreeBSD guest must enforce the engines range`);
   }
   const syncSetupNode = syncWorkflow.jobs["sync-main-with-squash-branches"].steps.find((step) => step.uses?.startsWith("actions/setup-node@"));
-  assert.equal(syncSetupNode?.with?.["node-version"], ">=22.22.2", "upstream sync gates must run on Node >=22.22.2");
+  assert.equal(syncSetupNode?.with?.["node-version"], "^22.22.2", "upstream sync gates must run on Node ^22.22.2");
   for (const uses of pinnedUses()) {
     assert.match(uses, /@[0-9a-f]{40}$/, `action must be SHA-pinned: ${uses}`);
   }

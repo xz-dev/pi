@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: ">=22.22.2", cache: npm }
+        with: { node-version: "^22.22.2", cache: npm }
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with: { version: "0.15.2" }
       - run: npm ci --ignore-scripts
@@ -75,7 +75,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: ">=22.22.2", cache: npm }
+        with: { node-version: "^22.22.2", cache: npm }
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with: { version: "0.15.2" }
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -130,8 +130,8 @@ jobs:
           mem: ${{ matrix.mem }}
           prepare: pkg install -y node22 npm-node22 bash curl git-lite zip unzip libxcb xorg-vfbserver fd-find ripgrep
           # The synced checkout keeps the runner uid; trust it so release tooling can verify HEAD == GITHUB_SHA.
-          # Runtime engines require >=22.22.2; FreeBSD pkg 'node22' must satisfy that floor.
-          run: git config --global --add safe.directory "$PWD" && node -e 'const v=process.versions.node.split(".").map(Number); if (!(v[0]>22||v[0]===22&&(v[1]>22||v[1]===22&&v[2]>=2)||v[0]>=24)) { console.error(`node22 ${process.version} below 22.22.2 floor`); process.exit(1) }' && bash scripts/freebsd-release.sh
+          # Runtime engines require ^22.22.2 || ^24.15.0 || >=26.0.0; FreeBSD pkg 'node22' must satisfy it.
+          run: git config --global --add safe.directory "$PWD" && node -e 'const v=process.versions.node.split(".").map(Number); if (!((v[0]===22&&(v[1]>22||v[1]===22&&v[2]>=2))||(v[0]===24&&(v[1]>15||v[1]===15&&v[2]>=0))||v[0]>=26)) { console.error(`node ${process.version} outside engines ^22.22.2 || ^24.15.0 || >=26.0.0`); process.exit(1) }' && bash scripts/freebsd-release.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-target-${{ github.sha }}-${{ matrix.target }}", path: ".artifacts/freebsd-release/pi-${{ matrix.target }}", if-no-files-found: error, overwrite: true, retention-days: 14 }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: ">=22.22.2" }
+        with: { node-version: "^22.22.2" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { pattern: "github-release-target-${{ github.sha }}-*", path: "${{ runner.temp }}/prebuilt", merge-multiple: true }
       - run: |
@@ -165,7 +165,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: ">=22.22.2" }
+        with: { node-version: "^22.22.2" }
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         if: runner.os == 'Windows'
         with: { version: "0.15.2" }
@@ -270,7 +270,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: ">=22.22.2" }
+        with: { node-version: "^22.22.2" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: "github-release-candidate-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
       - name: Restore executable bits dropped by artifact transport
@@ -294,7 +294,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: ">=22.22.2" }
+        with: { node-version: "^22.22.2" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: "github-release-accepted-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
       - name: Restore executable bits dropped by artifact transport
@@ -338,7 +338,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: ">=22.22.2" }
+        with: { node-version: "^22.22.2" }
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         if: runner.os == 'Windows'
         with: { version: "0.15.2" }
@@ -403,7 +403,7 @@ jobs:
           mem: ${{ matrix.mem }}
           prepare: pkg install -y node22
           run: |
-            node -e 'const v=process.versions.node.split(".").map(Number); if (!(v[0]>22||v[0]===22&&(v[1]>22||v[1]===22&&v[2]>=2)||v[0]>=24)) { console.error(`node22 ${process.version} below 22.22.2 floor`); process.exit(1) }'
+            node -e 'const v=process.versions.node.split(".").map(Number); if (!((v[0]===22&&(v[1]>22||v[1]===22&&v[2]>=2))||(v[0]===24&&(v[1]>15||v[1]===15&&v[2]>=0))||v[0]>=26)) { console.error(`node ${process.version} outside engines ^22.22.2 || ^24.15.0 || >=26.0.0`); process.exit(1) }'
             version=$(node -p 'require("./.artifacts/signed-release/release-manifest.json").distributionVersion')
             PI_XZ_E2E_TIMEOUT_MS=$(node --input-type=module -e 'import { EMULATED_SMOKE_SLOWDOWN, bunTarget } from "./scripts/lib/bun-targets.mjs"; console.log(120000 * (bunTarget(process.argv[1]).emulated ? EMULATED_SMOKE_SLOWDOWN : 1))' '${{ matrix.target }}') node scripts/e2e-binary-self-update.mjs .artifacts/signed-release '${{ matrix.target }}' "$version"
 
@@ -416,7 +416,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { ref: "${{ github.sha }}", fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: ">=22.22.2" }
+        with: { node-version: "^22.22.2" }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: "github-release-attested-${{ github.sha }}", path: "${{ runner.temp }}/pi-github-release" }
       - name: Restore executable bits dropped by artifact transport
