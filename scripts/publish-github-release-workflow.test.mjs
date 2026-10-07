@@ -354,6 +354,22 @@ test("Release publication workflow has trusted triggers, exact checkout, and lea
   assert.equal(workflow.jobs["publish-release"].if, "github.ref == 'refs/heads/main'");
   assert.match(workflowText, /git rev-parse HEAD[^\n]*GITHUB_SHA/);
   assert.match(workflowText, /git status --porcelain=v1 --untracked-files=all/);
+  // Runtime engines require ^22.22.2 || ^24.15.0 || >=26.0.0: every release job's
+  // setup-node must select a supported Node (a bare "22" can resolve to a cached
+  // version below the floor), and the FreeBSD pkg node22 guest asserts the floor.
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (typeof step.uses === "string" && step.uses.startsWith("actions/setup-node@")) {
+        assert.equal(step.with?.["node-version"], ">=22.22.2", `${name} must select Node >=22.22.2`);
+      }
+    }
+  }
+  for (const name of ["build-freebsd", "update-freebsd-release-candidate"]) {
+    const guest = workflow.jobs[name].steps.find((step) => step.uses?.startsWith("vmactions/freebsd-vm@"));
+    assert.match(guest?.with?.run ?? "", /22\.22\.2/, `${name} FreeBSD guest must enforce the Node floor`);
+  }
+  const syncSetupNode = syncWorkflow.jobs["sync-main-with-squash-branches"].steps.find((step) => step.uses?.startsWith("actions/setup-node@"));
+  assert.equal(syncSetupNode?.with?.["node-version"], ">=22.22.2", "upstream sync gates must run on Node >=22.22.2");
   for (const uses of pinnedUses()) {
     assert.match(uses, /@[0-9a-f]{40}$/, `action must be SHA-pinned: ${uses}`);
   }
@@ -698,5 +714,5 @@ test("FreeBSD guest verifies the exact checked-out commit with Git", () => {
   assert.deepEqual(job.strategy.matrix.include.map(({ target, arch }) => [target, arch]), [["freebsd-x64", "x86_64"], ["freebsd-arm64", "aarch64"]]);
   // Release tooling runs git rev-parse HEAD inside the guest; it needs Git and must trust the runner-owned checkout.
   assert.match(vmStep.with.prepare, /\bgit-lite\b/);
-  assert.match(vmStep.with.run, /git config --global --add safe\.directory "\$PWD" && bash scripts\/freebsd-release\.sh/);
+  assert.match(vmStep.with.run, /git config --global --add safe\.directory "\$PWD" && .*bash scripts\/freebsd-release\.sh/);
 });
