@@ -19,6 +19,7 @@ export interface ResolveProjectTrustedOptions {
 	extensionsResult?: LoadExtensionsResult;
 	projectTrustContext: ProjectTrustContext;
 	onExtensionError?: (message: string) => void;
+	getSlowHookThresholdMs?: (kind: "sync" | "async") => number;
 }
 
 function formatProjectTrustPrompt(cwd: string): string {
@@ -56,6 +57,7 @@ export async function resolveProjectTrusted(options: ResolveProjectTrustedOption
 			options.extensionsResult,
 			{ type: "project_trust", cwd: options.cwd },
 			options.projectTrustContext,
+			options.getSlowHookThresholdMs,
 		);
 		for (const error of errors) {
 			options.onExtensionError?.(`Extension "${error.extensionPath}" project_trust error: ${error.error}`);
