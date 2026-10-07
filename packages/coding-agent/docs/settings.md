@@ -164,7 +164,20 @@ The built-in extensions are named `builtin:mcp`, `builtin:llama.cpp`, `builtin:c
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
+| `updateMirrors` | `string[]` | None | Ordered URL bases replacing `https://github.com` for xz-dev Release downloads and version checks. One URL is a one-element chain; absent or empty uses GitHub directly. **Agent-directory settings only.** |
 | `collapseChangelog` | boolean | `false` | Show a condensed changelog after an update. |
 | `enableInstallTelemetry` | boolean | `true` | Enable anonymous install/update reporting and selected provider attribution headers. Does not control update checks. |
 | `enableAnalytics` | boolean | `false` | Opt in to analytics data sharing. Currently used only by the experimental first-run setup. |
 | `warnings.anthropicExtraUsage` | boolean | `true` | Warn when Anthropic subscription authentication may use paid extra usage. |
+
+Use `pi update --mirror --permanent` to save the current GH-Proxy → GHFast → GitHub list, repeat `--mirror-url <url>` with `--permanent` to save a custom ordered chain, or use `pi update --no-mirror --permanent` to clear it. These commands only change settings; they do not update or contact mirrors. Values are used verbatim, with no URL prevalidation. Custom chains do not implicitly append other sources. Mirrors do not affect extension, npm, or model-catalog downloads. See [mirror installation and updates](../../../README.md#install-through-a-github-mirror).
+
+```json
+{
+  "updateMirrors": [
+    "http://localhost:8080",
+    "https://ghfast.top/https://github.com",
+    "https://github.com"
+  ]
+}
+```
