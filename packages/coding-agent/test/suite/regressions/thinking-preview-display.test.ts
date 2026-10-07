@@ -171,7 +171,7 @@ describe("thinking preview display", () => {
 		expect(JSON.parse(saved)).toEqual({ thinkingDisplay: "collapsed" });
 	});
 
-	test("faux provider: default preview freezes at thinking_end before the answer delta", async () => {
+	test("faux provider: default preview keeps the identical tail row at thinking_end before the answer delta", async () => {
 		const h = await createHarness();
 		const chatContainer = new Container();
 		const ctx = makeCtx(h.settingsManager, chatContainer);
@@ -199,14 +199,19 @@ describe("thinking preview display", () => {
 			]);
 			await h.session.prompt("offline check");
 			await Promise.all(pending);
-			expect(snapshots.some((s) => s.kind === "thinking_delta" && s.text.includes("tail"))).toBe(true);
+			const delta = snapshots.find((s) => s.kind === "thinking_delta" && s.text.includes("live tail"));
+			expect(delta).toBeDefined();
 			const end = snapshots.find((s) => s.kind === "thinking_end");
 			expect(end).toBeDefined();
-			// Folded preview-mode run keeps its first-line summary, not the tail or the static label.
-			expect(end?.text).toContain("first");
-			expect(end?.text).not.toContain("live tail");
+			// Folded preview-mode run keeps the identical tail row, not a first-line summary or label.
+			expect(end?.text).toContain("live tail");
+			expect(end?.text).not.toContain("first");
 			expect(end?.text).not.toContain("Thinking...");
 			expect(end?.text).not.toContain("answer");
+			// The thinking_end row is unchanged from the streaming tail row.
+			expect(end?.text.split("\n").find((l) => l.includes("live tail"))).toBe(
+				delta?.text.split("\n").find((l) => l.includes("live tail")),
+			);
 			expect(snapshots.at(-1)?.text).toContain("answer");
 		} finally {
 			unsubscribe();
@@ -340,10 +345,12 @@ describe("thinking preview display", () => {
 		const next = ctx.streamingComponent;
 		expect(next).toBeDefined();
 		if (!next) throw new Error("message_start did not create an assistant component");
+		// Bulk-expanded state from Ctrl+O still expands the new run.
 		expect(renderText(next)).toContain("new first");
 		clickRow(next, "new first");
-		expect(renderText(next)).not.toContain("new first");
+		// Per-run mouse collapse folds back to the rolling tail row.
 		expect(renderText(next)).toContain("new tail");
+		expect(renderText(next)).not.toContain("new first");
 		expect(renderText(component)).toContain("first reasoning");
 		expect(renderText(tool)).toBe(expandedTool);
 		// A new bulk action resets that local mouse choice, without replacing cards.
@@ -383,8 +390,9 @@ describe("thinking preview display", () => {
 			},
 		});
 		expect(renderText(ctx.streamingComponent)).not.toContain("Thinking...");
-		expect(renderText(ctx.streamingComponent)).toContain("new first");
-		expect(renderText(ctx.streamingComponent)).not.toContain("new tail");
+		// thinking_end keeps the identical rolling tail row: still the tail, still no first line.
+		expect(renderText(ctx.streamingComponent)).toContain("new tail");
+		expect(renderText(ctx.streamingComponent)).not.toContain("new first");
 	});
 
 	test.each(["ctrl+t", "ctrl+y"] as const)("settings description respects display binding %s", (binding) => {
