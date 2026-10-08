@@ -42,7 +42,6 @@ describe("getSupportedThinkingLevels", () => {
 	it("includes Claude Sonnet 5.5 with managed effort levels and official pricing", () => {
 		const model = getModel("anthropic", "claude-sonnet-5-5");
 		expect(model).toMatchObject({
-			// https://www.anthropic.com/claude-haiku-5-5: Sonnet 5.5 cache reads now cost $0.10/MTok.
 			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
 			contextWindow: 1_000_000,
 			maxTokens: 128_000,
