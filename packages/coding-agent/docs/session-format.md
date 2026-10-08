@@ -206,6 +206,18 @@ Session metadata (e.g., user-defined display name). Set via `/name`, `--name` / 
 
 The session name is displayed in the session selector (`/resume`) instead of the first message when set.
 
+### SessionRunEntry
+
+Run lifecycle metadata with `type: "run_state"`. A `started` record is followed by `finished` when the whole run settles, or `aborted` for explicit cancellation. Tools, automatic retry waits, and internal continuations remain part of the same run. Shutdown cleanup does not close an interrupted run.
+
+```json
+{"type":"run_state","id":"record-uuid","parentId":"a1b2c3d4","timestamp":"2024-12-03T14:35:00.000Z","sessionId":"session-uuid","runId":"run-uuid","state":"started"}
+```
+
+Each record has a unique `id`; terminal records retain the same `runId`. Unlike conversation entries, these records do not move the leaf or change the conversation generation. They are excluded from `SessionEntry`, tree indexing, `getEntries()`, model context, and conversation rendering. `parentId` identifies the retained conversation anchor rather than a new tree edge. Forks do not inherit the source process's run records.
+
+Interactive cold startup can recover the latest unfinished run belonging to the current session and branch, subject to [input precedence and retry eligibility](sessions.md#retry-interrupted-work). A missing terminal record does not establish ownership of a session file; concurrent writers to the same file are not supported.
+
 ## Tree Structure
 
 Entries normally form one tree, but navigation APIs can create multiple roots:
