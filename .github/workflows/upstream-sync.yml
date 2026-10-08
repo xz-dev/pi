@@ -56,6 +56,7 @@ jobs:
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
             +refs/heads/patch/env-overrides:refs/remotes/origin/patch/env-overrides \
             +refs/heads/patch/defer-threshold-compaction:refs/remotes/origin/patch/defer-threshold-compaction \
+            +refs/heads/patch/cold-start-retry:refs/remotes/origin/patch/cold-start-retry \
             +refs/heads/patch/compact-input-dock:refs/remotes/origin/patch/compact-input-dock \
             +refs/heads/patch/thinking-preview:refs/remotes/origin/patch/thinking-preview \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort
@@ -95,6 +96,7 @@ jobs:
             quarantine-auth-storage-flake \
             env-overrides \
             defer-threshold-compaction \
+            cold-start-retry \
             compact-input-dock \
             thinking-preview \
             model-thinking-sort \

@@ -339,6 +339,17 @@ test("--print-inputs and --print-marker resolve current refs from a source repo"
 	}
 });
 
+test("cold-start retry follows its lifecycle and startup-input prerequisites", () => {
+	const script = readFileSync(SCRIPT, "utf8");
+	const order = script.match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
+	const coldStart = order.indexOf("cold-start-retry");
+	assert.ok(coldStart >= 0);
+	for (const prerequisite of ["startup-submit-readiness", "defer-threshold-compaction"]) {
+		assert.ok(order.indexOf(prerequisite) >= 0 && order.indexOf(prerequisite) < coldStart);
+	}
+	assert.match(script, /^\s*defer-threshold-compaction:cold-start-retry$/m);
+});
+
 test("--check passes when the workflow fetch list matches the recorded inputs", () => {
 	let status = 0;
 	let err = "";

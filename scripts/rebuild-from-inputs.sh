@@ -125,6 +125,7 @@ PATCH_ORDER=(
 	env-overrides
 	freebsd-support
 	defer-threshold-compaction
+	cold-start-retry
 	compact-input-dock
 	thinking-preview
 	model-thinking-sort
@@ -143,6 +144,7 @@ CHAIN_EDGES=(
 	esc-abort:manual-retry
 	manual-retry:slow-hook-tui-only
 	slow-hook-tui-only:defer-threshold-compaction
+	defer-threshold-compaction:cold-start-retry
 )
 
 print_marker() {
