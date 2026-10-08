@@ -466,13 +466,13 @@ export interface ThinkingBudgetsSettings extends Static<typeof ThinkingBudgetsSe
 export type MermaidRenderingMode = NonNullable<Static<typeof MarkdownSettingsSchema>["mermaid"]>;
 export interface MarkdownSettings extends Static<typeof MarkdownSettingsSchema> {}
 export interface WarningSettings extends Static<typeof WarningSettingsSchema> {}
+export interface SkillOverride extends Static<typeof SkillOverrideSchema> {}
+export type SkillOverrides = Static<typeof SkillOverridesSchema>;
 export type CodemodeMode = Static<typeof CodemodeModeSchema>;
 export interface CodemodeSettings extends Static<typeof CodemodeSettingsSchema> {}
 export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
 export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
 export type TransportSetting = NonNullable<SettingsInput["transport"]>;
-export interface SkillOverride extends Static<typeof SkillOverrideSchema> {}
-export type SkillOverrides = Static<typeof SkillOverridesSchema>;
 export type PackageSource = Static<typeof PackageSourceSchema>;
 export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutput"]>;
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
