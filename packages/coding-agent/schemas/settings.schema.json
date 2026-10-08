@@ -156,6 +156,13 @@
           "type": "number",
           "default": 60000
         },
+        "nonRetryableErrorPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional case-insensitive error message substrings that skip automatic retry."
+        },
         "provider": {
           "type": "object",
           "properties": {
