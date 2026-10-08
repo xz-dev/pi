@@ -1,9 +1,8 @@
-import { setKeybindings, type TUI } from "@earendil-works/pi-tui";
+import { setKeybindings, stripTerminalSequences, type TUI } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { LoginDialogComponent } from "../../../src/modes/interactive/components/login-dialog.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
-import { stripAnsi } from "../../../src/utils/ansi.ts";
 
 vi.mock("../../../src/utils/open-browser.ts", () => ({
 	openBrowser: vi.fn(),
@@ -19,7 +18,8 @@ function createDialog(): LoginDialogComponent {
 }
 
 function renderDialog(dialog: LoginDialogComponent): string[] {
-	return stripAnsi(dialog.render(120).join("\n"))
+	// Regression #5433: compare visible input, not the TUI's zero-width cursor markers.
+	return stripTerminalSequences(dialog.render(120).join("\n"))
 		.split("\n")
 		.map((line) => line.trimEnd());
 }
