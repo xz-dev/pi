@@ -218,6 +218,21 @@
       "description": "When true, hide all startup output. When \"header\", keep only the startup header.",
       "default": false
     },
+    "slowSyncHookThresholdMs": {
+      "type": "number",
+      "description": "Sync extension handler warning threshold in milliseconds; -1 disables, >=0 enables TUI notices.",
+      "default": -1
+    },
+    "slowAsyncHookThresholdMs": {
+      "type": "number",
+      "description": "Async extension handler warning threshold in milliseconds; -1 disables, >=0 enables TUI notices.",
+      "default": -1
+    },
+    "showStartupDiagnostics": {
+      "type": "boolean",
+      "description": "Show startup resource conflict and extension issue diagnostics.",
+      "default": false
+    },
     "defaultProjectTrust": {
       "anyOf": [
         {
