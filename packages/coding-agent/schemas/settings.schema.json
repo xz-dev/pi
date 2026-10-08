@@ -181,9 +181,27 @@
         }
       }
     },
+    "thinkingDisplay": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "preview"
+        },
+        {
+          "type": "string",
+          "const": "expanded"
+        },
+        {
+          "type": "string",
+          "const": "collapsed"
+        }
+      ],
+      "default": "preview"
+    },
     "hideThinkingBlock": {
       "type": "boolean",
-      "default": false
+      "description": "Legacy setting migrated to thinkingDisplay.",
+      "deprecated": true
     },
     "showCacheMissNotices": {
       "type": "boolean",

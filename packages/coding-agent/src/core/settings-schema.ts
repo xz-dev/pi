@@ -476,7 +476,8 @@ export type PackageSource = Static<typeof PackageSourceSchema>;
 export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutput"]>;
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
 export type CacheWarmingMode = NonNullable<SettingsInput["cacheWarming"]>;
-export interface Settings extends Omit<SettingsInput, "hideThinkingBlock" | "queueMode" | "retry" | "skills" | "websockets"> {
+export interface Settings
+	extends Omit<SettingsInput, "hideThinkingBlock" | "queueMode" | "retry" | "skills" | "websockets"> {
 	retry?: RetrySettings;
 	skills?: string[];
 }

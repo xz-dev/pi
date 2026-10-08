@@ -947,7 +947,9 @@ export class SettingsManager {
 
 	getThinkingDisplayMode(): ThinkingDisplayMode {
 		const mode = this.settings.thinkingDisplay;
-		return mode === "preview" || mode === "expanded" || mode === "collapsed" ? mode : "preview";
+		return mode === "preview" || mode === "expanded" || mode === "collapsed"
+			? mode
+			: SETTINGS_DEFAULTS.thinkingDisplay;
 	}
 
 	setThinkingDisplayMode(mode: ThinkingDisplayMode): void {
