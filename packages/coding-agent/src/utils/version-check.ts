@@ -1,6 +1,9 @@
 import { compare, valid } from "semver";
+import { DISTRIBUTION, detectInstallMethod, getAgentDir, PACKAGE_NAME } from "../config.ts";
+import { SettingsManager } from "../core/settings-manager.ts";
 import { fetchWithRetry } from "./management-http.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
+import { getLatestXzRelease } from "./xz-release-update.ts";
 
 const LATEST_VERSION_URL = "https://pi.dev/api/latest-version";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
@@ -53,6 +56,16 @@ export async function getLatestPiRelease(
 	options: { timeoutMs?: number; retry?: boolean } = {},
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_OFFLINE) return undefined;
+	if (DISTRIBUTION === "xz-dev" && PACKAGE_NAME === "@earendil-works/pi-coding-agent") {
+		if (detectInstallMethod() !== "bun-binary") {
+			return undefined;
+		}
+		const mirrors = SettingsManager.create(process.cwd(), getAgentDir(), {
+			projectTrusted: false,
+		}).getUpdateMirrors();
+		const release = await getLatestXzRelease(currentVersion, { ...options, mirrors });
+		return release ? { version: release.version } : undefined;
+	}
 
 	const response = await fetchWithRetry(
 		LATEST_VERSION_URL,
