@@ -618,11 +618,11 @@ export class SettingsSelectorComponent extends Container {
 								const sorted = [...config.availableDefaultModels].sort((a, b) => {
 									const aKey = modelSettingKey(a);
 									const bKey = modelSettingKey(b);
-									if (aKey === currentModelKey) return -1;
-									if (bKey === currentModelKey) return 1;
-									if (aKey === currentDefaultModelKey) return -1;
-									if (bKey === currentDefaultModelKey) return 1;
-									return a.provider.localeCompare(b.provider);
+									// Configured overrides first, then both groups alphabetically by provider/model-id.
+									const aConfigured = currentModelThinkingLevels[aKey] !== undefined;
+									const bConfigured = currentModelThinkingLevels[bKey] !== undefined;
+									if (aConfigured !== bConfigured) return aConfigured ? -1 : 1;
+									return aKey.localeCompare(bKey);
 								});
 								const items: SelectItem[] = sorted.map((model) => {
 									const key = modelSettingKey(model);
