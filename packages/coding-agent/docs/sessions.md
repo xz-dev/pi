@@ -17,6 +17,16 @@ Use `/name` or `--name` to assign a recognizable session name. Run `/session` to
 
 The session picker lets you search, rename, and delete sessions. It can also show paths, change sorting, and limit results to named sessions. See [Keybindings](keybindings.md#sessions) for its shortcuts.
 
+## Retry interrupted work
+
+Use `/retry` to retry an interrupted response or continue from a safe conversation boundary. When Pi is idle and that boundary is retryable, a dim `Use /retry to retry or continue` hint appears above the editor. The hint is hidden while work or queued input is pending.
+
+On interactive cold startup, Pi checks once whether the saved session has an unfinished run. If it is idle, has a valid retry boundary, and has no new startup input, queued message, or editor draft, Pi automatically retries. For example, `pi -c` or `pi --session <path>` can recover after a process kill or an exit during work without prior cancellation.
+
+Explicit cancellation, normal completion, and exhausted errors do not trigger automatic recovery. Manual `/retry` can still be available after cancellation. Old sessions without run records do not automatically recover.
+
+This check runs only during interactive startup. Switching sessions with `/resume`, navigating branches, and opening sessions through print mode, RPC, or the SDK do not trigger it. Recovery does not directly re-execute historical tools, and cannot guarantee exactly-once external effects. Do not open the same session file for writing in multiple processes.
+
 ## Choose how to branch
 
 Pi stores entries as a tree, so returning to an earlier point does not erase the branch you leave.

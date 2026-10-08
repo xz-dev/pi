@@ -1238,6 +1238,26 @@ export class InteractiveMode {
 
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
 
+		// One cold-start idle check, before entering the input loop. Session rebinding
+		// does not pass here, and fresh input always takes precedence over recovery.
+		const startupSession = this.session;
+		const canRecover = () =>
+			this.session === startupSession &&
+			!initialMessage &&
+			!initialMessages?.length &&
+			!initialImages?.length &&
+			!this.editor.getText().trim() &&
+			this.pendingUserInputs.length === 0 &&
+			this.compactionQueuedMessages.length === 0 &&
+			this.submittedInput === undefined &&
+			!this.isShuttingDown &&
+			this.session.isIdle &&
+			!!this.sessionManager.getInterruptedRun() &&
+			this.session.canRetry;
+		if (canRecover()) {
+			await this.handleRetryCommand(canRecover);
+		}
+
 		// Process initial messages
 		if (initialMessage) {
 			try {
@@ -2533,6 +2553,18 @@ export class InteractiveMode {
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
 		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
+		const retryHint = new ThemedText(() => theme.fg("dim", "Use /retry to retry or continue"), 1, 0);
+		this.widgetContainerAbove.addChild({
+			render: (width) =>
+				!this.isShuttingDown &&
+				this.pendingUserInputs.length === 0 &&
+				this.compactionQueuedMessages.length === 0 &&
+				this.submittedInput === undefined &&
+				this.session.canRetry
+					? retryHint.render(width)
+					: [],
+			invalidate: () => retryHint.invalidate(),
+		});
 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
 		this.ui.requestRender();
 	}
@@ -3756,6 +3788,7 @@ export class InteractiveMode {
 
 			case "agent_settled":
 				await this.checkShutdownRequested();
+				this.ui.requestRender();
 				break;
 
 			case "compaction_start": {
@@ -7206,10 +7239,10 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async handleRetryCommand(): Promise<void> {
+	private async handleRetryCommand(shouldStart?: () => boolean): Promise<void> {
 		this.clearStatusIndicator();
 		try {
-			await this.session.retry();
+			await this.session.retry(shouldStart);
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
