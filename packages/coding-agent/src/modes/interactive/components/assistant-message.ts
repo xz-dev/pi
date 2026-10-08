@@ -133,7 +133,7 @@ class ThinkingPreviewText implements Component {
 				hint = candidate;
 				clipped = next;
 			}
-			content = `${theme.fg("muted", hint)}${clipped.text}`;
+			content = `${theme.italic(theme.fg("muted", hint))}${clipped.text}`;
 		}
 
 		const line = `${" ".repeat(paddingX)}${content}\x1b[0m${" ".repeat(paddingX)}`;
