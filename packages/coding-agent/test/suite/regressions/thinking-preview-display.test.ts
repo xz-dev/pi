@@ -39,6 +39,7 @@ interface AssistantCtx {
 	chatContainer: Container;
 	pendingTools: Map<unknown, unknown>;
 	footer: { invalidate: () => void };
+	programStatus: { handleEvent: () => void };
 	session: {
 		sessionManager: { getCwd: () => string; buildContextEntries: () => never[]; getBranch: () => never[] };
 		retryAttempt: number;
@@ -81,6 +82,7 @@ function makeCtx(manager: SettingsManager, chatContainer: Container): AssistantC
 		chatContainer,
 		pendingTools: new Map(),
 		footer: { invalidate: noop },
+		programStatus: { handleEvent: noop },
 		ui: { requestRender: noop, terminal: { setProgress: noop } },
 		session: {
 			sessionManager: { getCwd: () => process.cwd(), buildContextEntries: () => [], getBranch: () => [] },
