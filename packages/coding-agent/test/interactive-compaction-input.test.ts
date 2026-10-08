@@ -27,6 +27,7 @@ describe("compaction input display", () => {
 			editor,
 			ui: { requestRender: vi.fn() },
 			footer: { invalidate: vi.fn() },
+			programStatus: { handleEvent: vi.fn() },
 			getAllQueuedMessages: () => ({ steering: [], followUp: [] }),
 			updatePendingMessagesDisplay() {
 				prototype.updatePendingMessagesDisplay.call(this);
@@ -73,6 +74,7 @@ describe("compaction input display", () => {
 				prototype.clearSubmittedInput.call(this);
 			},
 			footer: { invalidate: vi.fn() },
+			programStatus: { handleEvent: vi.fn() },
 			settingsManager: { getShowTerminalProgress: () => false },
 			sessionManager: { buildContextEntries: () => [{ type: "compaction" }] },
 			chatContainer: {
