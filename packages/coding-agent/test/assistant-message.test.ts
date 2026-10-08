@@ -158,6 +158,7 @@ describe("AssistantMessageComponent", () => {
 		expect(liveRow).toContain(theme.fg("mdCode", "code"));
 		// The earlier line is omitted with a muted grapheme count, not silently dropped.
 		expect(stripAnsi(liveRow).trimStart()).toMatch(/^\u2026 \(17 chars\) /);
+		expect(liveRow).toContain(theme.italic(theme.fg("muted", "\u2026 (17 chars) ")));
 
 		// thinking_end (no active thinking index) keeps the identical rolling tail row.
 		streaming.updateContent(
