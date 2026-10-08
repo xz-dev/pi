@@ -12,6 +12,7 @@ import {
 	streamSimple as streamSimpleOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
 import type { Api, Context, Model } from "../src/types.ts";
+import { retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -1720,21 +1721,26 @@ describe("openai-codex streaming", () => {
 			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
 		});
 
-		const resultPromise = streamOpenAICodexResponses(model, context, {
-			apiKey: token,
-			sessionId: "ws-connect-timeout",
-			transport: "auto",
-			timeoutMs: 300_000,
-			websocketConnectTimeoutMs: 50,
-		}).result();
+		const resultPromise = retryAssistantCall(
+			() =>
+				streamOpenAICodexResponses(model, context, {
+					apiKey: token,
+					sessionId: "ws-connect-timeout",
+					transport: "auto",
+					timeoutMs: 300_000,
+					websocketConnectTimeoutMs: 50,
+				}).result(),
+			{ enabled: false, maxRetries: 0, baseDelayMs: 0 },
+			undefined,
+		);
 
-		await vi.advanceTimersByTimeAsync(50);
+		await vi.advanceTimersByTimeAsync(205);
 
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(getOpenAICodexWebSocketDebugStats("ws-connect-timeout")).toMatchObject({
-			websocketFailures: 1,
+			websocketFailures: 4,
 			sseFallbacks: 1,
 			websocketFallbackActive: true,
 			lastWebSocketError: "WebSocket connect timeout after 50ms",
@@ -1880,22 +1886,27 @@ describe("openai-codex streaming", () => {
 			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
 		});
 
-		const resultPromise = streamOpenAICodexResponses(model, context, {
-			apiKey: token,
-			sessionId: "ws-idle-before-start",
-			transport: "auto",
-			timeoutMs: 50,
-		}).result();
+		const resultPromise = retryAssistantCall(
+			() =>
+				streamOpenAICodexResponses(model, context, {
+					apiKey: token,
+					sessionId: "ws-idle-before-start",
+					transport: "auto",
+					timeoutMs: 50,
+				}).result(),
+			{ enabled: false, maxRetries: 0, baseDelayMs: 0 },
+			undefined,
+		);
 
 		await vi.advanceTimersByTimeAsync(0);
 		expect(sentBodies).toHaveLength(1);
-		await vi.advanceTimersByTimeAsync(50);
+		await vi.advanceTimersByTimeAsync(205);
 
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(getOpenAICodexWebSocketDebugStats("ws-idle-before-start")).toMatchObject({
-			websocketFailures: 1,
+			websocketFailures: 4,
 			sseFallbacks: 1,
 			websocketFallbackActive: true,
 		});
@@ -2348,7 +2359,7 @@ describe("openai-codex streaming", () => {
 						]);
 						return;
 					}
-					if (sentBodies.length === 3 && recoveryTransport === "sse") {
+					if (sentBodies.length >= 3 && recoveryTransport === "sse") {
 						queueMicrotask(() => this.dispatch("error", { message: "retry websocket failed" }));
 						return;
 					}
@@ -2433,21 +2444,28 @@ describe("openai-codex streaming", () => {
 			const first = await streamOpenAICodexResponses(model, firstContext, {
 				apiKey: token,
 				sessionId,
-				transport: "websocket-cached",
+				transport: recoveryTransport === "sse" ? "auto" : "websocket-cached",
 			}).result();
 			const secondContext = normalizeContext({
 				messages: [...firstContext.messages, first, { role: "user", content: "Now finish", timestamp: 2 }],
 			});
-			const eventTypes: string[] = [];
-			const secondStream = streamOpenAICodexResponses(model, secondContext, {
-				apiKey: token,
-				sessionId,
-				transport: "websocket-cached",
-			});
-			for await (const event of secondStream) {
-				eventTypes.push(event.type);
-			}
-			const second = await secondStream.result();
+			const attempts: string[][] = [];
+			const second = await retryAssistantCall(
+				async () => {
+					const eventTypes: string[] = [];
+					attempts.push(eventTypes);
+					const secondStream = streamOpenAICodexResponses(model, secondContext, {
+						apiKey: token,
+						sessionId,
+						transport: recoveryTransport === "sse" ? "auto" : "websocket-cached",
+					});
+					for await (const event of secondStream) eventTypes.push(event.type);
+					return secondStream.result();
+				},
+				{ enabled: false, maxRetries: 0, baseDelayMs: 0 },
+				undefined,
+			);
+			const eventTypes = attempts.at(-1)!;
 
 			expect(second.stopReason).toBe("stop");
 			expect(second.content.find((content) => content.type === "text")?.text).toBe(
@@ -2455,9 +2473,14 @@ describe("openai-codex streaming", () => {
 			);
 			expect(eventTypes.filter((type) => type === "start")).toHaveLength(1);
 			expect(eventTypes).not.toContain("error");
-			expect(connections).toBe(2);
-			expect(sentBodies).toHaveLength(3);
-			expect(sentBodies.map((body) => body.connectionId)).toEqual([1, 1, 2]);
+			expect(attempts.filter((events) => events.includes("error"))).toHaveLength(
+				recoveryTransport === "sse" ? 3 : 0,
+			);
+			expect(connections).toBe(recoveryTransport === "sse" ? 5 : 2);
+			expect(sentBodies).toHaveLength(recoveryTransport === "sse" ? 6 : 3);
+			expect(sentBodies.map((body) => body.connectionId)).toEqual(
+				recoveryTransport === "sse" ? [1, 1, 2, 3, 4, 5] : [1, 1, 2],
+			);
 			expect(sentBodies[1].previous_response_id).toBe("resp_1");
 			expect(sentBodies[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Now finish" }] }]);
 			expect(sentBodies[2].previous_response_id).toBeUndefined();
@@ -2468,12 +2491,12 @@ describe("openai-codex streaming", () => {
 			});
 			expect(fetchMock).toHaveBeenCalledTimes(recoveryTransport === "sse" ? 1 : 0);
 			expect(getOpenAICodexWebSocketDebugStats(sessionId)).toMatchObject({
-				requests: 3,
-				connectionsCreated: 2,
+				requests: recoveryTransport === "sse" ? 6 : 3,
+				connectionsCreated: recoveryTransport === "sse" ? 5 : 2,
 				connectionsReused: 1,
-				fullContextRequests: 2,
+				fullContextRequests: recoveryTransport === "sse" ? 5 : 2,
 				deltaRequests: 1,
-				websocketFailures: recoveryTransport === "sse" ? 1 : 0,
+				websocketFailures: recoveryTransport === "sse" ? 4 : 0,
 				sseFallbacks: recoveryTransport === "sse" ? 1 : 0,
 			});
 		},
