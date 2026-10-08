@@ -292,6 +292,19 @@
                   "type": "string"
                 }
               },
+              "skillOverrides": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {
+                    "type": "object",
+                    "properties": {
+                      "disableModelInvocation": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
               "prompts": {
                 "type": "array",
                 "items": {
