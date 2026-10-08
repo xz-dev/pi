@@ -9,12 +9,14 @@ import {
 	resetOpenAICodexWebSocketDebugStatsLazy,
 } from "../src/compat.ts";
 import type { Model } from "../src/types.ts";
+import { retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 afterEach(() => {
 	vi.unstubAllGlobals();
 	closeOpenAICodexWebSocketSessions();
 	resetOpenAICodexWebSocketDebugStats();
+	vi.restoreAllMocks();
 });
 
 function mockToken(): string {
@@ -88,28 +90,29 @@ describe("lazy Codex WebSocket state accessors", () => {
 		const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] });
 		const api = openAICodexResponsesApi();
 		const run = (sessionId = "lazy-session") =>
-			api
-				.stream(model, context, {
-					apiKey: mockToken(),
-					sessionId,
-					transport: "auto",
-				})
-				.result();
+			retryAssistantCall(
+				() => api.stream(model, context, { apiKey: mockToken(), sessionId, transport: "auto" }).result(),
+				{ enabled: false, maxRetries: 0, baseDelayMs: 0 },
+				undefined,
+			);
 
+		vi.spyOn(Date, "now").mockReturnValue(1000);
 		expect((await run()).stopReason).toBe("stop");
+		expect((await run()).stopReason).toBe("stop");
+		expect((await run("other-session")).stopReason).toBe("stop");
 		expect((await run("other-session")).stopReason).toBe("stop");
 		for (const sessionId of ["lazy-session", "other-session"]) {
 			expect(await getOpenAICodexWebSocketDebugStatsLazy(sessionId)).toMatchObject({
-				websocketFailures: 1,
+				websocketFailures: 4,
 				websocketFallbackActive: true,
 			});
 		}
 
-		// Without a reset the session stays on SSE, even after the transport recovers.
+		// A reset can bypass the cooldown even before its five-minute deadline.
 		failSends = false;
 		expect((await run()).stopReason).toBe("stop");
-		expect(websocketRequests).toBe(2);
-		expect(fetchMock).toHaveBeenCalledTimes(3);
+		expect(websocketRequests).toBe(8);
+		expect(fetchMock).toHaveBeenCalledTimes(5);
 
 		if (scope === "all") {
 			await resetOpenAICodexWebSocketDebugStatsLazy();
@@ -118,12 +121,12 @@ describe("lazy Codex WebSocket state accessors", () => {
 		}
 		expect(await getOpenAICodexWebSocketDebugStatsLazy("lazy-session")).toBeUndefined();
 		expect((await run()).stopReason).toBe("stop");
-		expect(websocketRequests).toBe(3);
-		expect(fetchMock).toHaveBeenCalledTimes(3);
+		expect(websocketRequests).toBe(9);
+		expect(fetchMock).toHaveBeenCalledTimes(5);
 
 		// A scoped reset preserves the other session's fallback; reset-all clears it.
 		expect((await run("other-session")).stopReason).toBe("stop");
-		expect(websocketRequests).toBe(scope === "all" ? 4 : 3);
-		expect(fetchMock).toHaveBeenCalledTimes(scope === "all" ? 3 : 4);
+		expect(websocketRequests).toBe(scope === "all" ? 10 : 9);
+		expect(fetchMock).toHaveBeenCalledTimes(scope === "all" ? 5 : 6);
 	});
 });
