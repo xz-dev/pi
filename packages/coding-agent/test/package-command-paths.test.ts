@@ -458,6 +458,89 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it.each([
+		[
+			["--mirror"],
+			["https://gh-proxy.com/https://github.com", "https://ghfast.top/https://github.com", "https://github.com"],
+		],
+		[["--mirror-url", "http://localhost:8080"], ["http://localhost:8080"]],
+		[["--mirror-url", "not a URL"], ["not a URL"]],
+		[
+			["--mirror-url", "http://first.local", "--mirror-url", "https://second.example"],
+			["http://first.local", "https://second.example"],
+		],
+		[["--no-mirror"], undefined],
+	] as const)("saves mirror choice %j without updating or accessing the network", async (flags, expected) => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ theme: "dark", updateMirrors: ["https://old.example"] }));
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const update = vi.spyOn(DefaultPackageManager.prototype, "update");
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", ...flags, "--permanent"]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(update).not.toHaveBeenCalled();
+		expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+			theme: "dark",
+			...(expected === undefined ? {} : { updateMirrors: expected }),
+		});
+	});
+
+	it("reports a failed mirror save without overwriting malformed settings", async () => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, "{broken");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--mirror", "--permanent"]);
+
+		expect(process.exitCode).toBe(1);
+		expect(readFileSync(settingsPath, "utf8")).toBe("{broken");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.flat().join("\n")).toContain("Could not save mirror setting");
+		expect(logSpy).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["--permanent"],
+		["--mirror-url"],
+		["--mirror", "--no-mirror"],
+		["--mirror", "--mirror-url", "http://localhost"],
+		["--mirror", "--clean"],
+		["--mirror", "--models"],
+		["--mirror", "--extensions"],
+		["--mirror", "--permanent", "--all"],
+		["--mirror", "--permanent", "--force"],
+	])("rejects invalid mirror option combination %j without side effects", async (...flags) => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, "{}");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		await runPackageCommandDirectly(["update", ...flags]);
+		expect(process.exitCode).toBe(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(readFileSync(settingsPath, "utf8")).toBe("{}");
+	});
+
+	it("rejects update --clean combined with another update target", async () => {
+		const create = vi.spyOn(ModelRuntime, "create");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(runPackageCommandDirectly(["update", "--clean", "--models"])).resolves.toBeUndefined();
+
+		expect(create).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"--clean cannot be combined with another update target",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("refreshes only model catalogs with update --models", async () => {
 		const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
 		const create = vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh } as unknown as ModelRuntime);
@@ -612,6 +695,29 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 			expect(stderr).toContain("Missing install source.");
 			expect(stderr).toContain("Usage: pi install <source> [-l]");
 			expect(stderr).not.toContain("at ");
+			expect(process.exitCode).toBe(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("refuses self-update for a channel-managed install before any release lookup", async () => {
+		const lockDir = join(tempDir, "channel-install");
+		mkdirSync(lockDir, { recursive: true });
+		writeFileSync(join(lockDir, ".scoop.managed.lock"), "");
+		process.env.PI_PACKAGE_DIR = lockDir;
+		const fetchMock = vi.fn(async () => Response.json({ version: VERSION }));
+		vi.stubGlobal("fetch", fetchMock);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
+
+			// The refusal must happen offline, before any release/version lookup.
+			expect(fetchMock).not.toHaveBeenCalled();
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("managed by scoop");
+			expect(stderr).toContain("self-update is disabled");
 			expect(process.exitCode).toBe(1);
 		} finally {
 			errorSpy.mockRestore();
