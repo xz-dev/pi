@@ -133,10 +133,12 @@ function thinkingBudgetsSettings(options?: TSchemaOptions) {
 const ThinkingBudgetsSettingsSchema = thinkingBudgetsSettings();
 
 const ModelCatalogSettingsSchema = Type.Object({
-	refreshTimeoutMs: Type.Optional(Type.Number({
-		description: "Model catalog refresh timeout in milliseconds; negative disables, zero aborts immediately.",
-		default: SETTINGS_DEFAULTS.models.refreshTimeoutMs,
-	})),
+	refreshTimeoutMs: Type.Optional(
+		Type.Number({
+			description: "Model catalog refresh timeout in milliseconds; negative disables, zero aborts immediately.",
+			default: SETTINGS_DEFAULTS.models.refreshTimeoutMs,
+		}),
+	),
 });
 
 const MarkdownSettingsSchema = Type.Object({
