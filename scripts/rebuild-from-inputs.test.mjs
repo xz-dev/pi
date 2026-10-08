@@ -339,6 +339,42 @@ test("--print-inputs and --print-marker resolve current refs from a source repo"
 	}
 });
 
+test("Codex recovery applies only its delta after the retry-patterns prerequisite", () => {
+	const fixture = buildFixture();
+	const patterns = fixture.file("retry-policy.txt", "terminal-patterns\n", "patterns", "patch/retry-non-retryable-patterns");
+	const codex = fixture.file("retry-policy.txt", "terminal-patterns\ncodex-recovery\n", "codex", "patch/codex-websocket-recovery", "patch/retry-non-retryable-patterns");
+	const { target } = replay(fixture, [
+		"--upstream", fixture.upstream,
+		"--ci", fixture.ci,
+		"--patch", `retry-non-retryable-patterns=${patterns}`,
+		"--patch", `codex-websocket-recovery=${codex}`,
+	]);
+	try {
+		assert.equal(readFileSync(join(target, "retry-policy.txt"), "utf8"), "terminal-patterns\ncodex-recovery\n");
+		const subjects = log(target);
+		assert.ok(subjects.indexOf("merge patch/retry-non-retryable-patterns branch") < subjects.indexOf("merge patch/codex-websocket-recovery branch"));
+	} finally {
+		cleanup(fixture, target);
+	}
+});
+
+test("Codex recovery rejects a tip without its retry-patterns predecessor", () => {
+	const fixture = buildFixture();
+	const patterns = fixture.file("retry-policy.txt", "terminal-patterns\n", "patterns", "patch/retry-non-retryable-patterns");
+	const codex = fixture.file("codex.txt", "codex\n", "codex", "patch/codex-websocket-recovery");
+	const { target, out } = replay(fixture, [
+		"--upstream", fixture.upstream,
+		"--ci", fixture.ci,
+		"--patch", `retry-non-retryable-patterns=${patterns}`,
+		"--patch", `codex-websocket-recovery=${codex}`,
+	], { expectFail: true });
+	try {
+		assert.match(out, /patch\/codex-websocket-recovery must descend from patch\/retry-non-retryable-patterns/);
+	} finally {
+		cleanup(fixture, target);
+	}
+});
+
 test("cold-start retry follows its lifecycle and startup-input prerequisites", () => {
 	const script = readFileSync(SCRIPT, "utf8");
 	const order = script.match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);

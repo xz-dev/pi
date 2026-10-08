@@ -26,9 +26,14 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 
 ### Features
 
-- Let extensions inspect and clear a Codex session's sticky SSE fallback through `getOpenAICodexWebSocketDebugStatsLazy(sessionId)` and `resetOpenAICodexWebSocketDebugStatsLazy(sessionId?)` from `@earendil-works/pi-ai/compat` (also exposed by the extension runtime's `pi-ai` alias).
-  - Use case: An extension can re-enable WebSocket attempts after a transient socket or proxy failure without restarting the Pi session.
-  - Limits: Recovery is opt-in and extension-controlled. Pi adds no automatic retry or cooldown; reset also clears debug counters, and omitting the session ID resets all sessions.
+- Recover Codex WebSocket transport after transient failures, then resume incremental context instead of leaving the session permanently on SSE.
+  - `auto`: Make an initial WS attempt plus three fixed retries using Pi's global backoff (2, 4, and 8 seconds by default), even when ordinary retry is disabled. If these fail, use SSE with a fresh full global retry budget.
+  - Recovery: After five minutes on SSE, the next real request starts one logical WS probe. Transport failure renews the cooldown; success sends full context once on a fresh socket, then later requests can use deltas again. Probes never run in the background.
+  - Explicit `websocket` and `websocket-cached` never downgrade; they follow the global retry settings. Failed partial output is kept in history but omitted from automatic retry context.
+  - Use case: Recover from a socket or proxy interruption without restarting Pi or repeatedly sending full context after WebSocket recovery.
+  - Limits: Logical attempts may include existing bounded protocol repairs before output. SDK callers need a stable `sessionId` and an outer retry owner for the same policy; sessionless SDK calls retain their prior behavior.
+  - Extensions can still inspect/reset session recovery state through `getOpenAICodexWebSocketDebugStatsLazy(sessionId)` and `resetOpenAICodexWebSocketDebugStatsLazy(sessionId?)` from `@earendil-works/pi-ai/compat` (or `pi-ai` in the extension runtime). Reset also clears counters; omitting the ID resets all sessions.
+  - Details: [Network and retries](packages/coding-agent/docs/settings.md#network-and-retries)
   - Patch branch: [`patch/codex-websocket-recovery`](https://github.com/xz-dev/pi/tree/patch/codex-websocket-recovery)
 
 - Run the native FreeBSD amd64 and arm64 executables with CLI, TUI, extension loading, self-update, and cleanup of obsolete backup copies.

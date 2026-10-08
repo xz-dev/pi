@@ -143,6 +143,7 @@ CHAIN_EDGES=(
 	managed-tool-executions:esc-abort
 	esc-abort:manual-retry
 	manual-retry:slow-hook-tui-only
+	retry-non-retryable-patterns:codex-websocket-recovery
 	slow-hook-tui-only:defer-threshold-compaction
 	defer-threshold-compaction:cold-start-retry
 )

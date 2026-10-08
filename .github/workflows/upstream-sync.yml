@@ -199,7 +199,9 @@ jobs:
               test/event-stream.test.ts \
               test/openai-responses-compat.test.ts \
               test/openai-codex-websocket-lazy.test.ts \
+              test/openai-codex-websocket-recovery.test.ts \
               test/openai-codex-stream.test.ts \
+              test/ws-cached-stale-continuation-repro.test.ts \
               test/providers.test.ts \
               test/retry.test.ts
           )
@@ -210,6 +212,12 @@ jobs:
               test/agent.test.ts \
               test/managed-tool-executions.test.ts \
               test/managed-tool-executions-esc-abort.test.ts
+          )
+          # Keep Codex's deterministic transport/settings gate independent of
+          # the live-catalog exclusions used by the general suite below.
+          (
+            cd packages/coding-agent
+            node ../../node_modules/vitest/dist/cli.js --run test/suite/codex-websocket-retry.test.ts
           )
           # Run the full coding-agent suite with vitest auto-discovery, matching
           # upstream CI (npm test -> vitest --run).
