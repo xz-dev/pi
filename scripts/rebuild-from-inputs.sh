@@ -128,6 +128,7 @@ PATCH_ORDER=(
 	cold-start-retry
 	compact-input-dock
 	thinking-preview
+	retry-error-presentation
 	model-thinking-sort
 )
 

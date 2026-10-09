@@ -59,6 +59,7 @@ jobs:
             +refs/heads/patch/cold-start-retry:refs/remotes/origin/patch/cold-start-retry \
             +refs/heads/patch/compact-input-dock:refs/remotes/origin/patch/compact-input-dock \
             +refs/heads/patch/thinking-preview:refs/remotes/origin/patch/thinking-preview \
+            +refs/heads/patch/retry-error-presentation:refs/remotes/origin/patch/retry-error-presentation \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort
 
           # Driver source: the replay script and its small union helper come
@@ -99,6 +100,7 @@ jobs:
             cold-start-retry \
             compact-input-dock \
             thinking-preview \
+            retry-error-presentation \
             model-thinking-sort \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
@@ -217,7 +219,9 @@ jobs:
           # the live-catalog exclusions used by the general suite below.
           (
             cd packages/coding-agent
-            node ../../node_modules/vitest/dist/cli.js --run test/suite/codex-websocket-retry.test.ts
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/suite/codex-websocket-retry.test.ts \
+              test/interactive-retry-presentation.test.ts
           )
           # Run the full coding-agent suite with vitest auto-discovery, matching
           # upstream CI (npm test -> vitest --run).
