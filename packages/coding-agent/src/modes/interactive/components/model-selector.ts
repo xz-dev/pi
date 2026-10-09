@@ -6,6 +6,7 @@ import {
 	getKeybindings,
 	getSelectPageIndex,
 	Input,
+	renderSelectionWindow,
 	Spacer,
 	Text,
 	type TUI,
@@ -16,6 +17,7 @@ import { getDistinctModelName, getModelSelectorSearchText } from "../model-searc
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText, keyHint } from "./keybinding-hints.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 
 interface ModelItem {
 	provider: string;
@@ -40,7 +42,7 @@ const MAX_VISIBLE = 10;
 /**
  * Component that renders a model selector with search
  */
-export class ModelSelectorComponent extends Container implements Focusable {
+export class ModelSelectorComponent extends SelectorPanel implements Focusable {
 	readonly capturesViewportInput: boolean = true;
 	private searchInput: Input;
 
@@ -306,6 +308,44 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.updateList();
 	}
 
+	private createModelRow(item: ModelItem, index: number): Text {
+		const isSelected = index === this.selectedIndex;
+		const defaultBadge = this.isDefaultModel(item.model) ? theme.fg("muted", " · default") : "";
+		const cursor = isSelected ? theme.fg("accent", "→ ") : "  ";
+		const currentMarker = modelsAreEqual(this.currentModel, item.model) ? theme.fg("accent", "✓ ") : "  ";
+		const modelText = isSelected ? theme.fg("accent", item.id) : item.id;
+		const name = getDistinctModelName({ id: item.id, name: item.model.name });
+		const nameText = name ? theme.fg("muted", ` (${name})`) : "";
+		return new Text(
+			`${cursor}${currentMarker}${modelText}${nameText} ${theme.fg("muted", `[${item.provider}]`)}${defaultBadge}`,
+			0,
+			0,
+		);
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		const help = new Text(
+			theme.fg(
+				"dim",
+				`${keyDisplayText("tui.select.confirm")} select · ${keyDisplayText("tui.select.cancel")} cancel${this.onSelectAsDefaultCallback ? ` · ${keyDisplayText("app.models.save")} default` : ""}${this.scopedModelItems.length > 0 ? ` · ${keyDisplayText("tui.input.tab")} scope (${this.scope})` : ""}`,
+			),
+			0,
+			0,
+		);
+		const footer = [...(this.errorMessage ? [new Text(theme.fg("error", this.errorMessage), 0, 0)] : []), help];
+		const items = this.filteredModels.map((item, index) => this.createModelRow(item, index).render(width));
+		return compactSelector(
+			width,
+			height,
+			[this.searchInput],
+			(rows) =>
+				items.length > 0
+					? renderSelectionWindow(items, this.selectedIndex, rows).lines
+					: new Text(theme.fg("muted", "  No matching models"), 0, 0).render(width).slice(0, rows),
+			footer,
+		);
+	}
+
 	private updateList(): void {
 		this.listContainer.clear();
 
@@ -320,20 +360,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const item = this.filteredModels[i];
 			if (!item) continue;
 
-			const isSelected = i === this.selectedIndex;
-			const isCurrent = modelsAreEqual(this.currentModel, item.model);
-			const isDefault = this.isDefaultModel(item.model);
-			const defaultBadge = isDefault ? theme.fg("muted", " · default") : "";
-
-			const cursor = isSelected ? theme.fg("accent", "→ ") : "  ";
-			const currentMarker = isCurrent ? theme.fg("accent", "✓ ") : "  ";
-			const modelText = isSelected ? theme.fg("accent", item.id) : item.id;
-			const name = getDistinctModelName({ id: item.id, name: item.model.name });
-			const nameText = name ? theme.fg("muted", ` (${name})`) : "";
-			const providerBadge = theme.fg("muted", `[${item.provider}]`);
-			const line = `${cursor}${currentMarker}${modelText}${nameText} ${providerBadge}${defaultBadge}`;
-
-			this.listContainer.addChild(new Text(line, 0, 0));
+			this.listContainer.addChild(this.createModelRow(item, i));
 		}
 
 		// Add scroll indicator if needed
@@ -417,8 +444,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 		// Pass everything else to search input
 		else {
+			const query = this.searchInput.getValue();
 			this.searchInput.handleInput(keyData);
-			this.filterModels(this.searchInput.getValue());
+			if (query !== this.searchInput.getValue()) this.filterModels(this.searchInput.getValue());
 		}
 	}
 
