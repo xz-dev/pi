@@ -38,6 +38,7 @@ import {
 	getCapabilities,
 	hyperlink,
 	Markdown,
+	MouseRegion,
 	matchesKey,
 	Spacer,
 	setCapabilityOverrides,
@@ -501,6 +502,20 @@ export class InteractiveMode {
 	private changelogMarkdown: string | undefined = undefined;
 	private startupNoticesShown = false;
 	private anthropicSubscriptionWarningShown = false;
+
+	/**
+	 * Cold-start recovery, decided once at the start of run() against the session
+	 * and branch captured then. Eligibility derives from the retryable transcript
+	 * tail (`session.canRetry`), so sessions without run records recover; only a
+	 * durable explicit-cancellation veto (`hasRecoveryVeto`) keeps an interrupted
+	 * tail manual-only. Once cleared it is never restored: in-process /resume keeps
+	 * the hint manual even if the rebound session would qualify at cold start.
+	 */
+	private startupRecovery:
+		| { session: AgentSession; sessionId: string; leafId: string | null; generation: number; eligible: boolean }
+		| undefined;
+	/** Guard for the retry entry points that can race through the auth yield. */
+	private retryCommandInFlight = false;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
@@ -1006,6 +1021,9 @@ export class InteractiveMode {
 		]);
 		// Accept text while startup completes, but only enable interrupt, exit, and submission feedback.
 		this.defaultEditor.onAction("app.clear", () => this.handleCtrlC());
+		// Esc before full key handlers exist must still cancel a pending cold-start
+		// recovery; setupKeyHandlers keeps this through its normal onEscape install.
+		this.defaultEditor.onAction("app.interrupt", () => this.cancelStartupRecovery());
 		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
 		this.defaultEditor.onSubmit = (text) => this.handleStartupSubmit(text);
 		this.ui.setFocus(this.editor);
@@ -1165,6 +1183,18 @@ export class InteractiveMode {
 	 * Initializes the UI, shows warnings, processes initial messages, and starts the interactive loop.
 	 */
 	async run(): Promise<void> {
+		// Classify recovery before init so the first real render can promise it
+		// truthfully, and pin the exact work (session, branch leaf, generation) so
+		// navigation during startup can never redirect the automatic run.
+		const startupRecovery = {
+			session: this.session,
+			sessionId: this.sessionManager.getSessionId(),
+			leafId: this.sessionManager.getLeafId(),
+			generation: this.sessionManager.getGeneration(),
+			eligible: !this.sessionManager.hasRecoveryVeto(),
+		};
+		this.startupRecovery = startupRecovery;
+
 		await this.init();
 
 		if (!process.env.PI_OFFLINE) {
@@ -1251,6 +1281,16 @@ export class InteractiveMode {
 		}
 
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
+
+		// One cold-start idle check, decided before init() so the first render can
+		// promise the run truthfully. Fresh input always takes precedence over recovery.
+		if (this.startupRecoveryWillRun()) {
+			await this.handleRetryCommand(() => this.startupRecoveryWillRun());
+		}
+		// Recovery runs at most once; the hint must never promise another automatic run.
+		startupRecovery.eligible = false;
+		this.ui.invalidate();
+		this.ui.requestRender();
 
 		// Process initial messages
 		if (initialMessage) {
@@ -2547,8 +2587,82 @@ export class InteractiveMode {
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
 		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
+		// ThemedText caches its builder, so the text must be one of these stable
+		// instances selected in render; a live closure would keep a stale promise.
+		const dim = (text: string) => new ThemedText(() => theme.fg("dim", text), 1, 0);
+		const automaticHint = dim("This session will automatically run /retry shortly.");
+		const manualFullscreenHint = dim("Use /retry to retry or continue (click to run)");
+		const manualRegularHint = dim("Use /retry to retry or continue");
+		// Re-check every guard at render time: the automatic-run promise must vanish
+		// the moment cancellation, input, navigation, or completion makes it false.
+		const hintComponent: Component = {
+			render: (width) => {
+				if (this.startupRecoveryWillRun()) return automaticHint.render(width);
+				if (
+					this.isShuttingDown ||
+					this.pendingUserInputs.length > 0 ||
+					this.compactionQueuedMessages.length > 0 ||
+					this.submittedInput !== undefined ||
+					!this.session.canRetry
+				) {
+					return [];
+				}
+				return (this.options.tuiMode === "fullscreen" ? manualFullscreenHint : manualRegularHint).render(width);
+			},
+			invalidate: () => {
+				automaticHint.invalidate();
+				manualFullscreenHint.invalidate();
+				manualRegularHint.invalidate();
+			},
+		};
+		// Keep the mouse wrapper mounted through TUI mode switches (remount moves the
+		// same components); clicks dispatch only in fullscreen, where mouse input
+		// exists. A pending automatic run takes precedence over a click.
+		const gatedHint = new MouseRegion(hintComponent, (event) => {
+			if (this.options.tuiMode !== "fullscreen") return undefined;
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			if (
+				this.startupRecoveryWillRun() ||
+				this.isShuttingDown ||
+				this.pendingUserInputs.length > 0 ||
+				this.compactionQueuedMessages.length > 0 ||
+				this.submittedInput !== undefined ||
+				!this.session.canRetry
+			) {
+				return undefined;
+			}
+			void this.handleRetryCommand();
+			return { handled: true };
+		});
+		this.widgetContainerAbove.addChild(gatedHint);
 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Whether this startup's automatic recovery can still run. Shared by the retry
+	 * guard, the hint text, and the click gate: only the exact work captured at
+	 * startup (same session, branch leaf, and generation) may be executed.
+	 */
+	private startupRecoveryWillRun(): boolean {
+		const recovery = this.startupRecovery;
+		return (
+			recovery?.eligible === true &&
+			this.session === recovery.session &&
+			this.sessionManager.getSessionId() === recovery.sessionId &&
+			this.sessionManager.getLeafId() === recovery.leafId &&
+			this.sessionManager.getGeneration() === recovery.generation &&
+			!this.options.initialMessage &&
+			!this.options.initialMessages?.length &&
+			!this.options.initialImages?.length &&
+			!this.editor.getText().trim() &&
+			this.pendingUserInputs.length === 0 &&
+			this.compactionQueuedMessages.length === 0 &&
+			this.submittedInput === undefined &&
+			!this.isShuttingDown &&
+			this.session.isIdle &&
+			this.session.canRetry
+		);
 	}
 
 	private renderWidgetContainer(
@@ -3158,6 +3272,9 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
+			// Interrupt cancels a pending cold-start recovery even while idle; the
+			// ordinary chains below still run so Esc keeps its normal meaning.
+			this.cancelStartupRecovery();
 			if (this.session.isStreaming) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			} else if (this.session.isBashRunning) {
@@ -3773,6 +3890,7 @@ export class InteractiveMode {
 
 			case "agent_settled":
 				await this.checkShutdownRequested();
+				this.ui.requestRender();
 				break;
 
 			case "compaction_start": {
@@ -4387,9 +4505,38 @@ export class InteractiveMode {
 		if (now - this.lastSigintTime < 500) {
 			void this.shutdown();
 		} else {
+			this.cancelStartupRecovery();
 			this.clearEditor();
 			this.lastSigintTime = now;
 		}
+	}
+
+	/**
+	 * Explicit user cancellation of a pending cold-start recovery. In-memory
+	 * eligibility alone is not durable: the next cold start of the same session
+	 * would resume the work the user just cancelled. Persist an `aborted` marker
+	 * anchored to the exact leaf the recovery had pinned; it only vetoes recovery
+	 * of that captured work, fresh user input still lifts it, and sibling branches
+	 * ignore it. Manual /retry stays available because the veto never feeds
+	 * `session.canRetry`.
+	 */
+	private cancelStartupRecovery(): void {
+		const recovery = this.startupRecovery;
+		if (!recovery?.eligible) return;
+		recovery.eligible = false;
+		if (
+			this.session === recovery.session &&
+			this.sessionManager.getSessionId() === recovery.sessionId &&
+			this.sessionManager.getLeafId() === recovery.leafId &&
+			this.sessionManager.getGeneration() === recovery.generation
+		) {
+			// Anchored to the pinned leaf so reopening scopes the cancellation to the
+			// captured work, not to whatever leaf exists then. The record sits outside
+			// the conversation tree; it never becomes a message's parent.
+			this.sessionManager.appendRunState("aborted", undefined, recovery.leafId);
+		}
+		this.ui.invalidate();
+		this.ui.requestRender();
 	}
 
 	private handleCtrlD(): void {
@@ -7232,12 +7379,18 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async handleRetryCommand(): Promise<void> {
+	private async handleRetryCommand(shouldStart?: () => boolean): Promise<void> {
+		// Synchronous in-flight marker: auth can yield before AgentSession marks the
+		// retry active, and rapid clicks or a racing /retry must not start a second run.
+		if (this.retryCommandInFlight) return;
+		this.retryCommandInFlight = true;
 		this.clearStatusIndicator();
 		try {
-			await this.session.retry();
+			await this.session.retry(shouldStart);
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
+		} finally {
+			this.retryCommandInFlight = false;
 		}
 	}
 
