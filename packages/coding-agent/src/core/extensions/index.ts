@@ -2,6 +2,7 @@
  * Extension system for lifecycle events and custom tools.
  */
 
+export type { MessageOrigin } from "@earendil-works/pi-ai";
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
 export type { SourceInfo } from "../source-info.ts";
 export {
