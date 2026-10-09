@@ -6,6 +6,7 @@ import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
 	type ImageContent,
+	type MessageOrigin,
 	type Model,
 	type Provider,
 	type ProviderHeaders,
@@ -26,6 +27,7 @@ import {
 	normalizeBuildSystemPromptOptions,
 } from "../system-prompt.ts";
 import type { VirtualModelDefinition } from "../virtual-models.ts";
+import { getExtensionOrigin } from "./origin.ts";
 import type {
 	AgentBeforeSettleEvent,
 	BeforeAgentStartCustomEvent,
@@ -170,12 +172,12 @@ function isUserBashEventResult(value: unknown): value is UserBashEventResult {
 
 /** The message that starts a run: the before_agent_start event without its prompt fields. */
 export type BeforeAgentStartTrigger =
-	| Pick<BeforeAgentStartUserEvent, "messageType" | "prompt" | "images">
-	| Pick<BeforeAgentStartCustomEvent, "messageType" | "message">;
+	| Pick<BeforeAgentStartUserEvent, "messageType" | "prompt" | "images" | "origin">
+	| Pick<BeforeAgentStartCustomEvent, "messageType" | "message" | "origin">;
 
 /** Combined result from all before_agent_start handlers. */
 interface BeforeAgentStartCombinedResult {
-	messages: NonNullable<BeforeAgentStartEventResult["message"]>[];
+	messages: (NonNullable<BeforeAgentStartEventResult["message"]> & { origin: MessageOrigin })[];
 	systemPromptOptions: NormalizedBuildSystemPromptOptions;
 }
 
@@ -238,13 +240,18 @@ interface BoundaryDispatchResult {
 
 export type NewSessionHandler = (options?: {
 	parentSession?: string;
+	origin?: MessageOrigin;
 	setup?: (sessionManager: SessionManager) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 }) => Promise<{ cancelled: boolean }>;
 
 export type ForkHandler = (
 	entryId: string,
-	options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+	options?: {
+		position?: "before" | "at";
+		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+		origin?: MessageOrigin;
+	},
 ) => Promise<{ cancelled: boolean }>;
 
 export type NavigateTreeHandler = (
@@ -254,7 +261,7 @@ export type NavigateTreeHandler = (
 
 export type SwitchSessionHandler = (
 	sessionPath: string,
-	options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+	options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void>; origin?: MessageOrigin },
 ) => Promise<{ cancelled: boolean }>;
 
 export type ReloadHandler = () => Promise<void>;
@@ -1083,7 +1090,7 @@ export class ExtensionRunner {
 		});
 	}
 
-	createCommandContext(): ExtensionCommandContext {
+	createCommandContext(origin?: MessageOrigin): ExtensionCommandContext {
 		// Use property descriptors instead of object spread so the guarded getters from
 		// createContext() stay lazy. A spread would eagerly read them once and freeze the
 		// old values into the returned object, bypassing stale-instance checks.
@@ -1101,11 +1108,11 @@ export class ExtensionRunner {
 		};
 		context.newSession = (options) => {
 			this.assertActive();
-			return this.newSessionHandler(options);
+			return this.newSessionHandler(origin ? { ...options, origin } : options);
 		};
 		context.fork = (entryId, options) => {
 			this.assertActive();
-			return this.forkHandler(entryId, options);
+			return this.forkHandler(entryId, origin ? { ...options, origin } : options);
 		};
 		context.navigateTree = (targetId, options) => {
 			this.assertActive();
@@ -1113,7 +1120,7 @@ export class ExtensionRunner {
 		};
 		context.switchSession = (sessionPath, options) => {
 			this.assertActive();
-			return this.switchSessionHandler(sessionPath, options);
+			return this.switchSessionHandler(sessionPath, origin ? { ...options, origin } : options);
 		};
 		context.reload = () => {
 			this.assertActive();
@@ -1140,9 +1147,15 @@ export class ExtensionRunner {
 					continue: shouldContinue,
 					context,
 				} as TurnEndEvent | AgentBeforeSettleEvent;
+				const priorEntries = new Set(entries);
 				try {
 					const handlerResult = (await handler(event, ctx)) as BoundaryResult | undefined;
 					if (handlerResult?.entries !== undefined) entries = handlerResult.entries;
+					entries = entries.map((entry) =>
+						entry.type === "custom_message" && !priorEntries.has(entry)
+							? { ...entry, origin: getExtensionOrigin(ext.sourceInfo) }
+							: entry,
+					);
 					if (handlerResult?.continue !== undefined) shouldContinue = handlerResult.continue;
 				} catch (err) {
 					this.emitError({
@@ -1372,7 +1385,15 @@ export class ExtensionRunner {
 						continue;
 					}
 
-					currentMessage = handlerResult.message;
+					const replacement = handlerResult.message;
+					if (
+						(currentMessage.role === "user" || currentMessage.role === "custom") &&
+						(replacement.role === "user" || replacement.role === "custom")
+					) {
+						currentMessage = { ...replacement, origin: currentMessage.origin };
+					} else {
+						currentMessage = replacement;
+					}
 					modified = true;
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
@@ -1647,7 +1668,7 @@ export class ExtensionRunner {
 			this.assertActive();
 			return renderCurrentSystemPrompt();
 		};
-		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
+		const messages: BeforeAgentStartCombinedResult["messages"] = [];
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "before_agent_start")) {
 			for (const [handlerIndex, handler] of handlers.entries()) {
@@ -1666,7 +1687,11 @@ export class ExtensionRunner {
 
 					if (handlerResult) {
 						const result = handlerResult as BeforeAgentStartEventResult;
-						if (result.message) messages.push(result.message);
+						if (result.message) {
+							// Host resolves which extension authored the message; handlers
+							// cannot claim another origin through the returned shape.
+							messages.push({ ...result.message, origin: getExtensionOrigin(ext.sourceInfo) });
+						}
 						if (result.systemPrompt !== undefined) {
 							currentOptions.forceSystemPrompt = result.systemPrompt;
 						}
@@ -1740,6 +1765,7 @@ export class ExtensionRunner {
 		images: ImageContent[] | undefined,
 		source: InputSource,
 		streamingBehavior?: "steer" | "followUp",
+		origin?: MessageOrigin,
 	): Promise<InputEventResult> {
 		const ctx = this.createContext();
 		let currentText = text;
@@ -1753,6 +1779,7 @@ export class ExtensionRunner {
 						text: currentText,
 						images: currentImages,
 						source,
+						origin,
 						streamingBehavior,
 					};
 					const result = (await this.runHandler("input", ext, handlerIndex, () => handler(event, ctx))) as
