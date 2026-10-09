@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat";
@@ -5,6 +7,7 @@ import { Container, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import type { StatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -72,6 +75,10 @@ function createView(harness: Harness) {
 			InteractiveMode.prototype,
 			"getUserMessageText",
 		) as InteractiveMode["getUserMessageText"],
+		addCustomEntryToChat: Reflect.get(
+			InteractiveMode.prototype,
+			"addCustomEntryToChat",
+		) as InteractiveMode["addCustomEntryToChat"],
 		showError: Reflect.get(InteractiveMode.prototype, "showError") as InteractiveMode["showError"],
 		addMessageToChat: Reflect.get(
 			InteractiveMode.prototype,
@@ -295,9 +302,26 @@ describe("Interactive retry presentation", () => {
 		await prompt;
 		await view.flush();
 		expect(calls()).toBe(1);
-		expect(occurrences(view.renderChat(), "Retry cancelled")).toBe(1);
-		expect(view.renderChat()).not.toContain("never_ran");
-		expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
+		for (const reconstruct of [false, true]) {
+			if (reconstruct) view.rebuildChatFromMessages();
+			expect(occurrences(view.renderChat(), "Retry cancelled")).toBe(1);
+			expect(view.renderChat()).not.toContain("never_ran");
+			expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
+		}
+		const sessionFile = join(harness.tempDir, "cancelled.jsonl");
+		writeFileSync(
+			sessionFile,
+			`${[harness.sessionManager.getHeader(), ...harness.sessionManager.getEntries()]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const restored = await createHarness({ sessionManager: SessionManager.open(sessionFile, harness.tempDir) });
+		harnesses.push(restored);
+		const resumedView = createView(restored);
+		resumedView.rebuildChatFromMessages();
+		expect(occurrences(resumedView.renderChat(), "Retry cancelled")).toBe(1);
+		expect(resumedView.renderChat()).not.toContain(WEBSOCKET_1006);
+		expect(JSON.stringify(restored.session.messages)).not.toContain("Retry cancelled");
 	});
 
 	it("preserves an executed tool failure across later provider recovery and reconstruction", async () => {
