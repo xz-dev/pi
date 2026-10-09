@@ -592,7 +592,21 @@ describe("manual /retry continuation", () => {
 
 		await expect(created.session.retry()).rejects.toThrow(/injected publication failure/);
 
-		expect(readFileSync(file)).toEqual(beforeFile);
+		// Lifecycle records are append-only diagnostics; failed publication must leave every
+		// pre-existing byte and the entire conversation tree unchanged.
+		const afterFile = readFileSync(file);
+		expect(afterFile.subarray(0, beforeFile.length)).toEqual(beforeFile);
+		const runRecords = afterFile
+			.subarray(beforeFile.length)
+			.toString()
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		expect(runRecords.map((entry) => [entry.type, entry.state])).toEqual([
+			["run_state", "started"],
+			["run_state", "finished"],
+		]);
+		expect(runRecords[1].runId).toBe(runRecords[0].runId);
 		expect(created.sessionManager.getEntries()).toEqual(beforeEntries);
 		expect(created.sessionManager.getGeneration()).toBe(beforeGeneration);
 		expect(created.sessionManager.getLeafId()).toBe(failureId);

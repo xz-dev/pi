@@ -197,8 +197,16 @@ export type SessionEntry =
 	| LabelEntry
 	| SessionInfoEntry;
 
-/** Raw file entry (includes header) */
-export type FileEntry = SessionHeader | SessionEntry;
+/** Run lifecycle metadata, stored in JSONL but not in the conversation tree. */
+export interface SessionRunEntry extends SessionEntryBase {
+	type: "run_state";
+	runId: string;
+	sessionId: string;
+	state: "started" | "finished" | "aborted";
+}
+
+/** Raw file entry (includes header and run lifecycle metadata). */
+export type FileEntry = SessionHeader | SessionEntry | SessionRunEntry;
 
 /** Tree node for getTree() - defensive copy of session structure */
 export interface SessionTreeNode {
@@ -333,6 +341,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 			continue;
 		}
 
+		if (entry.type === "run_state") continue;
 		entry.id = generateId(ids);
 		entry.parentId = prevId;
 		prevId = entry.id;
@@ -1149,7 +1158,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		for (const entry of this.fileEntries) {
-			if (entry.type === "session") continue;
+			if (entry.type === "session" || entry.type === "run_state") continue;
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
 			if (entry.type === "label") {
@@ -1216,7 +1225,7 @@ export class SessionManager {
 		);
 	}
 
-	_persist(entry: SessionEntry): void {
+	_persist(entry: SessionEntry | SessionRunEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
 		if (!this.flushed) {
@@ -1233,6 +1242,38 @@ export class SessionManager {
 		} else {
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
+	}
+
+	/** Record a run without moving the leaf or invalidating a retry publication transaction. */
+	appendRunState(state: SessionRunEntry["state"], runId?: string, parentId = this.leafId): string {
+		const id = randomUUID();
+		const entry: SessionRunEntry = {
+			type: "run_state",
+			id,
+			parentId,
+			timestamp: new Date().toISOString(),
+			sessionId: this.sessionId,
+			runId: runId ?? id,
+			state,
+		};
+		this.fileEntries.push(entry);
+		this._persist(entry);
+		return entry.runId;
+	}
+
+	/** Only the latest run can be interrupted; old branches and copied sessions cannot revive it. */
+	getInterruptedRun(): SessionRunEntry | undefined {
+		const entry = this.fileEntries.findLast((candidate) => candidate.type === "run_state");
+		if (
+			entry?.state !== "started" ||
+			entry.sessionId !== this.sessionId ||
+			typeof entry.runId !== "string" ||
+			!entry.runId ||
+			(entry.parentId !== null && !this.getBranch().some((ancestor) => ancestor.id === entry.parentId))
+		) {
+			return undefined;
+		}
+		return entry;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1628,7 +1669,7 @@ export class SessionManager {
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session" && e.type !== "run_state");
 	}
 
 	/**
@@ -1970,9 +2011,9 @@ export class SessionManager {
 		};
 		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
 
-		// Copy all non-header entries from source
+		// Copy conversation history, not the source process's execution state.
 		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
+			if (entry.type !== "session" && entry.type !== "run_state") {
 				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
 			}
 		}
