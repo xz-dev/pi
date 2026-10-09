@@ -30,9 +30,11 @@ describe("issue #7829 invalid settings warning", () => {
 				options: { startupDiagnostics },
 				chatContainer,
 				outputPad: 1,
-				ui: { requestRender: vi.fn() },
+				ui: { requestRender: vi.fn(), invalidate: vi.fn() },
 				version: "test",
 				showWarning: (InteractiveMode.prototype as unknown as { showWarning(message: string): void }).showWarning,
+				startupRecoveryWillRun: (InteractiveMode.prototype as unknown as { startupRecoveryWillRun(): boolean })
+					.startupRecoveryWillRun,
 				session: harness.session,
 				sessionManager: harness.sessionManager,
 				editor: { getText: () => "" },
