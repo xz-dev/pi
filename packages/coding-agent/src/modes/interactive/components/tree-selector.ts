@@ -16,6 +16,7 @@ import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { formatKeyText, keyHint } from "./keybinding-hints.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -109,6 +110,7 @@ class TreeList implements Component {
 	private selectedIndex = 0;
 	private currentLeafId: string | null;
 	private maxVisibleLines: number;
+	private renderedMaxVisibleLines: number;
 	private filterMode: FilterMode = "default";
 	private searchQuery = "";
 	private toolCallMap: Map<string, ToolCallInfo> = new Map();
@@ -134,6 +136,7 @@ class TreeList implements Component {
 	) {
 		this.currentLeafId = currentLeafId;
 		this.maxVisibleLines = maxVisibleLines;
+		this.renderedMaxVisibleLines = maxVisibleLines;
 		this.filterMode = initialFilterMode ?? "default";
 		this.multipleRoots = tree.length > 1;
 		this.flatNodes = this.flattenTree(tree);
@@ -673,6 +676,17 @@ class TreeList implements Component {
 	}
 
 	render(width: number): string[] {
+		this.renderedMaxVisibleLines = this.maxVisibleLines;
+		return this.renderList(width);
+	}
+
+	renderInBounds(width: number, height: number): string[] {
+		const rows = Math.max(0, Math.floor(height));
+		this.renderedMaxVisibleLines = Math.max(1, rows - 1);
+		return this.renderList(width).slice(0, rows);
+	}
+
+	private renderList(width: number): string[] {
 		const lines: string[] = [];
 
 		if (this.filteredNodes.length === 0) {
@@ -684,11 +698,11 @@ class TreeList implements Component {
 		const startIndex = Math.max(
 			0,
 			Math.min(
-				this.selectedIndex - Math.floor(this.maxVisibleLines / 2),
-				this.filteredNodes.length - this.maxVisibleLines,
+				this.selectedIndex - Math.floor(this.renderedMaxVisibleLines / 2),
+				this.filteredNodes.length - this.renderedMaxVisibleLines,
 			),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisibleLines, this.filteredNodes.length);
+		const endIndex = Math.min(startIndex + this.renderedMaxVisibleLines, this.filteredNodes.length);
 
 		const renderedRows: HorizontalViewportRow[] = [];
 		for (let i = startIndex; i < endIndex; i++) {
@@ -1031,10 +1045,13 @@ class TreeList implements Component {
 			}
 		} else if (kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.select.pageUp")) {
 			// Page up
-			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisibleLines);
+			this.selectedIndex = Math.max(0, this.selectedIndex - this.renderedMaxVisibleLines);
 		} else if (kb.matches(keyData, "tui.editor.cursorRight") || kb.matches(keyData, "tui.select.pageDown")) {
 			// Page down
-			this.selectedIndex = Math.min(this.filteredNodes.length - 1, this.selectedIndex + this.maxVisibleLines);
+			this.selectedIndex = Math.min(
+				this.filteredNodes.length - 1,
+				this.selectedIndex + this.renderedMaxVisibleLines,
+			);
 		} else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selected = this.filteredNodes[this.selectedIndex];
 			if (selected && this.onSelect) {
@@ -1339,7 +1356,7 @@ class LabelInput implements Component, Focusable {
 /**
  * Component that renders a session tree selector for navigation
  */
-export class TreeSelectorComponent extends Container implements Focusable {
+export class TreeSelectorComponent extends SelectorPanel implements Focusable {
 	private treeList: TreeList;
 	private labelInput: LabelInput | null = null;
 	private labelInputContainer: Container;
@@ -1401,6 +1418,17 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		if (tree.length === 0) {
 			setTimeout(() => onCancel(), 100);
 		}
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		if (this.labelInput) {
+			const view = new Container();
+			view.addChild(this.labelInput);
+			return view;
+		}
+		return compactSelector(width, height, [new SearchLine(this.treeList)], this.treeList, [
+			new Text(`${keyHint("tui.select.confirm", "select")} · ${keyHint("tui.select.cancel", "back")}`, 0, 0),
+		]);
 	}
 
 	private showLabelInput(entryId: string, currentLabel: string | undefined): void {

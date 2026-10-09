@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import {
 	type Component,
-	Container,
+	type Container,
 	type Focusable,
 	getKeybindings,
 	Input,
@@ -23,6 +23,7 @@ import { canonicalizePath, isLocalPath, resolvePath } from "../../../utils/paths
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 type ConfigWriteScope = "global" | "project";
@@ -205,8 +206,9 @@ class ConfigSelectorHeader implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): string[] {
+	render(width: number, compact = false): string[] {
 		const title = theme.bold(this.writeScope === "project" ? "Project Local Resources" : "Global Resources");
+		if (compact) return [truncateToWidth(title, width)];
 		const sep = theme.fg("muted", " · ");
 		const switchHint = this.projectModeAvailable ? keyHint("tui.input.tab", "switch mode") + sep : "";
 		const actionHint =
@@ -232,6 +234,8 @@ class ResourceList implements Component, Focusable {
 	private selectedIndex = 0;
 	private searchInput: Input;
 	private maxVisible: number;
+	private renderedMaxVisible: number;
+	private selectionVisible = true;
 	private settingsManager: SettingsManager;
 	private cwd: string;
 	private agentDir: string;
@@ -270,6 +274,7 @@ class ResourceList implements Component, Focusable {
 		// 8 lines of chrome: top spacer + top border + spacer + header (2 lines) + spacer + bottom spacer + bottom border
 		const chrome = 8;
 		this.maxVisible = Math.max(5, (terminalHeight ?? 24) - chrome);
+		this.renderedMaxVisible = this.maxVisible;
 		this.buildFlatList();
 		this.filteredItems = [...this.flatItems];
 	}
@@ -396,11 +401,24 @@ class ResourceList implements Component, Focusable {
 	invalidate(): void {}
 
 	render(width: number): string[] {
+		this.selectionVisible = true;
+		this.renderedMaxVisible = this.maxVisible;
+		return this.renderList(width, false);
+	}
+
+	renderInBounds(width: number, height: number): string[] {
+		const rows = Math.max(0, Math.floor(height));
+		this.selectionVisible = rows >= 2;
+		this.renderedMaxVisible = Math.max(1, rows - 2);
+		return this.renderList(width, true).slice(0, rows);
+	}
+
+	private renderList(width: number, compact: boolean): string[] {
 		const lines: string[] = [];
 
 		// Search input
 		lines.push(...this.searchInput.render(width));
-		lines.push("");
+		if (!compact) lines.push("");
 
 		if (this.filteredItems.length === 0) {
 			lines.push(theme.fg("muted", "  No resources found"));
@@ -410,9 +428,12 @@ class ResourceList implements Component, Focusable {
 		// Calculate visible range
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+			Math.min(
+				this.selectedIndex - Math.floor(this.renderedMaxVisible / 2),
+				this.filteredItems.length - this.renderedMaxVisible,
+			),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		const endIndex = Math.min(startIndex + this.renderedMaxVisible, this.filteredItems.length);
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const entry = this.filteredItems[i];
@@ -470,7 +491,7 @@ class ResourceList implements Component, Focusable {
 		}
 		if (kb.matches(data, "tui.select.pageUp")) {
 			// Jump up by maxVisible, then find nearest item
-			let target = Math.max(0, this.selectedIndex - this.maxVisible);
+			let target = Math.max(0, this.selectedIndex - this.renderedMaxVisible);
 			while (target < this.filteredItems.length && this.filteredItems[target].type !== "item") {
 				target++;
 			}
@@ -481,7 +502,7 @@ class ResourceList implements Component, Focusable {
 		}
 		if (kb.matches(data, "tui.select.pageDown")) {
 			// Jump down by maxVisible, then find nearest item
-			let target = Math.min(this.filteredItems.length - 1, this.selectedIndex + this.maxVisible);
+			let target = Math.min(this.filteredItems.length - 1, this.selectedIndex + this.renderedMaxVisible);
 			while (target >= 0 && this.filteredItems[target].type !== "item") {
 				target--;
 			}
@@ -503,6 +524,7 @@ class ResourceList implements Component, Focusable {
 			return;
 		}
 		if (data === " " || kb.matches(data, "tui.select.confirm")) {
+			if (!this.selectionVisible) return;
 			const entry = this.filteredItems[this.selectedIndex];
 			if (entry?.type === "item" && (this.writeScope === "project" || this.getItemScope(entry.item) === "user")) {
 				const newEnabled = this.toggleResource(entry.item);
@@ -872,7 +894,7 @@ class ResourceList implements Component, Focusable {
 	}
 }
 
-export class ConfigSelectorComponent extends Container implements Focusable {
+export class ConfigSelectorComponent extends SelectorPanel implements Focusable {
 	private header: ConfigSelectorHeader;
 	private resourceList: ResourceList;
 	private writeScope: ConfigWriteScope;
@@ -937,6 +959,15 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 		// Bottom border
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		return compactSelector(
+			width,
+			height,
+			[{ render: () => this.header.render(width, true), invalidate: () => {} }],
+			this.resourceList,
+		);
 	}
 
 	private switchWriteScope(): void {

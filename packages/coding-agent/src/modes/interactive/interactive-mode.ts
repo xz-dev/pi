@@ -168,6 +168,7 @@ import {
 import { piLogoLines, piWordmark, supportsPiLogo } from "./components/pi-logo.ts";
 import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
+import { SelectorHost } from "./components/selector-host.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
@@ -681,7 +682,7 @@ export class InteractiveMode {
 			embedWorkingStatus: true,
 		});
 		this.editor = this.defaultEditor;
-		this.editorContainer = new Container();
+		this.editorContainer = new SelectorHost(this.ui, () => [this.widgetContainerBelow, this.footerContainer]);
 		this.editorContainer.addChild(this.editor as Component);
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);

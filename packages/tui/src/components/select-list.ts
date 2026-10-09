@@ -42,6 +42,7 @@ export class SelectList implements Component {
 	private filteredItems: SelectItem[] = [];
 	private selectedIndex: number = 0;
 	private mousePressedIndex: number | undefined;
+	private renderedMaxVisible = 5;
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
@@ -54,6 +55,7 @@ export class SelectList implements Component {
 		this.items = items;
 		this.filteredItems = items;
 		this.maxVisible = maxVisible;
+		this.renderedMaxVisible = maxVisible;
 		this.theme = theme;
 		this.layout = layout;
 	}
@@ -73,6 +75,18 @@ export class SelectList implements Component {
 	}
 
 	render(width: number): string[] {
+		this.renderedMaxVisible = this.maxVisible;
+		return this.renderVisible(width);
+	}
+
+	renderInBounds(width: number, height: number): string[] {
+		const rows = Math.max(0, Math.floor(height));
+		const indicatorRows = rows > 1 && this.filteredItems.length > rows ? 1 : 0;
+		this.renderedMaxVisible = Math.min(this.maxVisible, Math.max(0, rows - indicatorRows));
+		return this.renderVisible(width).slice(0, rows);
+	}
+
+	private renderVisible(width: number): string[] {
 		const lines: string[] = [];
 
 		// If no items match filter, show message
@@ -172,11 +186,14 @@ export class SelectList implements Component {
 	private getVisibleRange(): { startIndex: number; endIndex: number } {
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+			Math.min(
+				this.selectedIndex - Math.floor(this.renderedMaxVisible / 2),
+				this.filteredItems.length - this.renderedMaxVisible,
+			),
 		);
 		return {
 			startIndex,
-			endIndex: Math.min(startIndex + this.maxVisible, this.filteredItems.length),
+			endIndex: Math.min(startIndex + this.renderedMaxVisible, this.filteredItems.length),
 		};
 	}
 
