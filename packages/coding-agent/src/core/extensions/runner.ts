@@ -304,6 +304,13 @@ function snapshotEventHandlers(extensions: Extension[], event: ExtensionEvent["t
 	return extensions.map((ext) => ({ ext, handlers: ext.handlers.get(event)?.slice() ?? [] }));
 }
 
+function preserveMessageOrigin(current: AgentMessage, replacement: AgentMessage): AgentMessage {
+	return (current.role === "user" || current.role === "custom") &&
+		(replacement.role === "user" || replacement.role === "custom")
+		? { ...replacement, origin: current.origin }
+		: replacement;
+}
+
 function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
 	return left.length === right.length && left.every((message, index) => message === right[index]);
 }
@@ -1323,7 +1330,7 @@ export class ExtensionRunner {
 						continue;
 					}
 
-					currentMessage = handlerResult.message;
+					currentMessage = preserveMessageOrigin(currentMessage, handlerResult.message);
 					modified = true;
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
@@ -1366,15 +1373,7 @@ export class ExtensionRunner {
 						continue;
 					}
 
-					const replacement = handlerResult.message;
-					if (
-						(currentMessage.role === "user" || currentMessage.role === "custom") &&
-						(replacement.role === "user" || replacement.role === "custom")
-					) {
-						currentMessage = { ...replacement, origin: currentMessage.origin };
-					} else {
-						currentMessage = replacement;
-					}
+					currentMessage = preserveMessageOrigin(currentMessage, handlerResult.message);
 					modified = true;
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);

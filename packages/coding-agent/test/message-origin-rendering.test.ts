@@ -1,13 +1,16 @@
 import { stripVTControlCharacters } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Text, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { MessageRenderer } from "../src/core/extensions/types.ts";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { AgentSessionEvent } from "../src/core/agent-session.ts";
+import type { CustomMessageEntryDraft, MessageRenderer } from "../src/core/extensions/types.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
 import { OriginMessageComponent } from "../src/modes/interactive/components/origin-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { createHarness, type Harness } from "./suite/harness.ts";
 
 const message: CustomMessage = {
 	role: "custom",
@@ -41,12 +44,58 @@ function click(component: Container): void {
 
 // Exercise the same controller dispatch as Ctrl+O without booting provider/network services.
 const controller = InteractiveMode.prototype as unknown as {
+	handleEvent(this: object, event: AgentSessionEvent): Promise<void>;
 	setToolsExpanded(this: object, expanded: boolean): void;
 	addMessageToChat(this: object, message: AgentMessage, options?: { populateHistory?: boolean }): void;
 };
 
 describe("message origin rendering", () => {
+	const harnesses: Harness[] = [];
+	afterEach(() => {
+		for (const harness of harnesses.splice(0)) harness.cleanup();
+	});
 	beforeAll(() => initTheme("dark"));
+
+	it.each([null, undefined])("renders nullish hidden boundary content as empty (%s)", async (content) => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", () => ({
+						entries: [
+							{
+								type: "custom_message",
+								customType: "empty-control",
+								display: false,
+								...(content === undefined ? {} : { content }),
+							} as unknown as CustomMessageEntryDraft,
+						],
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("ok")]);
+		await harness.session.prompt("start", { source: "interactive" });
+		const event = harness.eventsOfType("entry_appended").find((entry) => entry.entry.type === "custom_message");
+		expect(event).toBeDefined();
+		const view = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			programStatus: { handleEvent: vi.fn() },
+			entriesRenderedByBoundaryCompaction: new Set<string>(),
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			outputPad: 1,
+			toolOutputExpanded: false,
+			session: harness.session,
+			settingsManager: { getShowImages: () => false, getImageWidthCells: () => 60 },
+			addMessageToChat(entry: AgentMessage) {
+				controller.addMessageToChat.call(this, entry);
+			},
+		};
+		await expect(controller.handleEvent.call(view, event!)).resolves.toBeUndefined();
+		expect(view.chatContainer.render(80)).toEqual([]);
+	});
 
 	it("shows a gray tool-style source row without hints and toggles hidden content by click", () => {
 		const component = new OriginMessageComponent(message);
