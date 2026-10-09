@@ -61,6 +61,7 @@ export class ModelSelectorComponent extends SelectorPanel implements Focusable {
 	private activeModels: ModelItem[] = [];
 	private filteredModels: ModelItem[] = [];
 	private selectedIndex: number = 0;
+	private selectionVisible = true;
 	private currentModel?: Model<any>;
 	private modelRuntime: ModelRuntime;
 	private onSelectCallback: (model: Model<any>) => void;
@@ -323,6 +324,11 @@ export class ModelSelectorComponent extends SelectorPanel implements Focusable {
 		);
 	}
 
+	override render(width: number): string[] {
+		this.selectionVisible = true;
+		return super.render(width);
+	}
+
 	protected getCompactView(width: number, height: number): Container {
 		const help = new Text(
 			theme.fg(
@@ -332,17 +338,22 @@ export class ModelSelectorComponent extends SelectorPanel implements Focusable {
 			0,
 			0,
 		);
-		const footer = [...(this.errorMessage ? [new Text(theme.fg("error", this.errorMessage), 0, 0)] : []), help];
+		const header = [
+			...(this.errorMessage ? [new Text(theme.fg("error", this.errorMessage), 0, 0)] : []),
+			this.searchInput,
+		];
 		const items = this.filteredModels.map((item, index) => this.createModelRow(item, index).render(width));
 		return compactSelector(
 			width,
 			height,
-			[this.searchInput],
-			(rows) =>
-				items.length > 0
+			header,
+			(rows) => {
+				this.selectionVisible = rows > 0;
+				return items.length > 0
 					? renderSelectionWindow(items, this.selectedIndex, rows).lines
-					: new Text(theme.fg("muted", "  No matching models"), 0, 0).render(width).slice(0, rows),
-			footer,
+					: new Text(theme.fg("muted", "  No matching models"), 0, 0).render(width).slice(0, rows);
+			},
+			[help],
 		);
 	}
 
@@ -437,7 +448,7 @@ export class ModelSelectorComponent extends SelectorPanel implements Focusable {
 		// Select and save as default
 		else if (kb.matches(keyData, "app.models.save") && this.onSelectAsDefaultCallback) {
 			const selectedModel = this.filteredModels[this.selectedIndex];
-			if (selectedModel) {
+			if (selectedModel && this.selectionVisible) {
 				this.dispose();
 				this.onSelectAsDefaultCallback(selectedModel.model);
 			}
@@ -451,6 +462,7 @@ export class ModelSelectorComponent extends SelectorPanel implements Focusable {
 	}
 
 	private handleSelect(model: Model<any>): void {
+		if (!this.selectionVisible) return;
 		this.dispose();
 		this.onSelectCallback(model);
 	}
