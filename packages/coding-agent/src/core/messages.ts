@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, Message, MessageOrigin, TextContent } from "@earendil-works/pi-ai";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -58,6 +58,8 @@ export interface CustomMessage<T = unknown> {
 	content: string | (TextContent | ImageContent)[];
 	display: boolean;
 	details?: T;
+	/** Provenance of this message when the host recorded it. Absent on legacy/unrecorded entries. */
+	origin?: MessageOrigin;
 	timestamp: number;
 }
 
@@ -142,6 +144,7 @@ export function createCustomMessage(
 	display: boolean,
 	details: unknown | undefined,
 	timestamp: string,
+	origin?: MessageOrigin,
 ): CustomMessage {
 	return {
 		role: "custom",
@@ -149,8 +152,52 @@ export function createCustomMessage(
 		content,
 		display,
 		details,
+		...(origin !== undefined ? { origin } : {}),
 		timestamp: new Date(timestamp).getTime(),
 	};
+}
+
+export function inputOrigin(source: MessageOrigin["type"] = "sdk"): MessageOrigin {
+	return source === "extension" ? { type: source, extensionId: "unrecorded" } : { type: source };
+}
+
+/**
+ * One-line provenance note prepended to model-facing text for messages whose
+ * recorded origin is not human terminal input. Deterministic for a given
+ * origin, never persisted into stored content, and never elevates the message
+ * above user role.
+ */
+function originAnnotation(origin: MessageOrigin | undefined): string | undefined {
+	switch (origin?.type) {
+		case "extension":
+			return `[Pi source: extension ${JSON.stringify(origin.extensionName ?? origin.extensionId)} (${origin.extensionId}); not direct human input or new authorization.]`;
+		case "rpc":
+			return "[Pi source: RPC input; human authorship unverified.]";
+		case "cli":
+			return "[Pi source: command-line input; human authorship unverified.]";
+		case "sdk":
+			return "[Pi source: SDK input; not direct terminal input.]";
+		default:
+			return undefined;
+	}
+}
+
+export function hasMeaningfulContent(content: string | (TextContent | ImageContent)[]): boolean {
+	if (typeof content === "string") return content.trim().length > 0;
+	return content.some(
+		(part) =>
+			(part.type === "text" && part.text.trim().length > 0) || (part.type === "image" && part.data.length > 0),
+	);
+}
+
+function annotateUserContent(
+	content: string | (TextContent | ImageContent)[],
+	origin: MessageOrigin | undefined,
+): string | (TextContent | ImageContent)[] {
+	const annotation = originAnnotation(origin);
+	if (annotation === undefined || !hasMeaningfulContent(content)) return content;
+	if (typeof content === "string") return `${annotation}\n${content}`;
+	return [{ type: "text", text: annotation }, ...content];
 }
 
 /**
@@ -179,7 +226,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
 					return {
 						role: "user",
-						content,
+						content: annotateUserContent(content, m.origin),
 						timestamp: m.timestamp,
 					};
 				}
@@ -203,8 +250,12 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						],
 						timestamp: m.timestamp,
 					};
+				case "user": {
+					const annotated = annotateUserContent(m.content, m.origin);
+					if (annotated === m.content) return m;
+					return { role: "user", content: annotated, timestamp: m.timestamp };
+				}
 				case "system":
-				case "user":
 				case "assistant":
 				case "toolResult":
 					return m;
