@@ -84,6 +84,11 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
 
 ### Fixes
 
+- Show transient assistant connection failures as recovery attempts while Pi's global retry policy runs, instead of copying the same provider error into every unexecuted tool preview. A successful retry continues normally; exhausted retries, non-retryable errors, and cancellation remain visible without pretending the previewed tools executed.
+  - Use case: Recover from a Responses WebSocket disconnect after tool calls have started streaming without seeing a separate false failure for each tool. Cancelling during retry backoff remains visible after transcript redraw or session resume; its saved display record never enters model context.
+  - Limits: This changes interactive error presentation, not retry classification, attempt limits, backoff, transport fallback, or real tool execution results.
+  - Patch branch: [`patch/retry-error-presentation`](https://github.com/xz-dev/pi/tree/patch/retry-error-presentation)
+
 - Defer automatic threshold and successful-response overflow compaction until another model request needs the context. Completed idle replies do not generate an unused summary; tool-loop compaction, extension/queued continuations, manual `/compact`, and immediate overflow/length retry recovery remain supported. No new setting is required.
   - Use case: Stop after an answer without paying for a summary that would only be useful if the session continued.
   - Details: [Automatic compaction](packages/coding-agent/docs/compaction.md#when-it-triggers)
