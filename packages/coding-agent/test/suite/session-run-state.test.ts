@@ -4,7 +4,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
-import { createHarness, type Harness } from "./harness.ts";
+import { createHarness, getAssistantTexts, type Harness } from "./harness.ts";
 
 describe("persisted agent run state", () => {
 	const harnesses: Harness[] = [];
@@ -90,6 +90,66 @@ describe("persisted agent run state", () => {
 		await Promise.allSettled([prompt, stopped]);
 		expect(Boolean(reopen(created).getInterruptedRun())).toBe(action === "dispose");
 		if (action === "abort") expect(created.session.canRetry).toBe(true);
+	});
+
+	it("vetoes only an explicit aborted record scoped to the current tail", async () => {
+		const created = await harness();
+		created.sessionManager.appendMessage({ role: "user", content: "work", timestamp: Date.now() });
+		created.sessionManager.appendMessage(fauxAssistantMessage("partial", { stopReason: "aborted" }));
+		const runId = created.sessionManager.appendRunState("started");
+		created.sessionManager.appendRunState("aborted", runId);
+		const restored = await createHarness({
+			sessionManager: reopen(created),
+			settings: { retry: { enabled: false } },
+		});
+		harnesses.push(restored);
+		restored.session.refreshContext();
+		// The cancelled run's own tail keeps the session manual-only at cold start.
+		expect(restored.sessionManager.hasRecoveryVeto()).toBe(true);
+		expect(restored.session.canRetry).toBe(true);
+	});
+
+	it("treats a finished record after an error tail as recoverable, not a veto", async () => {
+		const created = await harness();
+		created.sessionManager.appendMessage({ role: "user", content: "work", timestamp: Date.now() });
+		created.sessionManager.appendMessage(
+			fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "boom" }),
+		);
+		const runId = created.sessionManager.appendRunState("started");
+		created.sessionManager.appendRunState("finished", runId);
+		const restored = await createHarness({
+			sessionManager: reopen(created),
+			settings: { retry: { enabled: false } },
+		});
+		harnesses.push(restored);
+		restored.session.refreshContext();
+		// _emitAgentSettled records finished for retained errors too, so finished is
+		// not a veto: the same retryable error tail must recover at cold start.
+		expect(restored.sessionManager.hasRecoveryVeto()).toBe(false);
+		expect(restored.session.canRetry).toBe(true);
+		restored.setResponses([fauxAssistantMessage("recovered")]);
+		await restored.session.retry();
+	});
+
+	it("lifts the abort veto for fresh input appended after cancellation", async () => {
+		const created = await harness();
+		created.sessionManager.appendMessage({ role: "user", content: "work", timestamp: Date.now() });
+		created.sessionManager.appendMessage(fauxAssistantMessage("partial", { stopReason: "aborted" }));
+		const runId = created.sessionManager.appendRunState("started");
+		created.sessionManager.appendRunState("aborted", runId);
+		// Fresh work arrived after the cancellation but the process died before its run started.
+		created.sessionManager.appendMessage({ role: "user", content: "new task", timestamp: Date.now() });
+		const restored = await createHarness({
+			sessionManager: reopen(created),
+			settings: { retry: { enabled: false } },
+		});
+		harnesses.push(restored);
+		restored.session.refreshContext();
+		expect(restored.sessionManager.hasRecoveryVeto()).toBe(false);
+		expect(restored.session.canRetry).toBe(true);
+		restored.setResponses([fauxAssistantMessage("answered fresh")]);
+		await restored.session.retry();
+		expect(getAssistantTexts(restored).at(-1)).toBe("answered fresh");
 	});
 
 	it.each(["abort", "settle"] as const)("still becomes idle when %s run-state persistence fails", async (action) => {
@@ -228,6 +288,58 @@ describe("persisted agent run state", () => {
 		restored.setResponses([fauxAssistantMessage("after restart")]);
 		await restored.session.retry();
 		expect(restored.sessionManager.getInterruptedRun()).toBeUndefined();
+	});
+
+	it("scopes the cancellation veto to the current branch only", async () => {
+		const created = await harness();
+		const root = created.sessionManager.appendMessage({ role: "user", content: "root", timestamp: Date.now() });
+		created.sessionManager.appendMessage(fauxAssistantMessage("left", { stopReason: "error" }));
+		const leftRun = created.sessionManager.appendRunState("started");
+		created.sessionManager.appendRunState("aborted", leftRun);
+		// A fresh branch off an earlier user message is not blocked by a vetoed sibling.
+		created.sessionManager.branch(root);
+		created.sessionManager.appendMessage(fauxAssistantMessage("right", { stopReason: "error" }));
+		const restored = await createHarness({
+			sessionManager: reopen(created),
+			settings: { retry: { enabled: false } },
+		});
+		harnesses.push(restored);
+		restored.session.refreshContext();
+		expect(restored.sessionManager.hasRecoveryVeto()).toBe(false);
+		expect(restored.session.canRetry).toBe(true);
+	});
+
+	it("finds a retryable boundary in a legacy session without run records", async () => {
+		const created = await harness();
+		created.sessionManager.appendMessage({ role: "user", content: "old work", timestamp: Date.now() });
+		created.sessionManager.appendMessage(
+			fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "boom" }),
+		);
+		const restored = await createHarness({
+			sessionManager: reopen(created),
+			settings: { retry: { enabled: false } },
+		});
+		harnesses.push(restored);
+		restored.session.refreshContext();
+		// No run records at all: nothing vetoes, and the transcript tail is retryable.
+		expect(restored.sessionManager.hasRecoveryVeto()).toBe(false);
+		expect(restored.session.canRetry).toBe(true);
+		restored.setResponses([fauxAssistantMessage("recovered legacy")]);
+		await restored.session.retry();
+		expect(restored.sessionManager.getInterruptedRun()).toBeUndefined();
+	});
+
+	it.each(["stop", "length"] as const)("does not recover a completed %s tail", async (stopReason) => {
+		const created = await harness();
+		created.sessionManager.appendMessage({ role: "user", content: "done", timestamp: Date.now() });
+		created.sessionManager.appendMessage(fauxAssistantMessage("complete", { stopReason }));
+		const restored = await createHarness({
+			sessionManager: reopen(created),
+			settings: { retry: { enabled: false } },
+		});
+		harnesses.push(restored);
+		restored.session.refreshContext();
+		expect(restored.session.canRetry).toBe(false);
 	});
 
 	it("does not revive earlier runs from another branch or copy their state to a fork", async () => {
