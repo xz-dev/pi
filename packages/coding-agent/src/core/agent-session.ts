@@ -33,7 +33,7 @@ import {
 	runToolCall,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText, getCurrentSystemMessage, retryDelayMs } from "@earendil-works/pi-ai";
+import { contentText, getAssistantRetryPlan, getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -473,6 +473,7 @@ export class AgentSession {
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 
 	// Retry state
+	private _retryGlobalAttempt = 0;
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
 	/**
@@ -1363,6 +1364,7 @@ export class AgentSession {
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
+					this._retryGlobalAttempt = 0;
 				}
 			}
 		}
@@ -1381,14 +1383,14 @@ export class AgentSession {
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		if (this._agentRunAbortRequested) return false;
 		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled || this._retryAttempt >= settings.maxRetries) {
-			return false;
-		}
 
 		for (let i = event.messages.length - 1; i >= 0; i--) {
 			const message = event.messages[i];
 			if (message.role === "assistant") {
-				return this._isRetryableError(message as AssistantMessage);
+				return (
+					this._isRetryableError(message as AssistantMessage) &&
+					getAssistantRetryPlan(message as AssistantMessage, settings, this._retryGlobalAttempt) !== undefined
+				);
 			}
 		}
 		return false;
@@ -2179,6 +2181,7 @@ export class AgentSession {
 				finalError: message.errorMessage,
 			});
 			this._retryAttempt = 0;
+			this._retryGlobalAttempt = 0;
 		}
 
 		if (await this._checkCompaction(message, true, toolResults)) {
@@ -4067,6 +4070,7 @@ export class AgentSession {
 		if (this._retryAttempt === 0) return;
 		const attempt = this._retryAttempt;
 		this._retryAttempt = 0;
+		this._retryGlobalAttempt = 0;
 		this._emit({
 			type: "auto_retry_end",
 			success: false,
@@ -4080,45 +4084,35 @@ export class AgentSession {
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
 	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
-		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled) {
-			return false;
-		}
+		const plan = getAssistantRetryPlan(message, this.settingsManager.getRetrySettings(), this._retryGlobalAttempt);
+		if (!plan) return false;
+		this._retryAttempt = plan.attempt;
+		this._retryGlobalAttempt = plan.globalAttempt;
 
-		this._retryAttempt++;
-
-		if (this._retryAttempt > settings.maxRetries) {
-			// Preserve the completed attempt count so post-run handling can emit the final failure.
-			this._retryAttempt--;
-			return false;
-		}
-
-		const delayMs = retryDelayMs(settings, this._retryAttempt);
-
-		this._emit({
-			type: "auto_retry_start",
-			attempt: this._retryAttempt,
-			maxAttempts: settings.maxRetries,
-			delayMs,
-			errorMessage: message.errorMessage || "Unknown error",
-		});
-
-		// Keep the failed attempt in raw history while durably omitting it from model projection.
-		this._omitRecoveryAttempt(message);
-
-		// Wait with exponential backoff (abortable)
+		// Install cancellation before notifying listeners; an Esc/abort from a retry
+		// listener must cancel this wait rather than miss the not-yet-created controller.
 		this._retryAbortController = new AbortController();
 		try {
-			await sleep(delayMs, this._retryAbortController.signal);
-		} catch {
-			// Aborted during sleep - emit end event so UI can clean up
-			this._finishCancelledRetry();
-			return false;
+			this._emit({
+				type: "auto_retry_start",
+				attempt: plan.attempt,
+				maxAttempts: plan.maxAttempts,
+				delayMs: plan.delayMs,
+				errorMessage: message.errorMessage || "Unknown error",
+			});
+
+			// Keep the failed attempt in raw history while durably omitting it from model projection.
+			this._omitRecoveryAttempt(message);
+			try {
+				await sleep(plan.delayMs, this._retryAbortController.signal);
+			} catch {
+				this._finishCancelledRetry();
+				return false;
+			}
+			return true;
 		} finally {
 			this._retryAbortController = undefined;
 		}
-
-		return true;
 	}
 
 	/**
