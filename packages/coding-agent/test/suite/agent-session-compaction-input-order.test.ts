@@ -142,7 +142,7 @@ describe("input compaction ordering", () => {
 		]);
 		await harness.session.prompt("seed input");
 		failNext = true;
-		await harness.session.prompt("saved after routing failure");
+		await harness.session.prompt("saved after routing failure", { source: "interactive" });
 		expect(reasons).toEqual(["user", "user", "retry"]);
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.session.getLastAssistantText()).toBe("retried answer");
@@ -232,7 +232,7 @@ describe("input compaction ordering", () => {
 					return fauxAssistantMessage("small answer");
 				},
 			]);
-			await harness.session.prompt("original");
+			await harness.session.prompt("original", { source: "interactive" });
 			expect(routes.map((route) => route.selection)).toEqual(
 				change === "physical-to-virtual" ? ["B"] : change === "selection" ? ["A", "B"] : ["A", "A"],
 			);
@@ -349,7 +349,7 @@ describe("input compaction ordering", () => {
 					fauxAssistantMessage("new response"),
 				]);
 				await harness.session.prompt("run first turn");
-			} else await harness.session.prompt(input);
+			} else await harness.session.prompt(input, { source: "interactive" });
 
 			const branch = harness.sessionManager.getBranch();
 			const compactionIndex = branch.findIndex((entry) => entry.type === "compaction");
