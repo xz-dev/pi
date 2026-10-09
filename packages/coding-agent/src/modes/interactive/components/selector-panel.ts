@@ -20,7 +20,7 @@ export abstract class SelectorPanel extends Container {
 	renderInBounds(width: number, height: number): string[] {
 		const natural = this.render(width);
 		const available = Math.max(0, Math.floor(height));
-		if (available === 0) return [];
+		// Even a zero allocation must update the compact view's input eligibility.
 		if (natural.length <= available) return natural;
 		this.compactView = this.getCompactView(width, available);
 		return this.compactView.render(width).slice(0, available);
@@ -31,7 +31,7 @@ export abstract class SelectorPanel extends Container {
 	}
 }
 
-/** Compose the existing input controls around a height-aware list. */
+/** Compose essential headers and a height-aware list; footer content is supplemental help. */
 export function compactSelector(
 	width: number,
 	height: number,
@@ -40,13 +40,24 @@ export function compactSelector(
 	footer: readonly Component[] = [],
 ): Container {
 	const view = new Container();
-	const headerHeight = header.reduce((sum, component) => sum + component.render(width).length, 0);
+	const headerLines = header.flatMap((component) => component.render(width));
+	const headerHeight = headerLines.length;
 	const footerLines = footer.flatMap((component) => component.render(width));
 	const visibleFooter = footerLines.slice(0, Math.max(0, height - headerHeight - 1));
 	if (visibleFooter.length > 0 && visibleFooter.length < footerLines.length) {
 		visibleFooter[visibleFooter.length - 1] = truncateToWidth("… resize for full details", width);
 	}
-	for (const component of header) view.addChild(component);
+	if (headerHeight >= height) {
+		view.addChild({
+			render: () =>
+				height > 0
+					? [...headerLines.slice(0, height - 1), truncateToWidth("… resize for full details", width)]
+					: [],
+			invalidate: () => {},
+		});
+	} else {
+		for (const component of header) view.addChild(component);
+	}
 	const listHeight = Math.max(0, height - headerHeight - visibleFooter.length);
 	view.addChild({
 		render: () =>
