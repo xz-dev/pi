@@ -280,6 +280,11 @@ export const SettingsSchema = Type.Object(
 					'Command used for npm package lookup and installation, in argv form such as ["mise", "exec", "node@20", "--", "npm"].',
 			}),
 		),
+		updateMirrors: Type.Optional(
+			Type.Array(Type.String(), {
+				description: "Global-only ordered replacements for https://github.com during release downloads.",
+			}),
+		),
 		collapseChangelog: Type.Optional(
 			Type.Boolean({
 				description: "Show the condensed changelog after update; use /changelog for the full changelog.",
