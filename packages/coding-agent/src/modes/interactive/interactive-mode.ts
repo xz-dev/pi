@@ -291,6 +291,7 @@ function isUsageSessionEntry(item: RenderSessionItem): item is Extract<SessionEn
 
 // EIO: tty reads/ioctls from an orphaned background process group, or writes after hangup.
 // ENOTTY: the tty was revoked (macOS) and stdin is no longer a terminal.
+const RETRY_OUTCOME_ENTRY_TYPE = "pi:retry-outcome";
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN", "ENOTTY"]);
 
 function isDeadTerminalError(error: unknown): boolean {
@@ -3678,7 +3679,25 @@ export class InteractiveMode {
 				if (this.pendingFailure) {
 					const failure = this.pendingFailure;
 					this.pendingFailure = undefined;
-					failure.component.setFailureText(failure.text);
+					const text = failure.text;
+					const omitted =
+						text !== undefined &&
+						this.sessionManager
+							.buildSessionProjection()
+							.entries.some(
+								({ sourceEntry, messages }) =>
+									sourceEntry.type === "message" &&
+									sourceEntry.message === failure.message &&
+									messages.length === 0,
+							);
+					if (omitted) {
+						// Backoff cancellation has no new assistant message. Preserve the core's
+						// settled outcome as display-only history, never as model context.
+						this.sessionManager.appendCustomEntry(RETRY_OUTCOME_ENTRY_TYPE, text);
+						this.showError(text);
+					} else {
+						failure.component.setFailureText(failure.text);
+					}
 					this.maybeSuggestBugReport(failure.message);
 					this.ui.requestRender();
 				}
@@ -3862,6 +3881,10 @@ export class InteractiveMode {
 	}
 
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
+		if (entry.customType === RETRY_OUTCOME_ENTRY_TYPE && typeof entry.data === "string") {
+			this.showError(entry.data);
+			return;
+		}
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
 			return;
