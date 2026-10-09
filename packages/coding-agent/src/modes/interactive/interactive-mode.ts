@@ -3524,6 +3524,7 @@ export class InteractiveMode {
 						this.getMarkdownTransformers(),
 					);
 					this.streamingMessage = event.message;
+					this.streamingComponent.setFailureText(null);
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
 					this.ui.requestRender();
