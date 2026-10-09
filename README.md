@@ -89,6 +89,11 @@ It tracks upstream `main` with a minimal downstream patch stack, using [downstre
   - Limits: This changes interactive error presentation, not retry classification, attempt limits, backoff, transport fallback, or real tool execution results.
   - Patch branch: [`patch/retry-error-presentation`](https://github.com/xz-dev/pi/tree/patch/retry-error-presentation)
 
+- Size built-in selection panels to their allocated terminal rows in fullscreen and regular mode. Search and the highlighted choice stay visible as the software keyboard opens or closes; Enter confirms that highlighted choice. This covers model/scoped-model, OAuth, extension selection, fork, settings/theme, session, tree and resource configuration, including CLI `--resume` and `pi config`.
+  - Use case: Open `/model` on a phone with the software keyboard shown, browse the list, and confirm the choice that is visibly highlighted without hiding the keyboard.
+  - Limits: Custom components retain their existing rendering unless they opt in. Extremely small viewports cannot show every detail; resize notices mark omitted details, and extension choices cannot be confirmed while their explanation does not fit. Fullscreen PageUp/PageDown still scroll the transcript; selector page shortcuts can be rebound. Scrollback continues to hide panels without losing their state.
+  - Patch branch: [`patch/responsive-selectors`](https://github.com/xz-dev/pi/tree/patch/responsive-selectors)
+
 - Defer automatic threshold and successful-response overflow compaction until another model request needs the context. Completed idle replies do not generate an unused summary; tool-loop compaction, extension/queued continuations, manual `/compact`, and immediate overflow/length retry recovery remain supported. No new setting is required.
   - Use case: Stop after an answer without paying for a summary that would only be useful if the session continued.
   - Details: [Automatic compaction](packages/coding-agent/docs/compaction.md#when-it-triggers)
