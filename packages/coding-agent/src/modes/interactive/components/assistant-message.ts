@@ -156,6 +156,7 @@ export class AssistantMessageComponent extends Container {
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private lastMessage?: AssistantMessage;
+	private failureText: string | null | undefined;
 	private hasToolCalls = false;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
@@ -217,6 +218,12 @@ export class AssistantMessageComponent extends Container {
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
+	}
+
+	/** null defers failure display until the session decides its final outcome. */
+	setFailureText(text: string | null | undefined): void {
+		this.failureText = text;
+		if (this.lastMessage) this.updateContent(this.lastMessage);
 	}
 
 	setOutputPad(padding: number): void {
@@ -355,26 +362,25 @@ export class AssistantMessageComponent extends Container {
 			}
 		}
 
-		// Check if incomplete/failed - show after partial content.
-		// For aborted/error tool calls, tool execution components show the error.
-		// Length stops can happen before a tool call is complete, so surface them here too.
-		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
-		this.hasToolCalls = hasToolCalls;
+		// Model failures belong to the assistant, not its unexecuted tool previews.
+		// The session owns retry decisions; this component only renders their outcome.
+		this.hasToolCalls = message.content.some((c) => c.type === "toolCall");
 		if (message.stopReason === "length") {
 			this.contentContainer.addChild(new Spacer(1));
 			this.contentContainer.addChild(
 				new Text(theme.fg("error", "Response was truncated before completion."), this.outputPad, 0),
 			);
-		} else if (!hasToolCalls) {
+		} else if (this.failureText !== null) {
 			if (message.stopReason === "aborted") {
 				const abortMessage =
-					message.errorMessage && message.errorMessage !== "Request was aborted"
+					this.failureText ??
+					(message.errorMessage && message.errorMessage !== "Request was aborted"
 						? message.errorMessage
-						: "Operation aborted";
+						: "Operation aborted");
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), this.outputPad, 0));
 			} else if (message.stopReason === "error") {
-				const errorMsg = message.errorMessage || "Unknown error";
+				const errorMsg = this.failureText ?? (message.errorMessage || "Unknown error");
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
 			}
