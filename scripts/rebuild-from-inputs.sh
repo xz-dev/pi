@@ -130,6 +130,7 @@ PATCH_ORDER=(
 	responsive-selectors
 	thinking-preview
 	retry-error-presentation
+	message-origin
 	model-thinking-sort
 )
 
