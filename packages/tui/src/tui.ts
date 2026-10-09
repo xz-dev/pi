@@ -122,6 +122,9 @@ export interface Component {
 	 */
 	render(width: number): string[];
 
+	/** Optional bounded presentation. Height is the allocated region, not the terminal height. */
+	renderInBounds?(width: number, height: number): string[];
+
 	/** Optional handler for keyboard input when component has focus. */
 	handleInput?(data: string): void;
 

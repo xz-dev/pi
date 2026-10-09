@@ -19,6 +19,7 @@ import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
@@ -127,7 +128,7 @@ class SessionSelectorHeader implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): string[] {
+	render(width: number, compact = false): string[] {
 		const title = this.scope === "current" ? "Resume Session (Current Folder)" : "Resume Session (All)";
 		const leftText = theme.bold(title);
 
@@ -182,6 +183,10 @@ class SessionSelectorHeader implements Component {
 			hintLine2 = truncateToWidth(hint2, width, "…");
 		}
 
+		if (compact) {
+			if (this.confirmingDeletePath !== null || this.statusMessage) return [hintLine1];
+			return this.loading ? [truncateToWidth(scopeText, width)] : [];
+		}
 		return [`${left}${" ".repeat(spacing)}${rightText}`, hintLine1, hintLine2];
 	}
 }
@@ -308,6 +313,8 @@ class SessionList implements Component, Focusable {
 	public onDeleteSession?: (sessionPath: string) => Promise<void>;
 	public onRenameSession?: (sessionPath: string) => void;
 	public onError?: (message: string) => void;
+	private renderedMaxVisible = 10;
+	private selectionVisible = true;
 	private maxVisible: number = 10; // Max sessions visible (one line each)
 
 	// Focusable implementation - propagate to searchInput for IME cursor positioning
@@ -340,6 +347,7 @@ class SessionList implements Component, Focusable {
 
 		// Handle Enter in search input - select current item
 		this.searchInput.onSubmit = () => {
+			if (!this.selectionVisible) return;
 			if (this.filteredSessions[this.selectedIndex]) {
 				const selected = this.filteredSessions[this.selectedIndex];
 				if (this.onSelect) {
@@ -420,11 +428,24 @@ class SessionList implements Component, Focusable {
 	invalidate(): void {}
 
 	render(width: number): string[] {
+		this.selectionVisible = true;
+		this.renderedMaxVisible = this.maxVisible;
+		return this.renderList(width, false);
+	}
+
+	renderInBounds(width: number, height: number): string[] {
+		const rows = Math.max(0, Math.floor(height));
+		this.selectionVisible = rows >= 2;
+		this.renderedMaxVisible = Math.min(this.maxVisible, Math.max(1, rows - 2));
+		return this.renderList(width, true).slice(0, rows);
+	}
+
+	private renderList(width: number, compact: boolean): string[] {
 		const lines: string[] = [];
 
 		// Render search input
 		lines.push(...this.searchInput.render(width));
-		lines.push(""); // Blank line after search
+		if (!compact) lines.push("");
 
 		if (this.filteredSessions.length === 0) {
 			let emptyMessage: string;
@@ -449,9 +470,12 @@ class SessionList implements Component, Focusable {
 		// Calculate visible range with scrolling
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredSessions.length - this.maxVisible),
+			Math.min(
+				this.selectedIndex - Math.floor(this.renderedMaxVisible / 2),
+				this.filteredSessions.length - this.renderedMaxVisible,
+			),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredSessions.length);
+		const endIndex = Math.min(startIndex + this.renderedMaxVisible, this.filteredSessions.length);
 
 		// Render visible sessions (one line each with tree structure)
 		for (let i = startIndex; i < endIndex; i++) {
@@ -539,6 +563,7 @@ class SessionList implements Component, Focusable {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
+		if (!this.selectionVisible && kb.matches(keyData, "tui.select.confirm")) return;
 
 		// Handle delete confirmation state first - intercept all keys
 		if (this.confirmingDeletePath !== null) {
@@ -619,11 +644,11 @@ class SessionList implements Component, Focusable {
 		}
 		// Page up - jump up by maxVisible items
 		else if (kb.matches(keyData, "tui.select.pageUp")) {
-			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisible);
+			this.selectedIndex = Math.max(0, this.selectedIndex - this.renderedMaxVisible);
 		}
 		// Page down - jump down by maxVisible items
 		else if (kb.matches(keyData, "tui.select.pageDown")) {
-			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + this.maxVisible);
+			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + this.renderedMaxVisible);
 		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
@@ -691,7 +716,32 @@ async function deleteSessionFile(
 /**
  * Component that renders a session selector
  */
-export class SessionSelectorComponent extends Container implements Focusable {
+export class SessionSelectorComponent extends SelectorPanel implements Focusable {
+	private renameInputVisible = true;
+
+	override render(width: number): string[] {
+		this.renameInputVisible = true;
+		return super.render(width);
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		if (this.mode === "rename") {
+			this.renameInputVisible = height > 0;
+			const view = new Container();
+			view.addChild(this.renameInput);
+			view.addChild(
+				new Text(`${keyText("tui.select.confirm")} save · ${keyText("tui.select.cancel")} cancel`, 0, 0),
+			);
+			return view;
+		}
+		return compactSelector(
+			width,
+			height,
+			[{ render: () => this.header.render(width, true), invalidate: () => {} }],
+			this.sessionList,
+		);
+	}
+
 	handleInput(data: string): void {
 		if (this.mode === "rename") {
 			const kb = getKeybindings();
@@ -792,6 +842,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		this.buildBaseLayout(this.sessionList);
 
 		this.renameInput.onSubmit = (value) => {
+			if (!this.renameInputVisible) return;
 			void this.confirmRename(value);
 		};
 

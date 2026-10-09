@@ -3,11 +3,20 @@
  * Displays a list of string options with keyboard navigation.
  */
 
-import { Container, getKeybindings, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import {
+	Container,
+	getKeybindings,
+	renderSelectionWindow,
+	Spacer,
+	Text,
+	type TUI,
+	truncateToWidth,
+} from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 
 export interface ExtensionSelectorOptions {
 	tui?: TUI;
@@ -16,13 +25,15 @@ export interface ExtensionSelectorOptions {
 	description?: string;
 }
 
-export class ExtensionSelectorComponent extends Container {
+export class ExtensionSelectorComponent extends SelectorPanel {
 	private options: string[];
 	private selectedIndex = 0;
 	private listContainer: Container;
 	private onSelectCallback: (option: string) => void;
 	private onCancelCallback: () => void;
 	private titleText: Text;
+	private descriptionText?: Text;
+	private selectionVisible = true;
 	private baseTitle: string;
 	private countdown: CountdownTimer | undefined;
 	private onToggleToolsExpanded: (() => void) | undefined;
@@ -49,7 +60,8 @@ export class ExtensionSelectorComponent extends Container {
 		this.addChild(this.titleText);
 		if (opts?.description) {
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("text", opts.description), 1, 0));
+			this.descriptionText = new Text(theme.fg("text", opts.description), 1, 0);
+			this.addChild(this.descriptionText);
 		}
 		this.addChild(new Spacer(1));
 
@@ -82,6 +94,37 @@ export class ExtensionSelectorComponent extends Container {
 		this.updateList();
 	}
 
+	override render(width: number): string[] {
+		this.selectionVisible = true;
+		return super.render(width);
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		const header = [this.titleText, ...(this.descriptionText ? [this.descriptionText] : [])];
+		const heading = header.flatMap((child) => child.render(width));
+		if (heading.length >= height) {
+			// Never offer an unseen permission choice under a clipped explanation.
+			this.selectionVisible = false;
+			const view = new Container();
+			view.addChild({
+				render: () => [
+					...heading.slice(0, Math.max(0, height - 1)),
+					truncateToWidth("Resize to read and choose", width),
+				],
+				invalidate: () => {},
+			});
+			return view;
+		}
+		const rows = this.listContainer.children.map((child) => child.render(width));
+		return compactSelector(
+			width,
+			height,
+			header,
+			(rowsAvailable) => renderSelectionWindow(rows, this.selectedIndex, rowsAvailable).lines,
+			[new Text(`${keyHint("tui.select.confirm", "select")} · ${keyHint("tui.select.cancel", "cancel")}`, 0, 0)],
+		);
+	}
+
 	private updateList(): void {
 		this.listContainer.clear();
 		for (let i = 0; i < this.options.length; i++) {
@@ -104,6 +147,7 @@ export class ExtensionSelectorComponent extends Container {
 			this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + 1);
 			this.updateList();
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
+			if (!this.selectionVisible) return;
 			const selected = this.options[this.selectedIndex];
 			if (selected) this.onSelectCallback(selected);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
