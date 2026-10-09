@@ -107,7 +107,10 @@ export class ExtensionSelectorComponent extends SelectorPanel {
 			this.selectionVisible = false;
 			const view = new Container();
 			view.addChild({
-				render: () => [...heading.slice(0, height - 1), truncateToWidth("Resize to read and choose", width)],
+				render: () => [
+					...heading.slice(0, Math.max(0, height - 1)),
+					truncateToWidth("Resize to read and choose", width),
+				],
 				invalidate: () => {},
 			});
 			return view;
