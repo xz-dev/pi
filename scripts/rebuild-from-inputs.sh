@@ -149,6 +149,7 @@ CHAIN_EDGES=(
 	retry-non-retryable-patterns:codex-websocket-recovery
 	slow-hook-tui-only:defer-threshold-compaction
 	defer-threshold-compaction:cold-start-retry
+	cold-start-retry:message-origin
 	compact-input-dock:responsive-selectors
 )
 
