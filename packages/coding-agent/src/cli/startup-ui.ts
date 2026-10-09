@@ -19,6 +19,7 @@ import {
 	FirstTimeSetupComponent,
 	type FirstTimeSetupResult,
 } from "../modes/interactive/components/first-time-setup.ts";
+import { SelectorHost } from "../modes/interactive/components/selector-host.ts";
 import { type BlockedStatus, dialogBlockedStatus } from "../modes/interactive/program-status-reporter.ts";
 import { SYSTEM_THEME_NAME } from "../modes/interactive/theme/system-theme.ts";
 import {
@@ -128,9 +129,10 @@ function showStartupDialog(
 	component: Component,
 	blocked: BlockedStatus,
 	settingsManager: SettingsManager,
+	focus: Component = component,
 ): void {
 	ui.addChild(component);
-	ui.setFocus(component);
+	ui.setFocus(focus);
 	ui.terminal.setProgramStatus({ state: "blocked", app: APP_NAME, ...blocked });
 	startStartupTui(ui, settingsManager);
 }
@@ -194,7 +196,9 @@ export async function showStartupSelector<T>(
 			() => void finish(undefined),
 			{ tui: ui },
 		);
-		showStartupDialog(ui, selector, dialogBlockedStatus(blockedKind, title), settingsManager);
+		const host = new SelectorHost(ui, () => []);
+		host.addChild(selector);
+		showStartupDialog(ui, host, dialogBlockedStatus(blockedKind, title), settingsManager, selector);
 	});
 }
 
