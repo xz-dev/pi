@@ -216,7 +216,7 @@ Run lifecycle metadata with `type: "run_state"`. A `started` record is followed 
 
 Each record has a unique `id`; terminal records retain the same `runId`. Unlike conversation entries, these records do not move the leaf or change the conversation generation. They are excluded from `SessionEntry`, tree indexing, `getEntries()`, model context, and conversation rendering. `parentId` identifies the retained conversation anchor rather than a new tree edge. Forks do not inherit the source process's run records.
 
-Interactive cold startup can recover the latest unfinished run belonging to the current session and branch, subject to [input precedence and retry eligibility](sessions.md#retry-interrupted-work). A missing terminal record does not establish ownership of a session file; concurrent writers to the same file are not supported.
+Interactive cold startup derives recovery from the retryable conversation tail (see [`/retry`](sessions.md#retry-interrupted-work)); run records only supply the durable explicit user-cancellation veto (`aborted`). `finished` records cover both success and retained errors, so they do not block recovery. A missing terminal record does not establish ownership of a session file; concurrent writers to the same file are not supported.
 
 ## Tree Structure
 
