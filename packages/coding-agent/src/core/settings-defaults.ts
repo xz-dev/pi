@@ -23,7 +23,7 @@ export const SETTINGS_DEFAULTS = {
 			maxRetryDelayMs: 60000,
 		},
 	},
-	hideThinkingBlock: false,
+	thinkingDisplay: "preview",
 	showCacheMissNotices: false,
 	quietStartup: false,
 	slowSyncHookThresholdMs: -1,
