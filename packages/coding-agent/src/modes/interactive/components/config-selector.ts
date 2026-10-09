@@ -193,8 +193,9 @@ class ConfigSelectorHeader implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): string[] {
+	render(width: number, compact = false): string[] {
 		const title = theme.bold(this.writeScope === "project" ? "Project Local Resources" : "Global Resources");
+		if (compact) return [truncateToWidth(title, width)];
 		const sep = theme.fg("muted", " · ");
 		const switchHint = this.projectModeAvailable ? keyHint("tui.input.tab", "switch mode") + sep : "";
 		const actionHint =
@@ -221,6 +222,7 @@ class ResourceList implements Component, Focusable {
 	private searchInput: Input;
 	private maxVisible: number;
 	private renderedMaxVisible: number;
+	private selectionVisible = true;
 	private settingsManager: SettingsManager;
 	private cwd: string;
 	private agentDir: string;
@@ -386,12 +388,14 @@ class ResourceList implements Component, Focusable {
 	invalidate(): void {}
 
 	render(width: number): string[] {
+		this.selectionVisible = true;
 		this.renderedMaxVisible = this.maxVisible;
 		return this.renderList(width, false);
 	}
 
 	renderInBounds(width: number, height: number): string[] {
 		const rows = Math.max(0, Math.floor(height));
+		this.selectionVisible = rows >= 2;
 		this.renderedMaxVisible = Math.max(1, rows - 2);
 		return this.renderList(width, true).slice(0, rows);
 	}
@@ -507,6 +511,7 @@ class ResourceList implements Component, Focusable {
 			return;
 		}
 		if (data === " " || kb.matches(data, "tui.select.confirm")) {
+			if (!this.selectionVisible) return;
 			const entry = this.filteredItems[this.selectedIndex];
 			if (entry?.type === "item" && (this.writeScope === "project" || this.getItemScope(entry.item) === "user")) {
 				const newEnabled = this.toggleResource(entry.item);
@@ -944,7 +949,12 @@ export class ConfigSelectorComponent extends SelectorPanel implements Focusable 
 	}
 
 	protected getCompactView(width: number, height: number): Container {
-		return compactSelector(width, height, [this.header], this.resourceList);
+		return compactSelector(
+			width,
+			height,
+			[{ render: () => this.header.render(width, true), invalidate: () => {} }],
+			this.resourceList,
+		);
 	}
 
 	private switchWriteScope(): void {

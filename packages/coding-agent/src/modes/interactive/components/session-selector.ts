@@ -118,7 +118,7 @@ class SessionSelectorHeader implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): string[] {
+	render(width: number, compact = false): string[] {
 		const title = this.scope === "current" ? "Resume Session (Current Folder)" : "Resume Session (All)";
 		const leftText = theme.bold(title);
 
@@ -173,6 +173,10 @@ class SessionSelectorHeader implements Component {
 			hintLine2 = truncateToWidth(hint2, width, "…");
 		}
 
+		if (compact) {
+			if (this.confirmingDeletePath !== null || this.statusMessage) return [hintLine1];
+			return this.loading ? [truncateToWidth(scopeText, width)] : [];
+		}
 		return [`${left}${" ".repeat(spacing)}${rightText}`, hintLine1, hintLine2];
 	}
 }
@@ -300,6 +304,7 @@ class SessionList implements Component, Focusable {
 	public onRenameSession?: (sessionPath: string) => void;
 	public onError?: (message: string) => void;
 	private renderedMaxVisible = 10;
+	private selectionVisible = true;
 	private maxVisible: number = 10; // Max sessions visible (one line each)
 
 	// Focusable implementation - propagate to searchInput for IME cursor positioning
@@ -332,6 +337,7 @@ class SessionList implements Component, Focusable {
 
 		// Handle Enter in search input - select current item
 		this.searchInput.onSubmit = () => {
+			if (!this.selectionVisible) return;
 			if (this.filteredSessions[this.selectedIndex]) {
 				const selected = this.filteredSessions[this.selectedIndex];
 				if (this.onSelect) {
@@ -412,12 +418,14 @@ class SessionList implements Component, Focusable {
 	invalidate(): void {}
 
 	render(width: number): string[] {
+		this.selectionVisible = true;
 		this.renderedMaxVisible = this.maxVisible;
 		return this.renderList(width, false);
 	}
 
 	renderInBounds(width: number, height: number): string[] {
 		const rows = Math.max(0, Math.floor(height));
+		this.selectionVisible = rows >= 2;
 		this.renderedMaxVisible = Math.min(this.maxVisible, Math.max(1, rows - 2));
 		return this.renderList(width, true).slice(0, rows);
 	}
@@ -545,6 +553,7 @@ class SessionList implements Component, Focusable {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
+		if (!this.selectionVisible && kb.matches(keyData, "tui.select.confirm")) return;
 
 		// Handle delete confirmation state first - intercept all keys
 		if (this.confirmingDeletePath !== null) {
@@ -702,8 +711,16 @@ export class SessionSelectorComponent extends SelectorPanel implements Focusable
 		return this.mode !== "rename";
 	}
 
+	private renameInputVisible = true;
+
+	override render(width: number): string[] {
+		this.renameInputVisible = true;
+		return super.render(width);
+	}
+
 	protected getCompactView(width: number, height: number): Container {
 		if (this.mode === "rename") {
+			this.renameInputVisible = height > 0;
 			const view = new Container();
 			view.addChild(this.renameInput);
 			view.addChild(
@@ -711,7 +728,12 @@ export class SessionSelectorComponent extends SelectorPanel implements Focusable
 			);
 			return view;
 		}
-		return compactSelector(width, height, [this.header], this.sessionList);
+		return compactSelector(
+			width,
+			height,
+			[{ render: () => this.header.render(width, true), invalidate: () => {} }],
+			this.sessionList,
+		);
 	}
 
 	handleInput(data: string): void {
@@ -814,6 +836,7 @@ export class SessionSelectorComponent extends SelectorPanel implements Focusable
 		this.buildBaseLayout(this.sessionList);
 
 		this.renameInput.onSubmit = (value) => {
+			if (!this.renameInputVisible) return;
 			void this.confirmRename(value);
 		};
 
