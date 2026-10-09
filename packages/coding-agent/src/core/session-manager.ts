@@ -1278,6 +1278,30 @@ export class SessionManager {
 		return entry;
 	}
 
+	/** Explicit cancellation applies to the selected work, not to unrelated sibling runs. */
+	hasRecoveryVeto(): boolean {
+		const branchIds = new Set(this.getBranch().map((entry) => entry.id));
+		const runOnBranch = new Map<string, boolean>();
+		for (let i = this.fileEntries.length - 1; i >= 0; i--) {
+			const entry = this.fileEntries[i]!;
+			if (entry.type === "message" && branchIds.has(entry.id) && entry.message.role === "user") {
+				return false;
+			}
+			if (entry.type !== "run_state" || entry.sessionId !== this.sessionId) continue;
+			// A sibling run may start at a shared ancestor. Its last record, not that
+			// shared start, determines whether it can supersede this branch's cancellation.
+			if (!runOnBranch.has(entry.runId)) {
+				runOnBranch.set(entry.runId, entry.parentId === null || branchIds.has(entry.parentId));
+			}
+			if (!runOnBranch.get(entry.runId)) continue;
+			if (entry.state === "aborted") return true;
+			if (entry.state === "started") return false;
+			// `finished` also covers errors; only a new run or user input lifts a veto.
+			// A cancelled run's delayed assistant messages do not establish fresh work.
+		}
+		return false;
+	}
+
 	private _appendEntry(entry: SessionEntry): void {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
@@ -1356,11 +1380,24 @@ export class SessionManager {
 			parentId = entry.id;
 		}
 
+		const run = this.fileEntries.findLast((entry): entry is SessionRunEntry => entry.type === "run_state");
+		// Cancellation may precede the first reply. Publish its new branch anchor in
+		// the same atomic write so a late reply cannot orphan the cancelled run.
+		const cancellation: SessionRunEntry | undefined =
+			run?.state === "aborted" && run.sessionId === this.sessionId && run.parentId === commit.expectedLeafId
+				? { ...run, id: randomUUID(), parentId, timestamp: new Date().toISOString() }
+				: undefined;
+		const publishedEntries = cancellation ? [...entries, cancellation] : entries;
 		if (this.persist && this.sessionFile) {
 			const original = this.flushed && existsSync(this.sessionFile) ? readFileSync(this.sessionFile) : undefined;
 			const completeFile = original
-				? Buffer.concat([original, Buffer.from(entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""))])
-				: Buffer.from([...this.fileEntries, ...entries].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+				? Buffer.concat([
+						original,
+						Buffer.from(publishedEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("")),
+					])
+				: Buffer.from(
+						[...this.fileEntries, ...publishedEntries].map((entry) => `${JSON.stringify(entry)}\n`).join(""),
+					);
 			const temporaryFile = `${this.sessionFile}.continuation-${process.pid}-${randomUUID()}.tmp`;
 			try {
 				this.continuationFileWriter(temporaryFile, this.sessionFile, completeFile);
@@ -1374,6 +1411,7 @@ export class SessionManager {
 			this.fileEntries.push(entry);
 			this.byId.set(entry.id, entry);
 		}
+		if (cancellation) this.fileEntries.push(cancellation);
 		this.leafId = entries.at(-1)!.id;
 		this.generation++;
 		this.flushed = this.persist ? true : this.flushed;
