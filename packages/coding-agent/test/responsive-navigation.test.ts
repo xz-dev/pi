@@ -15,7 +15,12 @@ import { stripAnsi } from "../src/utils/ansi.ts";
 
 const labels = Array.from({ length: 30 }, (_, i) => `item-${String(i).padStart(2, "0")}`);
 
-describe.each(["fullscreen", "regular"] as const)("responsive navigation in %s mode", (mode) => {
+describe.each([
+	["fullscreen", 0],
+	["regular", 0],
+	["regular", 8],
+	["regular", 9],
+] as const)("responsive navigation in %s with %i trailing rows", (mode, trailingRows) => {
 	beforeEach(() => {
 		initTheme("dark");
 		// Fullscreen reserves PageUp/PageDown for transcript navigation; selector bindings remain configurable.
@@ -102,10 +107,12 @@ describe.each(["fullscreen", "regular"] as const)("responsive navigation in %s m
 				component = selector;
 				focus = selector.getResourceList();
 			}
-			const host = new SelectorHost(ui, () => []);
+			const below = new Text(Array.from({ length: trailingRows }, (_, i) => `widget ${i}`).join("\n"), 0, 0);
+			const host = new SelectorHost(ui, () => (trailingRows ? [below] : []));
 			host.addChild(component);
 			if (ui instanceof TuiMainScreen) {
 				ui.addChild(host);
+				if (trailingRows) ui.addChild(below);
 			} else {
 				ui.setLayoutRoot(
 					createChatViewport({
