@@ -239,7 +239,7 @@ jobs:
           # This cross-patch test requires both refresh-selection and responsive-selectors.
           node node_modules/vitest/dist/cli.js --run \
             --config packages/coding-agent/vitest.config.ts \
-            scripts/responsive-selector-refresh.integration.test.ts
+            scripts/responsive-selector-refresh.integration.test.mts
           # Run the full coding-agent suite with vitest auto-discovery, matching
           # upstream CI (npm test -> vitest --run).
           (
