@@ -390,7 +390,8 @@ describe("AgentSession model and extension characterization", () => {
 
 		await harness.session.prompt("original");
 
-		expect(providerUserText).toBe("rewritten");
+		expect(providerUserText).toContain("[Pi source: SDK input;");
+		expect(providerUserText).toMatch(/\nrewritten$/);
 		const storedUserMessage = harness.session.messages.find((message) => message.role === "user");
 		expect(storedUserMessage?.role).toBe("user");
 		if (storedUserMessage?.role === "user") {
@@ -432,7 +433,8 @@ describe("AgentSession model and extension characterization", () => {
 		await transformedHarness.session.prompt("hello");
 		await transformedHarness.session.prompt("ping");
 
-		expect(providerUserText).toBe("transformed:hello");
+		expect(providerUserText).toContain("[Pi source: SDK input;");
+		expect(providerUserText).toMatch(/\ntransformed:hello$/);
 		expect(transformedHarness.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
 		expect(extensionApi).toBeDefined();
 	});
