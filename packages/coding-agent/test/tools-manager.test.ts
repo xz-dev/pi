@@ -1,9 +1,15 @@
 import type * as ChildProcess from "node:child_process";
 import type * as Fs from "node:fs";
+import * as Os from "os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensureTool, getLatestVersion, type ToolStatus } from "../src/utils/tools-manager.ts";
 
 const originalOffline = process.env.PI_OFFLINE;
+
+vi.mock("os", async (importOriginal) => {
+	const actual = await importOriginal<typeof Os>();
+	return { ...actual, platform: vi.fn(actual.platform) };
+});
 
 vi.mock("fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof Fs>();
@@ -25,6 +31,7 @@ afterEach(() => {
 	if (originalOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = originalOffline;
 	vi.unstubAllGlobals();
+	vi.mocked(Os.platform).mockReturnValue(process.platform);
 });
 
 function redirectResponse(location: string): Response {
@@ -99,6 +106,24 @@ describe("getLatestVersion", () => {
 });
 
 describe("ensureTool", () => {
+	it.each([
+		["fd", "fd-find"],
+		["rg", "ripgrep"],
+	] as const)("reports the FreeBSD package for %s without network access", async (tool, pkgName) => {
+		delete process.env.PI_OFFLINE;
+		vi.mocked(Os.platform).mockReturnValue("freebsd");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const statuses: ToolStatus[] = [];
+		await expect(ensureTool(tool, (status) => statuses.push(status))).resolves.toBeUndefined();
+		expect(statuses).toEqual([
+			{
+				type: "warning",
+				message: `${tool === "fd" ? "fd" : "ripgrep"} not found. Install with: pkg install ${pkgName}`,
+			},
+		]);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
 	it("reports status through a callback without writing to the console", async () => {
 		process.env.PI_OFFLINE = "1";
 		const statuses: ToolStatus[] = [];
