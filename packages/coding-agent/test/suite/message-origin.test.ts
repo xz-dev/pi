@@ -2,7 +2,12 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type MessageOrigin } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ExtensionAPI, InputEvent } from "../../src/core/extensions/index.ts";
+import type {
+	ExtensionAPI,
+	InputEvent,
+	MessageEndEvent,
+	MessageEndEventResult,
+} from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
@@ -176,6 +181,93 @@ describe("message origin", () => {
 		const projected = harness.sessionManager.buildSessionContext().messages.find((m) => m.role === "custom");
 		expect(projected).toMatchObject({ content: "edited", origin: entries[0].origin });
 	});
+
+	it.each([
+		{ uninterruptible: false, role: "user" as const },
+		{ uninterruptible: true, role: "user" as const },
+		{ uninterruptible: false, role: "custom" as const },
+		{ uninterruptible: true, role: "custom" as const },
+	])(
+		"retains $role origin through replacement (uninterruptible=$uninterruptible)",
+		async ({ uninterruptible, role }) => {
+			let sender: ExtensionAPI | undefined;
+			const observed: Array<MessageOrigin | undefined> = [];
+			let modelText = "";
+			const harness = await createHarness({
+				extensionFactories: [
+					{
+						name: "sender",
+						factory: (pi) => {
+							sender = pi;
+						},
+					},
+					{
+						name: "redactor",
+						factory: (pi) => {
+							const replace = (event: MessageEndEvent): MessageEndEventResult | undefined => {
+								if (event.message.role !== role) return;
+								return {
+									message:
+										event.message.role === "user"
+											? { role: "user", content: "redacted", timestamp: event.message.timestamp }
+											: {
+													role: "custom",
+													customType: "notice",
+													display: false,
+													content: "redacted",
+													timestamp: event.message.timestamp,
+												},
+								};
+							};
+							const observe = (event: MessageEndEvent): undefined => {
+								if (event.message.role === role) observed.push(event.message.origin);
+							};
+							if (uninterruptible) {
+								pi.on("message_end", replace, { uninterruptible: true });
+								pi.on("message_end", observe, { uninterruptible: true });
+							} else {
+								pi.on("message_end", replace);
+								pi.on("message_end", observe);
+							}
+						},
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				(context) => {
+					modelText = context.messages
+						.filter((entry) => entry.role === "user")
+						.map(getMessageText)
+						.join("\n");
+					return fauxAssistantMessage("ok");
+				},
+			]);
+			const settled = new Promise<void>((resolve) => {
+				const unsubscribe = harness.session.subscribe((event) => {
+					if (event.type === "agent_settled") {
+						unsubscribe();
+						resolve();
+					}
+				});
+			});
+			if (role === "user") sender!.sendUserMessage("original");
+			else sender!.sendMessage({ customType: "notice", display: false, content: "original" }, { triggerTurn: true });
+			await settled;
+			const restored = SessionManager.open(harness.session.exportToJsonl(`${harness.tempDir}/replaced.jsonl`))
+				.buildSessionContext()
+				.messages.find((entry) => entry.role === role);
+			const origin = { type: "extension", extensionName: "inline:sender", extensionId: expect.any(String) };
+			expect(restored).toMatchObject({ origin, content: "redacted" });
+			expect(observed).toEqual([origin]);
+			expect(
+				harness.eventsOfType("message_end").find((event) => event.message.role === role)?.message,
+			).toMatchObject({ origin });
+			expect(modelText).toContain('extension "inline:sender"');
+			expect(modelText).toContain("not direct human input or new authorization");
+			expect(modelText).toContain("redacted");
+		},
+	);
 
 	it("keeps empty control content empty and preserves image-only input without mutating it", () => {
 		const origin: MessageOrigin = { type: "extension", extensionId: "ext-a", extensionName: "A" };
