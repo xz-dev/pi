@@ -1318,6 +1318,54 @@ export function sliceWithWidth(
 // Pooled tracker instance for extractSegments (avoids allocation per call)
 const pooledStyleTracker = new AnsiCodeTracker();
 
+/** Count cell-occupying graphemes after removing terminal sequences, including across style boundaries. */
+export function countVisibleGraphemes(str: string): number {
+	const visible = stripTerminalSequences(str);
+	if (isPrintableAscii(visible)) return visible.length;
+	let count = 0;
+	for (const { segment } of graphemeSegmenter.segment(visible)) {
+		if (graphemeWidth(segment) > 0) count++;
+	}
+	return count;
+}
+
+/** Keep a whole-grapheme suffix, carrying all terminal state from the omitted prefix. */
+export function clipLineStart(line: string, maxWidth: number): { text: string; width: number; hidden: number } {
+	if (maxWidth <= 0) return { text: "", width: 0, hidden: countVisibleGraphemes(line) };
+	const total = visibleWidth(line);
+	if (total <= maxWidth) return { text: line, width: total, hidden: 0 };
+
+	const visible = stripTerminalSequences(line);
+	let droppedWidth = 0;
+	let droppedUnits = 0;
+	let hidden = 0;
+	for (const { segment, index } of graphemeSegmenter.segment(visible)) {
+		if (droppedWidth >= total - maxWidth) break;
+		const width = graphemeWidth(segment);
+		droppedWidth += width;
+		droppedUnits = index + segment.length;
+		if (width > 0) hidden++;
+	}
+	if (droppedWidth === total) return { text: "", width: 0, hidden };
+
+	// Map just the cut back to raw text. Keep every escape in the omitted prefix,
+	// including changes inside a dropped grapheme, without storing per-character data.
+	let rawIndex = 0;
+	let visibleIndex = 0;
+	let prefix = "";
+	while (visibleIndex < droppedUnits) {
+		const ansi = extractAnsiCode(line, rawIndex);
+		if (ansi) {
+			prefix += ansi.code;
+			rawIndex += ansi.length;
+		} else {
+			rawIndex++;
+			visibleIndex++;
+		}
+	}
+	return { text: prefix + line.slice(rawIndex), width: total - droppedWidth, hidden };
+}
+
 /**
  * Extract "before" and "after" segments from a line in a single pass.
  * Used for overlay compositing where we need content before and after the overlay region.
