@@ -58,6 +58,7 @@ jobs:
             +refs/heads/patch/defer-threshold-compaction:refs/remotes/origin/patch/defer-threshold-compaction \
             +refs/heads/patch/cold-start-retry:refs/remotes/origin/patch/cold-start-retry \
             +refs/heads/patch/compact-input-dock:refs/remotes/origin/patch/compact-input-dock \
+            +refs/heads/patch/responsive-selectors:refs/remotes/origin/patch/responsive-selectors \
             +refs/heads/patch/thinking-preview:refs/remotes/origin/patch/thinking-preview \
             +refs/heads/patch/retry-error-presentation:refs/remotes/origin/patch/retry-error-presentation \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort
@@ -99,6 +100,7 @@ jobs:
             defer-threshold-compaction \
             cold-start-retry \
             compact-input-dock \
+            responsive-selectors \
             thinking-preview \
             retry-error-presentation \
             model-thinking-sort \
@@ -223,6 +225,16 @@ jobs:
               test/suite/codex-websocket-retry.test.ts \
               test/interactive-retry-presentation.test.ts
           )
+          # Exercise bounded selectors explicitly, independently of catalog exclusions.
+          (
+            cd packages/coding-agent
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/model-selector-responsive.test.ts \
+              test/responsive-selectors.test.ts \
+              test/responsive-navigation.test.ts \
+              test/cli-responsive-selectors.test.ts \
+              test/chat-viewport.test.ts
+          )
           # Run the full coding-agent suite with vitest auto-discovery, matching
           # upstream CI (npm test -> vitest --run).
           (
@@ -235,7 +247,11 @@ jobs:
           node --test --test-reporter=dot \
             packages/tui/test/tui-render.test.ts \
             packages/tui/test/tui-alt-screen.test.ts \
+            packages/tui/test/bounded-selection.test.ts \
             packages/tui/test/layout.test.ts \
+            packages/tui/test/select-list.test.ts \
+            packages/tui/test/settings-list.test.ts \
+            packages/tui/test/mouse-components.test.ts \
             packages/tui/test/editor.test.ts
 
       - name: Smoke test packed npm release

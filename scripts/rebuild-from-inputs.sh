@@ -127,6 +127,7 @@ PATCH_ORDER=(
 	defer-threshold-compaction
 	cold-start-retry
 	compact-input-dock
+	responsive-selectors
 	thinking-preview
 	retry-error-presentation
 	model-thinking-sort
@@ -147,6 +148,7 @@ CHAIN_EDGES=(
 	retry-non-retryable-patterns:codex-websocket-recovery
 	slow-hook-tui-only:defer-threshold-compaction
 	defer-threshold-compaction:cold-start-retry
+	compact-input-dock:responsive-selectors
 )
 
 print_marker() {
