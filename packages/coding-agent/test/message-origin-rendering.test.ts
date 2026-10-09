@@ -42,7 +42,6 @@ function click(component: Container): void {
 // Exercise the same controller dispatch as Ctrl+O without booting provider/network services.
 const controller = InteractiveMode.prototype as unknown as {
 	setToolsExpanded(this: object, expanded: boolean): void;
-	addOriginMessageToChat(this: object, message: AgentMessage): void;
 	addMessageToChat(this: object, message: AgentMessage, options?: { populateHistory?: boolean }): void;
 };
 
@@ -117,9 +116,6 @@ describe("message origin rendering", () => {
 			toolOutputExpanded: false,
 			session: { extensionRunner: { getMessageRenderer: () => undefined } },
 			settingsManager: { getShowImages: () => false, getImageWidthCells: () => 60 },
-			addOriginMessageToChat(message: AgentMessage) {
-				controller.addOriginMessageToChat.call(this, message);
-			},
 			getUserMessageText: () => "human input",
 			getMarkdownThemeWithSettings: () => undefined,
 			getMarkdownTransformers: () => [],
