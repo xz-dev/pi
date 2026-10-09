@@ -224,6 +224,67 @@ describe("Interactive retry presentation", () => {
 		expect(harness.eventsOfType("tool_execution_start")).toEqual([]);
 	});
 
+	it.each([true, false])("defers a pre-start failure through message_end hooks with retry=%s", async (enabled) => {
+		const hookEntered = Promise.withResolvers<void>();
+		const hookReleased = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			settings: { retry: { enabled, maxRetries: 1, baseDelayMs: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("message_end", async (event) => {
+						if (event.message.role === "assistant" && event.message.stopReason === "error") {
+							hookEntered.resolve();
+							await hookReleased.promise;
+						}
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const view = createView(harness);
+		let calls = 0;
+		harness.session.agent.streamFunction = (model) => {
+			const failed = ++calls === 1;
+			const response = {
+				...fauxAssistantMessage(
+					failed ? "" : "recovered",
+					failed ? { stopReason: "error", errorMessage: WEBSOCKET_1006 } : {},
+				),
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+			};
+			const stream = createAssistantMessageEventStream();
+			// No start event: exercise the agent loop's synthetic message_start.
+			stream.push(
+				failed
+					? { type: "error", reason: "error", error: response }
+					: { type: "done", reason: "stop", message: response },
+			);
+			stream.end(response);
+			return stream;
+		};
+		const prompt = harness.session.prompt("test");
+		await hookEntered.promise;
+		try {
+			await view.flush();
+			expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
+			view.chatContainer.invalidate();
+			expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
+		} finally {
+			hookReleased.resolve();
+			await prompt;
+			await view.flush();
+		}
+		expect(calls).toBe(enabled ? 2 : 1);
+		if (enabled) {
+			expect(view.renderChat()).toContain("recovered");
+			expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
+		} else {
+			expect(occurrences(view.renderChat(), WEBSOCKET_1006)).toBe(1);
+		}
+	});
+
 	it.each([
 		{ name: "disabled retry", enabled: false, maxRetries: 10, error: WEBSOCKET_1006 },
 		{ name: "zero retry budget", enabled: true, maxRetries: 0, error: WEBSOCKET_1006 },
