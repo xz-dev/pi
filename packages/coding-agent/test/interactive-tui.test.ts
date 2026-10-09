@@ -3,6 +3,7 @@ import { Container, getKeybindings, isViewportTUI, ScrollView, setKeybindings, T
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager.ts";
 import {
 	BranchSummaryStatusIndicator,
@@ -364,6 +365,7 @@ describe("InteractiveMode copy confirmation", () => {
 });
 
 type RenderSessionEntriesContext = {
+	sessionManager: SessionManager;
 	renderer: ReturnType<typeof createInteractiveTui>;
 	renderSessionItems: (items: unknown[]) => void;
 };
@@ -380,7 +382,11 @@ describe("InteractiveMode transcript rebuild", () => {
 			fullscreenCopyOnSelect: false,
 		});
 		ui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
-		const context: RenderSessionEntriesContext = { renderer: ui, renderSessionItems: vi.fn() };
+		const context: RenderSessionEntriesContext = {
+			sessionManager: SessionManager.inMemory(),
+			renderer: ui,
+			renderSessionItems: vi.fn(),
+		};
 		const { renderSessionEntries } = InteractiveMode.prototype as unknown as {
 			renderSessionEntries(this: RenderSessionEntriesContext, entries: unknown[]): void;
 		};
