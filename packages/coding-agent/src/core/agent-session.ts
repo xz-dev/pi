@@ -117,7 +117,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { type ExtensionShutdownProgressListener, emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { planContinuation } from "./manual-retry.ts";
+import { type ContinuationPlan, planContinuation } from "./manual-retry.ts";
 import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import {
 	type BashExecutionMessage,
@@ -443,6 +443,8 @@ export class AgentSession {
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
 	private _agentRunAbortRequested = false;
+	private _runId: string | undefined;
+	private _isShuttingDown = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 	private _manualRetryActive = false;
@@ -1304,28 +1306,41 @@ export class AgentSession {
 		resolve();
 	}
 
-	private async _emitAgentSettled(): Promise<void> {
-		this._cacheWarmer?.onAgentSettled();
-		this._isAgentRunActive = false;
-		this._isEmittingAgentSettled = true;
-		try {
-			const aborted = this._agentRunAbortRequested;
-			await this._extensionRunner.emit({ type: "agent_settled", aborted });
-			this._emit({ type: "agent_settled", aborted });
-		} finally {
-			this._isEmittingAgentSettled = false;
-		}
+	private _finishRun(state: "finished" | "aborted"): void {
+		if (!this._runId || this._isShuttingDown) return;
+		const runId = this._runId;
+		this._runId = undefined;
+		this.sessionManager.appendRunState(state, runId);
+	}
 
-		const deferred = this._deferredSettledActions.splice(0);
-		if (deferred.length > 0) {
+	/** Exit cleanup must not turn an interrupted run into an explicit cancellation. */
+	prepareForShutdown(): void {
+		this._isShuttingDown = true;
+	}
+
+	private async _emitAgentSettled(): Promise<void> {
+		try {
+			this._finishRun("finished");
+		} finally {
+			// A failed diagnostic write must not strand the session in a busy state.
+			this._cacheWarmer?.onAgentSettled();
+			this._isAgentRunActive = false;
+			this._isEmittingAgentSettled = true;
+			try {
+				const aborted = this._agentRunAbortRequested;
+				await this._extensionRunner.emit({ type: "agent_settled", aborted });
+				this._emit({ type: "agent_settled", aborted });
+			} finally {
+				this._isEmittingAgentSettled = false;
+			}
+
+			const deferred = this._deferredSettledActions.splice(0);
 			try {
 				for (const action of deferred) await action();
 			} finally {
 				this._resolveIdleWaitIfIdle();
 			}
-			return;
 		}
-		this._resolveIdleWaitIfIdle();
 	}
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
@@ -1706,6 +1721,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this.prepareForShutdown();
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -2146,6 +2162,7 @@ export class AgentSession {
 		this._pendingToolNames.clear();
 		this._continuationAnchorId = undefined;
 		this._continuationBranchLeafId = undefined;
+		this._runId = this.sessionManager.appendRunState("started");
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
@@ -2170,9 +2187,19 @@ export class AgentSession {
 		}
 	}
 
-	/** Recover the latest interrupted response or continue from an explicit safe protocol boundary. */
-	async retry(): Promise<void> {
+	/** Pure eligibility shared by the idle hint, cold-start recovery, and manual retry. */
+	get canRetry(): boolean {
+		try {
+			this._planRetry();
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private _planRetry(): ContinuationPlan {
 		const continuationAnchorId = this._continuationAnchorId;
+		if (this._isShuttingDown) throw new Error("Session is shutting down.");
 		if (this._manualRetryActive || this._isAgentRunActive) {
 			throw new Error("Agent is already processing a retry.");
 		}
@@ -2190,24 +2217,42 @@ export class AgentSession {
 		if (!this.model) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
-		const hasConfiguredAuth =
-			this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
-			(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
-		if (!hasConfiguredAuth) {
-			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
-		}
-
-		const expectedSessionId = this.sessionManager.getSessionId();
-		const expectedLeafId = this.sessionManager.getLeafId();
-		const expectedGeneration = this.sessionManager.getGeneration();
 		const branchEntries = continuationAnchorId
 			? this.sessionManager.getBranch(this._continuationBranchLeafId ?? continuationAnchorId)
 			: this.sessionManager.getBranch();
-		const plan = planContinuation({
+		return planContinuation({
 			branchEntries,
 			selectedEntryId: continuationAnchorId,
 			recoveryTimestamp: Date.now(),
 		});
+	}
+
+	/** Recover a safe boundary; an optional startup guard lets fresh input take priority after authentication. */
+	async retry(shouldStart?: () => boolean): Promise<void> {
+		if (shouldStart?.() === false) return;
+		this._planRetry();
+		const expectedSessionId = this.sessionManager.getSessionId();
+		const expectedLeafId = this.sessionManager.getLeafId();
+		const expectedGeneration = this.sessionManager.getGeneration();
+		const model = this.model!;
+		const hasConfiguredAuth =
+			this._modelRuntime.hasConfiguredAuth(model.provider) ||
+			(await this._modelRuntime.checkAuth(model.provider)) !== undefined;
+		if (shouldStart?.() === false) return;
+		if (!hasConfiguredAuth) throw new Error(formatNoApiKeyFoundMessage(model.provider));
+		// Authentication can yield; never redirect a pending retry to a changed target.
+		const plan = this._planRetry();
+		if (
+			this.model !== model ||
+			this.sessionManager.getSessionId() !== expectedSessionId ||
+			this.sessionManager.getLeafId() !== expectedLeafId ||
+			this.sessionManager.getGeneration() !== expectedGeneration
+		) {
+			throw new Error("Session changed while preparing retry. Try /retry again.");
+		}
+		this._agentRunAbortRequested = false;
+		// Retry publishes a sibling branch; its retained anchor, not the failed leaf, owns the run.
+		this._runId = this.sessionManager.appendRunState("started", undefined, plan.anchorEntryId);
 		const recoveryCue: ManualRetryRecoveryMessage | undefined =
 			plan.kind === "interrupted_assistant"
 				? {
@@ -2851,15 +2896,19 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
-		if (this._isAgentRunActive) {
-			this._agentRunAbortRequested = true;
+		try {
+			this._finishRun("aborted");
+		} finally {
+			if (this._isAgentRunActive) {
+				this._agentRunAbortRequested = true;
+			}
+			this.abortRetry();
+			this.abortCompaction();
+			this.abortBranchSummary();
+			if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
+			this.agent.abort();
+			await this.waitForIdle();
 		}
-		this.abortRetry();
-		this.abortCompaction();
-		this.abortBranchSummary();
-		if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
-		this.agent.abort();
-		await this.waitForIdle();
 	}
 
 	async waitForIdle(): Promise<void> {
@@ -3331,8 +3380,12 @@ export class AgentSession {
 	 * Cancel in-progress compaction (manual or auto).
 	 */
 	abortCompaction(): void {
-		this._compactionAbortController?.abort();
-		this._autoCompactionAbortController?.abort();
+		try {
+			if (this.isCompacting) this._finishRun("aborted");
+		} finally {
+			this._compactionAbortController?.abort();
+			this._autoCompactionAbortController?.abort();
+		}
 	}
 
 	/**
@@ -4242,7 +4295,11 @@ export class AgentSession {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
-		this._retryAbortController?.abort();
+		try {
+			if (this._retryAbortController) this._finishRun("aborted");
+		} finally {
+			this._retryAbortController?.abort();
+		}
 	}
 
 	/** Whether auto-retry is currently in progress */
