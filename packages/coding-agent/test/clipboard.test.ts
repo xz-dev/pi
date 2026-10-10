@@ -66,6 +66,14 @@ afterEach(() => {
 });
 
 describe("readClipboardText", () => {
+	test("FreeBSD uses the X11 text command before the native fallback", async () => {
+		mocks.platform.mockReturnValue("freebsd");
+		vi.stubEnv("DISPLAY", ":0");
+		mocks.command.mockResolvedValue(Buffer.from("FreeBSD clipboard"));
+		await expect(readClipboardText()).resolves.toBe("FreeBSD clipboard");
+		expect(mocks.command).toHaveBeenCalledWith("xclip", ["-selection", "clipboard", "-out"], { timeoutMs: 5000 });
+		expect(mocks.getNativeClipboard).not.toHaveBeenCalled();
+	});
 	test("awaits native clipboard text and catches rejected reads", async () => {
 		mocks.clipboard.getText.mockResolvedValue("clipboard text");
 		await expect(readClipboardText()).resolves.toBe("clipboard text");
@@ -119,14 +127,20 @@ describe("readClipboardText", () => {
 });
 
 describe("copyToClipboard", () => {
+	test("display-less FreeBSD uses OSC 52 without a native writer", async () => {
+		mocks.platform.mockReturnValue("freebsd");
+		mocks.getNativeClipboard.mockReturnValue(undefined);
+		await copyToClipboard("hello");
+		expect(osc52Writes).toEqual([`\x1b]52;c;${Buffer.from("hello").toString("base64")}\x07`]);
+	});
 	test("local native success skips OSC 52 and commands", async () => {
 		await copyToClipboard("hello");
 		expect(mocks.clipboard.setText).toHaveBeenCalledWith("hello");
 		expect(osc52Writes).toHaveLength(0);
 		expect(mocks.command).not.toHaveBeenCalled();
 	});
-	test("Linux skips the native writer", async () => {
-		mocks.platform.mockReturnValue("linux");
+	test.each(["linux", "freebsd"] as const)("%s skips the native writer", async (platform) => {
+		mocks.platform.mockReturnValue(platform);
 		vi.stubEnv("DISPLAY", ":0");
 		await copyToClipboard("hello");
 		expect(mocks.getNativeClipboard).not.toHaveBeenCalled();
@@ -173,17 +187,20 @@ describe("copyToClipboard", () => {
 		expect(mocks.command.mock.calls.map(([name]) => name)).toEqual(["wl-copy", "xclip", "xsel"]);
 		expect(osc52Writes).toHaveLength(0);
 	});
-	test("local Linux failure does not report an unverified OSC 52 write as success", async () => {
-		// Regression test for #9618.
-		mocks.platform.mockReturnValue("linux");
-		vi.stubEnv("DISPLAY", ":0");
-		mocks.command.mockResolvedValue(undefined);
-		await expect(copyToClipboard("hello")).rejects.toThrow(
-			"Clipboard unavailable: install `xclip` or `xsel`, or check X11 access",
-		);
-		expect(mocks.command.mock.calls.map(([name]) => name)).toEqual(["xclip", "xsel"]);
-		expect(osc52Writes).toHaveLength(0);
-	});
+	test.each(["linux", "freebsd"] as const)(
+		"local %s failure does not report an unverified OSC 52 write as success",
+		async (platform) => {
+			// Regression test for #9618.
+			mocks.platform.mockReturnValue(platform);
+			vi.stubEnv("DISPLAY", ":0");
+			mocks.command.mockResolvedValue(undefined);
+			await expect(copyToClipboard("hello")).rejects.toThrow(
+				"Clipboard unavailable: install `xclip` or `xsel`, or check X11 access",
+			);
+			expect(mocks.command.mock.calls.map(([name]) => name)).toEqual(["xclip", "xsel"]);
+			expect(osc52Writes).toHaveLength(0);
+		},
+	);
 	test("display-less Linux falls back to OSC 52", async () => {
 		// Regression test for #9688: containers without X11/Wayland access.
 		mocks.platform.mockReturnValue("linux");
@@ -255,16 +272,19 @@ describe("copyToClipboard", () => {
 		expect(mocks.command.mock.calls.map(([name]) => name)).toEqual(["wl-copy"]);
 		expect(osc52Writes).toHaveLength(0);
 	});
-	test("reports the Wayland clipboard tool instead of the X11 fallback", async () => {
-		mocks.platform.mockReturnValue("linux");
-		vi.stubEnv("WAYLAND_DISPLAY", "wayland-0");
-		vi.stubEnv("DISPLAY", ":0");
-		mocks.command.mockResolvedValue(undefined);
-		await expect(copyToClipboard("hello")).rejects.toThrow(
-			"Clipboard unavailable: install `wl-clipboard` (`wl-copy`) or check Wayland access",
-		);
-		expect(mocks.command.mock.calls.map(([name]) => name)).toEqual(["wl-copy", "xclip", "xsel"]);
-	});
+	test.each(["linux", "freebsd"] as const)(
+		"%s reports the Wayland clipboard tool instead of the X11 fallback",
+		async (platform) => {
+			mocks.platform.mockReturnValue(platform);
+			vi.stubEnv("WAYLAND_DISPLAY", "wayland-0");
+			vi.stubEnv("DISPLAY", ":0");
+			mocks.command.mockResolvedValue(undefined);
+			await expect(copyToClipboard("hello")).rejects.toThrow(
+				"Clipboard unavailable: install `wl-clipboard` (`wl-copy`) or check Wayland access",
+			);
+			expect(mocks.command.mock.calls.map(([name]) => name)).toEqual(["wl-copy", "xclip", "xsel"]);
+		},
+	);
 	test("Termux on Android writes through termux-clipboard-set", async () => {
 		mocks.platform.mockReturnValue("android");
 		vi.stubEnv("TERMUX_VERSION", "0.119");
