@@ -132,6 +132,7 @@ PATCH_ORDER=(
 	retry-error-presentation
 	message-origin
 	model-thinking-sort
+	pending-model-switch-indicator
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip
