@@ -3697,7 +3697,7 @@ export class InteractiveMode {
 				break;
 
 			case "turn_start":
-				this.settlePendingModelSwitch();
+				if (this.pendingModelSwitch) this.settlePendingModelSwitch();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
