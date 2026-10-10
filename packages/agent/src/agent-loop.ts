@@ -136,19 +136,15 @@ export async function runAgentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
-	const initialMessages = declareToolChanges(context, prompts);
-	const newMessages: AgentMessage[] = [...initialMessages];
-	const currentContext: AgentContext = {
-		...context,
-		messages: [...context.messages, ...initialMessages],
-	};
+	let currentContext: AgentContext = { ...context, messages: [...context.messages] };
 
 	await emitAbortable(emit, { type: "agent_start" }, signal);
 	await emitAbortable(emit, { type: "turn_start" }, signal);
-	for (const message of initialMessages) {
-		await emitAbortable(emit, { type: "message_start", message }, signal);
-		await emitAbortable(emit, { type: "message_end", message }, signal);
-	}
+	const pending = declareToolChanges(context, prompts);
+	const newMessages: AgentMessage[] = [];
+	const prepared = await prepareInput(currentContext, pending, config, signal, newMessages, emit);
+	currentContext = prepared.context;
+	config = prepared.config;
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
 	return newMessages;
@@ -184,6 +180,72 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 		(event: AgentEvent) => event.type === "agent_end",
 		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
 	);
+}
+
+async function prepareInput(
+	context: AgentContext,
+	messages: AgentMessage[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	newMessages: AgentMessage[],
+	emit: AgentEventSink,
+): Promise<{ context: AgentContext; config: AgentLoopConfig }> {
+	let preparationFailure: { error: unknown } | undefined;
+	try {
+		if (messages.length > 0 && config.prepareInput) {
+			signal?.throwIfAborted();
+			const update = await callAbortable(async () => {
+				const update = await config.prepareInput?.(
+					{ context, messages, model: config.model, thinkingLevel: config.reasoning ?? "off" },
+					signal,
+				);
+				context = update?.context ?? context;
+				return update;
+			}, signal);
+			signal?.throwIfAborted();
+			config = {
+				...config,
+				model: update?.model ?? config.model,
+				reasoning:
+					update?.thinkingLevel === undefined
+						? config.reasoning
+						: update.thinkingLevel === "off"
+							? undefined
+							: update.thinkingLevel,
+			};
+		}
+	} catch (error) {
+		// Keep accepted input even when preparation fails or aborts. Persistence and
+		// retries must see the same input tail as a failure in prepareRequest.
+		preparationFailure = { error };
+	}
+	// Deliver outside the preparation try: listener failures must never replay input.
+	// An input-preparation abort still commits accepted input, like terminal tool
+	// results. Ordinary delivery remains abortable, including listener waits.
+	await deliverInput(
+		context,
+		declareToolChanges(context, messages),
+		newMessages,
+		emit,
+		preparationFailure && signal?.aborted ? undefined : signal,
+	);
+	if (preparationFailure) throw preparationFailure.error;
+	return { context, config };
+}
+
+async function deliverInput(
+	context: AgentContext,
+	messages: AgentMessage[],
+	newMessages: AgentMessage[],
+	emit: AgentEventSink,
+	signal?: AbortSignal,
+): Promise<void> {
+	for (const message of messages) {
+		await emitAbortable(emit, { type: "message_start", message }, signal);
+		await emitAbortable(emit, { type: "message_end", message }, signal);
+		context.messages.push(message);
+		newMessages.push(message);
+	}
 }
 
 /**
@@ -239,12 +301,10 @@ async function runLoop(
 			}
 
 			// Process prepared and queued messages before the next assistant response.
-			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
-				await emitAbortable(emit, { type: "message_start", message }, signal);
-				await emitAbortable(emit, { type: "message_end", message }, signal);
-				currentContext.messages.push(message);
-				newMessages.push(message);
-			}
+			const input = declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages]);
+			const prepared = await prepareInput(currentContext, input, config, signal, newMessages, emit);
+			currentContext = prepared.context;
+			config = prepared.config;
 			pendingMessages = [];
 
 			const requestUpdate = await config.prepareRequest?.(
