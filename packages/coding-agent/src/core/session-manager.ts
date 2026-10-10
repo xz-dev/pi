@@ -197,8 +197,16 @@ export type SessionEntry =
 	| LabelEntry
 	| SessionInfoEntry;
 
-/** Raw file entry (includes header) */
-export type FileEntry = SessionHeader | SessionEntry;
+/** Run lifecycle metadata, stored in JSONL but not in the conversation tree. */
+export interface SessionRunEntry extends SessionEntryBase {
+	type: "run_state";
+	runId: string;
+	sessionId: string;
+	state: "started" | "finished" | "aborted";
+}
+
+/** Raw file entry (includes header and run lifecycle metadata). */
+export type FileEntry = SessionHeader | SessionEntry | SessionRunEntry;
 
 /** Tree node for getTree() - defensive copy of session structure */
 export interface SessionTreeNode {
@@ -335,6 +343,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 			continue;
 		}
 
+		if (entry.type === "run_state") continue;
 		entry.id = generateId(ids);
 		entry.parentId = prevId;
 		prevId = entry.id;
@@ -1151,7 +1160,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		for (const entry of this.fileEntries) {
-			if (entry.type === "session") continue;
+			if (entry.type === "session" || entry.type === "run_state") continue;
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
 			if (entry.type === "label") {
@@ -1218,7 +1227,7 @@ export class SessionManager {
 		);
 	}
 
-	_persist(entry: SessionEntry): void {
+	_persist(entry: SessionEntry | SessionRunEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
 		if (!this.flushed) {
@@ -1235,6 +1244,62 @@ export class SessionManager {
 		} else {
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
+	}
+
+	/** Record a run without moving the leaf or invalidating a retry publication transaction. */
+	appendRunState(state: SessionRunEntry["state"], runId?: string, parentId = this.leafId): string {
+		const id = randomUUID();
+		const entry: SessionRunEntry = {
+			type: "run_state",
+			id,
+			parentId,
+			timestamp: new Date().toISOString(),
+			sessionId: this.sessionId,
+			runId: runId ?? id,
+			state,
+		};
+		this.fileEntries.push(entry);
+		this._persist(entry);
+		return entry.runId;
+	}
+
+	/** Only the latest run can be interrupted; old branches and copied sessions cannot revive it. */
+	getInterruptedRun(): SessionRunEntry | undefined {
+		const entry = this.fileEntries.findLast((candidate) => candidate.type === "run_state");
+		if (
+			entry?.state !== "started" ||
+			entry.sessionId !== this.sessionId ||
+			typeof entry.runId !== "string" ||
+			!entry.runId ||
+			(entry.parentId !== null && !this.getBranch().some((ancestor) => ancestor.id === entry.parentId))
+		) {
+			return undefined;
+		}
+		return entry;
+	}
+
+	/** Explicit cancellation applies to the selected work, not to unrelated sibling runs. */
+	hasRecoveryVeto(): boolean {
+		const branchIds = new Set(this.getBranch().map((entry) => entry.id));
+		const runOnBranch = new Map<string, boolean>();
+		for (let i = this.fileEntries.length - 1; i >= 0; i--) {
+			const entry = this.fileEntries[i]!;
+			if (entry.type === "message" && branchIds.has(entry.id) && entry.message.role === "user") {
+				return false;
+			}
+			if (entry.type !== "run_state" || entry.sessionId !== this.sessionId) continue;
+			// A sibling run may start at a shared ancestor. Its last record, not that
+			// shared start, determines whether it can supersede this branch's cancellation.
+			if (!runOnBranch.has(entry.runId)) {
+				runOnBranch.set(entry.runId, entry.parentId === null || branchIds.has(entry.parentId));
+			}
+			if (!runOnBranch.get(entry.runId)) continue;
+			if (entry.state === "aborted") return true;
+			if (entry.state === "started") return false;
+			// `finished` also covers errors; only a new run or user input lifts a veto.
+			// A cancelled run's delayed assistant messages do not establish fresh work.
+		}
+		return false;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1315,11 +1380,24 @@ export class SessionManager {
 			parentId = entry.id;
 		}
 
+		const run = this.fileEntries.findLast((entry): entry is SessionRunEntry => entry.type === "run_state");
+		// Cancellation may precede the first reply. Publish its new branch anchor in
+		// the same atomic write so a late reply cannot orphan the cancelled run.
+		const cancellation: SessionRunEntry | undefined =
+			run?.state === "aborted" && run.sessionId === this.sessionId && run.parentId === commit.expectedLeafId
+				? { ...run, id: randomUUID(), parentId, timestamp: new Date().toISOString() }
+				: undefined;
+		const publishedEntries = cancellation ? [...entries, cancellation] : entries;
 		if (this.persist && this.sessionFile) {
 			const original = this.flushed && existsSync(this.sessionFile) ? readFileSync(this.sessionFile) : undefined;
 			const completeFile = original
-				? Buffer.concat([original, Buffer.from(entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""))])
-				: Buffer.from([...this.fileEntries, ...entries].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+				? Buffer.concat([
+						original,
+						Buffer.from(publishedEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("")),
+					])
+				: Buffer.from(
+						[...this.fileEntries, ...publishedEntries].map((entry) => `${JSON.stringify(entry)}\n`).join(""),
+					);
 			const temporaryFile = `${this.sessionFile}.continuation-${process.pid}-${randomUUID()}.tmp`;
 			try {
 				this.continuationFileWriter(temporaryFile, this.sessionFile, completeFile);
@@ -1333,6 +1411,7 @@ export class SessionManager {
 			this.fileEntries.push(entry);
 			this.byId.set(entry.id, entry);
 		}
+		if (cancellation) this.fileEntries.push(cancellation);
 		this.leafId = entries.at(-1)!.id;
 		this.generation++;
 		this.flushed = this.persist ? true : this.flushed;
@@ -1662,7 +1741,7 @@ export class SessionManager {
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session" && e.type !== "run_state");
 	}
 
 	/**
@@ -2004,9 +2083,9 @@ export class SessionManager {
 		};
 		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
 
-		// Copy all non-header entries from source
+		// Copy conversation history, not the source process's execution state.
 		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
+			if (entry.type !== "session" && entry.type !== "run_state") {
 				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
 			}
 		}

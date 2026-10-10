@@ -17,6 +17,16 @@ Use `/name` or `--name` to assign a recognizable session name. Run `/session` to
 
 The session picker lets you search, rename, and delete sessions. It can also show paths, change sorting, and limit results to named sessions. See [Keybindings](keybindings.md#sessions) for its shortcuts.
 
+## Retry interrupted work
+
+Use `/retry` to retry an interrupted response or continue from a safe conversation boundary. When Pi is idle and that boundary is retryable, a dim `Use /retry to retry or continue` hint appears above the editor (fullscreen adds ` (click to run)`; clicking runs `/retry` without touching the editor draft). The hint is hidden while work or queued input is pending.
+
+On interactive cold startup, Pi derives recovery from the current conversation tail, not from run records. If the session is idle, its tail has a valid retry boundary, and there is no new startup input, queued message, or editor draft, Pi automatically retries once. For example, `pi -c` or `pi --session <path>` can recover after a process kill or an exit during work, including old sessions without run records and tails left by exhausted automatic retries. While that startup will recover, the hint reads `This session will automatically run /retry shortly.`
+
+A durable explicit user cancellation vetoes automatic recovery for that tail, including when Esc cancelled retry waiting or tools without leaving an `aborted` assistant tail. Manual `/retry` is still available. Normal completion and output-limit ends remain non-retryable. Cancellation on an unrelated earlier branch or followed by newer fresh work does not block recovery.
+
+This check runs only during interactive startup. Switching sessions with `/resume`, navigating branches, and opening sessions through print mode, RPC, or the SDK do not trigger it. Recovery does not directly re-execute historical tools, and cannot guarantee exactly-once external effects. Do not open the same session file for writing in multiple processes.
+
 ## Choose how to branch
 
 Pi stores entries as a tree, so returning to an earlier point does not erase the branch you leave.
