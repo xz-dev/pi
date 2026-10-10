@@ -1308,30 +1308,6 @@ export class SessionManager {
 		return false;
 	}
 
-	/** Explicit cancellation applies to the selected work, not to unrelated sibling runs. */
-	hasRecoveryVeto(): boolean {
-		const branchIds = new Set(this.getBranch().map((entry) => entry.id));
-		const runOnBranch = new Map<string, boolean>();
-		for (let i = this.fileEntries.length - 1; i >= 0; i--) {
-			const entry = this.fileEntries[i]!;
-			if (entry.type === "message" && branchIds.has(entry.id) && entry.message.role === "user") {
-				return false;
-			}
-			if (entry.type !== "run_state" || entry.sessionId !== this.sessionId) continue;
-			// A sibling run may start at a shared ancestor. Its last record, not that
-			// shared start, determines whether it can supersede this branch's cancellation.
-			if (!runOnBranch.has(entry.runId)) {
-				runOnBranch.set(entry.runId, entry.parentId === null || branchIds.has(entry.parentId));
-			}
-			if (!runOnBranch.get(entry.runId)) continue;
-			if (entry.state === "aborted") return true;
-			if (entry.state === "started") return false;
-			// `finished` also covers errors; only a new run or user input lifts a veto.
-			// A cancelled run's delayed assistant messages do not establish fresh work.
-		}
-		return false;
-	}
-
 	private _appendEntry(entry: SessionEntry): void {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
