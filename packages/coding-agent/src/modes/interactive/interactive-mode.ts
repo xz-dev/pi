@@ -3730,6 +3730,7 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
+					this.clearPendingModelSwitch(event.message);
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.thinkingDisplayMode,
@@ -4113,6 +4114,42 @@ export class InteractiveMode {
 		this.chatContainer.addChild(text);
 		this.lastStatusSpacer = spacer;
 		this.lastStatusText = text;
+		this.ui.requestRender();
+	}
+
+	private pendingModelSwitch:
+		| { oldModel: Model<any>; newModel: Model<any>; spacer: Spacer; text: ThemedText }
+		| undefined;
+
+	private setPendingModelSwitch(oldModel: Model<any>, newModel: Model<any>): void {
+		this.clearPendingModelSwitch();
+		const spacer = new Spacer(1);
+		const text = new ThemedText(() => theme.fg("dim", `Model: ${oldModel.id} → ${newModel.id}`), 1, 0);
+		this.chatContainer.addChild(spacer);
+		this.chatContainer.addChild(text);
+		this.pendingModelSwitch = { oldModel, newModel, spacer, text };
+		this.ui.requestRender();
+	}
+
+	private clearPendingModelSwitch(assistantMessage?: AgentMessage): void {
+		if (!this.pendingModelSwitch) return;
+		// If an assistant message arrived, only clear when it matches the new model.
+		if (assistantMessage && assistantMessage.role === "assistant") {
+			const { newModel } = this.pendingModelSwitch;
+			const matches = assistantMessage.provider === newModel.provider && assistantMessage.model === newModel.id;
+			if (!matches) {
+				// Keep the indicator but move it to the bottom so it stays visible.
+				this.chatContainer.removeChild(this.pendingModelSwitch.spacer);
+				this.chatContainer.removeChild(this.pendingModelSwitch.text);
+				this.chatContainer.addChild(this.pendingModelSwitch.spacer);
+				this.chatContainer.addChild(this.pendingModelSwitch.text);
+				this.ui.requestRender();
+				return;
+			}
+		}
+		this.chatContainer.removeChild(this.pendingModelSwitch.spacer);
+		this.chatContainer.removeChild(this.pendingModelSwitch.text);
+		this.pendingModelSwitch = undefined;
 		this.ui.requestRender();
 	}
 
@@ -5571,11 +5608,13 @@ export class InteractiveMode {
 		const model = await this.findExactModelMatch(searchTerm);
 		if (model) {
 			try {
+				const previousModel = this.session.model;
 				await this.session.setModel(model, { persist: false });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
 				this.showStatus(`Model: ${model.id}`);
 				void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
+				if (previousModel) this.setPendingModelSwitch(previousModel, model);
 			} catch (error) {
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
@@ -5718,6 +5757,7 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selectModel = async (model: Model<any>, persist: boolean) => {
 				try {
+					const previousModel = this.session.model;
 					await this.session.setModel(model, { persist });
 					this.updateAvailableProviderCount();
 					this.footer.invalidate();
@@ -5725,6 +5765,7 @@ export class InteractiveMode {
 					done();
 					this.showStatus(persist ? `Default model: ${model.provider}/${model.id}` : `Model: ${model.id}`);
 					void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
+					if (previousModel) this.setPendingModelSwitch(previousModel, model);
 				} catch (error) {
 					done();
 					this.showError(error instanceof Error ? error.message : String(error));
