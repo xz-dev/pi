@@ -35,7 +35,6 @@ jobs:
           upstream_sha="$(git rev-parse upstream/main)"
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
-            +refs/heads/patch/contributor-approval:refs/remotes/origin/patch/contributor-approval \
             +refs/heads/patch/model-refresh:refs/remotes/origin/patch/model-refresh \
             +refs/heads/patch/model-refresh-session-rebind:refs/remotes/origin/patch/model-refresh-session-rebind \
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
@@ -65,10 +64,10 @@ jobs:
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort \
             +refs/heads/patch/pending-model-switch-indicator:refs/remotes/origin/patch/pending-model-switch-indicator
 
-          # Driver source: the replay script and its small union helper come
+          # Driver source: the replay script comes
           # from the reviewed ci snapshot, never from a stale generated-main
           # copy or a conflict-time resolver.
-          git checkout origin/ci -- scripts/rebuild-from-inputs.sh scripts/union-contributor-approvals.py .github/workflows/upstream-sync.yml
+          git checkout origin/ci -- scripts/rebuild-from-inputs.sh .github/workflows/upstream-sync.yml
           chmod +x scripts/rebuild-from-inputs.sh
 
           # Resolve the fetched tips once for this run. These are transient
@@ -79,7 +78,6 @@ jobs:
             --ci "$(git rev-parse origin/ci)"
           )
           for ref in \
-            contributor-approval \
             model-refresh \
             model-refresh-session-rebind \
             startup-benchmark-exit \

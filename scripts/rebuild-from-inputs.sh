@@ -104,7 +104,6 @@ print_inputs() {
 # Expected application order. run_replay is the shared implementation;
 # a complete marker is allowed only when its actual step trace matches this.
 PATCH_ORDER=(
-	contributor-approval
 	model-refresh
 	model-refresh-session-rebind
 	startup-benchmark-exit
@@ -587,8 +586,6 @@ run_replay() {
 
 	# Temporary files are used only for predecessor-relative patch ranges.
 	TMPDIR_WORK="$(mktemp -d "${TMPDIR:-/tmp}/rebuild-from-inputs.XXXXXX")"
-	UNION_HELPER="$(dirname "$ENTRYPOINT")/union-contributor-approvals.py"
-	[[ -f "$UNION_HELPER" ]] || die "missing helper next to replay driver: $UNION_HELPER"
 
 	# Only --diagnostic allows an explicitly selected, non-publishable subset.
 	# Full runs require the entire vector, whether defaulted or supplied.
@@ -656,32 +653,10 @@ run_replay() {
 	CURRENT_STEP=ci
 	merge_squash ci "merge ci branch" readme-ok,skip-check
 
-	# 2 contributor-approval — deterministic additive union, not a squash.
-	if [[ -v INPUT_SHA[contributor-approval] ]] && active contributor-approval; then
-		CURRENT_STEP=contributor-approval
-		stop_before contributor-approval
-		git show "$UPSTREAM_SHA":.github/APPROVED_CONTRIBUTORS >"$TMPDIR_WORK/up-contrib"
-		git show "${INPUT_SHA[contributor-approval]}":.github/APPROVED_CONTRIBUTORS >"$TMPDIR_WORK/patch-contrib"
-		python3 "$UNION_HELPER" \
-			--current "$TMPDIR_WORK/up-contrib" \
-			--patch "$TMPDIR_WORK/patch-contrib" \
-			--output .github/APPROVED_CONTRIBUTORS
-		if git diff --quiet -- .github/APPROVED_CONTRIBUTORS; then
-			say "contributor approval union already complete"
-			APPLIED_ORDER+=(contributor-approval)
-		else
-			test "$(git diff --name-only)" = .github/APPROVED_CONTRIBUTORS
-			git add .github/APPROVED_CONTRIBUTORS
-			verify_staged
-			commit_step "merge patch/contributor-approval branch"
-		fi
-	fi
-
-	# 3+ patches — plain squash merges in PATCH_ORDER; chain descendants apply
+	# 2+ patches — plain squash merges in PATCH_ORDER; chain descendants apply
 	# their predecessor-relative range instead. Any conflict fails closed with
 	# the patch name; the fix is a rebase of that patch branch.
 	for p in "${ACTIVE_ORDER[@]}"; do
-		[[ "$p" == contributor-approval ]] && continue
 		CURRENT_STEP="$p"
 		local_pred=""
 		for edge in "${CHAIN_EDGES[@]}"; do

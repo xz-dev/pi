@@ -143,8 +143,6 @@ Extension tooling, skills, and subprocess environment.
 
 Patches with no direct user-facing surface: test stability, fork CI plumbing, benchmark bounds.
 
-- Approve fork contributors for CI workflows from the fork's own tracking issue.
-  - Patch branch: [`patch/contributor-approval`](https://github.com/xz-dev/pi/tree/patch/contributor-approval)
 - Make the coalesced-reload auth-storage test deterministic by writing a different-size payload, so mtime-tick collisions cannot make the reader take the stale cached path.
   - Patch branch: [`patch/quarantine-auth-storage-flake`](https://github.com/xz-dev/pi/tree/patch/quarantine-auth-storage-flake)
 - Bound and report startup benchmarks: emit synchronous startup stage/completion markers, exit benchmark runs without waiting on arbitrary handles, and bound fd/rg version probes.

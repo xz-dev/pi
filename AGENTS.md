@@ -124,7 +124,7 @@ Force pushes are allowed in this downstream repository; the upstream blanket pro
 
 ## Issues and PRs
 
-See `CONTRIBUTING.md` for the contributor gate (auto-close workflows, `lgtm`/`lgtmi`, quality bar).
+See `CONTRIBUTING.md` for the contributor quality bar. This fork does not auto-close issues or PRs.
 
 When reviewing PRs:
 

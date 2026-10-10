@@ -39,11 +39,9 @@ function buildFixture() {
 	run("git checkout -q -B ci upstream-main");
 	mkdirSync(join(dir, "scripts"), { recursive: true });
 	writeFileSync(join(dir, "scripts", "rebuild-from-inputs.sh"), readFileSync(SCRIPT));
-	writeFileSync(join(dir, "scripts", "union-contributor-approvals.py"), "fixture helper\n");
 	execFileSync("bash", ["-c", "printf 'ci\\n' > ci.txt && printf 'ci-edited\\n' > f.txt && git add scripts ci.txt f.txt"], { cwd: dir });
 	run("git commit -q -m ci-content");
 	const ciSha = run("git rev-parse HEAD").trim();
-	const approval = file("approval.txt", "approval\n", "approval", "patch/contributor-approval");
 	const aaa = file("aaa.txt", "aaa\n", "aaa", "patch/model-refresh");
 	const seam = file("seam.txt", "seam\n", "seam", "patch/agent-run-failure-seam");
 	const mte = file("mte.txt", "mte\n", "mte", "patch/managed-tool-executions", "patch/agent-run-failure-seam");
@@ -59,7 +57,7 @@ function buildFixture() {
 		return commit("offender");
 	})();
 	run("git checkout -q upstream-main");
-	return { dir, run, file, upstream, ci: ciSha, approval, aaa, seam, mte, esc, conf, offender };
+	return { dir, run, file, upstream, ci: ciSha, aaa, seam, mte, esc, conf, offender };
 }
 
 const CHAIN = (fixture) => [
@@ -333,7 +331,7 @@ test("--print-inputs and --print-marker resolve current refs from a source repo"
 		assert.match(inputs, /^patch\/esc-abort [0-9a-f]{40}$/m);
 		const marker = execFileSync("bash", [SCRIPT, "--print-marker", "--source", fixture.dir], { encoding: "utf8" });
 		assert.ok(marker.startsWith(`record upstream sync inputs\n\nupstream/main ${fixture.upstream}`));
-		assert.match(marker, /^applied-order ci contributor-approval /m);
+		assert.match(marker, /^applied-order ci model-refresh /m);
 	} finally {
 		cleanup(fixture);
 	}
