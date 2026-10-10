@@ -634,6 +634,16 @@
       ],
       "description": "HTTP header or body idle timeout in milliseconds; 0 or \"disabled\" disables it."
     },
+    "models": {
+      "type": "object",
+      "properties": {
+        "refreshTimeoutMs": {
+          "type": "number",
+          "description": "Model catalog refresh timeout in milliseconds; negative disables, zero aborts immediately.",
+          "default": 60000
+        }
+      }
+    },
     "cacheWarming": {
       "anyOf": [
         {
