@@ -240,6 +240,13 @@
       },
       "description": "Command used for npm package lookup and installation, in argv form such as [\"mise\", \"exec\", \"node@20\", \"--\", \"npm\"]."
     },
+    "updateMirrors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Global-only ordered replacements for https://github.com during release downloads."
+    },
     "collapseChangelog": {
       "type": "boolean",
       "description": "Show the condensed changelog after update; use /changelog for the full changelog.",
