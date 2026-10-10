@@ -4,6 +4,7 @@ This is a downstream distribution fork of [earendil-works/pi](https://github.com
 
 > [!NOTE]
 > 🌟 Star this fork to show your support for its direction and encourage change in upstream Pi.
+>
 > All patches in this fork are free to submit upstream directly, or to use as a reference for your own upstream PR. I waive any code ownership over these downstream patches; please credit [this repository](https://github.com/xz-dev/pi) as the source in your PR.
 
 It tracks upstream `main` with a minimal downstream patch stack, using [downstream-fork-maintain-skill](https://github.com/xz-dev/downstream-fork-maintain-skill) as the blueprint for ongoing maintenance.
