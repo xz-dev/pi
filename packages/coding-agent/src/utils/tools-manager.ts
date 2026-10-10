@@ -359,6 +359,12 @@ export async function ensureTool(
 	const config = TOOLS[tool];
 	if (!config) return undefined;
 
+	if (platform() === "freebsd") {
+		const pkgName = tool === "fd" ? "fd-find" : "ripgrep";
+		onStatus?.({ type: "warning", message: `${config.name} not found. Install with: pkg install ${pkgName}` });
+		return undefined;
+	}
+
 	if (isOfflineModeEnabled()) {
 		onStatus?.({ type: "warning", message: `${config.name} not found. Offline mode enabled, skipping download.` });
 		return undefined;
