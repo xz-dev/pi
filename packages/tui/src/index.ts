@@ -9,6 +9,7 @@ export {
 	CombinedAutocompleteProvider,
 	type SlashCommand,
 } from "./autocomplete.ts";
+export { BoundedHost } from "./bounded-host.ts";
 // Colors and styling
 export {
 	backgroundAnsi,
@@ -113,6 +114,7 @@ export { getNativeClipboard, type NativeClipboard } from "./native-platform.ts";
 export { oklabToOkhslLightness } from "./oklab.ts";
 // Program status reporting (OSC 7501)
 export { formatProgramStatus, type ProgramStatus } from "./program-status.ts";
+export { renderSelectionWindow, type SelectionWindow } from "./selection-window.ts";
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.ts";
 // Terminal interface and implementations
@@ -159,6 +161,7 @@ export {
 	Container,
 	CURSOR_MARKER,
 	compositeTuiLine,
+	dispatchMouseEvent,
 	type Focusable,
 	isFocusable,
 	isViewportTUI,
