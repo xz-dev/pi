@@ -282,6 +282,24 @@ Add `--force` to reinstall Pi when the selected update includes Pi.
 
 `pi update` cannot update Pi when another package manager provides it, such as Nix. Update Pi with that package manager, for example `nix profile upgrade pi`. Package and model catalog updates still work.
 
+### GitHub Release mirrors (xz-dev distribution)
+
+| Task | Command |
+|---|---|
+| Use GH-Proxy → GHFast → GitHub fallback for this update | `pi update --mirror` |
+| Use a custom mirror for this update | `pi update --mirror-url http://localhost:8080` |
+| Use an ordered custom chain | `pi update --mirror-url http://localhost:8080 --mirror-url https://github.com` |
+| Save built-in fallback globally, without updating | `pi update --mirror --permanent` |
+| Save a custom base globally, without updating | `pi update --mirror-url https://ghfast.top/https://github.com --permanent` |
+| Ignore the saved mirror for this update | `pi update --no-mirror` |
+| Clear the global mirror, without updating | `pi update --no-mirror --permanent` |
+
+`--mirror-url` replaces the literal `https://github.com` with the supplied value; include the protocol and any path prefix, without a trailing slash. Repeat it to build an ordered chain; a single value is a one-element chain. Values are not prevalidated. Only your listed sources are attempted, so append `--mirror-url https://github.com` explicitly for direct fallback. Built-in and custom chains share the same discovery/download logic. Every source, including direct GitHub and `--force`, must supply a valid manifest attestation from the `xz-dev/pi` main-branch release workflow, verified against client-bundled Sigstore roots and the manifest's source commit. ZIP and executable hashes are checked against that authenticated manifest before installation; no flag disables verification. Every failed source gets one gray message during an explicit update; only exhaustion of the chain produces a final error.
+
+Saved arrays also apply to automatic version checks, which remain silent on failure. Only agent-directory `updateMirrors` settings are read; project settings cannot redirect updates. CLI choices override the saved setting. With neither, downloads remain direct. These flags do not affect extension, npm, or model-catalog downloads and cannot be combined with `--clean` or extension/model-only targets. `--permanent` requires a mirror choice and cannot be combined with `--force` or `--all`.
+
+See [mirror installation and trust considerations](../../../README.md#install-through-a-github-mirror).
+
 ### Aliases and command options
 
 - `pi uninstall <source>` is an alias for `pi remove <source>`.
