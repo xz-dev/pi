@@ -6,6 +6,13 @@ This is a downstream distribution fork of [earendil-works/pi](https://github.com
 > 🌟 Star this fork to show your support for its direction and encourage change in upstream Pi.
 > All patches in this fork are free to submit upstream directly, or to use as a reference for your own upstream PR. I waive any code ownership over these downstream patches; please credit [this repository](https://github.com/xz-dev/pi) as the source in your PR.
 
+It tracks upstream `main` with a minimal downstream patch stack, using [downstream-fork-maintain-skill](https://github.com/xz-dev/downstream-fork-maintain-skill) as the blueprint for ongoing maintenance.
+
+> [!WARNING]
+> This fork relies heavily on vibe coding. Logic changes are manually reviewed, and tests are also written by AI under human direction before the full test gate is run.
+>
+> Almost none of the code in this fork is handwritten by xz-dev. Do not use this distribution if you are uncomfortable with AI-assisted development.
+
 Release platforms (one `pi-<target>.zip` each, see [Installation](#installation)):
 
 | OS | Release assets |
@@ -15,13 +22,6 @@ Release platforms (one `pi-<target>.zip` each, see [Installation](#installation)
 | macOS | `darwin-x64-baseline`, `darwin-x64-modern`, `darwin-arm64` |
 | Windows | `windows-x64-baseline`, `windows-x64-modern`, `windows-arm64` |
 | FreeBSD 14.3+ | `freebsd-x64`, `freebsd-arm64` |
-
-It tracks upstream `main` with a minimal downstream patch stack, using [downstream-fork-maintain-skill](https://github.com/xz-dev/downstream-fork-maintain-skill) as the blueprint for ongoing maintenance.
-
-> [!WARNING]
-> This fork relies heavily on vibe coding. Logic changes are manually reviewed, and tests are also written by AI under human direction before the full test gate is run.
->
-> Almost none of the code in this fork is handwritten by xz-dev. Do not use this distribution if you are uncomfortable with AI-assisted development.
 
 ## Downstream changes
 
