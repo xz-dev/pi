@@ -4,6 +4,7 @@ import {
 	getCurrentSystemMessage,
 	type ImageContent,
 	type Message,
+	type MessageOrigin,
 	type SystemMessage,
 	type TextContent,
 	type ToolResultMessage,
@@ -166,6 +167,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	content: string | (TextContent | ImageContent)[];
 	details?: T;
 	display: boolean;
+	/** Provenance of this entry when the host recorded it. Absent on legacy/unrecorded entries. */
+	origin?: MessageOrigin;
 }
 
 /** Content that an append-only context edit may replace without changing message metadata. */
@@ -502,7 +505,14 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	}
 	if (entry.type === "custom_message") {
 		return [
-			createCustomMessage(entry.customType, entry.content ?? [], entry.display, entry.details, entry.timestamp),
+			createCustomMessage(
+				entry.customType,
+				entry.content ?? [],
+				entry.display,
+				entry.details,
+				entry.timestamp,
+				entry.origin,
+			),
 		];
 	}
 	if (entry.type === "branch_summary" && entry.summary) {
@@ -1564,6 +1574,7 @@ export class SessionManager {
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
+		origin?: MessageOrigin,
 	): string {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -1571,6 +1582,7 @@ export class SessionManager {
 			content,
 			display,
 			details,
+			...(origin !== undefined ? { origin } : {}),
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),

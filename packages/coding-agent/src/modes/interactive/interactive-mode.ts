@@ -100,7 +100,7 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { McpHttpServerConfig } from "../../core/mcp-servers.ts";
-import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
+import { createCompactionSummaryMessage, hasMeaningfulContent } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -147,7 +147,6 @@ import { BranchSummaryMessageComponent } from "./components/branch-summary-messa
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
-import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
 import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
@@ -165,6 +164,7 @@ import {
 	formatAuthSelectorProviderType,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.ts";
+import { formatMessageOrigin, OriginMessageComponent } from "./components/origin-message.ts";
 import { piLogoLines, piWordmark, supportsPiLogo } from "./components/pi-logo.ts";
 import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
@@ -1088,7 +1088,7 @@ export class InteractiveMode {
 					rawKeyHint("!", "to run bash"),
 					rawKeyHint("!!", "to run bash (no context)"),
 					hint("app.message.followUp", "to queue follow-up"),
-					hint("app.message.dequeue", "to edit all queued messages"),
+					hint("app.message.dequeue", "to edit queued terminal drafts"),
 					hint("app.clipboard.pasteImage", "to paste files on macOS, images, or text"),
 					rawKeyHint("drop files", "to attach"),
 				].join("\n");
@@ -1305,7 +1305,7 @@ export class InteractiveMode {
 		// Process initial messages
 		if (initialMessage) {
 			try {
-				await this.promptWithPendingDisplay(initialMessage, initialImages);
+				await this.promptWithPendingDisplay(initialMessage, initialImages, "cli");
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -1315,7 +1315,7 @@ export class InteractiveMode {
 		if (initialMessages) {
 			for (const message of initialMessages) {
 				try {
-					await this.promptWithPendingDisplay(message);
+					await this.promptWithPendingDisplay(message, undefined, "cli");
 				} catch (error: unknown) {
 					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 					this.showError(errorMessage);
@@ -1335,10 +1335,14 @@ export class InteractiveMode {
 		}
 	}
 
-	private async promptWithPendingDisplay(text: string, images?: ImageContent[]): Promise<void> {
+	private async promptWithPendingDisplay(
+		text: string,
+		images?: ImageContent[],
+		source: "interactive" | "cli" = "interactive",
+	): Promise<void> {
 		this.submittedInput = text;
 		try {
-			await this.session.prompt(text, { images });
+			await this.session.prompt(text, { images, source });
 		} catch (error) {
 			this.restoreSubmittedInput();
 			throw error;
@@ -3589,7 +3593,7 @@ export class InteractiveMode {
 				if (this.isExtensionCommand(text)) {
 					this.editor.addToHistory?.(text);
 					this.editor.setText("");
-					await this.session.prompt(text);
+					await this.session.prompt(text, { source: "interactive" });
 				} else {
 					this.queueCompactionMessage(text, "steer");
 				}
@@ -3601,7 +3605,7 @@ export class InteractiveMode {
 			if (this.session.isStreaming) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, { streamingBehavior: "steer" });
+				await this.session.prompt(text, { streamingBehavior: "steer", source: "interactive" });
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -3675,16 +3679,8 @@ export class InteractiveMode {
 				} else if (event.entry.type === "usage" && event.entry.kind === "cache_warm") {
 					this.addCacheWarmingUsage(event.entry);
 					this.ui.requestRender();
-				} else if (event.entry.type === "custom_message" && event.entry.display) {
-					this.addMessageToChat(
-						createCustomMessage(
-							event.entry.customType,
-							event.entry.content,
-							event.entry.display,
-							event.entry.details,
-							event.entry.timestamp,
-						),
-					);
+				} else if (event.entry.type === "custom_message") {
+					for (const message of sessionEntryToContextMessages(event.entry)) this.addMessageToChat(message);
 					this.ui.requestRender();
 				} else if (event.entry.type === "compaction") {
 					const entries = this.sessionManager.buildContextEntries();
@@ -4170,20 +4166,6 @@ export class InteractiveMode {
 				this.chatContainer.addChild(component);
 				break;
 			}
-			case "custom": {
-				if (message.display) {
-					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
-					const component = new CustomMessageComponent(
-						message,
-						renderer,
-						this.getMarkdownThemeWithSettings(),
-						this.outputPad,
-					);
-					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
-				}
-				break;
-			}
 			case "compactionSummary": {
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(
@@ -4208,7 +4190,23 @@ export class InteractiveMode {
 			}
 			case "system":
 				break;
+			case "custom":
 			case "user": {
+				if (message.role === "custom" || message.origin?.type !== "interactive") {
+					if (!hasMeaningfulContent(message.content)) break;
+					const component = new OriginMessageComponent(
+						message,
+						message.role === "custom"
+							? this.session.extensionRunner.getMessageRenderer(message.customType)
+							: undefined,
+						this.outputPad,
+						this.settingsManager.getShowImages(),
+						this.settingsManager.getImageWidthCells(),
+					);
+					component.setExpanded(this.toolOutputExpanded);
+					this.chatContainer.addChild(component);
+					break;
+				}
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
 					if (this.chatContainer.children.length > 0) {
@@ -4244,7 +4242,7 @@ export class InteractiveMode {
 						);
 						this.chatContainer.addChild(userComponent);
 					}
-					if (options?.populateHistory) {
+					if (options?.populateHistory && message.origin?.type === "interactive") {
 						this.editor.addToHistory?.(textContent);
 					}
 				}
@@ -4831,7 +4829,7 @@ export class InteractiveMode {
 			if (this.isExtensionCommand(text)) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text);
+				await this.session.prompt(text, { source: "interactive" });
 			} else {
 				this.queueCompactionMessage(text, "followUp");
 			}
@@ -4843,7 +4841,7 @@ export class InteractiveMode {
 		if (this.session.isStreaming) {
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
-			await this.session.prompt(text, { streamingBehavior: "followUp" });
+			await this.session.prompt(text, { streamingBehavior: "followUp", source: "interactive" });
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}
@@ -5050,13 +5048,18 @@ export class InteractiveMode {
 	 * Combines session queue and compaction queue.
 	 */
 	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
+		const inputs = this.session.getQueuedInputs();
+		const label = (message: (typeof inputs.steering)[number]) => {
+			const text = this.getUserMessageText(message);
+			return message.origin?.type === "interactive" ? text : `[${formatMessageOrigin(message.origin)}] ${text}`;
+		};
 		return {
 			steering: [
-				...this.session.getSteeringMessages(),
+				...inputs.steering.map(label),
 				...this.compactionQueuedMessages.filter((msg) => msg.mode === "steer").map((msg) => msg.text),
 			],
 			followUp: [
-				...this.session.getFollowUpMessages(),
+				...inputs.followUp.map(label),
 				...this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text),
 			],
 		};
@@ -5067,7 +5070,7 @@ export class InteractiveMode {
 	 * Clears both session queue and compaction queue.
 	 */
 	private clearAllQueues(): { steering: string[]; followUp: string[] } {
-		const { steering, followUp } = this.session.clearQueue();
+		const { steering, followUp } = this.session.takeInteractiveDrafts();
 		const compactionSteering = this.compactionQueuedMessages
 			.filter((msg) => msg.mode === "steer")
 			.map((msg) => msg.text);
@@ -5101,7 +5104,7 @@ export class InteractiveMode {
 				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
-			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
+			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit queued terminal drafts`);
 			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}
@@ -5170,11 +5173,11 @@ export class InteractiveMode {
 				// When retry is pending, queue messages for the retry turn
 				for (const message of queuedMessages) {
 					if (this.isExtensionCommand(message.text)) {
-						await this.session.prompt(message.text);
+						await this.session.prompt(message.text, { source: "interactive" });
 					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text);
+						await this.session.followUp(message.text, undefined, { source: "interactive" });
 					} else {
-						await this.session.steer(message.text);
+						await this.session.steer(message.text, undefined, { source: "interactive" });
 					}
 				}
 				this.updatePendingMessagesDisplay();
@@ -5186,7 +5189,7 @@ export class InteractiveMode {
 			if (firstPromptIndex === -1) {
 				// All extension commands - execute them all
 				for (const message of queuedMessages) {
-					await this.session.prompt(message.text);
+					await this.session.prompt(message.text, { source: "interactive" });
 				}
 				return;
 			}
@@ -5197,12 +5200,12 @@ export class InteractiveMode {
 			const rest = queuedMessages.slice(firstPromptIndex + 1);
 
 			for (const message of preCommands) {
-				await this.session.prompt(message.text);
+				await this.session.prompt(message.text, { source: "interactive" });
 			}
 
 			// Start a prompt when idle, or queue it into a run still finishing compaction.
 			const promptPromise = this.session
-				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
+				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode, source: "interactive" })
 				.catch((error) => {
 					restoreQueue(error);
 				});
@@ -5210,11 +5213,11 @@ export class InteractiveMode {
 			// Queue remaining messages
 			for (const message of rest) {
 				if (this.isExtensionCommand(message.text)) {
-					await this.session.prompt(message.text);
+					await this.session.prompt(message.text, { source: "interactive" });
 				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text);
+					await this.session.followUp(message.text, undefined, { source: "interactive" });
 				} else {
-					await this.session.steer(message.text);
+					await this.session.steer(message.text, undefined, { source: "interactive" });
 				}
 			}
 			this.updatePendingMessagesDisplay();
@@ -5331,7 +5334,7 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof OriginMessageComponent) {
 								child.setShowImages(enabled);
 							}
 						}
@@ -5339,7 +5342,7 @@ export class InteractiveMode {
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof OriginMessageComponent) {
 								child.setImageWidthCells(width);
 							}
 						}
@@ -6131,7 +6134,7 @@ export class InteractiveMode {
 		this.clearStatusIndicator();
 		try {
 			const result = await this.runtimeHost.switchSession(sessionPath, {
-				withSession: options?.withSession,
+				...options,
 				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
 			});
 			if (result.cancelled) {
@@ -6148,7 +6151,7 @@ export class InteractiveMode {
 				}
 				const result = await this.runtimeHost.switchSession(sessionPath, {
 					cwdOverride: selectedCwd,
-					withSession: options?.withSession,
+					...options,
 					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
 				});
 				if (result.cancelled) {
