@@ -17,16 +17,20 @@ import {
 	closeSync,
 	createReadStream,
 	existsSync,
+	fsyncSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
+	renameSync,
+	rmSync,
 	type Stats,
 	statSync,
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -225,6 +229,43 @@ export interface SessionContext {
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
 }
+
+export interface ContinuationCommit {
+	expectedSessionId: string;
+	expectedLeafId: string | null;
+	expectedGeneration: number;
+	/** `getEntryCount()` when the retry started; only entries appended after it may be carried. */
+	expectedEntryCount: number;
+	branchFromId: string | null;
+	messages: Message[];
+}
+
+export type ContinuationFileWriter = (temporaryFile: string, destinationFile: string, contents: Buffer) => void;
+
+const writeContinuationFile: ContinuationFileWriter = (temporaryFile, destinationFile, contents) => {
+	const mode = existsSync(destinationFile) ? statSync(destinationFile).mode & 0o777 : 0o600;
+	const fileDescriptor = openSync(temporaryFile, "wx", mode);
+	try {
+		writeFileSync(fileDescriptor, contents);
+		fsyncSync(fileDescriptor);
+	} finally {
+		closeSync(fileDescriptor);
+	}
+	// Atomic replacement requires source and destination to share a directory.
+	renameSync(temporaryFile, destinationFile);
+	if (process.platform !== "win32") {
+		let directoryDescriptor: number | undefined;
+		try {
+			directoryDescriptor = openSync(dirname(destinationFile), "r");
+			fsyncSync(directoryDescriptor);
+		} catch {
+			// Some filesystems do not support directory fsync. The atomic rename
+			// has already succeeded, so this durability reinforcement is best-effort.
+		} finally {
+			if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
+		}
+	}
+};
 
 export interface SessionInfo {
 	path: string;
@@ -996,6 +1037,9 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private generation = 0;
+	/** @internal Fault-injection seam for continuation publication tests. */
+	continuationFileWriter: ContinuationFileWriter = writeContinuationFile;
 
 	private constructor(
 		cwd: string,
@@ -1074,6 +1118,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this.generation++;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1153,6 +1198,10 @@ export class SessionManager {
 		return this.sessionId;
 	}
 
+	getGeneration(): number {
+		return this.generation;
+	}
+
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
 	}
@@ -1192,7 +1241,102 @@ export class SessionManager {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
+		this.generation++;
 		this._persist(entry);
+	}
+
+	/**
+	 * Extension state (`custom` entries) appended on the expected leaf while the retry
+	 * ran. They carry no model context, so they must not invalidate the retry; any
+	 * other change since the expected leaf/generation still does.
+	 */
+	private _stateAppendedSince(commit: ContinuationCommit): CustomEntry[] {
+		// Tree entries appended since the retry started: byId keeps append order and holds only tree entries.
+		const newEntries = [...this.byId.values()].slice(commit.expectedEntryCount);
+		const appended: CustomEntry[] = [];
+		let parentId = commit.expectedLeafId;
+		for (const entry of newEntries) {
+			// Only custom state chained on the expected leaf qualifies; anything else, or an
+			// existing entry reached by moving the leaf, means the branch really changed.
+			if (entry.type !== "custom" || entry.parentId !== parentId) {
+				throw new Error("Session branch changed before retry continuation could be committed");
+			}
+			appended.push(entry);
+			parentId = entry.id;
+		}
+		if (this.leafId !== parentId) {
+			throw new Error("Session branch changed before retry continuation could be committed");
+		}
+		// Each append advances the generation once; any other mutation (e.g. branch away and back) is stale.
+		if (this.generation !== commit.expectedGeneration + appended.length) {
+			throw new Error("Session changed before retry continuation could be committed");
+		}
+		return appended;
+	}
+
+	/**
+	 * Atomically publish recovery messages and the first continued assistant as a
+	 * new append-only branch. Extension state appended during the retry is copied
+	 * onto the new branch so it stays on the active path. Validation and persistence
+	 * happen before in-memory state changes, so a failed commit leaves the active
+	 * branch unchanged.
+	 */
+	commitContinuation(commit: ContinuationCommit): string {
+		if (this.sessionId !== commit.expectedSessionId) {
+			throw new Error("Session changed before retry continuation could be committed");
+		}
+		const carriedState = this._stateAppendedSince(commit);
+		if (commit.branchFromId !== null && !this.byId.has(commit.branchFromId)) {
+			throw new Error(`Entry ${commit.branchFromId} not found`);
+		}
+		if (commit.messages.length === 0) {
+			throw new Error("Retry continuation commit requires at least one message");
+		}
+
+		const entries: Array<SessionMessageEntry | CustomEntry> = [];
+		let parentId = commit.branchFromId;
+		const reservedIds = new Map(this.byId);
+		for (const state of carriedState) {
+			const entry: CustomEntry = { ...state, id: generateId(reservedIds), parentId };
+			entries.push(entry);
+			reservedIds.set(entry.id, entry);
+			parentId = entry.id;
+		}
+		for (const message of commit.messages) {
+			const entry: SessionMessageEntry = {
+				type: "message",
+				id: generateId(reservedIds),
+				parentId,
+				timestamp: new Date().toISOString(),
+				message,
+			};
+			entries.push(entry);
+			reservedIds.set(entry.id, entry);
+			parentId = entry.id;
+		}
+
+		if (this.persist && this.sessionFile) {
+			const original = this.flushed && existsSync(this.sessionFile) ? readFileSync(this.sessionFile) : undefined;
+			const completeFile = original
+				? Buffer.concat([original, Buffer.from(entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""))])
+				: Buffer.from([...this.fileEntries, ...entries].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+			const temporaryFile = `${this.sessionFile}.continuation-${process.pid}-${randomUUID()}.tmp`;
+			try {
+				this.continuationFileWriter(temporaryFile, this.sessionFile, completeFile);
+			} catch (error) {
+				rmSync(temporaryFile, { force: true });
+				throw error;
+			}
+		}
+
+		for (const entry of entries) {
+			this.fileEntries.push(entry);
+			this.byId.set(entry.id, entry);
+		}
+		this.leafId = entries.at(-1)!.id;
+		this.generation++;
+		this.flushed = this.persist ? true : this.flushed;
+		return this.leafId;
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1581,6 +1725,7 @@ export class SessionManager {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		this.leafId = branchFromId;
+		this.generation++;
 	}
 
 	/**
@@ -1590,6 +1735,7 @@ export class SessionManager {
 	 */
 	resetLeaf(): void {
 		this.leafId = null;
+		this.generation++;
 	}
 
 	/**
@@ -1609,6 +1755,7 @@ export class SessionManager {
 		}
 		const fromId = this.leafId ?? "root";
 		this.leafId = branchFromId;
+		this.generation++;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
@@ -1713,6 +1860,7 @@ export class SessionManager {
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
+			this.generation++;
 
 			// Use the same rule as _persist(): write now if the branched path already
 			// has a conversation, otherwise let _persist() create the file later.
@@ -1744,6 +1892,7 @@ export class SessionManager {
 		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 		this.sessionId = newSessionId;
 		this._buildIndex();
+		this.generation++;
 		return undefined;
 	}
 
