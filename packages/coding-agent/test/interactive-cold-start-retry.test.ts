@@ -96,15 +96,16 @@ describe("cold-start retry", () => {
 		return { mode, seams, idle, runtime, init, terminal, rebind: () => rebind() };
 	}
 
-	it.each(["started", "finished", "legacy"] as const)(
-		"recovers an error tail with %s run records exactly once at cold start",
+	it.each(["finished", "legacy"] as const)(
+		"does not auto-recover an error tail with %s run records at cold start",
 		async (state) => {
 			const harness = await open(state);
 			const retry = vi.spyOn(harness.session, "retry");
 			const { mode, idle } = ui(harness);
 			await expect(mode.run()).rejects.toBe(idle);
-			expect(retry).toHaveBeenCalledTimes(1);
-			expect(harness.faux.state.callCount).toBe(1);
+			// No working-start owns the tail, so cold start returns without auto retry.
+			expect(retry).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(0);
 		},
 	);
 
@@ -115,7 +116,7 @@ describe("cold-start retry", () => {
 		await expect(mode.run()).rejects.toBe(idle);
 		expect(retry).toHaveBeenCalledTimes(1);
 		expect(harness.faux.state.callCount).toBe(1);
-		expect(harness.sessionManager.getInterruptedRun()).toBeUndefined();
+		expect(harness.sessionManager.hasUnfinishedWork()).toBe(false);
 	});
 
 	it.each(["regular", "fullscreen"] as const)(
@@ -189,7 +190,7 @@ describe("cold-start retry", () => {
 		await expect(mode.run()).rejects.toBe(idle);
 		expect(retry).toHaveBeenCalledTimes(1);
 		expect(harness.faux.state.callCount).toBe(1);
-		expect(harness.sessionManager.getInterruptedRun()).toBeUndefined();
+		expect(harness.sessionManager.hasUnfinishedWork()).toBe(false);
 	});
 
 	it.each([
@@ -340,7 +341,7 @@ describe("cold-start retry", () => {
 			release();
 			await expect(run).rejects.toBe(idle);
 			expect(harness.faux.state.callCount).toBe(0);
-			expect(harness.sessionManager.getInterruptedRun()).toBeDefined();
+			expect(harness.sessionManager.hasUnfinishedWork()).toBe(true);
 		},
 	);
 
@@ -384,7 +385,7 @@ describe("cold-start retry", () => {
 		});
 		try {
 			await expect(seams.shutdown()).rejects.toBe(exit);
-			expect(SessionManager.open(harness.sessionManager.getSessionFile()!).getInterruptedRun()).toBeDefined();
+			expect(SessionManager.open(harness.sessionManager.getSessionFile()!).hasUnfinishedWork()).toBe(true);
 		} finally {
 			exiting.mockRestore();
 			release();
@@ -451,7 +452,8 @@ describe("cold-start retry", () => {
 				await Promise.all([running, abort]);
 				const reopened = SessionManager.open(harness.sessionManager.getSessionFile()!, harness.tempDir);
 				if (operation === "retry") expect(reopened.getLeafId()).not.toBe(previousLeaf);
-				expect(reopened.hasRecoveryVeto()).toBe(true);
+				// The aborted record's working-end closes the run: no auto recovery.
+				expect(reopened.hasUnfinishedWork()).toBe(false);
 				const restored = await createHarness({ sessionManager: reopened, settings: { retry: { enabled: false } } });
 				harnesses.push(restored);
 				restored.session.refreshContext();
@@ -484,7 +486,9 @@ describe("cold-start retry", () => {
 		m.appendRunState("finished", runB);
 		await harness.session.navigateTree(cancelledTailId, { label: "selected cancelled work" });
 		const reopened = SessionManager.open(m.getSessionFile()!, harness.tempDir);
-		expect(reopened.hasRecoveryVeto()).toBe(true);
+		// The sibling's later working-end does not reopen the selected branch's
+		// aborted run: its own aborted end is reached first on this branch.
+		expect(reopened.hasUnfinishedWork()).toBe(false);
 	});
 
 	// R3 — Esc during init/auth must permanently cancel pending startup recovery.
