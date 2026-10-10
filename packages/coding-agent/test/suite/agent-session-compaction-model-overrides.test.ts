@@ -33,7 +33,7 @@ describe("AgentSession compaction model overrides", () => {
 		while (harnesses.length) harnesses.pop()?.cleanup();
 	});
 
-	it.each(["manual", "pre-prompt", "post-run", "overflow"] as const)(
+	it.each(["manual", "pre-prompt", "next-prompt", "custom-message", "queued-message", "overflow"] as const)(
 		"uses model token settings for %s compaction and extension preparation",
 		async (path) => {
 			const preparations: SessionBeforeCompactEvent[] = [];
@@ -69,15 +69,44 @@ describe("AgentSession compaction model overrides", () => {
 			if (path === "manual") {
 				await harness.session.compact();
 			} else {
+				if (path === "queued-message") {
+					harness.session.subscribe((event) => {
+						if (event.type === "agent_end" && harness.faux.state.callCount === 1) {
+							expect(preparations).toHaveLength(0);
+							harness.session.agent.followUp({
+								role: "custom",
+								customType: "test",
+								content: "next",
+								display: false,
+								timestamp: Date.now(),
+							});
+						}
+					});
+				}
 				harness.setResponses(
 					path === "overflow"
 						? [
 								fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
 								fauxAssistantMessage("recovered"),
 							]
-						: [fauxAssistantMessage(path === "post-run" ? "z".repeat(8000) : "done")],
+						: path === "next-prompt" || path === "custom-message" || path === "queued-message"
+							? [fauxAssistantMessage("z".repeat(8000)), fauxAssistantMessage("done")]
+							: [fauxAssistantMessage("done")],
 				);
 				await harness.session.prompt("continue");
+				if (path === "next-prompt" || path === "custom-message") {
+					// Ending above the threshold is idle; compact only when another request needs it.
+					expect(preparations).toHaveLength(0);
+					expect(harness.session.isIdle).toBe(true);
+					if (path === "next-prompt") {
+						await harness.session.prompt("next");
+					} else {
+						await harness.session.sendCustomMessage(
+							{ customType: "test", content: "next", display: false },
+							{ triggerTurn: true },
+						);
+					}
+				}
 			}
 
 			expect(preparations).toHaveLength(1);
