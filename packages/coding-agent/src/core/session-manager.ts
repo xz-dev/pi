@@ -4,6 +4,7 @@ import {
 	getCurrentSystemMessage,
 	type ImageContent,
 	type Message,
+	type MessageOrigin,
 	type SystemMessage,
 	type TextContent,
 	type ToolResultMessage,
@@ -166,6 +167,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	content: string | (TextContent | ImageContent)[];
 	details?: T;
 	display: boolean;
+	/** Provenance of this entry when the host recorded it. Absent on legacy/unrecorded entries. */
+	origin?: MessageOrigin;
 }
 
 /** Content that an append-only context edit may replace without changing message metadata. */
@@ -197,8 +200,18 @@ export type SessionEntry =
 	| LabelEntry
 	| SessionInfoEntry;
 
-/** Raw file entry (includes header) */
-export type FileEntry = SessionHeader | SessionEntry;
+/** Run lifecycle metadata, stored in JSONL but not in the conversation tree. */
+export interface SessionRunEntry extends SessionEntryBase {
+	type: "run_state";
+	runId: string;
+	sessionId: string;
+	state: "started" | "finished" | "aborted";
+	/** Run boundary flag; absent in older files, derive from `state` when reading. */
+	working?: "start" | "end";
+}
+
+/** Raw file entry (includes header and run lifecycle metadata). */
+export type FileEntry = SessionHeader | SessionEntry | SessionRunEntry;
 
 /** Tree node for getTree() - defensive copy of session structure */
 export interface SessionTreeNode {
@@ -335,6 +348,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 			continue;
 		}
 
+		if (entry.type === "run_state") continue;
 		entry.id = generateId(ids);
 		entry.parentId = prevId;
 		prevId = entry.id;
@@ -493,7 +507,14 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	}
 	if (entry.type === "custom_message") {
 		return [
-			createCustomMessage(entry.customType, entry.content ?? [], entry.display, entry.details, entry.timestamp),
+			createCustomMessage(
+				entry.customType,
+				entry.content ?? [],
+				entry.display,
+				entry.details,
+				entry.timestamp,
+				entry.origin,
+			),
 		];
 	}
 	if (entry.type === "branch_summary" && entry.summary) {
@@ -1151,7 +1172,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		for (const entry of this.fileEntries) {
-			if (entry.type === "session") continue;
+			if (entry.type === "session" || entry.type === "run_state") continue;
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
 			if (entry.type === "label") {
@@ -1218,7 +1239,7 @@ export class SessionManager {
 		);
 	}
 
-	_persist(entry: SessionEntry): void {
+	_persist(entry: SessionEntry | SessionRunEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
 		if (!this.flushed) {
@@ -1235,6 +1256,56 @@ export class SessionManager {
 		} else {
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
+	}
+
+	/** Record a run without moving the leaf or invalidating a retry publication transaction. */
+	appendRunState(state: SessionRunEntry["state"], runId?: string, parentId = this.leafId): string {
+		const id = randomUUID();
+		const entry: SessionRunEntry = {
+			type: "run_state",
+			id,
+			parentId,
+			timestamp: new Date().toISOString(),
+			sessionId: this.sessionId,
+			runId: runId ?? id,
+			state,
+			working: state === "started" ? "start" : "end",
+		};
+		this.fileEntries.push(entry);
+		this._persist(entry);
+		return entry.runId;
+	}
+
+	/**
+	 * Whether an unfinished working run still owns the current tail. Scans the
+	 * working boundary flags from the end of the file: the first flag for this
+	 * session decides — "start" means work was interrupted and recovery may run,
+	 * "end" (finished or aborted) means the run is closed and nothing revives it.
+	 * Runs are matched by runId: an end only closes its own run, so a sibling
+	 * branch's finished end never reopens — or closes — this branch's run, and
+	 * the scan continues past records of other runs. On-branch starts win over
+	 * any earlier end. User messages do not lift an end; files without flags
+	 * are read as if there were no record.
+	 */
+	hasUnfinishedWork(): boolean {
+		const branchIds = new Set(this.getBranch().map((entry) => entry.id));
+		// A run belongs to the active branch when any of its records anchors on it;
+		// tree navigation may append label entries after a leaf, so a run's end
+		// record can point at a node outside the branch even though its start is on it.
+		const onBranchRuns = new Set<string>();
+		for (const entry of this.fileEntries) {
+			if (entry.type !== "run_state" || entry.sessionId !== this.sessionId) continue;
+			if (entry.parentId === null || branchIds.has(entry.parentId)) onBranchRuns.add(entry.runId);
+		}
+		for (let i = this.fileEntries.length - 1; i >= 0; i--) {
+			const entry = this.fileEntries[i]!;
+			if (entry.type !== "run_state" || entry.sessionId !== this.sessionId) continue;
+			if (!onBranchRuns.has(entry.runId)) continue;
+			const working = entry.working ?? (entry.state === "started" ? "start" : "end");
+			if (working === "end") return false;
+			return true;
+		}
+		return false;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1315,11 +1386,24 @@ export class SessionManager {
 			parentId = entry.id;
 		}
 
+		const run = this.fileEntries.findLast((entry): entry is SessionRunEntry => entry.type === "run_state");
+		// Cancellation may precede the first reply. Publish its new branch anchor in
+		// the same atomic write so a late reply cannot orphan the cancelled run.
+		const cancellation: SessionRunEntry | undefined =
+			run?.state === "aborted" && run.sessionId === this.sessionId && run.parentId === commit.expectedLeafId
+				? { ...run, id: randomUUID(), parentId, timestamp: new Date().toISOString() }
+				: undefined;
+		const publishedEntries = cancellation ? [...entries, cancellation] : entries;
 		if (this.persist && this.sessionFile) {
 			const original = this.flushed && existsSync(this.sessionFile) ? readFileSync(this.sessionFile) : undefined;
 			const completeFile = original
-				? Buffer.concat([original, Buffer.from(entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""))])
-				: Buffer.from([...this.fileEntries, ...entries].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+				? Buffer.concat([
+						original,
+						Buffer.from(publishedEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("")),
+					])
+				: Buffer.from(
+						[...this.fileEntries, ...publishedEntries].map((entry) => `${JSON.stringify(entry)}\n`).join(""),
+					);
 			const temporaryFile = `${this.sessionFile}.continuation-${process.pid}-${randomUUID()}.tmp`;
 			try {
 				this.continuationFileWriter(temporaryFile, this.sessionFile, completeFile);
@@ -1333,6 +1417,7 @@ export class SessionManager {
 			this.fileEntries.push(entry);
 			this.byId.set(entry.id, entry);
 		}
+		if (cancellation) this.fileEntries.push(cancellation);
 		this.leafId = entries.at(-1)!.id;
 		this.generation++;
 		this.flushed = this.persist ? true : this.flushed;
@@ -1485,6 +1570,7 @@ export class SessionManager {
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
+		origin?: MessageOrigin,
 	): string {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -1492,6 +1578,7 @@ export class SessionManager {
 			content,
 			display,
 			details,
+			...(origin !== undefined ? { origin } : {}),
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
@@ -1662,7 +1749,7 @@ export class SessionManager {
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session" && e.type !== "run_state");
 	}
 
 	/**
@@ -2004,9 +2091,9 @@ export class SessionManager {
 		};
 		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
 
-		// Copy all non-header entries from source
+		// Copy conversation history, not the source process's execution state.
 		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
+			if (entry.type !== "session" && entry.type !== "run_state") {
 				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
 			}
 		}
