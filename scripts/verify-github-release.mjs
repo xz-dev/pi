@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import {
+	ATTESTATION_SIGNER_REF,
+	ATTESTATION_SIGNER_WORKFLOW,
+	ATTESTATION_SUBJECTS_FILENAME,
+	BINARY_PLATFORMS,
+	ENTRY_PACKAGE,
+	MANIFEST_SCHEMA_VERSION,
+	PACKAGING_BINARY,
+	REPOSITORY,
+	assertExecutableAsset,
+	binaryArchiveName,
+	readTargetArchive,
+	releaseArchiveName,
+	readJson,
+	sha256File,
+} from "./lib/github-release.mjs";
+
+const MANIFEST_FILENAME = "release-manifest.json";
+const sha256Bytes = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const SUMS_FILENAME = "SHA256SUMS";
+const ACCEPTANCE_FILENAME = "binary-acceptance.json";
+const NOTICES_FILENAME = "THIRD_PARTY_NOTICES.md";
+
+function parseArgs(argv) {
+	const [mode, manifestPath, ...extra] = argv.slice(2);
+	if (!manifestPath || extra.length || !["local", "all"].includes(mode)) {
+		throw new Error("Usage: node scripts/verify-github-release.mjs <local|all> <release-manifest.json>");
+	}
+	return { mode, manifestPath: resolve(manifestPath) };
+}
+
+function assertManifest(manifest, requireFullSet) {
+	const allowedKeys = new Set(["schemaVersion", "repository", "tag", "distributionVersion", "apiVersion", "commit", "packaging", "bundles", "acceptance", "attestation"]);
+	if (!manifest || typeof manifest !== "object" || Object.keys(manifest).some((key) => !allowedKeys.has(key))) throw new Error("Invalid GitHub Release manifest schema");
+	const version = /^(\d+\.\d+\.\d+)-xz\.(\d+)\.(\d+)\.g([0-9a-f]{8})$/.exec(manifest.distributionVersion ?? "");
+	if (manifest.schemaVersion !== MANIFEST_SCHEMA_VERSION || manifest.repository !== REPOSITORY || manifest.packaging !== PACKAGING_BINARY || !version || manifest.apiVersion !== version[1] || manifest.tag !== `xz-v${manifest.distributionVersion}` || !/^[0-9a-f]{40}$/.test(manifest.commit) || !manifest.commit.startsWith(version[4])) throw new Error("Invalid GitHub Release manifest");
+	const platforms = Object.keys(manifest.bundles ?? {}).sort();
+	if (requireFullSet && JSON.stringify(platforms) !== JSON.stringify([...BINARY_PLATFORMS].sort())) throw new Error(`Manifest bundles must cover exactly the ${BINARY_PLATFORMS.length} canonical Bun targets`);
+	for (const platform of platforms) {
+		if (!BINARY_PLATFORMS.includes(platform)) throw new Error(`Unexpected bundle platform ${platform}`);
+		const bundle = manifest.bundles[platform];
+		const validIdentity = (entry, file) => entry?.file === file && Number.isSafeInteger(entry.bytes) && entry.bytes > 0 && /^[0-9a-f]{64}$/.test(entry.sha256 ?? "");
+		if (!bundle || Object.keys(bundle).sort().join() !== "bytes,executable,file,sha256" || !validIdentity(bundle, releaseArchiveName(platform)) || !validIdentity(bundle.executable, binaryArchiveName(platform)) || Object.keys(bundle.executable).length !== 3) throw new Error(`Invalid bundle metadata for ${platform}`);
+	}
+	if (manifest.acceptance?.file !== ACCEPTANCE_FILENAME || manifest.acceptance?.targetCount !== BINARY_PLATFORMS.length) throw new Error("Invalid binary acceptance metadata");
+	if (manifest.attestation?.repository !== REPOSITORY || manifest.attestation.signerWorkflow !== `${REPOSITORY}/${ATTESTATION_SIGNER_WORKFLOW}` || manifest.attestation.signerRef !== ATTESTATION_SIGNER_REF || manifest.attestation.denySelfHostedRunners !== true || manifest.attestation.subjectsFile !== ATTESTATION_SUBJECTS_FILENAME) throw new Error("Invalid attestation policy");
+	return manifest;
+}
+
+function parseSums(text) {
+	const result = new Map();
+	for (const line of text.split(/\r?\n/)) {
+		if (!line.trim()) continue;
+		const match = /^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._+-]*)$/.exec(line);
+		if (!match || result.has(match[2])) throw new Error(`Invalid SHA256SUMS line: ${line}`);
+		result.set(match[2], match[1]);
+	}
+	return result;
+}
+
+function assertAsset(releaseDir, sums, file, expectedSha) {
+	const path = join(releaseDir, file);
+	if (!existsSync(path) || basename(path) !== file) throw new Error(`Missing release asset: ${file}`);
+	const actual = sha256File(path);
+	if (expectedSha && actual !== expectedSha) throw new Error(`${file} sha256 mismatch`);
+	if (sums.get(file) !== actual) throw new Error(`SHA256SUMS digest for ${file} does not match file`);
+	return path;
+}
+
+function hostPlatform() {
+	const override = process.env.PI_XZ_VERIFY_TARGET;
+	if (override) {
+		if (!BINARY_PLATFORMS.includes(override)) throw new Error(`Invalid PI_XZ_VERIFY_TARGET ${override}`);
+		return override;
+	}
+	const modern = process.arch === "x64" && process.features?.typescript !== undefined && process.env.PI_XZ_VERIFY_MODERN === "1";
+	if (process.platform === "freebsd") return process.arch === "arm64" ? "freebsd-arm64" : "freebsd-x64";
+	if (process.platform === "darwin") return process.arch === "arm64" ? "darwin-arm64" : `darwin-x64-${modern ? "modern" : "baseline"}`;
+	if (process.platform === "linux") {
+		const libc = process.report?.getReport()?.header?.glibcVersionRuntime ? "gnu" : "musl";
+		return process.arch === "arm64" ? `linux-arm64-${libc}` : `linux-x64-${libc}-${modern ? "modern" : "baseline"}`;
+	}
+	if (process.platform === "win32") return process.arch === "arm64" ? "windows-arm64" : `windows-x64-${modern ? "modern" : "baseline"}`;
+	return undefined;
+}
+
+/** Smoke the raw executable under an isolated HOME with PI_OFFLINE=1. */
+function smokeHostExecutable(executable, platform, version) {
+	assertExecutableAsset(executable, platform);
+	const home = mkdtempSync(join(tmpdir(), "pi-release-smoke-"));
+	try {
+		const env = { ...process.env, HOME: home, USERPROFILE: home, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(home, "agent"), NODE_ENV: "production" };
+		for (const args of [["--version"], ["--help"]]) {
+			const result = spawnSync(executable, args, { encoding: "utf8", env });
+			if (result.status !== 0) throw new Error(`Host smoke failed: ${result.stdout ?? ""}${result.stderr ?? ""}`);
+			if (args[0] === "--version" && (result.stdout ?? "").trim() !== version) throw new Error("Executable version smoke mismatch");
+		}
+		console.log(`Host-native executable smoke ok: ${version}`);
+	} finally { rmSync(home, { recursive: true, force: true }); }
+}
+
+const { mode, manifestPath } = parseArgs(process.argv);
+const releaseDir = dirname(manifestPath);
+const manifest = assertManifest(readJson(manifestPath), mode === "all");
+const sums = parseSums(readFileSync(join(releaseDir, SUMS_FILENAME), "utf8"));
+// On a full release, binary-acceptance.json exists and was already summed by
+// aggregation; on a `local` pre-publication candidate it may not exist yet.
+const acceptancePath = join(releaseDir, ACCEPTANCE_FILENAME);
+const assets = [
+	...Object.values(manifest.bundles).map((bundle) => bundle.file),
+	MANIFEST_FILENAME,
+	NOTICES_FILENAME,
+	...(existsSync(acceptancePath) ? [ACCEPTANCE_FILENAME] : []),
+	SUMS_FILENAME,
+];
+for (const [platform, bundle] of Object.entries(manifest.bundles)) {
+	// The ZIP is the release asset; its single entry must be the exact executable
+	// the candidate smoke-tested (kept beside it, never uploaded).
+	const archive = assertAsset(releaseDir, sums, bundle.file, bundle.sha256);
+	if (readFileSync(archive).byteLength !== bundle.bytes) throw new Error(`${bundle.file} byte length mismatch`);
+	const inner = readTargetArchive(archive, platform);
+	if (inner.byteLength !== bundle.executable.bytes || sha256Bytes(inner) !== bundle.executable.sha256) throw new Error(`${bundle.file} does not contain the accepted executable`);
+	const executable = join(releaseDir, bundle.executable.file);
+	if (sums.has(bundle.executable.file)) throw new Error(`${bundle.executable.file} must not be a Release asset`);
+	if (existsSync(executable)) {
+		if (sha256File(executable) !== bundle.executable.sha256) throw new Error(`${bundle.executable.file} does not match the manifest`);
+		assertExecutableAsset(executable, platform);
+	}
+}
+assertAsset(releaseDir, sums, NOTICES_FILENAME);
+const noticesText = readFileSync(join(releaseDir, NOTICES_FILENAME), "utf8");
+if (!noticesText.startsWith("# Third-Party Notices") || !noticesText.includes("License SHA-256:")) throw new Error("Invalid third-party notices asset");
+if (existsSync(acceptancePath)) {
+	assertAsset(releaseDir, sums, ACCEPTANCE_FILENAME);
+	const acceptance = readJson(acceptancePath);
+	if (acceptance.schemaVersion !== 1 || acceptance.targetCount !== BINARY_PLATFORMS.length || acceptance.manifest?.sha256 !== sha256File(manifestPath) || acceptance.manifest?.commit !== manifest.commit || !Array.isArray(acceptance.targets) || acceptance.targets.length !== BINARY_PLATFORMS.length) throw new Error("Invalid binary acceptance record");
+	for (const record of acceptance.targets) {
+		const bundle = manifest.bundles[record.target];
+		if (!bundle || record.asset?.file !== bundle.executable.file || record.asset?.sha256 !== bundle.executable.sha256 || record.asset?.bytes !== bundle.executable.bytes) throw new Error(`Invalid acceptance evidence for ${record.target}`);
+		if (record.runner?.osArchitecture !== (record.target.includes("arm64") ? "arm64" : "x64") || record.executor?.emulated !== (record.target === "freebsd-arm64")) throw new Error(`Invalid acceptance runner evidence for ${record.target}`);
+		if (record.tui?.observedOutput !== true || record.tui?.cleanExit !== true || record.clipboard?.loadedAndCalled !== true) throw new Error(`Missing bounded TUI/clipboard acceptance for ${record.target}`);
+	}
+}
+if (sums.size !== assets.length - 1) throw new Error(`SHA256SUMS must contain ZIP archives, manifest, notices${existsSync(acceptancePath) ? ", and acceptance record" : ""} only`);
+const subjects = readFileSync(join(releaseDir, ATTESTATION_SUBJECTS_FILENAME), "utf8").trim().split(/\r?\n/).sort();
+if (JSON.stringify(subjects) !== JSON.stringify([...assets].sort()) || subjects.some((subject) => basename(subject) !== subject)) throw new Error("Attestation subjects do not match exact Release assets");
+const platform = hostPlatform();
+if (platform && manifest.bundles[platform] && existsSync(join(releaseDir, manifest.bundles[platform].executable.file))) smokeHostExecutable(join(releaseDir, manifest.bundles[platform].executable.file), platform, manifest.distributionVersion);
+console.log(`${mode}: exact Release assets and binary contract verified`);
