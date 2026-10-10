@@ -129,6 +129,53 @@ export interface RetryPolicy {
 }
 
 export const DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000;
+export const CODEX_AUTO_WEBSOCKET_RETRIES = 3;
+
+export interface AssistantRetryPlan {
+	attempt: number;
+	maxAttempts: number;
+	delayMs: number;
+	/** Agent-level budget consumed; transport recovery does not consume this budget. */
+	globalAttempt: number;
+}
+
+/** Shared by agent turns and summarization so transport recovery cannot multiply their budgets. */
+export function getAssistantRetryPlan(
+	message: AssistantMessage,
+	policy: RetryPolicy | undefined,
+	globalAttempt: number,
+): AssistantRetryPlan | undefined {
+	if (!policy || !isRetryableAssistantError(message, policy)) return undefined;
+	const failure =
+		message.api === "openai-codex-responses"
+			? message.diagnostics?.findLast((diagnostic) => diagnostic.type === "provider_transport_failure")?.details
+			: undefined;
+	if (failure?.configuredTransport === "auto") {
+		if (failure.resetRetryBudget === true) globalAttempt = 0;
+		const attempt = failure.retryAttempt;
+		if (
+			typeof attempt === "number" &&
+			Number.isInteger(attempt) &&
+			attempt > 0 &&
+			attempt <= CODEX_AUTO_WEBSOCKET_RETRIES
+		) {
+			return {
+				attempt,
+				maxAttempts: CODEX_AUTO_WEBSOCKET_RETRIES,
+				delayMs: retryDelayMs(policy, attempt),
+				globalAttempt,
+			};
+		}
+		// A started response cannot be replayed inside the provider stream. Start a new
+		// assistant attempt on SSE immediately, even when ordinary retry is disabled.
+		if (attempt === 0 && failure.fallbackTransport === "sse" && failure.eventsEmitted === true) {
+			return { attempt: 1, maxAttempts: 1, delayMs: 0, globalAttempt };
+		}
+	}
+	const attempt = globalAttempt + 1;
+	if (!policy.enabled || attempt > policy.maxRetries) return undefined;
+	return { attempt, maxAttempts: policy.maxRetries, delayMs: retryDelayMs(policy, attempt), globalAttempt: attempt };
+}
 
 export function retryDelayMs(policy: Pick<RetryPolicy, "baseDelayMs" | "maxAgentDelayMs">, attempt: number): number {
 	const delay = policy.baseDelayMs * 2 ** Math.max(0, attempt - 1);
@@ -195,8 +242,10 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  *   the retried call starts, and `onRetryFinished` once at the end (whether the loop
  *   ends in success, exhausted retries, or an aborted backoff).
  *
- * When `policy` is undefined or disabled, the first response is returned unchanged
- * (equivalent to calling `produce()` directly).
+ * When `policy` is undefined, the first response is returned unchanged. A disabled
+ * policy suppresses ordinary retries, but Codex auto transport recovery with a stable
+ * producer sessionId still uses its fixed WS allowance and a new SSE attempt after
+ * transport exhaustion. Sessionless producers do not participate in that allowance.
  */
 export async function retryAssistantCall(
 	produce: () => Promise<AssistantMessage>,
@@ -204,9 +253,7 @@ export async function retryAssistantCall(
 	signal: AbortSignal | undefined,
 	callbacks?: RetryCallbacks,
 ): Promise<AssistantMessage> {
-	const maxAttempts = policy?.enabled ? policy.maxRetries : 0;
-
-	let attempt = 0;
+	let globalAttempt = 0;
 	let lastRetry: { attempt: number; errorMessage: string } | undefined;
 	for (;;) {
 		const response = await produce();
@@ -223,20 +270,15 @@ export async function retryAssistantCall(
 			return response;
 		}
 
-		// Non-retryable, or budget exhausted: return the final error message.
-		if (
-			attempt >= maxAttempts ||
-			!isRetryableAssistantError(response, {
-				nonRetryableErrorPatterns: policy?.nonRetryableErrorPatterns,
-			})
-		) {
+		const plan = getAssistantRetryPlan(response, policy, globalAttempt);
+		if (!plan) {
 			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt, response.errorMessage);
 			return response;
 		}
 
-		attempt++;
+		globalAttempt = plan.globalAttempt;
+		const { attempt, maxAttempts, delayMs } = plan;
 		lastRetry = { attempt, errorMessage: response.errorMessage || "Unknown error" };
-		const delayMs = retryDelayMs(policy!, attempt);
 		await callbacks?.onRetryScheduled?.(attempt, maxAttempts, delayMs, lastRetry.errorMessage);
 
 		// Normalize aborts during retry backoff to the same AssistantMessage shape as
@@ -280,5 +322,11 @@ export function isRetryableAssistantError(message: AssistantMessage, options?: R
 	const errorMessage = message.errorMessage;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
 	if (matchesNonRetryableErrorPatterns(errorMessage, options?.nonRetryableErrorPatterns)) return false;
+	if (message.api === "openai-codex-responses") {
+		const failure = message.diagnostics?.findLast((diagnostic) => diagnostic.type === "provider_transport_failure");
+		// A prior WS failure must not classify a subsequent, possibly terminal SSE error.
+		if (failure && (failure.details?.fallbackTransport !== "sse" || failure.details.eventsEmitted === true))
+			return true;
+	}
 	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
 }
