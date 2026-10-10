@@ -2,6 +2,8 @@
 
 This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
+All patches in this fork are free to submit upstream directly, or to use as a reference for your own upstream PR. I waive any code ownership over these downstream patches; please credit this repository as the source in your PR.
+
 Release platforms (one `pi-<target>.zip` each, see [Installation](#installation)):
 
 | OS | Release assets |
