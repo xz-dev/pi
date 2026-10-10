@@ -28,6 +28,7 @@ import type {
 	ImageContent,
 	JsonValue,
 	Message,
+	MessageOrigin,
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
@@ -924,6 +925,8 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	/** Images attached to the user prompt, if any. */
 	images?: ImageContent[];
+	/** Origin of the triggering input, when recorded by the host. */
+	origin?: MessageOrigin;
 	/** The current system prompt, rendered from systemPromptOptions and earlier handler changes. */
 	readonly systemPrompt: string;
 	/** Mutable prompt sections. Later handlers observe mutations made by earlier handlers. */
@@ -955,6 +958,8 @@ export interface CustomMessageEntryDraft {
 	content: string | (TextContent | ImageContent)[];
 	display: boolean;
 	details?: unknown;
+	/** Host-resolved provenance. Set by the runtime for extension-authored drafts. */
+	origin?: MessageOrigin;
 }
 
 export interface ContextEditEntryDraft {
@@ -1139,7 +1144,7 @@ export interface UserBashEvent {
 // ============================================================================
 
 /** Source of user input */
-export type InputSource = "interactive" | "rpc" | "extension";
+export type InputSource = MessageOrigin["type"];
 
 /** Fired when user input is received, before agent processing */
 export interface InputEvent {
@@ -1150,6 +1155,11 @@ export interface InputEvent {
 	images?: ImageContent[];
 	/** Where the input came from */
 	source: InputSource;
+	/**
+	 * Recorded provenance of this input. Absent means unrecorded (legacy path);
+	 * do not infer human typing from `source` or text.
+	 */
+	origin?: MessageOrigin;
 	/** How the input will be delivered during streaming, or undefined when idle */
 	streamingBehavior?: "steer" | "followUp";
 }
@@ -2087,11 +2097,13 @@ type HandlerFn = (...args: unknown[]) => unknown;
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	origin?: MessageOrigin,
 ) => void;
 
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
+	origin?: MessageOrigin,
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
