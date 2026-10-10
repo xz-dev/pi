@@ -65,6 +65,7 @@ interface AssistantCtx {
 	workingVisible: boolean;
 	activeStatusIndicator: undefined;
 	entriesRenderedByBoundaryCompaction: Set<string>;
+	clearPendingModelSwitch: () => void;
 	ui: { requestRender: () => void; terminal: { setProgress: (v: boolean) => void } };
 }
 
@@ -109,6 +110,7 @@ function makeCtx(manager: SettingsManager, chatContainer: Container): AssistantC
 		workingVisible: false,
 		activeStatusIndicator: undefined,
 		entriesRenderedByBoundaryCompaction: new Set(),
+		clearPendingModelSwitch: noop,
 	};
 }
 
