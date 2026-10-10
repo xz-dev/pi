@@ -164,6 +164,7 @@ import {
 	getBranchSelection,
 	getVirtualModelState,
 	isVirtualModel,
+	type ModelRoute,
 	VIRTUAL_MODEL_STATE_ENTRY,
 	type VirtualModelStateData,
 } from "./virtual-models.ts";
@@ -421,6 +422,11 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 	return tokens;
 }
 
+// Custom-message persistence assigns its entry timestamp. Compare content, not that bookkeeping.
+function snapshotMessages(messages: AgentMessage[]): string[] {
+	return messages.map(({ timestamp: _timestamp, ...message }) => JSON.stringify(message));
+}
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -477,6 +483,15 @@ export class AgentSession {
 	private _retryGlobalAttempt = 0;
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	/** Single-use input preparation handed to the immediately following request. */
+	private _preparedInputRequest:
+		| {
+				route?: ModelRoute;
+				selectedModel: { provider: string; id: string };
+				thinkingLevel: ThinkingLevel;
+				messages: string[];
+		  }
+		| undefined;
 	/**
 	 * Failed response that the next request repeats, set by auto-retry and overflow recovery. The
 	 * retry is routed with it as `failed`, since the context no longer contains it.
@@ -880,10 +895,14 @@ export class AgentSession {
 	}
 
 	/** Whether `projection`, the current session projection, exceeds the compaction threshold of `model`. */
-	private _exceedsCompactionThreshold(model: Model<any>, projection: SessionProjection): boolean {
+	private _exceedsCompactionThreshold(
+		model: Model<string>,
+		projection: SessionProjection,
+		additionalTokens = 0,
+	): boolean {
 		if (model.contextWindow <= 0) return false;
 		return shouldCompact(
-			estimateProjectedContextTokens(projection, this.sessionManager.getBranch()).tokens,
+			estimateProjectedContextTokens(projection, this.sessionManager.getBranch()).tokens + additionalTokens,
 			model.contextWindow,
 			this.settingsManager.getCompactionSettings(this.model),
 		);
@@ -900,9 +919,96 @@ export class AgentSession {
 		return { ...context, messages: this.sessionManager.buildSessionProjection().messages };
 	}
 
+	private async _resolveRequestRoute(
+		model: Model<string>,
+		thinkingLevel: ThinkingLevel,
+		messages: AgentMessage[],
+		failed: AssistantMessage | undefined,
+		signal?: AbortSignal,
+	): Promise<ModelRoute> {
+		const lastResponse = messages.findLastIndex((message) => message.role === "assistant");
+		const userTurn = messages.slice(lastResponse + 1).some((message) => message.role === "user");
+		const state = getVirtualModelState(this.sessionManager.getBranch(), model.provider, model.id);
+		const route = await this._modelRuntime.resolveModel(model, convertToLlm(messages), {
+			reason: failed ? "retry" : userTurn ? "user" : "continuation",
+			thinkingLevel,
+			signal,
+			failed,
+			state,
+		});
+		signal?.throwIfAborted();
+		if (route.state !== undefined && route.state !== state) {
+			const data: VirtualModelStateData = { provider: model.provider, modelId: model.id, state: route.state };
+			const entry = this.sessionManager.getEntry(
+				this.sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, data),
+			);
+			if (entry) this._emit({ type: "entry_appended", entry });
+		}
+		return route;
+	}
+
 	private _installAgentRequestProjection(): void {
+		const previousPrepareInput = this.agent.prepareInput;
+		this.agent.prepareInput = async (input, signal) => {
+			this._preparedInputRequest = undefined;
+			signal?.throwIfAborted();
+			const previous = await previousPrepareInput?.(input, signal);
+			signal?.throwIfAborted();
+			// Manual retry uses an uncommitted recovery context until its first response.
+			// Preserve that transaction; request preparation already routes its agent-state view.
+			if (this._manualRetryActive) return previous || undefined;
+			let projection = this.sessionManager.buildSessionProjection();
+			const model = previous?.model ?? this.agent.state.model;
+			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			const context = previous?.context ?? { ...input.context, messages: projection.messages };
+			// Capture before awaiting routing: message_end may later mutate these objects in place.
+			const contextSnapshot = snapshotMessages(context.messages);
+			const inputSnapshot = snapshotMessages(input.messages);
+			const route = isVirtualModel(model)
+				? await this._resolveRequestRoute(
+						model,
+						thinkingLevel,
+						[...context.messages, ...input.messages],
+						this._failedResponse,
+						signal,
+					)
+				: undefined;
+			let compacted = false;
+			if (
+				this._exceedsCompactionThreshold(route?.model ?? model, projection, estimateMessagesTokens(input.messages))
+			) {
+				const abortCompaction = () => this.abortCompaction();
+				signal?.addEventListener("abort", abortCompaction, { once: true });
+				try {
+					await this._runAutoCompaction("threshold", false);
+				} finally {
+					signal?.removeEventListener("abort", abortCompaction);
+				}
+				projection = this.sessionManager.buildSessionProjection();
+				compacted = true;
+			}
+			signal?.throwIfAborted();
+			// Our compaction may replace history without rerouting: the route stands only
+			// for exactly its rebuilt projection plus the captured pending input below.
+			// Other content, selection, or thinking changes invalidate this single-use handoff.
+			this._preparedInputRequest = {
+				route,
+				selectedModel: { provider: model.provider, id: model.id },
+				thinkingLevel,
+				messages: [...(compacted ? snapshotMessages(projection.messages) : contextSnapshot), ...inputSnapshot],
+			};
+			return {
+				...previous,
+				context: { ...context, messages: compacted ? projection.messages : context.messages },
+				model: route?.model ?? model,
+				thinkingLevel: route?.thinkingLevel ?? thinkingLevel,
+			};
+		};
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
+			signal?.throwIfAborted();
+			const preparedInput = this._preparedInputRequest;
+			this._preparedInputRequest = undefined;
 			const failed = this._failedResponse;
 			this._failedResponse = undefined;
 			const prepare = async () => {
@@ -925,33 +1031,40 @@ export class AgentSession {
 				return { previous, context: previous?.context ?? canonicalContext, projection };
 			};
 			let { previous, context, projection } = await prepare();
+			signal?.throwIfAborted();
 			const model = previous?.model ?? this.agent.state.model;
 			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
-			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
-
-			// The selection stays in agent state; only this request uses the routed model. A routing
-			// failure rejects, which ends the run with an error response. Only messages the user wrote
-			// start a turn; extension messages can follow them, e.g. from before_agent_start.
-			const lastResponse = context.messages.findLastIndex((message) => message.role === "assistant");
-			const userTurn = context.messages.slice(lastResponse + 1).some((message) => message.role === "user");
-			const state = getVirtualModelState(this.sessionManager.getBranch(), model.provider, model.id);
-			const route = await this._modelRuntime.resolveModel(model, convertToLlm(context.messages), {
-				reason: failed ? "retry" : userTurn ? "user" : "continuation",
-				thinkingLevel,
-				signal,
-				failed,
-				state,
-			});
-			if (route.state !== undefined && route.state !== state) {
-				const data: VirtualModelStateData = { provider: model.provider, modelId: model.id, state: route.state };
-				const entry = this.sessionManager.getEntry(
-					this.sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, data),
-				);
-				if (entry) this._emit({ type: "entry_appended", entry });
+			const currentSnapshot = snapshotMessages(context.messages);
+			const inputUnchanged =
+				preparedInput &&
+				model.provider === preparedInput.selectedModel.provider &&
+				model.id === preparedInput.selectedModel.id &&
+				thinkingLevel === preparedInput.thinkingLevel &&
+				currentSnapshot.length === preparedInput.messages.length &&
+				currentSnapshot.every((message, index) => message === preparedInput.messages[index]);
+			const contextGrowth = Math.max(
+				0,
+				estimateMessagesTokens(context.messages) - estimateMessagesTokens(projection.messages),
+			);
+			if (!isVirtualModel(model)) {
+				// Threshold compaction runs here, before the request that needs it, instead of after the
+				// previous run ended: a session the user never continues pays nothing.
+				if (!inputUnchanged && this._exceedsCompactionThreshold(model, projection, contextGrowth)) {
+					await this._runAutoCompaction("threshold", false);
+					({ previous, context } = await prepare());
+				}
+				return { ...previous, context, model, thinkingLevel };
 			}
+
+			// Input-bearing requests already routed before their input events. Context-only
+			// continuations and retries still route here, including the failed response.
+			const route =
+				inputUnchanged && preparedInput.route
+					? preparedInput.route
+					: await this._resolveRequestRoute(model, thinkingLevel, context.messages, failed, signal);
 			// The route stands: the router already decided this request. The state entry does not change
 			// the projection.
-			if (this._exceedsCompactionThreshold(route.model, projection)) {
+			if (!inputUnchanged && this._exceedsCompactionThreshold(route.model, projection, contextGrowth)) {
 				await this._runAutoCompaction("threshold", false);
 				({ previous, context } = await prepare());
 			}
@@ -1240,6 +1353,7 @@ export class AgentSession {
 			this._manualRetryCommit.runFailedBeforeCommit = true;
 			this._manualRetryCommit.runFailureMessage = event.message.errorMessage;
 		}
+		if (event.type === "agent_end") this._preparedInputRequest = undefined;
 
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
@@ -2053,6 +2167,7 @@ export class AgentSession {
 			}
 		} finally {
 			if (this._agentRunAbortRequested) this._finishCancelledRetry();
+			this._preparedInputRequest = undefined;
 			this._failedResponse = undefined;
 			this._runSystemPromptOptions = undefined;
 			this._flushPendingBashMessages();
@@ -2192,7 +2307,7 @@ export class AgentSession {
 			this._retryGlobalAttempt = 0;
 		}
 
-		if (await this._checkCompaction(message, true, toolResults)) {
+		if (await this._checkCompaction(message, true, toolResults, true)) {
 			return !this._agentRunAbortRequested;
 		}
 
@@ -2360,11 +2475,12 @@ export class AgentSession {
 			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 		}
 
-		// Check if we need to compact before sending (catches aborted responses).
+		// Check overflow recovery before sending (including aborted responses). Threshold
+		// checks wait for prepareInput, where pending input and the routed model are known.
 		// The user's new prompt is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
 		if (lastAssistant) {
-			await this._checkCompaction(lastAssistant, false);
+			await this._checkCompaction(lastAssistant, false, [], false, false);
 		}
 
 		// Emit before_agent_start before normalizing images so extension-driven model
@@ -3235,7 +3351,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Dispatch automatic compaction after `agent_end` or before prompt submission.
+	 * Dispatch automatic compaction after `agent_end` (retry only) or before prompt submission.
 	 * Manual compaction does not call this method; it enters through `compact()`.
 	 *
 	 * Automatic cases:
@@ -3253,12 +3369,18 @@ export class AgentSession {
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
+	 * @param retryOnly Only compact when the turn is retried (case 1). Cases 2 and 3 are left to the
+	 *   next request, which compacts in `prepareRequest`, so an idle session does not compact.
+	 * @param checkThreshold Whether to check case 3. Prompt preflight keeps cases 1/2 only;
+	 *   prepareInput checks threshold with the complete pending batch and routed model.
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
 	private async _checkCompaction(
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck = true,
 		toolResults: AgentMessage[] = [],
+		retryOnly = false,
+		checkThreshold = true,
 	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings(this.model);
 		if (!settings.enabled) return false;
@@ -3324,7 +3446,7 @@ export class AgentSession {
 			// Case 2: the response completed successfully. Compact, but do not retry because
 			// agent.continue() cannot continue from a completed assistant response.
 			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
+				return retryOnly ? false : await this._runAutoCompaction("overflow", false);
 			}
 
 			if (this._overflowRecoveryAttempted) {
@@ -3358,6 +3480,7 @@ export class AgentSession {
 		}
 
 		// Case 3: threshold compaction without retry.
+		if (retryOnly || !checkThreshold) return false;
 		// For error messages or all-zero usage messages, estimate from the last valid response.
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
 		// responses can still compact and do not reset context accounting.
