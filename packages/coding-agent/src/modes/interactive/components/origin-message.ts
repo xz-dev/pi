@@ -67,21 +67,35 @@ export class OriginMessageComponent extends Container {
 		this.rebuild();
 	}
 
+	private toggleOnClick(component: Component): MouseRegion {
+		// Like tool results, the whole block toggles; body children still handle their own clicks first.
+		return new MouseRegion(component, (event) => {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			this.setExpanded(!this.expanded);
+			return { handled: true };
+		});
+	}
+
 	private rebuild(): void {
 		this.clear();
 		if (!hasMeaningfulContent(this.message.content)) return;
 		this.addChild(new Spacer(1));
+		if (this.message.role === "custom" && !this.message.display && !this.expanded) {
+			// Collapsed hidden message: one low-key italic line, background under the text only.
+			const line = new Text(
+				theme.bg(
+					"toolPendingBg",
+					theme.italic(theme.fg("muted", `[${formatMessageOrigin(this.message.origin)} · hidden]`)),
+				),
+				0,
+				0,
+			);
+			this.addChild(this.toggleOnClick(line));
+			return;
+		}
 		const box = new Box(this.outputPad, 1, (text) => theme.bg("toolPendingBg", text));
 		box.addChild(new Text(theme.fg("muted", `[${formatMessageOrigin(this.message.origin)}]`), 0, 0));
-		// Like tool results, the whole block toggles; interactive body children still handle their own clicks first.
-		this.addChild(
-			new MouseRegion(box, (event) => {
-				if (event.type !== "click" || event.button !== "left") return undefined;
-				this.setExpanded(!this.expanded);
-				return { handled: true };
-			}),
-		);
-		if (this.message.role === "custom" && !this.message.display && !this.expanded) return;
+		this.addChild(this.toggleOnClick(box));
 
 		let body: Component | undefined;
 		if (this.renderer && this.message.role === "custom") {
