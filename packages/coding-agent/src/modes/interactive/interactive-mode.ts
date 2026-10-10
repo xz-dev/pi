@@ -507,11 +507,12 @@ export class InteractiveMode {
 
 	/**
 	 * Cold-start recovery, decided once at the start of run() against the session
-	 * and branch captured then. Eligibility derives from the retryable transcript
-	 * tail (`session.canRetry`), so sessions without run records recover; only a
-	 * durable explicit-cancellation veto (`hasRecoveryVeto`) keeps an interrupted
-	 * tail manual-only. Once cleared it is never restored: in-process /resume keeps
-	 * the hint manual even if the rebound session would qualify at cold start.
+	 * and branch captured then. Eligibility requires both an unfinished working
+	 * record (`hasUnfinishedWork`: latest run flag is "start", not "end") and a
+	 * retryable transcript tail (`session.canRetry`); sessions without run records
+	 * never recover automatically. Once cleared it is never restored: in-process
+	 * /resume keeps the hint manual even if the rebound session would qualify at
+	 * cold start.
 	 */
 	private startupRecovery:
 		| { session: AgentSession; sessionId: string; leafId: string | null; generation: number; eligible: boolean }
@@ -1201,7 +1202,7 @@ export class InteractiveMode {
 			sessionId: this.sessionManager.getSessionId(),
 			leafId: this.sessionManager.getLeafId(),
 			generation: this.sessionManager.getGeneration(),
-			eligible: !this.sessionManager.hasRecoveryVeto(),
+			eligible: this.sessionManager.hasUnfinishedWork(),
 		};
 		this.startupRecovery = startupRecovery;
 
