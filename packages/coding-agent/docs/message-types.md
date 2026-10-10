@@ -112,9 +112,27 @@ The leading system message declares the initial prompt and tools. Later system m
 interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
+  origin?: MessageOrigin;
   timestamp: number;
 }
 ```
+
+### MessageOrigin
+
+```typescript
+type MessageOrigin =
+  | { type: "interactive" }
+  | { type: "extension"; extensionId: string; extensionName?: string }
+  | { type: "rpc" }
+  | { type: "sdk" }
+  | { type: "cli" };
+```
+
+`origin` records the input boundary, independently of the provider role. Pi stamps terminal submissions as `interactive`, command-line prompts as `cli`, RPC submissions as `rpc`, and direct SDK calls as `sdk` by default. Its extension wrappers stamp `extension` automatically. `extensionId` is an opaque identifier derived from the loaded entry path; it is stable while that path is unchanged, not a portable identity or authentication credential. `extensionName` is for display.
+
+An absent origin means **unrecorded**, not human-authored. Pi does not guess from the content of old messages. Terminal input includes indistinguishable simulated keystrokes. In-process extensions remain trusted code; this is not a sandbox or permission boundary.
+
+Non-interactive user/custom input gets a deterministic source note in model context and summarization. The raw stored content is unchanged. The note does not elevate the protocol role or grant user authorization. Empty control messages remain empty, and image-only input retains its image blocks.
 
 ### AssistantMessage
 
@@ -228,11 +246,12 @@ interface CustomMessage<T = unknown> {
   content: string | (TextContent | ImageContent)[];
   display: boolean;
   details?: T;
+  origin?: MessageOrigin;
   timestamp: number;
 }
 ```
 
-Pi converts its content to a user message for model requests. `display` controls terminal rendering; `details` is not sent to the model.
+Pi converts its content to a user message for model requests, adding a source note when recorded. `details` is not sent to the model. Nonempty `display: false` context has a visible source heading in the TUI, with its body initially folded. Empty control markers stay invisible. Clicking the heading in fullscreen mode toggles one body; the configurable global tool-expansion action (default `Ctrl+O`) applies to these messages too. The source heading and body use gray text on the tool-execution background, without expansion hints or added italics.
 
 ### BranchSummaryMessage
 
