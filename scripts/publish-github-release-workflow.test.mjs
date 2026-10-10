@@ -73,7 +73,7 @@ test("upstream sync fetches and merges the single-executable patch", () => {
 
 test("upstream sync keeps the unsafe synchronized-cursor patch retired", () => {
   assert.doesNotMatch(syncWorkflowText, /patch\/tui-synchronized-cursor-fleet/);
-  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`patch\/tui-synchronized-cursor-fleet` is temporarily retired/);
+  assert.match(readFileSync(join(ROOT, "docs", "downstream-changes.md"), "utf8"), /`patch\/tui-synchronized-cursor-fleet` is temporarily retired/);
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /can emit excessive terminal data/);
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /do not fetch, merge, or add a CI conflict resolver/);
 });
@@ -109,7 +109,7 @@ test("upstream sync integrates and tests managed tool execution compatibility", 
   assert.doesNotMatch(script, /resolve-(?:agent-run-failure-seam|managed-tool|esc-abort|manual-retry)/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions\.test\.ts/);
   assert.match(syncWorkflowText, /test\/managed-tool-executions-esc-abort\.test\.ts/);
-  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /patch\/managed-tool-executions/);
+  assert.match(readFileSync(join(ROOT, "docs", "downstream-changes.md"), "utf8"), /patch\/managed-tool-executions/);
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /declared ancestry edges only where a descendant's range truly depends on the predecessor/);
 });
 
@@ -247,8 +247,8 @@ test("upstream sync carries and tests the model catalog list refresh patch", () 
   assertPatchIntegrated(syncScript, "model-refresh");
   assert.doesNotMatch(syncWorkflowText, /patch\/(?:model-startup-refresh-barrier|model-catalog-extension-refresh|model-refresh-timeout)\b/);
   // list-models-refresh and args tests are covered by the coding-agent auto-discovery run.
-  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi --list-models`/);
-  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /`pi update --models` extension-free/);
+  assert.match(readFileSync(join(ROOT, "docs", "downstream-changes.md"), "utf8"), /`pi --list-models`/);
+  assert.match(readFileSync(join(ROOT, "docs", "downstream-changes.md"), "utf8"), /`pi update --models` extension-free/);
 });
 
 test("upstream sync carries and tests the bounded startup benchmark patch", () => {
@@ -282,7 +282,7 @@ test("upstream sync keeps provider-transparent compaction temporarily retired", 
   assert.doesNotMatch(syncWorkflowText, /patch\/provider-transparent-compaction/);
   assert.doesNotMatch(syncWorkflowText, /patch\/pre-provider-compaction/);
   assert.doesNotMatch(syncWorkflowText, /Responses compaction/);
-  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"), /Temporarily disabled/);
+  assert.match(readFileSync(join(ROOT, "docs", "downstream-changes.md"), "utf8"), /Temporarily disabled/);
   assert.match(readFileSync(join(ROOT, "MAINTAIN.md"), "utf8"), /temporarily retired/);
 });
 
