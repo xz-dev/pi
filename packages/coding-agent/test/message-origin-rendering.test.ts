@@ -99,17 +99,21 @@ describe("message origin rendering", () => {
 
 	it("shows a gray tool-style source row without hints and toggles hidden content by click", () => {
 		const component = new OriginMessageComponent(message);
-		expect(text(component)).toContain("[Extension · pi-subagents]");
-		expect(text(component)).not.toMatch(/hidden body|expand|Ctrl|▸|▶/);
-		const ansi = component.render(80).join("\n");
-		expect(ansi).toContain(theme.fg("muted", "[Extension · pi-subagents]"));
-		expect(ansi).not.toContain("\x1b[3m");
-		click(component);
-		expect(text(component)).toContain("hidden body");
+		const collapsed = component.render(80).join("\n");
+		expect(stripVTControlCharacters(collapsed)).toContain("[Extension · pi-subagents · hidden]");
+		expect(stripVTControlCharacters(collapsed)).not.toMatch(/hidden body|expand|Ctrl|▸|▶/);
+		// Collapsed hidden message: gray italic, background only under the text.
+		expect(collapsed).toContain(theme.italic(theme.fg("muted", "[Extension · pi-subagents · hidden]")));
+		expect(collapsed).toMatch(/\x1b\[48;/);
+		click(component, "· hidden");
+		const expandedAnsi = component.render(80).join("\n");
+		expect(stripVTControlCharacters(expandedAnsi)).toContain("[Extension · pi-subagents]");
+		expect(stripVTControlCharacters(expandedAnsi)).toContain("hidden body");
+		expect(expandedAnsi).toMatch(/\x1b\[48;/);
 		click(component);
 		expect(text(component)).not.toContain("hidden body");
 		// Like tool results, clicking the expanded body collapses it again.
-		click(component);
+		click(component, "· hidden");
 		click(component, "hidden body");
 		expect(text(component)).not.toContain("hidden body");
 	});
