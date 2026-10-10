@@ -45,22 +45,23 @@ describe("persisted agent run state", () => {
 		const prompt = created.session.prompt("work");
 		await started;
 		try {
-			expect(reopen(created).getInterruptedRun()).toBeDefined();
+			expect(reopen(created).hasUnfinishedWork()).toBe(true);
 			expect(created.session.canRetry).toBe(false);
 		} finally {
 			release();
 			await prompt;
 		}
-		expect(reopen(created).getInterruptedRun()).toBeUndefined();
+		expect(reopen(created).hasUnfinishedWork()).toBe(false);
 		expect(created.sessionManager.getLeafEntry()).toMatchObject({ type: "message", message: { role: "assistant" } });
 		expect(created.session.canRetry).toBe(false);
 		const records = readFileSync(created.sessionManager.getSessionFile()!, "utf8")
 			.trim()
 			.split("\n")
 			.map((line) => JSON.parse(line));
-		expect(records.filter((entry) => entry.type === "run_state").map((entry) => entry.state)).toEqual([
-			"started",
-			"finished",
+		const runRecords = records.filter((entry) => entry.type === "run_state");
+		expect(runRecords.map((entry) => [entry.state, entry.working])).toEqual([
+			["started", "start"],
+			["finished", "end"],
 		]);
 	});
 
@@ -85,14 +86,14 @@ describe("persisted agent run state", () => {
 		await started;
 		const stopped = action === "abort" ? created.session.abort() : Promise.resolve(created.session.dispose());
 		// Cancellation must be durable even before the running provider has settled.
-		expect(Boolean(reopen(created).getInterruptedRun())).toBe(action === "dispose");
+		expect(reopen(created).hasUnfinishedWork()).toBe(action === "dispose");
 		release();
 		await Promise.allSettled([prompt, stopped]);
-		expect(Boolean(reopen(created).getInterruptedRun())).toBe(action === "dispose");
+		expect(reopen(created).hasUnfinishedWork()).toBe(action === "dispose");
 		if (action === "abort") expect(created.session.canRetry).toBe(true);
 	});
 
-	it("vetoes only an explicit aborted record scoped to the current tail", async () => {
+	it("closes an explicitly aborted run: no unfinished work, manual retry stays available", async () => {
 		const created = await harness();
 		created.sessionManager.appendMessage({ role: "user", content: "work", timestamp: Date.now() });
 		created.sessionManager.appendMessage(fauxAssistantMessage("partial", { stopReason: "aborted" }));
@@ -104,12 +105,13 @@ describe("persisted agent run state", () => {
 		});
 		harnesses.push(restored);
 		restored.session.refreshContext();
-		// The cancelled run's own tail keeps the session manual-only at cold start.
-		expect(restored.sessionManager.hasRecoveryVeto()).toBe(true);
+		// The aborted run's working-end flag closes the tail: cold start must not
+		// auto-run it, but manual /retry stays available.
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(false);
 		expect(restored.session.canRetry).toBe(true);
 	});
 
-	it("treats a finished record after an error tail as recoverable, not a veto", async () => {
+	it("treats a finished record as closed even with a retryable error tail", async () => {
 		const created = await harness();
 		created.sessionManager.appendMessage({ role: "user", content: "work", timestamp: Date.now() });
 		created.sessionManager.appendMessage(
@@ -123,15 +125,16 @@ describe("persisted agent run state", () => {
 		});
 		harnesses.push(restored);
 		restored.session.refreshContext();
-		// _emitAgentSettled records finished for retained errors too, so finished is
-		// not a veto: the same retryable error tail must recover at cold start.
-		expect(restored.sessionManager.hasRecoveryVeto()).toBe(false);
+		// _emitAgentSettled records finished for retained errors too. Scanning finds
+		// working-end first, so cold start returns without auto-retry; the retryable
+		// error tail stays manual-only.
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(false);
 		expect(restored.session.canRetry).toBe(true);
 		restored.setResponses([fauxAssistantMessage("recovered")]);
 		await restored.session.retry();
 	});
 
-	it("lifts the abort veto for fresh input appended after cancellation", async () => {
+	it("keeps an aborted run closed when fresh input arrived before its run started", async () => {
 		const created = await harness();
 		created.sessionManager.appendMessage({ role: "user", content: "work", timestamp: Date.now() });
 		created.sessionManager.appendMessage(fauxAssistantMessage("partial", { stopReason: "aborted" }));
@@ -145,7 +148,8 @@ describe("persisted agent run state", () => {
 		});
 		harnesses.push(restored);
 		restored.session.refreshContext();
-		expect(restored.sessionManager.hasRecoveryVeto()).toBe(false);
+		// Run flags only track agent work; user messages do not lift the working-end.
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(false);
 		expect(restored.session.canRetry).toBe(true);
 		restored.setResponses([fauxAssistantMessage("answered fresh")]);
 		await restored.session.retry();
@@ -231,7 +235,7 @@ describe("persisted agent run state", () => {
 		await started;
 		try {
 			expect(created.sessionManager.getLeafId()).not.toBe(failedId);
-			expect(reopen(created).getInterruptedRun()).toBeDefined();
+			expect(reopen(created).hasUnfinishedWork()).toBe(true);
 		} finally {
 			created.session.dispose();
 			release();
@@ -244,11 +248,11 @@ describe("persisted agent run state", () => {
 		harnesses.push(restored);
 		restored.session.refreshContext();
 		expect(restored.session.canRetry).toBe(true);
-		expect(restored.sessionManager.getInterruptedRun()).toBeDefined();
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(true);
 		restored.setResponses([fauxAssistantMessage("recovered")]);
 		await restored.session.retry();
 		expect(executions).toBe(1);
-		expect(restored.sessionManager.getInterruptedRun()).toBeUndefined();
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(false);
 	});
 
 	it.each(["exit", "cancel"] as const)("handles %s during automatic-retry waiting", async (action) => {
@@ -268,10 +272,10 @@ describe("persisted agent run state", () => {
 		const prompt = created.session.prompt("work");
 		await ready;
 		expect(created.session.isRetrying).toBe(true);
-		expect(reopen(created).getInterruptedRun()).toBeDefined();
+		expect(reopen(created).hasUnfinishedWork()).toBe(true);
 		if (action === "cancel") {
 			created.session.abortRetry();
-			expect(reopen(created).getInterruptedRun()).toBeUndefined();
+			expect(reopen(created).hasUnfinishedWork()).toBe(false);
 			await prompt;
 			expect(created.session.canRetry).toBe(true);
 			return;
@@ -287,16 +291,17 @@ describe("persisted agent run state", () => {
 		expect(restored.session.canRetry).toBe(true);
 		restored.setResponses([fauxAssistantMessage("after restart")]);
 		await restored.session.retry();
-		expect(restored.sessionManager.getInterruptedRun()).toBeUndefined();
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(false);
 	});
 
-	it("scopes the cancellation veto to the current branch only", async () => {
+	it("treats a branch with no run of its own as closed", async () => {
 		const created = await harness();
 		const root = created.sessionManager.appendMessage({ role: "user", content: "root", timestamp: Date.now() });
 		created.sessionManager.appendMessage(fauxAssistantMessage("left", { stopReason: "error" }));
 		const leftRun = created.sessionManager.appendRunState("started");
 		created.sessionManager.appendRunState("aborted", leftRun);
-		// A fresh branch off an earlier user message is not blocked by a vetoed sibling.
+		// A fresh branch off an earlier user message has no working-start of its own;
+		// the sibling's closed run must not revive it either.
 		created.sessionManager.branch(root);
 		created.sessionManager.appendMessage(fauxAssistantMessage("right", { stopReason: "error" }));
 		const restored = await createHarness({
@@ -305,11 +310,11 @@ describe("persisted agent run state", () => {
 		});
 		harnesses.push(restored);
 		restored.session.refreshContext();
-		expect(restored.sessionManager.hasRecoveryVeto()).toBe(false);
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(false);
 		expect(restored.session.canRetry).toBe(true);
 	});
 
-	it("finds a retryable boundary in a legacy session without run records", async () => {
+	it("does not auto-recover a legacy session without run records", async () => {
 		const created = await harness();
 		created.sessionManager.appendMessage({ role: "user", content: "old work", timestamp: Date.now() });
 		created.sessionManager.appendMessage(
@@ -321,12 +326,13 @@ describe("persisted agent run state", () => {
 		});
 		harnesses.push(restored);
 		restored.session.refreshContext();
-		// No run records at all: nothing vetoes, and the transcript tail is retryable.
-		expect(restored.sessionManager.hasRecoveryVeto()).toBe(false);
+		// No working flags at all: nothing was interrupted, so cold start returns.
+		// The retryable error tail stays manual-only.
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(false);
 		expect(restored.session.canRetry).toBe(true);
 		restored.setResponses([fauxAssistantMessage("recovered legacy")]);
 		await restored.session.retry();
-		expect(restored.sessionManager.getInterruptedRun()).toBeUndefined();
+		expect(restored.sessionManager.hasUnfinishedWork()).toBe(false);
 	});
 
 	it.each(["stop", "length"] as const)("does not recover a completed %s tail", async (stopReason) => {
@@ -349,14 +355,20 @@ describe("persisted agent run state", () => {
 		created.sessionManager.appendRunState("started");
 		created.sessionManager.branch(root);
 		created.sessionManager.appendMessage(fauxAssistantMessage("right", { stopReason: "error" }));
-		expect(reopen(created).getInterruptedRun()).toBeUndefined();
+		// The unfinished run is anchored on the left branch; from the right branch
+		// the scan never reaches a start it owns, so no unfinished work.
+		expect(reopen(created).hasUnfinishedWork()).toBe(false);
 		const rightRun = created.sessionManager.appendRunState("started");
-		created.sessionManager.appendRunState("finished", rightRun);
 		created.sessionManager.branch(left);
-		expect(created.sessionManager.getInterruptedRun()).toBeUndefined();
+		// The left branch owns an unfinished start again; the sibling's finished end
+		// does not close it, and the scan reaches the left start first.
+		expect(created.sessionManager.hasUnfinishedWork()).toBe(true);
+		expect(reopen(created).hasUnfinishedWork()).toBe(true);
+		created.sessionManager.appendRunState("finished", rightRun);
+		expect(created.sessionManager.hasUnfinishedWork()).toBe(false);
 		created.sessionManager.appendRunState("started");
 		const fork = SessionManager.forkFrom(created.sessionManager.getSessionFile()!, created.tempDir, created.tempDir);
-		expect(fork.getInterruptedRun()).toBeUndefined();
+		expect(fork.hasUnfinishedWork()).toBe(false);
 		expect(fork.getEntries()).toEqual(created.sessionManager.getEntries());
 	});
 
@@ -376,6 +388,28 @@ describe("persisted agent run state", () => {
 		expect(created.sessionManager.getLeafId()).toBe(leaf);
 		expect(created.sessionManager.getGeneration()).toBe(generation);
 		expect(created.sessionManager.getEntries()).toEqual(entries);
-		expect(reopen(created).getInterruptedRun()).toBeUndefined();
+		expect(reopen(created).hasUnfinishedWork()).toBe(false);
+	});
+
+	it("reads legacy run records without a working flag by deriving it from state", async () => {
+		const created = await harness();
+		created.sessionManager.appendMessage({ role: "user", content: "work", timestamp: Date.now() });
+		const startedId = created.sessionManager.appendRunState("started");
+		const finishStarted = (manager: SessionManager) => manager.appendRunState("finished", startedId);
+		// Older files have no `working` field; strip it to simulate the legacy record.
+		const stripWorking = (manager: SessionManager) => {
+			for (const entry of manager["fileEntries"] as Array<{ working?: string }>) delete entry.working;
+		};
+		stripWorking(created.sessionManager);
+		expect(created.sessionManager.hasUnfinishedWork()).toBe(true);
+		finishStarted(created.sessionManager);
+		delete (created.sessionManager["fileEntries"].at(-1) as { working?: string }).working;
+		expect(created.sessionManager.hasUnfinishedWork()).toBe(false);
+		// The derived flag must also survive a reload from disk.
+		finishStarted(created.sessionManager);
+		stripWorking(created.sessionManager);
+		const reopened = reopen(created);
+		stripWorking(reopened);
+		expect(reopened.hasUnfinishedWork()).toBe(false);
 	});
 });
