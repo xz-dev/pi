@@ -128,6 +128,7 @@ import {
 	convertToLlm,
 	inputOrigin,
 	type ManualRetryRecoveryMessage,
+	sameImages,
 } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -478,6 +479,8 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	/** Inputs swallowed by an extension input handler (action: "handled"), pending re-issue. */
+	private _swallowedInputs: { text: string; images: ImageContent[] | undefined; origin: MessageOrigin }[] = [];
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -2398,6 +2401,11 @@ export class AgentSession {
 
 		const inputResult = await this._extensionRunner.emitInput(text, images, source, streamingBehavior, origin);
 		if (inputResult.action === "handled") {
+			// An extension swallowed this input (e.g. takeover capture) and will re-issue it via
+			// sendUserMessage. Remember the swallowed payload so the re-issue can be attributed
+			// to this original origin instead of the re-issuing extension.
+			this._swallowedInputs.push({ text, images, origin: origin ?? inputOrigin(source) });
+			if (this._swallowedInputs.length > 8) this._swallowedInputs.shift();
 			return undefined;
 		}
 		if (inputResult.action === "transform") {
@@ -2868,6 +2876,16 @@ export class AgentSession {
 			}
 			text = textParts.join("\n");
 			if (images.length === 0) images = undefined;
+		}
+
+		// A re-issued swallowed input is attributed to its original origin, not the
+		// re-issuing extension. Exact-content match, oldest first, one-time claim.
+		const claim = this._swallowedInputs.findIndex(
+			(s) => s.text === text && sameImages(s.images, images) && s.origin.type !== "extension",
+		);
+		if (claim >= 0) {
+			origin = this._swallowedInputs[claim].origin;
+			this._swallowedInputs.splice(claim, 1);
 		}
 
 		await this.prompt(text, {
