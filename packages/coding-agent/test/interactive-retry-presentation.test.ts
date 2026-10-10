@@ -92,6 +92,10 @@ function createView(harness: Harness) {
 			InteractiveMode.prototype,
 			"renderSessionEntries",
 		) as InteractiveMode["renderSessionEntries"],
+		clearPendingModelSwitch: Reflect.get(
+			InteractiveMode.prototype,
+			"clearPendingModelSwitch",
+		) as InteractiveMode["clearPendingModelSwitch"],
 		rebuildChatFromMessages: Reflect.get(
 			InteractiveMode.prototype,
 			"rebuildChatFromMessages",
