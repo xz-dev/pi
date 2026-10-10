@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels, type Model, type Transport } from "@earendil-works/pi-ai";
 import {
+	BoundedHost,
 	type Component,
 	Container,
 	getCapabilities,
@@ -33,6 +34,7 @@ import {
 } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 import { SelectSubmenu, SteppedSubmenu, type SteppedSubmenuStep } from "./settings-submenu.ts";
 
 const MODEL_PICKER_LAYOUT = { minPrimaryColumnWidth: 12, maxPrimaryColumnWidth: 46 };
@@ -144,7 +146,7 @@ export interface SettingsCallbacks {
 /**
  * A submenu component for selecting from a list of options.
  */
-class WarningSettingsSubmenu extends Container {
+class WarningSettingsSubmenu extends BoundedHost {
 	private settingsList: SettingsList;
 	private state: WarningSettings;
 
@@ -251,7 +253,7 @@ function defaultAutomaticThemes(
 	return { lightTheme: themeName, darkTheme: themeName };
 }
 
-class ThemeSubmenu extends Container {
+class ThemeSubmenu extends SelectorPanel {
 	private inputComponent: Component | undefined;
 	private readonly callbacks: SettingsCallbacks;
 	private readonly availableThemes: string[];
@@ -297,6 +299,10 @@ class ThemeSubmenu extends Container {
 
 	handleInput(data: string): void {
 		this.inputComponent?.handleInput?.(data);
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		return compactSelector(width, height, [], this.inputComponent ?? new Container());
 	}
 
 	private setContent(renderComponent: Component, inputComponent: Component = renderComponent): void {
@@ -462,7 +468,7 @@ class ThemeSubmenu extends Container {
 /**
  * Main settings selector component.
  */
-export class SettingsSelectorComponent extends Container {
+export class SettingsSelectorComponent extends SelectorPanel {
 	private settingsList: SettingsList;
 
 	constructor(config: SettingsConfig, callbacks: SettingsCallbacks) {
@@ -987,6 +993,10 @@ export class SettingsSelectorComponent extends Container {
 
 		this.addChild(this.settingsList);
 		this.addChild(new DynamicBorder());
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		return compactSelector(width, height, [], this.settingsList);
 	}
 
 	getSettingsList(): SettingsList {

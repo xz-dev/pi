@@ -1,6 +1,16 @@
-import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	type Container,
+	getKeybindings,
+	renderSelectionWindow,
+	Spacer,
+	Text,
+	truncateToWidth,
+} from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import { keyDisplayText } from "./keybinding-hints.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 
 interface UserMessageItem {
 	id: string; // Entry ID in the session
@@ -30,6 +40,22 @@ class UserMessageList implements Component {
 		// No cached state to invalidate currently
 	}
 
+	private getStartIndex(): number {
+		return Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.messages.length - this.maxVisible),
+		);
+	}
+
+	renderInBounds(width: number, height: number): string[] {
+		const lines = this.render(width);
+		if (this.messages.length === 0) return lines.slice(0, height);
+		const items = Array.from({ length: Math.min(this.maxVisible, this.messages.length) }, (_, index) =>
+			lines.slice(index * 3, index * 3 + 3),
+		);
+		return renderSelectionWindow(items, this.selectedIndex - this.getStartIndex(), height).lines;
+	}
+
 	render(width: number): string[] {
 		const lines: string[] = [];
 
@@ -39,10 +65,7 @@ class UserMessageList implements Component {
 		}
 
 		// Calculate visible range with scrolling
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.messages.length - this.maxVisible),
-		);
+		const startIndex = this.getStartIndex();
 		const endIndex = Math.min(startIndex + this.maxVisible, this.messages.length);
 
 		// Render visible messages (2 lines per message + blank line)
@@ -107,7 +130,7 @@ class UserMessageList implements Component {
 /**
  * Component that renders a user message selector for branching
  */
-export class UserMessageSelectorComponent extends Container {
+export class UserMessageSelectorComponent extends SelectorPanel {
 	private messageList: UserMessageList;
 
 	constructor(
@@ -147,6 +170,22 @@ export class UserMessageSelectorComponent extends Container {
 		if (messages.length === 0) {
 			setTimeout(() => onCancel(), 100);
 		}
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		return compactSelector(
+			width,
+			height,
+			[new Text(theme.bold("Fork from Message"), 0, 0)],
+			(rows) => this.messageList.renderInBounds(width, rows),
+			[
+				new Text(
+					`${keyDisplayText("tui.select.confirm")} fork · ${keyDisplayText("tui.select.cancel")} cancel`,
+					0,
+					0,
+				),
+			],
+		);
 	}
 
 	getMessageList(): UserMessageList {
