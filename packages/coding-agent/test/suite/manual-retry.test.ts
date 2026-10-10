@@ -450,6 +450,55 @@ describe("manual /retry continuation", () => {
 		expect(persisted).not.toContain("The previous assistant response was interrupted");
 	});
 
+	it.each(["agent_start", "first message_end"] as const)(
+		"tolerates extension state appended during %s without invalidating retry",
+		async (hook) => {
+			const created = await createHarness({
+				settings: { retry: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("agent_start", () => {
+							if (hook === "agent_start") pi.appendEntry("accounting-boundary", { seq: 1 });
+						});
+						pi.on("message_end", (event) => {
+							if (hook === "first message_end" && event.message.role === "assistant") {
+								pi.appendEntry("accounting-boundary", { seq: 1 });
+							}
+						});
+					},
+				],
+			});
+			harnesses.push(created);
+			setBranch(created, [
+				userMessage("retry once"),
+				fauxAssistantMessage("failed", { stopReason: "error", errorMessage: "network failed" }),
+			]);
+			created.setResponses([fauxAssistantMessage("continued")]);
+
+			await created.session.retry();
+
+			expect(getAssistantTexts(created)).toEqual(["continued"]);
+			const leaf = created.sessionManager.getLeafEntry();
+			expect(leaf).toMatchObject({ type: "message", message: { role: "assistant" } });
+			// The state is kept on the new active branch exactly once, before the continued assistant.
+			const branch = created.sessionManager.getBranch();
+			const carried = branch.filter(
+				(entry) => entry.type === "custom" && entry.customType === "accounting-boundary",
+			);
+			expect(carried).toHaveLength(1);
+			expect(carried[0]).toMatchObject({ data: { seq: 1 } });
+			expect(branch.indexOf(carried[0]!)).toBeLessThan(branch.indexOf(leaf!));
+			expect(
+				branch.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.stopReason === "error",
+				),
+			).toBe(false);
+		},
+	);
+
 	it("rolls back when the provider throws before producing an assistant", async () => {
 		const created = await harness();
 		setBranch(created, [
@@ -567,6 +616,34 @@ describe("manual /retry continuation", () => {
 		expect(executions).toBe(0);
 		expect(created.sessionManager.getLeafId()).toBe(beforeLeaf);
 		expect(created.sessionManager.getEntries()).toEqual(beforeEntries);
+	});
+
+	it("reports the missing-persisted-assistant error only for real publication failures", async () => {
+		const extensionErrors: string[] = [];
+		const created = await createHarness({
+			settings: { retry: { enabled: false } },
+			sessionManagerFactory: (tempDir) =>
+				SessionManager.create(tempDir, tempDir, { id: "manual-retry-turn-end-after-failure" }),
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", () => {});
+				},
+			],
+		});
+		harnesses.push(created);
+		setBranch(created, [
+			userMessage("retry once"),
+			fauxAssistantMessage("failed", { stopReason: "error", errorMessage: "failed" }),
+		]);
+		created.sessionManager.continuationFileWriter = () => {
+			throw new Error("injected publication failure");
+		};
+		created.setResponses([fauxAssistantMessage("must not publish")]);
+		await created.session.bindExtensions({ onError: (error) => extensionErrors.push(error.error) });
+
+		await expect(created.session.retry()).rejects.toThrow(/injected publication failure/);
+
+		expect(extensionErrors).toEqual([]);
 	});
 
 	it("leaves durable and in-memory state unchanged when atomic publication fails", async () => {
