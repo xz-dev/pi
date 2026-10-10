@@ -266,10 +266,14 @@ test("upstream sync requires ci to merge cleanly without source rewriting", () =
   const script = readFileSync(join(ROOT, "scripts", "rebuild-from-inputs.sh"), "utf8");
   assert.match(script, /git merge --squash "origin\/\$\(label_of "\$name"\)"/);
   assert.match(script, /Unexpected .*squash conflict/);
-  // README.md is the one allowed conflict: the fork README is a full rewrite on ci,
-  // so the sync takes the ci version when README.md is the only conflicted file.
+  // README.md and AGENTS.md are allowed conflicts: both are full fork rewrites
+  // on ci, so the sync takes the ci version. .github/APPROVED_CONTRIBUTORS is
+  // deleted downstream, so upstream's modify/delete conflict re-deletes it.
   assert.match(script, /git checkout --theirs -- README\.md/);
+  assert.match(script, /git checkout --theirs -- AGENTS\.md/);
+  assert.match(script, /git rm -f \.github\/APPROVED_CONTRIBUTORS/);
   assert.doesNotMatch(script, /resolve-ci-squash-conflicts/);
+  assert.doesNotMatch(script, /contributor-approval/);
 });
 
 test("upstream sync runs the compaction characterization suite", () => {

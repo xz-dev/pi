@@ -463,13 +463,20 @@ merge_squash() {
 			mapfile -t ci_conflicts < <(git diff --name-only --diff-filter=U)
 			for f in "${ci_conflicts[@]}"; do
 				case "$f" in
-				README.md|.github/workflows/publish-model-catalog.yml) ;;
+				README.md|AGENTS.md|.github/APPROVED_CONTRIBUTORS|.github/workflows/publish-model-catalog.yml) ;;
 				*) die "Unexpected $msg squash conflict: $f — rebase patch/$name onto upstream and rerun" ;;
 				esac
 			done
 			if git diff --name-only --diff-filter=U | grep -qx 'README.md'; then
 				git checkout --theirs -- README.md
 				git add README.md
+			fi
+			if git diff --name-only --diff-filter=U | grep -qx 'AGENTS.md'; then
+				git checkout --theirs -- AGENTS.md
+				git add AGENTS.md
+			fi
+			if git diff --name-only --diff-filter=U | grep -qx '.github/APPROVED_CONTRIBUTORS'; then
+				git rm -f .github/APPROVED_CONTRIBUTORS
 			fi
 			if git diff --name-only --diff-filter=U | grep -qx '.github/workflows/publish-model-catalog.yml'; then
 				git rm -f .github/workflows/publish-model-catalog.yml
@@ -648,8 +655,10 @@ run_replay() {
 	git reset --hard "$UPSTREAM_SHA"
 	git checkout -q -B rebuilt-main "$UPSTREAM_SHA"
 
-	# 1 ci — README.md is the only tolerated squash conflict (fork README is a
-	# full rewrite maintained on ci).
+	# 1 ci — README.md, AGENTS.md, and .github/APPROVED_CONTRIBUTORS are the
+	# only tolerated squash conflicts (fork-owned files maintained on ci; the
+	# approvals file is deleted downstream and re-deleted after each upstream
+	# modify/delete conflict).
 	CURRENT_STEP=ci
 	merge_squash ci "merge ci branch" readme-ok,skip-check
 
