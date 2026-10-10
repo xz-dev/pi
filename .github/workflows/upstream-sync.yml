@@ -61,8 +61,7 @@ jobs:
             +refs/heads/patch/thinking-preview:refs/remotes/origin/patch/thinking-preview \
             +refs/heads/patch/retry-error-presentation:refs/remotes/origin/patch/retry-error-presentation \
             +refs/heads/patch/message-origin:refs/remotes/origin/patch/message-origin \
-            +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort \
-            +refs/heads/patch/pending-model-switch-indicator:refs/remotes/origin/patch/pending-model-switch-indicator
+            +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort
 
           # Driver source: the replay script comes
           # from the reviewed ci snapshot, never from a stale generated-main
@@ -105,7 +104,6 @@ jobs:
             retry-error-presentation \
             message-origin \
             model-thinking-sort \
-            pending-model-switch-indicator \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done
