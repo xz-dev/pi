@@ -151,14 +151,14 @@ describe("AssistantMessageComponent", () => {
 		);
 		const streamingLines = streaming.render(80);
 		const liveRow = streamingLines.find((line) => stripAnsi(line).includes("second thought tail")) ?? "";
-		expect(stripAnsi(streamingLines.join("\n"))).not.toContain("summary");
+		// Lines join on one row with a muted newline mark that hugs the previous text.
+		expect(stripAnsi(liveRow)).toContain("summary lead here\u21b2 second thought tail bold code");
+		expect(liveRow).toContain(theme.fg("muted", "\u21b2 "));
+		expect(stripAnsi(liveRow)).not.toContain("\u2026");
 		expect(stripAnsi(liveRow)).not.toContain("**");
 		expect(stripAnsi(liveRow)).not.toContain("`");
 		expect(liveRow).toMatch(/\x1b\[1m(?:\x1b\[[\d;]*m)*bold/);
 		expect(liveRow).toContain(theme.fg("mdCode", "code"));
-		// The earlier line is omitted with a muted grapheme count, not silently dropped.
-		expect(stripAnsi(liveRow).trimStart()).toMatch(/^\u2026 \(17 chars\) /);
-		expect(liveRow).toContain(theme.italic(theme.fg("muted", "\u2026 (17 chars) ")));
 
 		// thinking_end (no active thinking index) keeps the identical rolling tail row.
 		streaming.updateContent(
@@ -180,9 +180,8 @@ describe("AssistantMessageComponent", () => {
 		);
 		const longLines = longFirst.render(40).map((line) => stripAnsi(line));
 		const longRow = longLines.find((line) => line.includes("short tail")) ?? "";
-		expect(longRow).toContain("(129 chars)");
-		expect(longRow).not.toContain("head-end");
-		expect(longRow).not.toContain("x");
+		// 117 hidden + "xxx head-end" (12 shown) = 129 body graphemes; the mark is not counted.
+		expect(longRow.trim()).toBe("\u2026 (117 chars) xxx head-end\u21b2 short tail");
 
 		const finished = new AssistantMessageComponent(
 			createAssistantMessage([
@@ -257,17 +256,15 @@ describe("AssistantMessageComponent", () => {
 			expect(stripAnsi(component.render(width).join("\n"))).toContain("second tail");
 			component.updateContent(message, true, null);
 			component.updateContent(message, false);
-			// Completion keeps the identical tail row: same omission hint, no first line.
+			// Completion keeps the identical one-row preview.
 			let rendered = stripAnsi(component.render(width).join("\n"));
-			expect(rendered).toContain("\u2026 (12 chars) second tail");
-			expect(rendered).not.toContain("summary line");
+			expect(rendered).toContain("summary line\u21b2 second tail");
 			expect(rendered).not.toContain("Thinking...");
 			clickRow(component, "second tail");
-			expect(stripAnsi(component.render(width).join("\n"))).toContain("summary line");
+			expect(stripAnsi(component.render(width).join("\n"))).not.toContain("\u21b2");
 			clickRow(component, "second tail");
 			rendered = stripAnsi(component.render(width).join("\n"));
-			expect(rendered).toContain("\u2026 (12 chars) second tail");
-			expect(rendered).not.toContain("summary line");
+			expect(rendered).toContain("summary line\u21b2 second tail");
 		}
 	});
 
@@ -349,14 +346,12 @@ describe("AssistantMessageComponent", () => {
 		for (const active of [null, 2, null]) {
 			component.updateContent(message, true, active);
 			const rendered = stripAnsi(component.render(80).join("\n"));
-			expect(rendered).toContain("first body");
-			expect(rendered).not.toContain("first summary");
-			expect(rendered).toContain("second tail");
-			expect(rendered).not.toContain("second summary");
+			expect(rendered).toContain("first summary\u21b2 first body");
+			expect(rendered).toContain("second summary\u21b2 second tail");
 		}
 	});
 
-	test("preview respects thinking markdown transformers before picking the latest line", () => {
+	test("preview respects thinking markdown transformers before joining lines", () => {
 		initTheme("dark");
 
 		const component = new AssistantMessageComponent(undefined, "preview", undefined, "Thinking...", 1, [
@@ -364,8 +359,7 @@ describe("AssistantMessageComponent", () => {
 		]);
 		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "sensitive tail" }]), true, 0);
 		const lines = component.render(40).map((line) => stripAnsi(line));
-		expect(lines.some((line) => line.includes("redacted marker"))).toBe(true);
-		expect(lines.some((line) => line.includes("sensitive tail"))).toBe(false);
+		expect(lines.some((line) => line.includes("sensitive tail\u21b2 redacted marker"))).toBe(true);
 	});
 
 	test("preview passes the real available width to transformers and re-runs them on width change", () => {
@@ -394,9 +388,8 @@ describe("AssistantMessageComponent", () => {
 		const width = 80;
 		let lines = component.render(width);
 		let rendered = stripAnsi(lines.join("\n"));
-		// Preview row shows only the tail line, not the whole run.
-		expect(rendered).toContain("last tail line");
-		expect(rendered).not.toContain("first line");
+		// Preview row shows the whole run on one row.
+		expect(rendered).toContain("first line\u21b2 last tail line");
 
 		const previewRow = lines.findIndex((line) => stripAnsi(line).includes("last tail line"));
 		expect(previewRow).toBeGreaterThanOrEqual(0);
@@ -421,6 +414,7 @@ describe("AssistantMessageComponent", () => {
 		rendered = stripAnsi(lines.join("\n"));
 		expect(rendered).toContain("first line");
 		expect(rendered).toContain("last tail line");
+		expect(rendered).not.toContain("\u21b2");
 		const expandedRow = lines.findIndex((line) => stripAnsi(line).includes("first line"));
 		expect(expandedRow).toBeGreaterThanOrEqual(0);
 
@@ -430,8 +424,7 @@ describe("AssistantMessageComponent", () => {
 		).toBe(true);
 		lines = component.render(width);
 		rendered = stripAnsi(lines.join("\n"));
-		expect(rendered).not.toContain("first line");
-		expect(rendered).toContain("last tail line");
+		expect(rendered).toContain("first line\u21b2 last tail line");
 		expect(rendered).not.toContain("Thinking...");
 	});
 
@@ -465,8 +458,7 @@ describe("AssistantMessageComponent", () => {
 		component.setExpanded(true);
 		component.setExpanded(false);
 		let rendered = stripAnsi(component.render(80).join("\n"));
-		expect(rendered).toContain("live tail");
-		expect(rendered).not.toContain("earlier");
+		expect(rendered).toContain("earlier\u21b2 live tail");
 		expect(rendered).not.toContain("Thinking...");
 
 		// Mouse expand then collapse while live: preview row returns.
@@ -493,8 +485,7 @@ describe("AssistantMessageComponent", () => {
 			})?.handled,
 		).toBe(true);
 		rendered = stripAnsi(component.render(80).join("\n"));
-		expect(rendered).toContain("live tail");
-		expect(rendered).not.toContain("earlier");
+		expect(rendered).toContain("earlier\u21b2 live tail");
 
 		// thinking_end keeps the identical tail row instead of switching to a summary.
 		component.updateContent(
@@ -503,9 +494,8 @@ describe("AssistantMessageComponent", () => {
 			null,
 		);
 		rendered = stripAnsi(component.render(80).join("\n"));
-		expect(rendered).toContain("\u2026 (7 chars) live tail");
+		expect(rendered).toContain("earlier\u21b2 live tail");
 		expect(rendered).not.toContain("Thinking...");
-		expect(rendered).not.toContain("earlier");
 	});
 
 	test("preview row renders nothing visible at zero columns and stays within bounds for CJK text", () => {
@@ -547,9 +537,10 @@ describe("AssistantMessageComponent", () => {
 			}
 		}
 		// Count is computed from post-redaction rendered content, not the raw source.
-		const rendered = stripAnsi(component.render(80).join("\n"));
-		expect(rendered).toContain("[redacted] tail 中文你好");
-		expect(rendered).toContain("\u2026 (3 chars)");
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("old\u21b2 [redacted] tail 中文你好");
+		const row = stripAnsi(component.render(26).join("\n")).trim();
+		// 23 body graphemes after redaction, 7 shown.
+		expect(row).toBe("\u2026 (16 chars) il 中文你好");
 	});
 
 	test("preview hidden count spans preceding lines and the clipped prefix of the tail line", () => {
@@ -567,21 +558,21 @@ describe("AssistantMessageComponent", () => {
 		expect(row.endsWith("xxxtail")).toBe(true);
 	});
 
-	test("preview count grows across the 9-to-10 digit boundary without changing the tail", () => {
+	test("preview count grows across the 99-to-100 digit boundary without changing the tail", () => {
 		initTheme("dark");
-		for (const hidden of [9, 10]) {
+		for (const hidden of [99, 100]) {
 			const component = new AssistantMessageComponent(undefined, "preview", undefined, "Thinking...", 0);
 			component.updateContent(
-				createAssistantMessage([{ type: "thinking", thinking: `${"a".repeat(hidden)}\n${"b".repeat(30)}` }]),
+				createAssistantMessage([{ type: "thinking", thinking: `${"a".repeat(hidden)}${"b".repeat(30)}` }]),
 				true,
 				0,
 			);
-			// Width 50: plenty of tail fits; only the count digits differ.
-			const row = stripAnsi(component.render(50).join("\n")).trimEnd();
-			expect(row).toContain(`\u2026 (${hidden} chars)`);
-			// The tail fills the remaining columns of the single row.
-			const hintWidth = `\u2026 (${hidden} chars) `.length;
-			expect(row.endsWith("b".repeat(Math.min(30, 50 - hintWidth)))).toBe(true);
+			// Count digits change width; the row stays full and the count stays exact.
+			const row = stripAnsi(component.render(44).join("\n")).split("\n").pop()!;
+			expect(visibleWidth(row)).toBe(44);
+			const match = /^\u2026 \((\d+) chars\) (a*b{30})$/.exec(row);
+			expect(match).not.toBeNull();
+			expect(Number(match![1]) + match![2].length).toBe(hidden + 30);
 		}
 	});
 
@@ -617,43 +608,46 @@ describe("AssistantMessageComponent", () => {
 		expect(stripAnsi(component.render(40).join("\n"))).toContain("first line");
 		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "first line\nsecond" }]), true, 0);
 		let rendered = stripAnsi(component.render(40).join("\n"));
-		expect(rendered).toContain("second");
-		expect(rendered).not.toContain("first");
-		// Trailing newline / blank tail does not flash an empty row.
+		expect(rendered).toContain("first line\u21b2 second");
+		// Trailing newline / blank lines add no mark and do not flash an empty row.
 		component.updateContent(
-			createAssistantMessage([{ type: "thinking", thinking: "first line\nsecond\n" }]),
+			createAssistantMessage([{ type: "thinking", thinking: "first line\n\n\nsecond\n" }]),
 			true,
 			0,
 		);
-		rendered = stripAnsi(component.render(40).join("\n"));
-		expect(rendered).toContain("second");
+		rendered = stripAnsi(component.render(40).join("\n")).trim();
+		expect(rendered).toBe("first line\u21b2 second");
 	});
 
 	test("preview recomputes the tail and count after resize", () => {
 		initTheme("dark");
 		const component = new AssistantMessageComponent(undefined, "preview", undefined, "Thinking...", 0);
 		component.updateContent(
-			createAssistantMessage([{ type: "thinking", thinking: `start\n${"y".repeat(40)}` }]),
+			createAssistantMessage([{ type: "thinking", thinking: `start\n${"y".repeat(60)}` }]),
 			false,
 		);
-		const wide = stripAnsi(component.render(50).join("\n")).trimEnd();
-		// "start" (5) + 2 clipped tail clusters = 7 hidden at width 50.
-		expect(wide).toContain("\u2026 (7 chars)");
-		const narrow = stripAnsi(component.render(20).join("\n")).trimEnd();
+		const lastRow = (width: number) => stripAnsi(component.render(width).join("\n")).split("\n").pop()!.trimEnd();
+		const wide = lastRow(50);
+		// "start" (5) + 23 clipped tail clusters = 28 hidden at width 50; the mark is not counted.
+		expect(wide).toBe(`\u2026 (28 chars) ${"y".repeat(37)}`);
+		const narrow = lastRow(20);
 		// Same content, narrower row: more of the tail is hidden and counted.
-		expect(narrow).toContain("\u2026 (38 chars)");
+		expect(narrow).toContain("\u2026 (58 chars)");
 		expect(narrow.endsWith("y".repeat(7))).toBe(true);
 		// Wide again restores the larger tail window.
-		expect(stripAnsi(component.render(50).join("\n")).trimEnd()).toBe(wide);
+		expect(lastRow(50)).toBe(wide);
 	});
 
 	test("preview counts combined emoji and CJK as single clusters", () => {
 		initTheme("dark");
 		const component = new AssistantMessageComponent(undefined, "preview", undefined, "Thinking...", 0);
-		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "👨‍👩‍👧中e\u0301\nlast" }]), false);
-		const row = stripAnsi(component.render(80).join("\n")).trimEnd();
-		// 3 clusters hidden (👨‍👩‍👧, 中, e+́), shown by the count, not cell widths.
-		expect(row).toContain("\u2026 (3 chars) last");
+		component.updateContent(
+			createAssistantMessage([{ type: "thinking", thinking: `👨‍👩‍👧中e\u0301\n${"z".repeat(30)}` }]),
+			false,
+		);
+		const row = stripAnsi(component.render(36).join("\n")).split("\n").pop()!.trimEnd();
+		// 13 hidden cells = 👨‍👩‍👧, 中, e+́ (3 clusters) + mark + 6 z: counted as 9 clusters.
+		expect(row).toBe(`\u2026 (9 chars) ${"z".repeat(24)}`);
 	});
 
 	test("preview keeps bold styling on the cropped tail without leaking markers", () => {
@@ -712,10 +706,10 @@ describe("AssistantMessageComponent", () => {
 	test("preview prefers a bare ellipsis over hiding a fitting wide final grapheme", () => {
 		initTheme("dark");
 		const component = new AssistantMessageComponent(undefined, "preview", undefined, "Thinking...", 0);
-		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "old\n中" }]), true, 0);
-		// Width 13: counted form "… (N chars) " leaves 1 col, dropping 中; bare form keeps it.
+		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "中中中中中中\n中" }]), true, 0);
+		// Width 13: counted form "… (7 chars) " leaves 1 col, dropping 中; bare form keeps it.
 		const row = stripAnsi(component.render(13).join("\n")).split("\n").pop()!.trimEnd();
-		expect(row).toBe("\u2026 中");
+		expect(row).toBe("\u2026 中中中\u21b2 中");
 	});
 
 	test("preview preserves a combining mark and ZWJ family across style boundaries", () => {
@@ -743,9 +737,9 @@ describe("AssistantMessageComponent", () => {
 			const mdTheme = codeBlockIndent ? { ...getMarkdownTheme(), codeBlockIndent } : getMarkdownTheme();
 			const component = new AssistantMessageComponent(undefined, "preview", mdTheme, "Thinking...", 0);
 			component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "```\na\nb\n```" }]), false);
-			// Only the one real body char on the earlier code line is hidden, regardless of indent.
+			// Renderer code indentation never reaches the row, regardless of indent.
 			const row = stripAnsi(component.render(40).join("\n")).split("\n").pop()!.trimEnd();
-			expect(row).toMatch(/^\u2026 \(1 chars\)/);
+			expect(row).toBe("a\u21b2 b");
 		}
 		// Genuine leading code indentation still counts as body characters.
 		const component = new AssistantMessageComponent(undefined, "preview", undefined, "Thinking...", 0);
@@ -754,16 +748,16 @@ describe("AssistantMessageComponent", () => {
 			false,
 		);
 		const row = stripAnsi(component.render(40).join("\n")).split("\n").pop()!.trimEnd();
-		expect(row).toMatch(/^\u2026 \(10 chars\)/);
+		expect(row).toBe("  indented\u21b2 x");
 	});
 
 	test("preview counts body spaces without generated continuation or table padding", () => {
 		initTheme("dark");
-		for (const [thinking, hidden] of [
-			["- a\n  b\n\nend", 4],
-			["- p\n  - a\n    b\n\nend", 7],
-			["```\na\n  \nb\n```", 3],
-			["| a | long |\n|---|---|\n| x | y |\n\nend", 9],
+		for (const [thinking, expected] of [
+			["- a\n  b\n\nend", "- a\u21b2 b\u21b2 end"],
+			["- p\n  - a\n    b\n\nend", "- p\u21b2 - a\u21b2 b\u21b2 end"],
+			["```\na\n  \nb\n```", "a\u21b2 b"],
+			["| a | long |\n|---|---|\n| x | y |\n\nend", "a\u2502long\u21b2 x\u2502y\u21b2 end"],
 		] as const) {
 			const component = new AssistantMessageComponent(
 				createAssistantMessage([{ type: "thinking", thinking }]),
@@ -774,7 +768,7 @@ describe("AssistantMessageComponent", () => {
 			);
 			for (const width of [20, 40, 80]) {
 				const row = stripAnsi(component.render(width).at(-1)!);
-				expect(row).toContain(`… (${hidden} chars) `);
+				expect(row.trimEnd()).toBe(expected);
 				expect(visibleWidth(row)).toBeLessThanOrEqual(width);
 			}
 		}
@@ -792,7 +786,8 @@ describe("AssistantMessageComponent", () => {
 					"Thinking...",
 					0,
 				);
-				expect(stripAnsi(component.render(40).at(-1)!)).toContain("… (5 chars) b");
+				// Leading code spaces stay; trailing spaces before the mark are dropped.
+				expect(stripAnsi(component.render(40).at(-1)!).trimEnd()).toBe("  a\u21b2 b");
 			}
 		}
 	});
@@ -803,10 +798,11 @@ describe("AssistantMessageComponent", () => {
 		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "    **literal**" }]));
 		expect(stripAnsi(component.render(40).at(-1)!)).toContain("**literal**");
 		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "```text\nold\n  b  " }]), true, 0);
-		const live = component.render(16);
-		expect(stripAnsi(live.at(-1)!)).toBe("… (4 chars)  b  ");
+		const live = component.render(9);
+		// The live last line keeps its trailing spaces.
+		expect(stripAnsi(live.at(-1)!)).toBe("… \u21b2   b  ");
 		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "```text\nold\n  b  " }]), false);
-		expect(component.render(16)).toEqual(live);
+		expect(component.render(9)).toEqual(live);
 	});
 
 	test("preview retains the last styled table content row rather than a box border", () => {
@@ -819,7 +815,7 @@ describe("AssistantMessageComponent", () => {
 			0,
 		);
 		const row = component.render(40).at(-1)!;
-		expect(stripAnsi(row).trimEnd()).toBe("… (9 chars) last│tail");
+		expect(stripAnsi(row).trimEnd()).toBe("key│value\u21b2 last│tail");
 		expect(row).toMatch(/\x1b\[1m(?:\x1b\[[\d;]*m)*tail/);
 	});
 
