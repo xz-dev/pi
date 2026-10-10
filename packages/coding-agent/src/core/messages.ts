@@ -161,6 +161,15 @@ export function inputOrigin(source: MessageOrigin["type"] = "sdk"): MessageOrigi
 	return source === "extension" ? { type: source, extensionId: "unrecorded" } : { type: source };
 }
 
+/** Exact image-list equality (order and data), treating undefined as empty. */
+export function sameImages(a: ImageContent[] | undefined, b: ImageContent[] | undefined): boolean {
+	if (a === b) return true;
+	if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
+	return (a ?? []).every(
+		(img, i) => img.type === b![i].type && img.data === b![i].data && img.mimeType === b![i].mimeType,
+	);
+}
+
 /**
  * One-line provenance note prepended to model-facing text for messages whose
  * recorded origin is not human terminal input. Deterministic for a given
