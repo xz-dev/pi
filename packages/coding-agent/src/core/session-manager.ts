@@ -234,6 +234,8 @@ export interface ContinuationCommit {
 	expectedSessionId: string;
 	expectedLeafId: string | null;
 	expectedGeneration: number;
+	/** `getEntryCount()` when the retry started; only entries appended after it may be carried. */
+	expectedEntryCount: number;
 	branchFromId: string | null;
 	messages: Message[];
 }
@@ -1248,19 +1250,25 @@ export class SessionManager {
 	 * ran. They carry no model context, so they must not invalidate the retry; any
 	 * other change since the expected leaf/generation still does.
 	 */
-	private _stateAppendedSince(expectedLeafId: string | null, expectedGeneration: number): CustomEntry[] {
+	private _stateAppendedSince(commit: ContinuationCommit): CustomEntry[] {
+		// Tree entries appended since the retry started: byId keeps append order and holds only tree entries.
+		const newEntries = [...this.byId.values()].slice(commit.expectedEntryCount);
 		const appended: CustomEntry[] = [];
-		let id = this.leafId;
-		while (id !== expectedLeafId) {
-			const entry = id === null ? undefined : this.byId.get(id);
-			if (entry?.type !== "custom") {
+		let parentId = commit.expectedLeafId;
+		for (const entry of newEntries) {
+			// Only custom state chained on the expected leaf qualifies; anything else, or an
+			// existing entry reached by moving the leaf, means the branch really changed.
+			if (entry.type !== "custom" || entry.parentId !== parentId) {
 				throw new Error("Session branch changed before retry continuation could be committed");
 			}
-			appended.unshift(entry);
-			id = entry.parentId;
+			appended.push(entry);
+			parentId = entry.id;
 		}
-		// Each append advances the generation once; any extra change (e.g. branch away and back) is stale.
-		if (this.generation !== expectedGeneration + appended.length) {
+		if (this.leafId !== parentId) {
+			throw new Error("Session branch changed before retry continuation could be committed");
+		}
+		// Each append advances the generation once; any other mutation (e.g. branch away and back) is stale.
+		if (this.generation !== commit.expectedGeneration + appended.length) {
 			throw new Error("Session changed before retry continuation could be committed");
 		}
 		return appended;
@@ -1277,7 +1285,7 @@ export class SessionManager {
 		if (this.sessionId !== commit.expectedSessionId) {
 			throw new Error("Session changed before retry continuation could be committed");
 		}
-		const carriedState = this._stateAppendedSince(commit.expectedLeafId, commit.expectedGeneration);
+		const carriedState = this._stateAppendedSince(commit);
 		if (commit.branchFromId !== null && !this.byId.has(commit.branchFromId)) {
 			throw new Error(`Entry ${commit.branchFromId} not found`);
 		}
