@@ -958,6 +958,10 @@ export class AgentSession {
 			message.stopReason === "aborted" ? "aborted" : message.stopReason === "error" ? "error" : "completed";
 		const messageEntryId = this._findPersistedMessageEntryId(message);
 		if (!this._extensionRunner.hasHandlers("turn_end")) return false;
+		// A retry whose publication failed deliberately persisted nothing; its original error is reported instead.
+		if (!messageEntryId && this._manualRetryCommit?.runFailedBeforeCommit && !this._manualRetryCommit.committed) {
+			return false;
+		}
 		if (!messageEntryId) {
 			this._extensionRunner.emitError({
 				extensionPath: "<boundary>",

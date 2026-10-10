@@ -1244,20 +1244,40 @@ export class SessionManager {
 	}
 
 	/**
+	 * Extension state (`custom` entries) appended on the expected leaf while the retry
+	 * ran. They carry no model context, so they must not invalidate the retry; any
+	 * other change since the expected leaf/generation still does.
+	 */
+	private _stateAppendedSince(expectedLeafId: string | null, expectedGeneration: number): CustomEntry[] {
+		const appended: CustomEntry[] = [];
+		let id = this.leafId;
+		while (id !== expectedLeafId) {
+			const entry = id === null ? undefined : this.byId.get(id);
+			if (entry?.type !== "custom") {
+				throw new Error("Session branch changed before retry continuation could be committed");
+			}
+			appended.unshift(entry);
+			id = entry.parentId;
+		}
+		// Each append advances the generation once; any extra change (e.g. branch away and back) is stale.
+		if (this.generation !== expectedGeneration + appended.length) {
+			throw new Error("Session changed before retry continuation could be committed");
+		}
+		return appended;
+	}
+
+	/**
 	 * Atomically publish recovery messages and the first continued assistant as a
-	 * new append-only branch. Validation and persistence happen before in-memory
-	 * state changes, so a failed commit leaves the active branch unchanged.
+	 * new append-only branch. Extension state appended during the retry is copied
+	 * onto the new branch so it stays on the active path. Validation and persistence
+	 * happen before in-memory state changes, so a failed commit leaves the active
+	 * branch unchanged.
 	 */
 	commitContinuation(commit: ContinuationCommit): string {
 		if (this.sessionId !== commit.expectedSessionId) {
 			throw new Error("Session changed before retry continuation could be committed");
 		}
-		if (this.leafId !== commit.expectedLeafId) {
-			throw new Error("Session branch changed before retry continuation could be committed");
-		}
-		if (this.generation !== commit.expectedGeneration) {
-			throw new Error("Session changed before retry continuation could be committed");
-		}
+		const carriedState = this._stateAppendedSince(commit.expectedLeafId, commit.expectedGeneration);
 		if (commit.branchFromId !== null && !this.byId.has(commit.branchFromId)) {
 			throw new Error(`Entry ${commit.branchFromId} not found`);
 		}
@@ -1265,9 +1285,15 @@ export class SessionManager {
 			throw new Error("Retry continuation commit requires at least one message");
 		}
 
-		const entries: SessionMessageEntry[] = [];
+		const entries: Array<SessionMessageEntry | CustomEntry> = [];
 		let parentId = commit.branchFromId;
 		const reservedIds = new Map(this.byId);
+		for (const state of carriedState) {
+			const entry: CustomEntry = { ...state, id: generateId(reservedIds), parentId };
+			entries.push(entry);
+			reservedIds.set(entry.id, entry);
+			parentId = entry.id;
+		}
 		for (const message of commit.messages) {
 			const entry: SessionMessageEntry = {
 				type: "message",
