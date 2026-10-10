@@ -13,3 +13,9 @@ includes only high plus off for OpenCode Go Kimi K2.6
 built-in chat providers have defaults in their generated catalogs
 # together/deepseek-ai/DeepSeek-V4-Pro (dropped from models.dev):
 models Together reasoning controls from the Together API surface
+# anthropic catalog drift (Claude fable-5-1/opus-4-6/4-7/5-5/sonnet-4-6/5-5
+# added, haiku-5-5 dropped; tests pin the old list):
+marks built-in Anthropic Messages models that use adaptive thinking
+lists OpenAI Decisions models only for API key credentials
+routes OpenAI GPT-6 Luna through the Decisions API with images
+includes Claude Sonnet 5.5 with managed effort levels and official pricing
