@@ -23,9 +23,9 @@ const message: CustomMessage = {
 function text(component: Container, width = 80): string {
 	return component.render(width).map(stripVTControlCharacters).join("\n");
 }
-function click(component: Container): void {
+function click(component: Container, label = "Extension"): void {
 	const lines = component.render(80);
-	const y = lines.findIndex((line) => stripVTControlCharacters(line).includes("Extension"));
+	const y = lines.findIndex((line) => stripVTControlCharacters(line).includes(label));
 	const event: TuiMouseEvent = {
 		type: "click",
 		button: "left",
@@ -107,6 +107,10 @@ describe("message origin rendering", () => {
 		click(component);
 		expect(text(component)).toContain("hidden body");
 		click(component);
+		expect(text(component)).not.toContain("hidden body");
+		// Like tool results, clicking the expanded body collapses it again.
+		click(component);
+		click(component, "hidden body");
 		expect(text(component)).not.toContain("hidden body");
 	});
 
