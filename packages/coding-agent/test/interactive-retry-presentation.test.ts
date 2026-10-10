@@ -477,6 +477,7 @@ describe("Interactive model switch indicator", () => {
 		) as InteractiveMode["setPendingModelSwitch"];
 
 		const current = harness.session.model;
+		if (!current) throw new Error("session model missing");
 		setPendingModelSwitch.call(view as unknown as InteractiveMode, current, current);
 		await view.flush();
 		expect(view.renderChat()).not.toContain("Model:");
