@@ -440,6 +440,11 @@ export const SettingsSchema = Type.Object(
 		httpProxy: Type.Optional(
 			Type.String({ description: "Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients." }),
 		),
+		envOverrides: Type.Optional(
+			Type.Array(Type.String(), {
+				description: "Global-only KEY=VALUE entries applied to child process environment at startup; [] disables.",
+			}),
+		),
 		httpIdleTimeoutMs: Type.Optional(
 			timeoutSetting({
 				description: 'HTTP header or body idle timeout in milliseconds; 0 or "disabled" disables it.',
