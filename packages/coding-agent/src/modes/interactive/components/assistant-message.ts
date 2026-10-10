@@ -30,10 +30,12 @@ function omissionHintText(hidden: number): string {
 
 const BARE_HINT = "\u2026 ";
 const MINIMAL_HINT = "\u2026";
+const NEWLINE_MARK = "\u21b2 ";
 
 /**
  * One styled reasoning row: a rolling tail window over the fully rendered
- * Markdown buffer. New text pushes old content off the left edge; the muted
+ * Markdown buffer, with line breaks shown as a muted `↲ ` so newlines never
+ * reset the row. New text pushes old content off the left edge; the muted
  * `… (N chars)` hint reports hidden rendered-body grapheme clusters. Live and
  * completed runs use the identical algorithm, so thinking_end changes nothing.
  */
@@ -83,18 +85,29 @@ class ThinkingPreviewText implements Component {
 			{ color: (text) => theme.fg("thinkingText", text), italic: true },
 			{ transform: this.transform, overflow: "preserve" },
 		).render(availableWidth);
-		// A single-row preview cannot display terminal image rows.
-		let hiddenBefore = 0;
-		const textLines = rendered.filter((line) => !line.includes("\x1b_G") && !line.includes("\x1b]1337;"));
-		const tailIndex = textLines.findLastIndex((line) => stripTerminalSequences(line).trim().length > 0);
-		const tail = textLines[tailIndex] ?? "";
-		for (let i = 0; i < tailIndex; i++) {
-			hiddenBefore += countVisibleGraphemes(textLines[i]);
+		// A single-row preview cannot display terminal image rows; blank rows add no content.
+		const textLines = rendered.filter(
+			(line) =>
+				!line.includes("\x1b_G") && !line.includes("\x1b]1337;") && stripTerminalSequences(line).trim().length > 0,
+		);
+		// The mark hugs the previous text: drop trailing spaces, keeping trailing SGR codes.
+		const bodyLines = textLines.map((line, i) =>
+			i < textLines.length - 1 ? line.replace(/ +((?:\x1b\[[0-9;]*m)*)$/, "$1") : line,
+		);
+		const tail = bodyLines.join(`\x1b[0m${theme.fg("muted", NEWLINE_MARK)}`);
+		// The omission count reports body graphemes only, so hidden `↲ ` marks are excluded.
+		const markEnds: number[] = [];
+		let position = 0;
+		for (const line of bodyLines.slice(0, -1)) {
+			position += countVisibleGraphemes(line);
+			markEnds.push(position);
+			position += NEWLINE_MARK.length;
 		}
+		const hiddenBody = (hidden: number) =>
+			hidden - markEnds.reduce((sum, start) => sum + Math.min(NEWLINE_MARK.length, Math.max(0, hidden - start)), 0);
 
 		let content: string;
-		const tailWidth = visibleWidth(tail);
-		if (hiddenBefore === 0 && tailWidth <= availableWidth) {
+		if (visibleWidth(tail) <= availableWidth) {
 			// Nothing omitted: show the styled body without a false ellipsis.
 			content = tail;
 		} else {
@@ -105,7 +118,7 @@ class ThinkingPreviewText implements Component {
 			let hint = MINIMAL_HINT;
 			let clipped = clipLineStart(tail, Math.max(0, availableWidth - visibleWidth(hint)));
 			for (;;) {
-				const total = hiddenBefore + clipped.hidden;
+				const total = hiddenBody(clipped.hidden);
 				const candidate = omissionHintText(total);
 				const bodyWidth = availableWidth - visibleWidth(candidate);
 				if (bodyWidth <= 0) {
@@ -115,7 +128,7 @@ class ThinkingPreviewText implements Component {
 					break;
 				}
 				const next = clipLineStart(tail, bodyWidth);
-				if (hiddenBefore + next.hidden === total) {
+				if (hiddenBody(next.hidden) === total) {
 					// Self-consistent: the printed count equals the true hidden count.
 					// But if the counted form hides a final wide grapheme that fits with
 					// the bare hint, the newest content wins over the count.
