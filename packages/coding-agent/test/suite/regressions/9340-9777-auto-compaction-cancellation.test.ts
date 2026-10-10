@@ -1,4 +1,5 @@
-import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -46,7 +47,7 @@ describe("automatic compaction cancellation regressions", () => {
 	// Regression test for #9340.
 	it("does not start post-run auto-compaction after abort", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 200, maxTokens: 50 }],
+			models: [{ id: "faux-1", contextWindow: 4000, maxTokens: 50 }],
 			settings: {
 				compaction: { enabled: true, reserveTokens: 50, keepRecentTokens: 1 },
 				retry: { enabled: false },
@@ -60,7 +61,8 @@ describe("automatic compaction cancellation regressions", () => {
 		harnesses.push(harness);
 		seedCompactableSession(harness);
 		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "Synthetic network failure" }),
+			// Overflow recovery is the only compaction that still runs after a run ends.
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
 		]);
 		harness.session.subscribe((event) => {
 			if (event.type === "message_end" && event.message.role === "assistant") {
@@ -69,9 +71,59 @@ describe("automatic compaction cancellation regressions", () => {
 			}
 		});
 
-		await harness.session.prompt("z".repeat(1000));
+		await harness.session.prompt("z");
 
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+	});
+
+	it("does not restart compaction for an aborted next request", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 400, keepRecentTokens: 1750 } },
+			tools: [
+				{
+					name: "large_result",
+					label: "Large result",
+					description: "Returns a large result",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "x".repeat(16000) }], details: {} }),
+				},
+			],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "summary that must not be saved after abort",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("a".repeat(800)),
+			fauxAssistantMessage("b".repeat(800)),
+			fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("unused next response"),
+		]);
+		await harness.session.prompt("old");
+		await harness.session.prompt("recent");
+
+		let abort: Promise<void> | undefined;
+		harness.session.subscribe((event) => {
+			if (event.type === "compaction_start" && !abort) abort = harness.session.abort();
+		});
+		await harness.session.prompt("run tool");
+		await abort;
+
+		expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
+		expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+		expect(harness.eventsOfType("compaction_end")[0]?.aborted).toBe(true);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toEqual([]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.session.isIdle).toBe(true);
 	});
 
 	// Regression test for #9777.
