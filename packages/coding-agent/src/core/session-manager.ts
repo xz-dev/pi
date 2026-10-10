@@ -4,6 +4,7 @@ import {
 	getCurrentSystemMessage,
 	type ImageContent,
 	type Message,
+	type MessageOrigin,
 	type SystemMessage,
 	type TextContent,
 	type ToolResultMessage,
@@ -166,6 +167,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	content: string | (TextContent | ImageContent)[];
 	details?: T;
 	display: boolean;
+	/** Provenance of this entry when the host recorded it. Absent on legacy/unrecorded entries. */
+	origin?: MessageOrigin;
 }
 
 /** Content that an append-only context edit may replace without changing message metadata. */
@@ -203,6 +206,8 @@ export interface SessionRunEntry extends SessionEntryBase {
 	runId: string;
 	sessionId: string;
 	state: "started" | "finished" | "aborted";
+	/** Run boundary flag; absent in older files, derive from `state` when reading. */
+	working?: "start" | "end";
 }
 
 /** Raw file entry (includes header and run lifecycle metadata). */
@@ -502,7 +507,14 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	}
 	if (entry.type === "custom_message") {
 		return [
-			createCustomMessage(entry.customType, entry.content ?? [], entry.display, entry.details, entry.timestamp),
+			createCustomMessage(
+				entry.customType,
+				entry.content ?? [],
+				entry.display,
+				entry.details,
+				entry.timestamp,
+				entry.origin,
+			),
 		];
 	}
 	if (entry.type === "branch_summary" && entry.summary) {
@@ -1257,25 +1269,43 @@ export class SessionManager {
 			sessionId: this.sessionId,
 			runId: runId ?? id,
 			state,
+			working: state === "started" ? "start" : "end",
 		};
 		this.fileEntries.push(entry);
 		this._persist(entry);
 		return entry.runId;
 	}
 
-	/** Only the latest run can be interrupted; old branches and copied sessions cannot revive it. */
-	getInterruptedRun(): SessionRunEntry | undefined {
-		const entry = this.fileEntries.findLast((candidate) => candidate.type === "run_state");
-		if (
-			entry?.state !== "started" ||
-			entry.sessionId !== this.sessionId ||
-			typeof entry.runId !== "string" ||
-			!entry.runId ||
-			(entry.parentId !== null && !this.getBranch().some((ancestor) => ancestor.id === entry.parentId))
-		) {
-			return undefined;
+	/**
+	 * Whether an unfinished working run still owns the current tail. Scans the
+	 * working boundary flags from the end of the file: the first flag for this
+	 * session decides — "start" means work was interrupted and recovery may run,
+	 * "end" (finished or aborted) means the run is closed and nothing revives it.
+	 * Runs are matched by runId: an end only closes its own run, so a sibling
+	 * branch's finished end never reopens — or closes — this branch's run, and
+	 * the scan continues past records of other runs. On-branch starts win over
+	 * any earlier end. User messages do not lift an end; files without flags
+	 * are read as if there were no record.
+	 */
+	hasUnfinishedWork(): boolean {
+		const branchIds = new Set(this.getBranch().map((entry) => entry.id));
+		// A run belongs to the active branch when any of its records anchors on it;
+		// tree navigation may append label entries after a leaf, so a run's end
+		// record can point at a node outside the branch even though its start is on it.
+		const onBranchRuns = new Set<string>();
+		for (const entry of this.fileEntries) {
+			if (entry.type !== "run_state" || entry.sessionId !== this.sessionId) continue;
+			if (entry.parentId === null || branchIds.has(entry.parentId)) onBranchRuns.add(entry.runId);
 		}
-		return entry;
+		for (let i = this.fileEntries.length - 1; i >= 0; i--) {
+			const entry = this.fileEntries[i]!;
+			if (entry.type !== "run_state" || entry.sessionId !== this.sessionId) continue;
+			if (!onBranchRuns.has(entry.runId)) continue;
+			const working = entry.working ?? (entry.state === "started" ? "start" : "end");
+			if (working === "end") return false;
+			return true;
+		}
+		return false;
 	}
 
 	/** Explicit cancellation applies to the selected work, not to unrelated sibling runs. */
@@ -1564,6 +1594,7 @@ export class SessionManager {
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
+		origin?: MessageOrigin,
 	): string {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -1571,6 +1602,7 @@ export class SessionManager {
 			content,
 			display,
 			details,
+			...(origin !== undefined ? { origin } : {}),
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
