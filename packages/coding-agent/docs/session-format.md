@@ -46,6 +46,8 @@ A `message` entry stores an [`AgentMessage`](message-types.md). Message content 
 
 Session entry timestamps are ISO 8601 strings. The nested message timestamp is a Unix timestamp in milliseconds.
 
+User messages can contain optional [`origin`](message-types.md#messageorigin) metadata. Custom-message entries store it at the entry's top level. It survives JSONL export, resume, branching and context-edit projection without changing the raw content. Existing entries without it remain unrecorded; no migration infers their author.
+
 ## Entry Base
 
 All entries (except `SessionHeader`) extend `SessionEntryBase`:
@@ -183,7 +185,8 @@ Extension-injected messages that DO participate in LLM context.
 
 Fields:
 - `content`: String or `(TextContent | ImageContent)[]` (same as UserMessage)
-- `display`: `true` = show in TUI with distinct styling, `false` = hidden
+- `display`: `true` = visible body; `false` = source heading with an initially folded body for nonempty context. Empty control markers remain invisible.
+- `origin`: Optional [input provenance](message-types.md#messageorigin), automatically recorded for extension API messages and hook-created custom messages
 - `details`: Optional extension-specific metadata (not sent to LLM)
 
 ### LabelEntry
@@ -205,6 +208,20 @@ Session metadata (e.g., user-defined display name). Set via `/name`, `--name` / 
 ```
 
 The session name is displayed in the session selector (`/resume`) instead of the first message when set.
+
+### SessionRunEntry
+
+Run lifecycle metadata with `type: "run_state"`. A `started` record is followed by `finished` when the whole run settles, or `aborted` for explicit cancellation. Tools, automatic retry waits, and internal continuations remain part of the same run. Shutdown cleanup does not close an interrupted run.
+
+Each record also carries a `working` boundary flag — `"start"` on `started`, `"end"` on `finished`/`aborted` — written since the flag was introduced. Older records without the field derive the flag from `state` on read.
+
+```json
+{"type":"run_state","id":"record-uuid","parentId":"a1b2c3d4","timestamp":"2024-12-03T14:35:00.000Z","sessionId":"session-uuid","runId":"run-uuid","state":"started","working":"start"}
+```
+
+Each record has a unique `id`; terminal records retain the same `runId`. Unlike conversation entries, these records do not move the leaf or change the conversation generation. They are excluded from `SessionEntry`, tree indexing, `getEntries()`, model context, and conversation rendering. `parentId` identifies the retained conversation anchor rather than a new tree edge. Forks do not inherit the source process's run records.
+
+Interactive cold startup decides automatic recovery by scanning these flags from the end of the file: the first flag of a run that belongs to the active branch decides. `"start"` means the run was interrupted and `/retry` runs once automatically; `"end"` (finished or aborted) closes the run and startup returns without auto-retry. An `end` only closes its own `runId`, so a sibling branch's finished run never closes — or reopens — this branch's run. User messages do not lift an `end`. Sessions without any flag (including all legacy sessions) never auto-recover; a retryable error tail stays manual-only via `/retry`. A missing terminal record does not establish ownership of a session file; concurrent writers to the same file are not supported.
 
 ## Tree Structure
 
