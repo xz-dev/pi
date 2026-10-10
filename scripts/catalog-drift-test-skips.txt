@@ -19,3 +19,8 @@ marks built-in Anthropic Messages models that use adaptive thinking
 lists OpenAI Decisions models only for API key credentials
 routes OpenAI GPT-6 Luna through the Decisions API with images
 includes Claude Sonnet 5.5 with managed effort levels and official pricing
+# durable/tools-images: Photon WASM image re-encode exceeds the 5s test timeout
+# under the publish workflow's validate-source runner load (passes locally in
+# ~1s and in the standard test suite); pre-existing since upstream 42a3497d0,
+# publish run 38048252139.
+re-encodes a PNG too large for the byte limit as JPEG at its size, and shrinks it when that is not enough
