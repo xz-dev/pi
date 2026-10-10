@@ -7,6 +7,7 @@ import {
 	Input,
 	Key,
 	matchesKey,
+	renderSelectionWindow,
 	Spacer,
 	Text,
 } from "@earendil-works/pi-tui";
@@ -14,6 +15,7 @@ import { getModelSearchText } from "../model-search.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 
 // EnabledIds: null = all enabled (no filter), string[] = explicit ordered list
 type EnabledIds = string[] | null;
@@ -94,7 +96,7 @@ export interface ModelsCallbacks {
  * Component for enabling/disabling models for Ctrl+P cycling.
  * Changes are session-only until explicitly persisted with Ctrl+S.
  */
-export class ScopedModelsSelectorComponent extends Container implements Focusable {
+export class ScopedModelsSelectorComponent extends SelectorPanel implements Focusable {
 	private modelsById: Map<string, Model<any>> = new Map();
 	private allIds: string[] = [];
 	private enabledIds: EnabledIds = null;
@@ -232,6 +234,33 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		this.callbacks.onChange(this.enabledIds === null ? null : [...this.enabledIds]);
 	}
 
+	private getStartIndex(): number {
+		return Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+		);
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		const count = this.filteredItems.length === 0 ? 1 : Math.min(this.maxVisible, this.filteredItems.length);
+		const rows = this.listContainer.children.slice(0, count).map((child) => child.render(width));
+		const help = new Text(
+			theme.fg(
+				"dim",
+				`${keyDisplayText("tui.select.confirm")} toggle · ${keyDisplayText("app.models.save")} save · ${keyDisplayText("tui.select.cancel")} cancel${this.isDirty ? " (unsaved)" : " (session-only)"}`,
+			),
+			0,
+			0,
+		);
+		return compactSelector(
+			width,
+			height,
+			[this.searchInput],
+			(rowsAvailable) => renderSelectionWindow(rows, this.selectedIndex - this.getStartIndex(), rowsAvailable).lines,
+			[help, ...(this.refreshStatusText ? [this.refreshStatusText] : [])],
+		);
+	}
+
 	private updateList(): void {
 		this.listContainer.clear();
 
@@ -240,10 +269,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			return;
 		}
 
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
-		);
+		const startIndex = this.getStartIndex();
 		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredItems[i]!;
