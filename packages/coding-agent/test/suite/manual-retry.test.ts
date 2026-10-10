@@ -577,6 +577,30 @@ describe("manual /retry continuation", () => {
 		expect(getAssistantTexts(created)).toEqual(["failed"]);
 	});
 
+	it("rejects a branch move onto pre-existing extension state during retry", async () => {
+		const created = await harness();
+		const [userId, failedId] = setBranch(created, [
+			userMessage("retry once"),
+			fauxAssistantMessage("failed", { stopReason: "error", errorMessage: "failed" }),
+		]);
+		created.sessionManager.appendCustomEntry("accounting-boundary", { seq: 1 });
+		const oldState = created.sessionManager.appendCustomEntry("accounting-boundary", { seq: 2 });
+		created.sessionManager.branch(failedId!);
+		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
+		// Two branch moves advance the generation by the same amount as two fresh appends would.
+		created.setResponses([
+			async () => {
+				created.sessionManager.branch(userId!);
+				created.sessionManager.branch(oldState);
+				return fauxAssistantMessage("stale");
+			},
+		]);
+
+		await expect(created.session.retry()).rejects.toThrow(/Session branch changed/);
+		expect(created.sessionManager.getLeafId()).toBe(oldState);
+		expect(getAssistantTexts(created)).toEqual(["failed"]);
+	});
+
 	it("prevents first-assistant tool execution when publication fails", async () => {
 		let executions = 0;
 		const tool: AgentTool = {
