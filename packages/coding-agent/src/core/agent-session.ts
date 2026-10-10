@@ -476,6 +476,7 @@ export class AgentSession {
 				expectedSessionId: string;
 				expectedLeafId: string | null;
 				expectedGeneration: number;
+				expectedEntryCount: number;
 				branchFromId: string | null;
 				recoveryMessages: Message[];
 				committed: boolean;
@@ -1384,6 +1385,7 @@ export class AgentSession {
 						expectedSessionId: this._manualRetryCommit.expectedSessionId,
 						expectedLeafId: this._manualRetryCommit.expectedLeafId,
 						expectedGeneration: this._manualRetryCommit.expectedGeneration,
+						expectedEntryCount: this._manualRetryCommit.expectedEntryCount,
 						branchFromId: this._manualRetryCommit.branchFromId,
 						messages: [...this._manualRetryCommit.recoveryMessages, event.message],
 					});
@@ -2328,6 +2330,7 @@ export class AgentSession {
 		const expectedSessionId = this.sessionManager.getSessionId();
 		const expectedLeafId = this.sessionManager.getLeafId();
 		const expectedGeneration = this.sessionManager.getGeneration();
+		const expectedEntryCount = this.sessionManager.getEntryCount();
 		const branchEntries = continuationAnchorId
 			? this.sessionManager.getBranch(this._continuationBranchLeafId ?? continuationAnchorId)
 			: this.sessionManager.getBranch();
@@ -2352,6 +2355,7 @@ export class AgentSession {
 			expectedSessionId,
 			expectedLeafId,
 			expectedGeneration,
+			expectedEntryCount,
 			branchFromId: plan.anchorEntryId,
 			recoveryMessages: plan.recoveryMessages,
 			committed: false,
