@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { formatSlowExtensionHook } from "../core/extensions/runner.ts";
 import type { ProjectTrustContext } from "../core/extensions/types.ts";
 import type { AppMode } from "../core/project-trust.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
@@ -14,6 +15,13 @@ export function createProjectTrustContext(options: {
 		cwd: options.cwd,
 		mode: options.mode === "interactive" ? "tui" : options.mode,
 		hasUI: options.hasUI,
+		onSlowHook:
+			options.mode === "interactive" && options.hasUI
+				? (entry) => {
+						const color = entry.executionKind === "sync" ? chalk.yellow : chalk.dim;
+						console.error(color(formatSlowExtensionHook(entry)));
+					}
+				: undefined,
 		ui: {
 			select: async (title, selectOptions) => {
 				if (!options.hasUI) {
