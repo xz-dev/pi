@@ -201,6 +201,9 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(replacementSessionFile).not.toBe(oldSessionFile);
 		expect(staleCtxThrows).toBe(true);
 		expect(stalePiThrows).toBe(true);
+		expect(runtime.session.messages.find((message) => message.role === "user")).toMatchObject({
+			origin: { type: "extension", extensionName: expect.any(String), extensionId: expect.any(String) },
+		});
 		expect(
 			runtime.session.messages
 				.filter((message) => message.role !== "system")
@@ -232,6 +235,9 @@ describe("regression #2860: replaced session callbacks", () => {
 
 		await runtime.session.prompt("seed");
 		await runtime.session.prompt("/fork-it");
+		expect(runtime.session.messages.findLast((message) => message.role === "user")).toMatchObject({
+			origin: { type: "extension" },
+		});
 
 		expect(
 			runtime.session.messages
@@ -269,6 +275,9 @@ describe("regression #2860: replaced session callbacks", () => {
 		await runtime.session.prompt("/switch-it");
 
 		expect(runtime.session.sessionFile).toBe(targetSessionPath);
+		expect(runtime.session.messages.findLast((message) => message.role === "user")).toMatchObject({
+			origin: { type: "extension" },
+		});
 		expect(
 			runtime.session.messages
 				.filter((message) => message.role !== "system")
