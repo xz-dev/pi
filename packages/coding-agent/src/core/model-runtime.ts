@@ -194,6 +194,8 @@ export class ModelRuntime implements Models {
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
+	/** Rejection-neutral tail of registration-triggered refresh convergence. */
+	private registrationConvergence: Promise<void> | undefined;
 
 	private constructor(
 		credentials: RuntimeCredentials,
@@ -881,6 +883,35 @@ export class ModelRuntime implements Models {
 		return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
 	}
 
+	/**
+	 * Startup barrier: wait for registration-triggered refresh convergence, then run a normal refresh.
+	 * Caller-local cancellation only abandons the wait/refresh request; registration work continues.
+	 */
+	async refreshAfterRegistrationConvergence(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
+		const pending = this.registrationConvergence;
+		if (pending) await raceWithAbortSignal(pending, options.signal);
+		return this.refresh(options);
+	}
+
+	/**
+	 * Start a full offline refresh after a registration mutation and track it for the startup barrier.
+	 * The refresh starts immediately (upstream timing): a caller's own later refresh() must bump the
+	 * availability sequence last, or its availability result is discarded as stale.
+	 * The tail stays rejection-neutral.
+	 */
+	private queueRegistrationConvergence(): void {
+		const previous = this.registrationConvergence;
+		const operation = this.refresh({ allowNetwork: false });
+		const tail = Promise.all([previous, operation]).then(
+			() => undefined,
+			() => undefined,
+		);
+		this.registrationConvergence = tail;
+		void tail.then(() => {
+			if (this.registrationConvergence === tail) this.registrationConvergence = undefined;
+		});
+	}
+
 	registerNativeProvider(provider: Provider): void {
 		if (!provider.id.trim()) throw new Error("Provider id must not be empty.");
 		this.extensionProviders.delete(provider.id);
@@ -892,7 +923,7 @@ export class ModelRuntime implements Models {
 			configuredRequestAuthStatus(this.config.getProvider(provider.id), undefined),
 			provider.auth.oauth && !provider.auth.apiKey ? "oauth" : "api_key",
 		);
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationConvergence();
 	}
 
 	/**
@@ -938,7 +969,7 @@ export class ModelRuntime implements Models {
 			configuredRequestAuthStatus(this.config.getProvider(providerId), effective),
 			effective.oauth && !effective.apiKey ? "oauth" : "api_key",
 		);
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationConvergence();
 	}
 
 	unregisterProvider(providerId: string): void {
@@ -946,7 +977,7 @@ export class ModelRuntime implements Models {
 		this.nativeExtensionProviders.delete(providerId);
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationConvergence();
 	}
 
 	/**
@@ -972,7 +1003,7 @@ export class ModelRuntime implements Models {
 			this.snapshot = { ...this.snapshot, auth, configuredProviders };
 		}
 		this.updateModelSnapshot();
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationConvergence();
 	}
 
 	unregisterVirtualModel(providerId: string, id: string): void {
@@ -981,7 +1012,7 @@ export class ModelRuntime implements Models {
 		if (models.size === 0) this.virtualModels.delete(providerId);
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationConvergence();
 	}
 
 	/**
