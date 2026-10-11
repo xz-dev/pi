@@ -31,6 +31,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
+import { CODEX_AUTO_WEBSOCKET_RETRIES } from "../utils/retry.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
 	getDeclaredTools,
@@ -112,7 +113,7 @@ function assertSuccessfulOutput(output: AssistantMessage): asserts output is Suc
 		throw new Error("Codex stream ended without a stop reason");
 	}
 	if (output.stopReason === "error" || output.stopReason === "aborted") {
-		throw new Error(output.errorMessage || "An unknown error occurred");
+		throw new CodexApiError(output.errorMessage || "An unknown error occurred");
 	}
 }
 
@@ -261,6 +262,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			timestamp: Date.now(),
 		};
 
+		let recoveryState: WebSocketRecoveryState | undefined;
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -292,13 +294,21 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
+			const sessionId = options?.sessionId;
+			const fallbackState = sessionId ? websocketSseFallbackSessions.get(sessionId) : undefined;
+			const recoveryProbe = (fallbackState?.retryAt ?? 0) > 0;
 			let startEmitted = false;
-			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(cacheSessionId);
+			const websocketDisabledForSession =
+				transport === "auto" && fallbackState && (fallbackState.recovering || Date.now() < fallbackState.retryAt);
 			if (websocketDisabledForSession) {
-				recordWebSocketSseFallback(cacheSessionId);
+				recordWebSocketSseFallback(sessionId);
 			}
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
+				if (transport === "auto" && fallbackState) {
+					recoveryState = fallbackState;
+					recoveryState.recovering = true;
+				}
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
 				let retriedMissingWebSocketContinuation = false;
@@ -324,6 +334,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							cacheSessionId,
 							accountId,
 							grammarToolInputProperties,
+							recoveryState !== undefined,
 							options,
 						);
 
@@ -331,6 +342,13 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							throw new Error("Request was aborted");
 						}
 						assertSuccessfulOutput(output);
+						if (
+							transport === "auto" &&
+							sessionId &&
+							websocketSseFallbackSessions.get(sessionId) === recoveryState
+						) {
+							websocketSseFallbackSessions.delete(sessionId);
+						}
 						stream.push({
 							type: "done",
 							reason: output.stopReason,
@@ -342,7 +360,13 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						const aborted = options?.signal?.aborted;
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
-						if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
+						// A replacement socket would append to this same message; only repair before output.
+						if (
+							!aborted &&
+							previousResponseNotFound &&
+							output.content.length === 0 &&
+							!retriedMissingWebSocketContinuation
+						) {
 							retriedMissingWebSocketContinuation = true;
 							continue;
 						}
@@ -353,21 +377,26 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						if (aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
 							throw error;
 						}
+						const failureState = recordWebSocketFailure(sessionId, error, transport === "auto");
+						const fallbackToSse = transport === "auto" && (!failureState || failureState.retryAt > 0);
 						appendAssistantMessageDiagnostic(
 							output,
 							createAssistantMessageDiagnostic("provider_transport_failure", error, {
 								configuredTransport: transport,
-								...(websocketStarted ? {} : { fallbackTransport: "sse" }),
-								eventsEmitted: websocketStarted,
-								phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
+								...(fallbackToSse ? { fallbackTransport: "sse" } : {}),
+								...(failureState ? { retryAttempt: fallbackToSse ? 0 : failureState.failures } : {}),
+								...(failureState && fallbackToSse && !recoveryProbe ? { resetRetryBudget: true } : {}),
+								eventsEmitted: startEmitted,
+								phase: startEmitted ? "after_message_stream_start" : "before_message_stream_start",
 								requestBytes: new TextEncoder().encode(bodyJson).byteLength,
 							}),
 						);
-						recordWebSocketFailure(cacheSessionId, error);
-						if (websocketStarted) {
+						// The outer retry owner applies the configured backoff and discards failed
+						// assistant attempts. Never replay a started response in this stream.
+						if (!fallbackToSse || startEmitted) {
 							throw error;
 						}
-						recordWebSocketSseFallback(cacheSessionId);
+						recordWebSocketSseFallback(sessionId);
 						break;
 					}
 				}
@@ -491,6 +520,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			output.errorMessage = formatProviderError(normalizeProviderError(error));
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
+		} finally {
+			if (recoveryState) recoveryState.recovering = false;
 		}
 	})();
 
@@ -865,6 +896,7 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
 const SESSION_WEBSOCKET_MAX_AGE_MS = 55 * 60 * 1000;
+const AUTO_SSE_COOLDOWN_MS = 5 * 60 * 1000;
 
 type WebSocketEventType = "open" | "message" | "error" | "close";
 type WebSocketListener = (event: unknown) => void;
@@ -909,7 +941,14 @@ export interface OpenAICodexWebSocketDebugStats {
 
 const websocketSessionCache = new Map<string, Map<string, CachedWebSocketConnection>>();
 const websocketDebugStats = new Map<string, OpenAICodexWebSocketDebugStats>();
-const websocketSseFallbackSessions = new Set<string>();
+interface WebSocketRecoveryState {
+	failures: number;
+	retryAt: number;
+	recovering: boolean;
+}
+
+// Pi's outer retry owner retries three times before this session enters SSE cooldown.
+const websocketSseFallbackSessions = new Map<string, WebSocketRecoveryState>();
 
 function getOrCreateWebSocketDebugStats(sessionId: string): OpenAICodexWebSocketDebugStats {
 	let stats = websocketDebugStats.get(sessionId);
@@ -933,7 +972,7 @@ function getOrCreateWebSocketDebugStats(sessionId: string): OpenAICodexWebSocket
 
 export function getOpenAICodexWebSocketDebugStats(sessionId: string): OpenAICodexWebSocketDebugStats | undefined {
 	const stats = websocketDebugStats.get(sessionId);
-	return stats ? { ...stats } : undefined;
+	return stats ? { ...stats, websocketFallbackActive: isWebSocketSseFallbackActive(sessionId) } : undefined;
 }
 
 export function resetOpenAICodexWebSocketDebugStats(sessionId?: string): void {
@@ -954,18 +993,20 @@ export function closeOpenAICodexWebSocketSessions(sessionId?: string): void {
 	if (sessionId) {
 		for (const entry of websocketSessionCache.get(sessionId)?.values() ?? []) closeEntry(entry);
 		websocketSessionCache.delete(sessionId);
+		websocketSseFallbackSessions.delete(sessionId);
 		return;
 	}
 	for (const accountEntries of websocketSessionCache.values()) {
 		for (const entry of accountEntries.values()) closeEntry(entry);
 	}
 	websocketSessionCache.clear();
+	websocketSseFallbackSessions.clear();
 }
 
 registerSessionResourceCleanup(closeOpenAICodexWebSocketSessions);
 
 function isWebSocketSseFallbackActive(sessionId: string | undefined): boolean {
-	return sessionId ? websocketSseFallbackSessions.has(sessionId) : false;
+	return sessionId ? (websocketSseFallbackSessions.get(sessionId)?.retryAt ?? 0) > 0 : false;
 }
 
 function recordWebSocketSseFallback(sessionId: string | undefined): void {
@@ -975,14 +1016,31 @@ function recordWebSocketSseFallback(sessionId: string | undefined): void {
 	stats.websocketFallbackActive = isWebSocketSseFallbackActive(sessionId);
 }
 
-function recordWebSocketFailure(sessionId: string | undefined, error: unknown): void {
-	if (!sessionId) return;
-	websocketSseFallbackSessions.add(sessionId);
+function recordWebSocketFailure(
+	sessionId: string | undefined,
+	error: unknown,
+	autoFallback: boolean,
+): WebSocketRecoveryState | undefined {
+	if (!sessionId) return undefined;
+	let state: WebSocketRecoveryState | undefined;
+	if (autoFallback) {
+		state = websocketSseFallbackSessions.get(sessionId);
+		if (!state) {
+			state = { failures: 0, retryAt: 0, recovering: false };
+			websocketSseFallbackSessions.set(sessionId, state);
+		}
+		state.failures++;
+		if (state.retryAt > 0 || state.failures > CODEX_AUTO_WEBSOCKET_RETRIES) {
+			// Preserve ownership when an older request fails during a recovery probe.
+			state.retryAt = Date.now() + AUTO_SSE_COOLDOWN_MS;
+		}
+	}
 
 	const stats = getOrCreateWebSocketDebugStats(sessionId);
 	stats.websocketFailures++;
 	stats.lastWebSocketError = formatThrownValue(error);
-	stats.websocketFallbackActive = true;
+	stats.websocketFallbackActive = isWebSocketSseFallbackActive(sessionId);
+	return state;
 }
 
 type WebSocketConstructor = new (
@@ -1155,9 +1213,10 @@ async function acquireWebSocket(
 	headers: Headers,
 	sessionId: string | undefined,
 	accountId: string,
-	signal?: AbortSignal,
-	connectTimeoutMs?: number,
-	env?: ProviderEnv,
+	signal: AbortSignal | undefined,
+	connectTimeoutMs: number | undefined,
+	env: ProviderEnv | undefined,
+	forceFresh: boolean,
 ): Promise<{
 	socket: WebSocketLike;
 	entry?: CachedWebSocketConnection;
@@ -1180,8 +1239,8 @@ async function acquireWebSocket(
 			clearTimeout(cached.idleTimer);
 			cached.idleTimer = undefined;
 		}
-		if (!cached.busy && isWebSocketSessionExpired(cached)) {
-			closeWebSocketSilently(cached.socket, 1000, "connection_age_limit");
+		if (!cached.busy && (forceFresh || isWebSocketSessionExpired(cached))) {
+			closeWebSocketSilently(cached.socket, 1000, forceFresh ? "recovery" : "connection_age_limit");
 			accountEntries?.delete(accountId);
 			if (accountEntries?.size === 0) websocketSessionCache.delete(sessionId);
 		} else if (!cached.busy && isWebSocketReusable(cached.socket)) {
@@ -1507,6 +1566,7 @@ async function processWebSocketStream(
 	cacheSessionId: string | undefined,
 	accountId: string,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
+	forceFresh: boolean,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	const { socket, entry, reused, release } = await acquireWebSocket(
@@ -1517,12 +1577,15 @@ async function processWebSocketStream(
 		options?.signal,
 		websocketConnectTimeoutMs,
 		options?.env,
+		forceFresh,
 	);
 	let keepConnection = true;
-	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
+	const transport = options?.transport ?? "auto";
+	const useCachedContext = transport === "websocket-cached" || transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const fullBody = body;
+	const fullBody = { ...body };
+	if (forceFresh) delete fullBody.previous_response_id;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
@@ -1564,6 +1627,7 @@ async function processWebSocketStream(
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			},
 		);
+		assertSuccessfulOutput(output);
 		if (options?.signal?.aborted) {
 			keepConnection = false;
 		} else if (useCachedContext && entry && output.responseId) {

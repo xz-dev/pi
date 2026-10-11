@@ -138,6 +138,16 @@ See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and p
 | `retry.provider.maxRetries` | number | `0` | Provider-level retry attempts. |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Maximum server-requested delay in milliseconds. Set to `0` to disable the limit. |
 
+For Codex Responses, explicit `websocket` and `websocket-cached` never fall back to SSE. Their transient failures follow the global `retry` settings, including `enabled`, `maxRetries`, delay limits, and non-retryable error patterns.
+
+In `auto`, Pi makes an initial WebSocket attempt plus up to three retries for transport failures. This fixed retry count is independent of `retry.enabled` and `retry.maxRetries`; delays use `retry.baseDelayMs` and `retry.maxAgentDelayMs` (2, 4, and 8 seconds by default). After exhausting these attempts, Pi switches to SSE with a fresh full global retry budget. With `retry.enabled: false`, the three WebSocket retries still run, but a failed SSE attempt is not retried.
+
+Downgrade starts a five-minute SSE cooldown. The next real request after expiry starts one logical WebSocket probe; transport failure renews the cooldown for five minutes, while success restores WebSocket and subsequent incremental-context requests. Each logical WS attempt, including a recovery probe, retains the existing bounded protocol repairs for a missing cached response or an expired server connection. These repairs can open replacement sockets before output, so one logical probe is not a limit of one physical WS send. They do not add global retry budget. Probes never run in the background. Recovery sends full context on a fresh socket, without a stale response ID. Only one recovery request runs per session at a time; overlapping requests use SSE. Explicit WebSocket requests ignore, but do not clear, an auto cooldown.
+
+Pi conversations and summaries supply a stable session ID. SDK callers need a stable `sessionId` across attempts and an outer retry owner such as `retryAssistantCall` with the desired policy to get the same fixed allowance and cooldown behavior. Sessionless SDK calls retain their previous behavior: a before-start failure can fall back immediately; with ordinary retry disabled, an after-start failure returns an error rather than using the fixed recovery allowance. They do not retain cooldown state.
+
+Cancellation and non-transport errors, including provider content-filter outcomes, do not count as transport failures. If a provider response has already started, Pi ends that failed attempt before switching to SSE; it never replays SSE inside the same started provider stream. Internal protocol repair stops once assistant content exists, so failed output cannot mix into a replacement WS response either. Failed partial output remains in session history but is omitted from the context sent by an automatic retry. Session cleanup clears transport recovery state.
+
 Keep `retry.provider.maxRetries` at `0` unless provider-level retries are required. Provider retries can delay Pi from handling quota and usage-limit errors itself.
 
 `retry.nonRetryableErrorPatterns` is useful when a gateway returns a terminal quota/limit error that still looks retryable (for example a plain HTTP 429 whose body is not covered by the built-in patterns).
