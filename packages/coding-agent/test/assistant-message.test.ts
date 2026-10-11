@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
-import { Chalk } from "chalk";
+import xterm from "@xterm/headless";
+import chalk, { Chalk } from "chalk";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
@@ -662,6 +663,84 @@ describe("AssistantMessageComponent", () => {
 		expect(stripAnsi(row)).not.toContain("**");
 		// Crop boundary inside the bold run keeps bold on the surviving text.
 		expect(row).toMatch(/\x1b\[1m(?:\x1b\[[\d;]*m)*q/);
+	});
+
+	test("preview tail stays italic across styled spans, the line join and the crop", async () => {
+		initTheme("dark");
+		// theme.italic delegates to the shared chalk instance, which disables styling
+		// under the offline test env (level 0). Force decorations on, then restore, so
+		// the xterm buffer records real cell italics instead of raw escape matching.
+		const previousLevel = chalk.level;
+		chalk.level = 3;
+		const writeRow = async (row: string, cols: number) => {
+			const terminal = new xterm.Terminal({ cols, rows: 2, allowProposedApi: true });
+			try {
+				await new Promise<void>((resolve) => terminal.write(row, resolve));
+				const line = terminal.buffer.active.getLine(0)!;
+				const cells: { chars: string; italic: boolean }[] = [];
+				for (let col = 0; col < cols; col++) {
+					const cell = line.getCell(col)!;
+					if (!cell.getChars().trim()) continue;
+					cells.push({ chars: cell.getChars(), italic: Boolean(cell.isItalic()) });
+				}
+				return cells;
+			} finally {
+				terminal.dispose();
+			}
+		};
+		try {
+			const cases = [
+				// Unclipped: every visible preview cell is italic, padding stays unstyled.
+				{ thinking: "plain thinking", width: 40, clipped: false },
+				// Clipped across a newline join and styled spans; hint is italic too.
+				{ thinking: `${"p".repeat(30)}\nplain \`code\` **bold** end`, width: 40, clipped: true },
+			];
+			for (const { thinking, width, clipped } of cases) {
+				for (const live of [true, false]) {
+					const component = new AssistantMessageComponent(undefined, "preview", undefined, "Thinking...", 0);
+					component.updateContent(
+						createAssistantMessage([
+							{ type: "thinking", thinking },
+							{ type: "text", text: "answer" },
+						]),
+						live,
+						live ? 0 : null,
+					);
+					const lines = component.render(width);
+					const previewRow = lines.find((line) => stripAnsi(line).includes(clipped ? "end" : "thinking")) ?? "";
+					const answerRow = lines.find((line) => stripAnsi(line).includes("answer")) ?? "";
+					for (const cell of await writeRow(previewRow, width)) {
+						expect(cell.italic).toBe(true);
+					}
+					// Trailing answer keeps its own (non-italic) style.
+					for (const cell of await writeRow(answerRow, width)) {
+						expect(cell.italic).toBe(false);
+					}
+				}
+			}
+		} finally {
+			chalk.level = previousLevel;
+		}
+
+		// Disabled decorations: theme.italic is a no-op, so no escape may inject italics.
+		chalk.level = 0;
+		try {
+			const component = new AssistantMessageComponent(undefined, "preview", undefined, "Thinking...", 0);
+			component.updateContent(
+				createAssistantMessage([{ type: "thinking", thinking: `first\n${"q".repeat(60)} end` }]),
+				false,
+			);
+			const row = component.render(40).find((line) => stripAnsi(line).includes("end")) ?? "";
+			expect(row).not.toContain("\x1b[3m");
+			expect(row).not.toContain("\x1b[23m");
+			const cells = await writeRow(row, 40);
+			expect(cells.length).toBeGreaterThan(0);
+			for (const cell of cells) {
+				expect(cell.italic).toBe(false);
+			}
+		} finally {
+			chalk.level = previousLevel;
+		}
 	});
 
 	test("preview published count always equals the true hidden cluster count", () => {
