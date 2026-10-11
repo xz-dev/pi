@@ -157,7 +157,7 @@ export class ExperimentalChatView {
 			this.transcript.addChild(new Spacer(1));
 			this.transcript.addChild(new UserMessageComponent(userText(message.content)));
 		} else if (entry.kind === "pi.assistant" && message?.role === "assistant") {
-			const component = this.#streaming ?? new AssistantMessageComponent();
+			const component = this.#streaming ?? new AssistantMessageComponent(undefined, "expanded");
 			if (this.#streaming === undefined) this.transcript.addChild(component);
 			this.#streaming = undefined;
 			component.updateContent(message, false);
@@ -188,7 +188,7 @@ export class ExperimentalChatView {
 
 	#syncStreaming(message: AssistantMessage): void {
 		if (this.#streaming === undefined) {
-			this.#streaming = new AssistantMessageComponent();
+			this.#streaming = new AssistantMessageComponent(undefined, "expanded");
 			this.transcript.addChild(this.#streaming);
 		}
 		this.#streaming.updateContent(message, true);

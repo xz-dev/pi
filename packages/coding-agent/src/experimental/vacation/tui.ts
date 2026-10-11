@@ -431,7 +431,7 @@ class DurableTui {
 			this.#chat.addChild(new Spacer(1));
 			this.#chat.addChild(new UserMessageComponent(userText(message.content)));
 		} else if (entry.kind === "pi.assistant" && message?.role === "assistant") {
-			const component = this.#streaming ?? new AssistantMessageComponent();
+			const component = this.#streaming ?? new AssistantMessageComponent(undefined, "expanded");
 			if (this.#streaming === undefined) this.#chat.addChild(component);
 			this.#streaming = undefined;
 			component.updateContent(message, false);
@@ -466,7 +466,7 @@ class DurableTui {
 
 	#syncStreaming(message: AssistantMessage): void {
 		if (this.#streaming === undefined) {
-			this.#streaming = new AssistantMessageComponent();
+			this.#streaming = new AssistantMessageComponent(undefined, "expanded");
 			this.#chat.addChild(this.#streaming);
 		}
 		this.#streaming.updateContent(message, true);
