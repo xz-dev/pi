@@ -1,206 +1,247 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
-</p>
+# xz-dev/pi
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+This is a downstream distribution fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
-# Pi
+> [!NOTE]
+> 🌟 Star this fork to show your support for its direction and encourage change in upstream Pi.
+>
+> All patches in this fork are free to submit upstream directly, or to use as a reference for your own upstream PR. I waive any code ownership over these downstream patches; please credit [this repository](https://github.com/xz-dev/pi) as the source in your PR.
 
-Pi is a minimal, extensible agent harness that you can make your own.
+It tracks upstream `main` with a minimal downstream patch stack, using [downstream-fork-maintain-skill](https://github.com/xz-dev/downstream-fork-maintain-skill) as the blueprint for ongoing maintenance.
 
-Adapt Pi to your workflows, not the other way around. Customize Pi with [extensions](packages/coding-agent/docs/extensions.md), [skills](packages/coding-agent/docs/skills.md), [prompt templates](packages/coding-agent/docs/prompt-templates.md), and [themes](packages/coding-agent/docs/themes.md). Bundle them as [Pi packages](packages/coding-agent/docs/packages.md) and share via npm or git.
+> [!WARNING]
+> This fork relies heavily on vibe coding. Logic changes are manually reviewed, and tests are also written by AI under human direction before the full test gate is run.
+>
+> Almost none of the code in this fork is handwritten by xz-dev. Do not use this distribution if you are uncomfortable with AI-assisted development.
 
-Pi ships with powerful defaults but skips features like sub-agents and plan mode. Ask Pi to build what you want, or install a package that does it your way.
+Release platforms (one `pi-<target>.zip` each, see [Installation](#installation)):
 
-Use Pi [interactively](packages/coding-agent/docs/usage.md), automate it in [print or JSON mode](packages/coding-agent/docs/cli.md), control it over [RPC](packages/coding-agent/docs/rpc.md), or build apps with the [Pi TypeScript SDK](packages/coding-agent/docs/sdk.md). See [OpenClaw](https://github.com/OpenClaw/OpenClaw) for a real-world integration.
+| OS | Release assets |
+| --- | --- |
+| Linux glibc | `linux-x64-gnu-baseline`, `linux-x64-gnu-modern`, `linux-arm64-gnu` |
+| Linux musl | `linux-x64-musl-baseline`, `linux-x64-musl-modern`, `linux-arm64-musl` |
+| macOS | `darwin-x64-baseline`, `darwin-x64-modern`, `darwin-arm64` |
+| Windows | `windows-x64-baseline`, `windows-x64-modern`, `windows-arm64` |
+| FreeBSD 14.3+ | `freebsd-x64`, `freebsd-arm64` |
 
-## Getting started
+## Downstream changes
 
-Install the command-line interface:
+Highlights only; full details with use cases, limits, and patch branches: [docs/downstream-changes.md](docs/downstream-changes.md).
 
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
-```
+Features:
 
-On Windows:
+- Single executable, no Node.js needed (JIT)
+- FreeBSD support
+- Auto-retry interrupted sessions (`/retry`, also automatic on startup)
+- WebSocket reconnect for Codex, keeps cached context
+- Detach long tool calls, keep chatting (`tool_task`)
+- Thinking shown as one preview line (`Ctrl+T` to expand)
+- Smaller input dock when reading history
+- See where each message came from (you, extension, RPC, SDK)
+- Update mirrors and self-update (`pi update --self`, `--mirror`)
+- Verified downloads (Sigstore signatures)
+- Install extensions without npm or Node
+- English locale for tools, keeps your UI language
+- Quieter startup screen
+- Per-model thinking level picker, sorted and preselected
+- `Model: old → new` hint after switching models
+- Per-skill on/off switches
+- Detect slow extensions (opt-in)
+- Clean old backups (`pi update --clean`)
+- Scoop/ebuild installs blocked from self-update fights
 
-```shell
-powershell -c "irm https://pi.dev/install.ps1 | iex"
-```
+Fixes:
 
-The installer pins all dependencies and updates Pi with `pi update`. Alternatively, install directly with npm, which does not pin transitive dependencies:
+- Esc now aborts stuck hooks and streams ([#6234](https://github.com/earendil-works/pi/issues/6234))
+- Retry errors no longer spam fake tool failures
+- Model picker fits small screens and phone keyboards
+- No wasted summary after a finished answer
+- Models from extensions load before startup
+- Context % stays right after model list refresh
+- `pi --list-models --refresh`
+- Model picker keeps your selection during refresh
+- Empty messages from extensions no longer break Gemini
 
-```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-```
+## Installation
 
-Pi requires Node.js 22.19 or newer. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
+xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 14 ZIP archives: FreeBSD amd64 and arm64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64, named `pi-<target>.zip`. Each ZIP holds exactly one file, the single-file executable `pi` (`pi.exe` on Windows). The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. The extracted executable is the complete product; there is no wrapper and no companion `pi-native` binary. No Node.js, Bun, npm, package manager, or generated installer script is required.
 
-Start Pi in the directory where you want it to work:
+The executable materializes its embedded runtime assets (docs, themes, native clipboard helper) into a per-user tmpdir cache at `os.tmpdir()/pi-resources-<uid>/<target>/<version>` on first use; a nonempty cache directory is reused as-is. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
 
-```bash
-cd /path/to/project
-pi
-```
-
-For a built-in AI provider, run `/login` inside Pi to connect a subscription or API key. Then give Pi a task.
-
-See the [documentation](https://pi.dev/docs/latest) for full setup and usage instructions, or [visit pi.dev](https://pi.dev) for demos.
-
-## Run with Nix
-
-```bash
-nix run github:earendil-works/pi/stable
-```
-
-`stable` points at the latest release. Install it with `nix profile add github:earendil-works/pi/stable` and update with `nix profile upgrade pi`. Use a release tag such as `github:earendil-works/pi/v1.0.0` to pin a version, or `github:earendil-works/pi` for unreleased changes on `main`. Nix builds Pi from source.
-
-Supports ARM64 and x86-64 on Linux and macOS. Use `nix build .` or `nix run .` to build or run your checkout.
-
-Nix builds are offline, so the bundled model data comes from a pi.dev model catalog revision pinned in `nix/model-catalog.json`. At runtime, Pi still overlays newer catalog data from pi.dev as usual. The Nix workflow replaces the pin on `main` when it no longer matches the checkout, for example after a provider is added or gains a new model type. To refresh it by hand:
-
-```bash
-npm run update:model-catalog-pin
-```
-
-## Packages
-
-This monorepo contains the Pi CLI and its supporting libraries.
-
-| Package | Description |
-|---------|-------------|
-| **[@earendil-works/chord](packages/chord)** | Standalone application-composition runtime for services, replicated state, RPC, and plugins |
-| **[@earendil-works/pi-telemetry](packages/telemetry)** | Vendor-neutral telemetry contracts, reference adapter, conformance tests, and typed schemas |
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@earendil-works/pi-durable](packages/durable)** | Durable conversation, task, and document runtime |
-| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
-
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
-
-## Permissions & Containerization
-
-Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
-
-If you need stronger boundaries, containerize or sandbox Pi. See [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) for three patterns:
-
-- **Gondolin extension**: keep `pi` and provider auth on the host while routing built-in tools and `!` commands into a local Linux micro-VM.
-- **Plain Docker**: run the whole `pi` process in a local container for simple isolation.
-- **OpenShell**: run the whole `pi` process in a policy-controlled sandbox.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).  Longer term plans for Pi can also be found in [RFCs](https://rfc.earendil.com/keyword/pi/).
-
-## Development
+### Linux and macOS
 
 ```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build         # Refresh model data, then build all packages
-npm run build:offline # Rebuild using existing model data without network access
-npm run check         # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+# Download the matching pi-<target>.zip from the latest Release, then:
+unzip pi-<target>.zip
+./pi --version
+# Optionally install it on PATH:
+mv pi ~/.local/bin/pi
 ```
 
-### Using local packages outside the monorepo
+### FreeBSD
 
-Build every public package into one coherent local artifact set:
+Download `pi-freebsd-x64.zip` (amd64) or `pi-freebsd-arm64.zip` (arm64) on FreeBSD 14.3 or newer, then:
+
+```sh
+pkg install fd-find ripgrep
+unzip pi-freebsd-<arch>.zip
+./pi --version
+```
+
+`fd-find` is the Rust search tool, not FreeBSD's unrelated `fd` package. Bash is optional: command tools fall back to `/bin/sh`. No Node.js or Bun installation is needed. Desktop clipboard reads require `pkg install libxcb xclip` for X11, or `pkg install wl-clipboard` for Wayland. Without a display, copy uses terminal OSC 52; availability depends on the terminal.
+
+### Windows Scoop
+
+```powershell
+$scoopRoot = (Resolve-Path (Join-Path (scoop prefix scoop) '..\..\..')).Path
+$bucket = Join-Path $scoopRoot 'buckets\xz-dev'
+git clone --branch scoop --single-branch https://github.com/xz-dev/pi.git $bucket
+scoop install xz-dev/pi
+```
+
+Scoop installs the x64 `modern` ZIP, or the native arm64 ZIP on Windows arm64, and shims the extracted `pi.exe`. The x64 asset uses the same runtime-dispatched Bun target as the `baseline` alias. Update with `scoop update pi`.
+
+The Scoop install writes an empty `.scoop.managed.lock` next to the executable, so `pi update --self` refuses and points at `scoop update pi` instead; scoop owns the upgrade. Direct ZIP downloads carry no lock file and keep self-update enabled.
+
+### Windows PowerShell
+
+```powershell
+# Download the matching pi-<target>.zip from the latest Release, then:
+Expand-Archive pi-<target>.zip -DestinationPath pi
+.\pi\pi.exe --version
+```
+
+### Exact Release installation
+
+Download `pi-<target>.zip` from the exact `xz-v<VERSION>` Release instead of Latest, then extract and run it using the same commands above. Minimal Debian/Ubuntu images need `apt install unzip` first; `bsdtar -xf pi-<target>.zip` also works.
+
+Release assets include `SHA256SUMS` and GitHub build-provenance attestations for independent verification.
+
+### Install through a GitHub mirror
+
+First install a current [GitHub CLI](https://cli.github.com/) through a trusted channel (for example your OS package manager), independently of the Release mirror. Its `gh attestation verify` command authenticates the archive **before extraction or execution**. Do not download a verifier or a replacement trust root from the same mirror.
+
+Choose `target` from the platform table, and obtain the desired version and full 40-character source commit from a trusted Release page at `https://github.com/xz-dev/pi/releases`. For Linux x64 with glibc:
+
+```sh
+target=linux-x64-gnu-modern
+version='<VERSION>'
+commit='<FULL_COMMIT_SHA>'
+mirror=https://gh-proxy.com/https://github.com
+base="${mirror}/xz-dev/pi/releases/download/xz-v${version}"
+curl --fail --location --output "pi-${target}.zip" "${base}/pi-${target}.zip" &&
+curl --fail --location --output attestation-subjects.jsonl "${base}/attestation-subjects.jsonl" &&
+gh attestation verify "pi-${target}.zip" --bundle attestation-subjects.jsonl \
+  --repo xz-dev/pi \
+  --cert-identity 'https://github.com/xz-dev/pi/.github/workflows/publish-github-release.yml@refs/heads/main' \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners &&
+unzip "pi-${target}.zip" &&
+./pi --version
+```
+
+If GH-Proxy is unavailable, set `mirror=https://ghfast.top/https://github.com` (or `https://github.com`) and retry the whole chain. Keep the same exact version and commit. Missing or invalid attestations mean **stop**, not execute anyway. On Windows, download both files, run the same `gh attestation verify` command with your platform ZIP and full commit, and check `$LASTEXITCODE -eq 0` before `Expand-Archive` or running Pi.
+
+These are third-party services, not infrastructure operated by this fork. A mirror can withhold or replay authentic releases; signatures prove origin and integrity, not that a release is the newest. SHA256 checks alone cannot authenticate a mirror that replaces both the archive and checksums. jsDelivr is not included: its GitHub repository-file CDN is not a proxy for these Release ZIP attachments.
+
+### Update
+
+An installed executable updates itself from the matching `pi-<target>.zip`:
 
 ```bash
-npm run pack:packages -- --out .artifacts/pi-packages
+pi update --self
 ```
 
-This refreshes model data before building `pi-ai`. To avoid network access when
-model data is already hydrated, pass `--offline-model-data`.
+To accelerate updates without changing settings:
 
-Then configure an external project to consume one package and resolve all of
-its Pi dependencies from the same artifact set. npm is the default:
+```sh
+pi update --mirror
+pi update --mirror-url https://ghfast.top/https://github.com
+pi update --mirror-url http://localhost:8080
+```
+
+`--mirror` tries **GH-Proxy → GHFast → direct GitHub**, in that order, for release discovery and again for the selected version's ZIP. Each failed source prints one gray message before trying the next; only an exhausted chain reports a final error. Failed requests or invalid downloads advance without skipping verification.
+
+Repeat `--mirror-url` to build your own ordered chain. A single URL is simply a one-element chain. Each value replaces the literal `https://github.com` in download URLs, including its protocol and optional path. Values are not prevalidated or normalized; invalid addresses fail when requested. Do not add a trailing slash, since the original URL already supplies it. Custom chains contain only the sources you name; append GitHub explicitly if you want a direct fallback:
+
+```sh
+pi update --mirror-url https://ghfast.top/https://github.com \
+          --mirror-url https://gh.llkk.cc/https://github.com \
+          --mirror-url https://github.com
+```
+
+[gh.llkk.cc](https://gh.llkk.cc/) is another proxy supporting Release downloads. It is not in the built-in chain; availability varies by network.
+
+Save a global default without performing an update:
+
+```sh
+pi update --mirror --permanent
+# Or save your own ordered chain:
+pi update --mirror-url http://localhost:8080 \
+          --mirror-url https://ghfast.top/https://github.com --permanent
+# A later command uses the saved choice:
+pi update
+```
+
+`--permanent` **only saves settings and exits**, even if an address is unreachable. Settings are stored in `~/.pi/agent/settings.json` (or the directory selected by `PI_CODING_AGENT_DIR`) as an ordered `updateMirrors` array. `--mirror --permanent` saves the current built-in list; one custom URL is saved as a one-element array. Saved chains also apply to automatic version checks, which remain silent on failure. Project settings cannot override this download source. Extension, npm, and model-catalog requests are unaffected.
+
+```sh
+pi update --no-mirror              # Direct GitHub this time; keep the saved setting
+pi update --no-mirror --permanent  # Clear the saved mirror; do not update
+```
+
+Without a saved setting or a mirror flag, updates continue to use GitHub directly. Command-line choices override saved settings for one invocation unless `--permanent` is present. Mirror flags cannot be combined with `--clean` or extension/model-only updates; `--permanent` also cannot be combined with `--force` or `--all`.
+
+Extension updates are separate:
 
 ```bash
-node scripts/use-local-packages.mjs \
-  --manifest .artifacts/pi-packages/manifest.json \
-  --consumer ../my-project \
-  --package @earendil-works/pi-durable \
-  --package @earendil-works/pi-agent-core
-cd ../my-project
-npm install --ignore-scripts
+pi update --extensions
 ```
 
-For a pnpm project, point `--consumer` at the workspace root:
+Standalone extension operations spawn the running executable itself, so public `pi` on `PATH` is not required. Git sources also require Git. See [package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection) for overrides and compatibility limits.
+
+Pi authenticates the manifest using Sigstore trust roots bundled in the trusted client, requiring the `xz-dev/pi` main-branch `publish-github-release.yml` workflow, GitHub-hosted signing runner, and the manifest's source commit. It then checks the ZIP and extracted executable against that authenticated manifest before writing or replacing files. This verification is mandatory for every mirror **and direct GitHub**, including `--force`. Missing, forged, or wrong-identity attestations reject that source; only another fully verified source can succeed. No mirror-supplied trust root or verification-disable flag is accepted. Root rotations require a trusted Pi update; if the installed roots no longer cover a new signer, update through a separately trusted installation path.
+
+On successful update, the old executable is retained as `pi-<old-version>` (`pi-<old-version>.exe` on Windows) and the verified candidate replaces the public path. `pi update --clean` removes only regular backups matching the strict distribution-version pattern; the running executable, symlinks, directories, and unrelated files are left untouched.
+
+Installations from releases up to `xz-v1.0.0-xz.253` (raw `pi-<target>` downloads) cannot self-update onto ZIP releases: their updater only knows the raw asset and reports an invalid manifest. Reinstall once by downloading and extracting the current `pi-<target>.zip` over the old `pi`; later updates work with `pi update --self` again. Older ZIP bundle installations (`pi` + `pi-native` + loose assets) need the same one-time reinstall and should delete the old extracted directory.
+
+### Building without the native X11 helper
+
+For package-manager builds such as Gentoo `USE=-X`, pass `--without-x11` to `scripts/build-binaries.sh`. Linux and FreeBSD executables then omit the native X11 clipboard helper; musl builds also no longer need `--clipboard-musl-dir`. The default build and macOS/Windows native helpers are unchanged. This option does not disable command-line clipboard fallbacks such as `wl-paste` or `xclip`.
 
 ```bash
-node scripts/use-local-packages.mjs \
-  --manifest .artifacts/pi-packages/manifest.json \
-  --consumer ../my-project \
-  --package @earendil-works/pi-agent-core \
-  --package-manager pnpm
-cd ../my-project
-pnpm install --ignore-scripts
+bash scripts/build-binaries.sh --platform linux-x64-gnu-baseline --without-x11
 ```
 
-Repeat `--package` for each direct dependency. The command updates the
-consumer's `package.json` with content-addressed local `file:` references. It
-writes transitive overrides to `package.json` for npm or `pnpm-workspace.yaml`
-for pnpm. Keep the artifact directory available while installing or updating
-the consumer. Re-run both commands after changing Pi source.
+### Source checkout
 
-## Building standalone binaries from release source
-
-GitHub releases include a versioned source archive covered by the release's `SHA256SUMS` file. Extract it and run the same build script used for the official standalone binaries:
+A documented source installation uses the xz-dev checkout and is user-managed. Source/npm execution requires Node.js **22.22.2+ within 22.x, 24.15.0+ within 24.x, or 26+** (`^22.22.2 || ^24.15.0 || >=26.0.0`) for the hardened Sigstore verifier. Standalone Release executables retain their embedded Bun runtime and do not require Node.js.
 
 ```bash
-VERSION="<release-version>"
-tar -xzf "pi-${VERSION}-source.tar.gz"
-cd "pi-${VERSION}"
-./scripts/build-binaries.sh --offline-model-data --platform linux-x64 --out "$PWD/out"
+git clone https://github.com/xz-dev/pi.git
+cd pi
+npm ci --ignore-scripts
+npm run build
+cd packages/coding-agent
+npm link
 ```
 
-The archive includes release model data and native prebuilds. `--offline-model-data` uses that model data without refreshing provider catalogs. The script installs dependencies and builds the executable with its runtime assets; pass `--skip-install` if dependencies are already provided.
+For this installation, `pi update --self` never runs a package-manager update and never queries official upstream Release/update sources; it prints xz-dev source-checkout update instructions that you run yourself.
 
-## Supply-chain hardening
+## Automation upstream sync
 
-We treat npm dependency changes as reviewed code changes.
+Release CI signs accepted candidates before self-update acceptance on native, offline musl, and FreeBSD runners; publication waits for these update gates. Signature-gated update acceptance and publication run only on `refs/heads/main`. A non-main `workflow_dispatch` can build and smoke-test, but cannot pass the main-only release identity policy and therefore skips those signed-update/publication jobs.
 
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent install lock.
-- The pi.dev installer installs from `packages/coding-agent/install-lock/`, generated from the root lockfile, to pin transitive deps. The npm package does not pin transitive deps.
-- Local release smoke tests and npm publication use the same tarball packer; npm publishes the validated tarballs rather than repacking workspace directories.
-- Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
-- Install lock generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
+See [`MAINTAIN.md`](MAINTAIN.md) for the authoritative downstream branch ownership, rebuild, publication, recovery, and patch-retirement rules.
 
-## Share your OSS coding agent sessions
+Twice daily, [Upstream Sync](https://github.com/xz-dev/pi/actions/workflows/upstream-sync.yml) rebuilds `main` from the latest `https://github.com/earendil-works/pi.git` `main`, then integrates the maintenance overlay, feature and fix branches, and temporary compatibility branches in a fixed order:
 
-If you use Pi or other coding agents for open source work, please share your sessions.
+- 01:28 Asia/Shanghai
+- 13:28 Asia/Shanghai
 
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
+Before a lease-protected update of `main`, the workflow installs dependencies, hydrates model data, builds, checks, runs focused integration regressions, validates the exact GitHub Release candidate, audits production and development dependencies, and verifies production dependency signatures. Conflicts, empty integrations, failed blocking gates, or a changed remote lease leave `main` unchanged. Dependency audits and production signature checks are currently advisory (`continue-on-error`); their failure alone does not block the rebuild. A successful push triggers the full [CI](https://github.com/xz-dev/pi/actions/workflows/ci.yml), [Esc Abort Integration](https://github.com/xz-dev/pi/actions/workflows/esc-abort-integration.yml), and [Publish GitHub Release](https://github.com/xz-dev/pi/actions/workflows/publish-github-release.yml) workflows for the rebuilt commit.
 
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
+## Friends
 
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
-
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
-
-I regularly publish my own `pi-mono` work sessions here:
-
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
-
-## License
-
-MIT
-
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+- [LINUX DO](https://linux.do/)
