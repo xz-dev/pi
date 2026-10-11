@@ -94,7 +94,7 @@ class ThinkingPreviewText implements Component {
 		const bodyLines = textLines.map((line, i) =>
 			i < textLines.length - 1 ? line.replace(/ +((?:\x1b\[[0-9;]*m)*)$/, "$1") : line,
 		);
-		const tail = bodyLines.join(`\x1b[0m${theme.fg("muted", NEWLINE_MARK)}`);
+		const tail = theme.italic(bodyLines.join(`\x1b[0m${theme.italic(theme.fg("muted", NEWLINE_MARK))}`));
 		// The omission count reports body graphemes only, so hidden `↲ ` marks are excluded.
 		const markEnds: number[] = [];
 		let position = 0;
