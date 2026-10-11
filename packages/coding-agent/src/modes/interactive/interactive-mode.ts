@@ -15,6 +15,7 @@ import {
 	isRetryableAssistantError,
 	type Message,
 	type Model,
+	modelsAreEqual,
 	type Usage,
 } from "@earendil-works/pi-ai/compat";
 import type {
@@ -3654,6 +3655,7 @@ export class InteractiveMode {
 				break;
 
 			case "turn_start":
+				if (this.pendingModelSwitch) this.settlePendingModelSwitch();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3731,7 +3733,6 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
-					this.clearPendingModelSwitch(event.message);
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.thinkingDisplayMode,
@@ -4118,39 +4119,29 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private pendingModelSwitch:
-		| { oldModel: Model<any>; newModel: Model<any>; spacer: Spacer; text: ThemedText }
-		| undefined;
+	private pendingModelSwitch: { newModel: Model<any>; text: ThemedText; label: { value: string } } | undefined;
 
 	private setPendingModelSwitch(oldModel: Model<any>, newModel: Model<any>): void {
-		this.clearPendingModelSwitch();
+		// A no-op reselection (A → A) is not a switch.
+		if (modelsAreEqual(oldModel, newModel)) return;
+		// A switch that never got a request is still a completed switch; settle it before tracking the next one.
+		this.settlePendingModelSwitch();
+		const label = { value: `Model: ${oldModel.id} → ${newModel.id}` };
 		const spacer = new Spacer(1);
-		const text = new ThemedText(() => theme.fg("dim", `Model: ${oldModel.id} → ${newModel.id}`), 1, 0);
+		const text = new ThemedText(() => theme.fg("dim", label.value), 1, 0);
 		this.chatContainer.addChild(spacer);
 		this.chatContainer.addChild(text);
-		this.pendingModelSwitch = { oldModel, newModel, spacer, text };
+		this.pendingModelSwitch = { newModel, text, label };
 		this.ui.requestRender();
 	}
 
-	private clearPendingModelSwitch(assistantMessage?: AgentMessage): void {
-		if (!this.pendingModelSwitch) return;
-		// If an assistant message arrived, only clear when it matches the new model.
-		if (assistantMessage && assistantMessage.role === "assistant") {
-			const { newModel } = this.pendingModelSwitch;
-			const matches = assistantMessage.provider === newModel.provider && assistantMessage.model === newModel.id;
-			if (!matches) {
-				// Keep the indicator but move it to the bottom so it stays visible.
-				this.chatContainer.removeChild(this.pendingModelSwitch.spacer);
-				this.chatContainer.removeChild(this.pendingModelSwitch.text);
-				this.chatContainer.addChild(this.pendingModelSwitch.spacer);
-				this.chatContainer.addChild(this.pendingModelSwitch.text);
-				this.ui.requestRender();
-				return;
-			}
-		}
-		this.chatContainer.removeChild(this.pendingModelSwitch.spacer);
-		this.chatContainer.removeChild(this.pendingModelSwitch.text);
+	/** Confirm the pending switch in place (`old → new` becomes `Model: new`) once a request actually starts. */
+	private settlePendingModelSwitch(): void {
+		const pending = this.pendingModelSwitch;
+		if (!pending) return;
 		this.pendingModelSwitch = undefined;
+		pending.label.value = `Model: ${pending.newModel.id}`;
+		pending.text.invalidate();
 		this.ui.requestRender();
 	}
 
@@ -4923,6 +4914,7 @@ export class InteractiveMode {
 
 	private async cycleModel(direction: "forward" | "backward"): Promise<void> {
 		try {
+			const previousModel = this.session.model;
 			const result = await this.session.cycleModel(direction);
 			if (result === undefined) {
 				const msg = this.session.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available";
@@ -4930,10 +4922,8 @@ export class InteractiveMode {
 			} else {
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
-				const thinkingStr =
-					result.model.reasoning && result.thinkingLevel !== "off" ? ` (thinking: ${result.thinkingLevel})` : "";
-				this.showStatus(`Switched to ${result.model.name || result.model.id}${thinkingStr}`);
 				void this.maybeWarnAboutAnthropicSubscriptionAuth(result.model);
+				if (previousModel) this.setPendingModelSwitch(previousModel, result.model);
 			}
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
@@ -5613,7 +5603,6 @@ export class InteractiveMode {
 				await this.session.setModel(model, { persist: false });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
-				this.showStatus(`Model: ${model.id}`);
 				void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
 				if (previousModel) this.setPendingModelSwitch(previousModel, model);
 			} catch (error) {
@@ -5764,7 +5753,7 @@ export class InteractiveMode {
 					this.footer.invalidate();
 					this.updateEditorBorderColor();
 					done();
-					this.showStatus(persist ? `Default model: ${model.provider}/${model.id}` : `Model: ${model.id}`);
+					if (persist) this.showStatus(`Default model: ${model.provider}/${model.id}`);
 					void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
 					if (previousModel) this.setPendingModelSwitch(previousModel, model);
 				} catch (error) {
