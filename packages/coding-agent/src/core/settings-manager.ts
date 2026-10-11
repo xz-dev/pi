@@ -1078,6 +1078,19 @@ export class SettingsManager {
 		return value === true || value === "header" ? value : SETTINGS_DEFAULTS.quietStartup;
 	}
 
+	getSlowHookThresholdMs(kind: "sync" | "async"): number {
+		const key = kind === "sync" ? "slowSyncHookThresholdMs" : "slowAsyncHookThresholdMs";
+		try {
+			return parseTimeoutSetting(this.settings[key], key) ?? SETTINGS_DEFAULTS[key];
+		} catch {
+			return SETTINGS_DEFAULTS[key];
+		}
+	}
+
+	getShowStartupDiagnostics(): boolean {
+		return this.settings.showStartupDiagnostics ?? SETTINGS_DEFAULTS.showStartupDiagnostics;
+	}
+
 	setQuietStartup(quiet: QuietStartup): void {
 		this.globalSettings.quietStartup = quiet;
 		this.markModified("quietStartup");
