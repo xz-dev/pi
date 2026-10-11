@@ -272,7 +272,7 @@ describe("AgentSession prompt characterization", () => {
 			},
 		]);
 
-		await harness.session.prompt("/review src/index.ts");
+		await harness.session.prompt("/review src/index.ts", { source: "interactive" });
 
 		expect(expandedPrompt).toBe("Review this code: src/index.ts");
 	});
@@ -307,7 +307,8 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.sendUserMessage("/review src/index.ts", { expandPromptTemplates: true });
 
-		expect(expandedPrompt).toBe("Review this code: src/index.ts");
+		expect(expandedPrompt).toContain("[Pi source: SDK input;");
+		expect(expandedPrompt).toMatch(/\nReview this code: src\/index\.ts$/);
 	});
 
 	it("dispatches extension commands without consuming a provider response", async () => {
