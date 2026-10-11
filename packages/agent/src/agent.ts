@@ -2,6 +2,7 @@ import {
 	createInitialSystemMessage,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
+	type AssistantMessage,
 	type ImageContent,
 	type Message,
 	type Model,
@@ -540,7 +541,8 @@ export class Agent {
 			stopReason: aborted ? "aborted" : "error",
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
-		} satisfies AgentMessage;
+		} satisfies AssistantMessage;
+		await this.processEvents({ type: "run_failure", message: failureMessage });
 		await this.processEvents({ type: "message_start", message: failureMessage });
 		await this.processEvents({ type: "message_end", message: failureMessage });
 		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
