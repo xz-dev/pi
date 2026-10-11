@@ -177,6 +177,12 @@ const CodemodeSettingsSchema = Type.Object({
 	),
 });
 
+const SkillOverrideSchema = Type.Object({
+	disableModelInvocation: Type.Optional(Type.Boolean()),
+});
+
+const SkillOverridesSchema = Type.Record(Type.String(), SkillOverrideSchema);
+
 const PackageSourceSchema = Type.Union(
 	[
 		Type.String({ description: "Load all resources from the package." }),
@@ -187,6 +193,7 @@ const PackageSourceSchema = Type.Union(
 			),
 			extensions: Type.Optional(Type.Array(Type.String())),
 			skills: Type.Optional(Type.Array(Type.String())),
+			skillOverrides: Type.Optional(SkillOverridesSchema),
 			prompts: Type.Optional(Type.Array(Type.String())),
 			themes: Type.Optional(Type.Array(Type.String())),
 		}),
@@ -482,6 +489,8 @@ export type MermaidRenderingMode = NonNullable<Static<typeof MarkdownSettingsSch
 export interface ModelCatalogSettings extends Static<typeof ModelCatalogSettingsSchema> {}
 export interface MarkdownSettings extends Static<typeof MarkdownSettingsSchema> {}
 export interface WarningSettings extends Static<typeof WarningSettingsSchema> {}
+export interface SkillOverride extends Static<typeof SkillOverrideSchema> {}
+export type SkillOverrides = Static<typeof SkillOverridesSchema>;
 export type CodemodeMode = Static<typeof CodemodeModeSchema>;
 export interface CodemodeSettings extends Static<typeof CodemodeSettingsSchema> {}
 export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
