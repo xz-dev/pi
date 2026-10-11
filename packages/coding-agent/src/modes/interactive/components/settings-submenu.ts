@@ -1,6 +1,7 @@
 import {
 	type Component,
 	Container,
+	dispatchMouseEvent,
 	fuzzyFilter,
 	getKeybindings,
 	Input,
@@ -9,8 +10,10 @@ import {
 	type SelectListLayoutOptions,
 	Spacer,
 	Text,
+	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 import { getSelectListTheme, theme } from "../theme/theme.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 
 const SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -28,7 +31,7 @@ export interface SelectSubmenuOptions {
  * Single-step submenu that shows a titled select list.
  * With `searchable: true`, typing filters the list using fuzzy matching.
  */
-export class SelectSubmenu extends Container {
+export class SelectSubmenu extends SelectorPanel {
 	private selectList: SelectList;
 	private listChildIndex: number;
 	private allOptions: SelectItem[];
@@ -89,6 +92,11 @@ export class SelectSubmenu extends Container {
 			? "  Type to filter \u00b7 Enter to select \u00b7 Esc to go back"
 			: "  Enter to select \u00b7 Esc to go back";
 		this.addChild(new Text(theme.fg("dim", hint), 0, 0));
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		const header = this.searchInput ? [this.searchInput] : [this.children[0]!];
+		return compactSelector(width, height, header, this.selectList, [this.children[this.children.length - 1]!]);
 	}
 
 	private buildSelectList(options: SelectItem[], preselect: string): SelectList {
@@ -242,6 +250,14 @@ export class SteppedSubmenu extends Container {
 			undefined,
 			step.searchable || step.layout ? { searchable: step.searchable, layout: step.layout } : undefined,
 		);
+	}
+
+	renderInBounds(width: number, height: number): string[] {
+		return this.activeComponent.renderInBounds?.(width, height) ?? this.activeComponent.render(width);
+	}
+
+	override handleMouse(event: TuiMouseEvent) {
+		return dispatchMouseEvent(this.activeComponent, event);
 	}
 
 	render(width: number): string[] {
