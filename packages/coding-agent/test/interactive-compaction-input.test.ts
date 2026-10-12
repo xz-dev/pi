@@ -38,6 +38,8 @@ describe("compaction input display", () => {
 			clearSubmittedInput() {
 				prototype.clearSubmittedInput.call(this);
 			},
+			maybeSuggestBugReport: vi.fn(),
+			showError: vi.fn(),
 			session: {
 				prompt: async () => {
 					if (failure === "rejection") throw new Error("preflight failed");
@@ -63,6 +65,7 @@ describe("compaction input display", () => {
 			submittedInput: undefined as string | undefined,
 			showSubmittedInput: false,
 			pendingMessagesContainer,
+			editor: {},
 			defaultEditor: { onEscape: undefined },
 			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
 			session: { prompt, abortCompaction: vi.fn() },
