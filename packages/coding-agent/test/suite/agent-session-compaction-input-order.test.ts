@@ -255,6 +255,91 @@ describe("input compaction ordering", () => {
 		},
 	);
 
+	it("routes the complete custom-message batch before threshold compaction", async () => {
+		const order: string[] = [];
+		const input = `custom:${"x".repeat(8000)}`;
+		const extra = `next-turn:${"y".repeat(8000)}`;
+		const harness = await createHarness({
+			models: [
+				{ id: "small", contextWindow: 6000 },
+				{ id: "routed", contextWindow: 10000 },
+			],
+			settings: { compaction: { enabled: true, reserveTokens: 200, keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.registerVirtualModel({
+						provider: "router",
+						id: "auto",
+						name: "Auto",
+						contextWindow: 100000,
+						route(request, ctx) {
+							order.push("route");
+							expect(request.messages.some((message) => getMessageText(message).includes(input))).toBe(true);
+							expect(request.messages.some((message) => getMessageText(message).includes(extra))).toBe(true);
+							return { model: ctx.modelRegistry.find("faux", "routed")!, thinkingLevel: "off" };
+						},
+					});
+					pi.on("before_agent_start", async (event, ctx) => {
+						expect(event.messageType).toBe("custom");
+						order.push("hook");
+						await harness.session.setModel(ctx.modelRegistry.find("router", "auto")!);
+						pi.sendMessage({ customType: "extra", content: extra, display: true }, { deliverAs: "nextTurn" });
+					});
+					pi.on("session_before_compact", (event) => {
+						expect(order).toEqual(["hook", "route"]);
+						order.push("compact");
+						expect(event.branchEntries.some((entry) => entry.type === "custom_message")).toBe(false);
+						return {
+							compaction: {
+								summary: "old history compacted",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() - 1000 });
+		const previous = fauxAssistantMessage("previous");
+		harness.sessionManager.appendMessage({
+			...previous,
+			provider: "faux",
+			model: "small",
+			usage: { ...previous.usage, input: 5900 },
+		});
+		harness.session.refreshContext();
+		const projected = estimateProjectedContextTokens(
+			harness.sessionManager.buildSessionProjection(),
+			harness.sessionManager.getBranch(),
+		).tokens;
+		const inputTokens = estimateTokens({ role: "user", content: input, timestamp: Date.now() });
+		const extraTokens = estimateTokens({ role: "user", content: extra, timestamp: Date.now() });
+		expect(projected).toBeGreaterThan(5800);
+		expect(projected + inputTokens).toBeLessThan(9800);
+		expect(projected + inputTokens + extraTokens).toBeGreaterThan(9800);
+		harness.setResponses([
+			(_context, _options, _state, model) => {
+				expect(model.id).toBe("routed");
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await harness.session.sendCustomMessage(
+			{ customType: "task-done", content: input, display: true },
+			{ triggerTurn: true },
+		);
+		expect(order).toEqual(["hook", "route", "compact"]);
+		expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+		const branch = harness.sessionManager.getBranch();
+		const compacted = branch.findIndex((entry) => entry.type === "compaction");
+		for (const content of [input, extra]) {
+			expect(
+				branch.findIndex((entry) => entry.type === "custom_message" && entry.content === content),
+			).toBeGreaterThan(compacted);
+		}
+	});
+
 	it.each(["prompt", "steer", "followUp", "previous-turn", "virtual"] as const)(
 		"compacts before delivering %s input",
 		async (kind) => {
