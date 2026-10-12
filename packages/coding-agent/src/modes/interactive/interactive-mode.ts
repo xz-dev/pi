@@ -58,7 +58,6 @@ import { spawn } from "child_process";
 import {
 	APP_NAME,
 	APP_TITLE,
-	CHANGELOG_VERSION,
 	CONFIG_DIR_NAME,
 	detectInstallChange,
 	getAgentDir,
@@ -100,7 +99,7 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { McpHttpServerConfig } from "../../core/mcp-servers.ts";
-import { createCompactionSummaryMessage, hasMeaningfulContent } from "../../core/messages.ts";
+import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -117,7 +116,7 @@ import {
 	sessionEntryToContextMessages,
 	type UsageEntry,
 } from "../../core/session-manager.ts";
-import type { FullscreenExitOutput, ThinkingDisplayMode, TuiMode } from "../../core/settings-manager.ts";
+import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -134,7 +133,6 @@ import { ensurePngTranscoder } from "../../utils/image-convert.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
-import { markStartupBenchmarkStage } from "../../utils/startup-benchmark.ts";
 import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
@@ -147,6 +145,7 @@ import { BranchSummaryMessageComponent } from "./components/branch-summary-messa
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
+import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
 import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
@@ -164,11 +163,9 @@ import {
 	formatAuthSelectorProviderType,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.ts";
-import { formatMessageOrigin, OriginMessageComponent } from "./components/origin-message.ts";
 import { piLogoLines, piWordmark, supportsPiLogo } from "./components/pi-logo.ts";
 import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
-import { SelectorHost } from "./components/selector-host.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
@@ -300,7 +297,6 @@ function isUsageSessionEntry(item: RenderSessionItem): item is Extract<SessionEn
 
 // EIO: tty reads/ioctls from an orphaned background process group, or writes after hangup.
 // ENOTTY: the tty was revoked (macOS) and stdin is no longer a terminal.
-const RETRY_OUTCOME_ENTRY_TYPE = "pi:retry-outcome";
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN", "ENOTTY"]);
 
 function isDeadTerminalError(error: unknown): boolean {
@@ -532,13 +528,6 @@ export class InteractiveMode {
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private readonly entriesRenderedByBoundaryCompaction = new Set<string>();
 	private streamingMessage: AssistantMessage | undefined = undefined;
-	private pendingFailure:
-		| {
-				message: AssistantMessage;
-				component: AssistantMessageComponent;
-				text?: string;
-		  }
-		| undefined;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -546,9 +535,8 @@ export class InteractiveMode {
 	// Tool output expansion state
 	private toolOutputExpanded = false;
 
-	// Thinking block display style (Ctrl+T) and bulk expand override (Ctrl+O)
-	private thinkingDisplayMode: ThinkingDisplayMode = "preview";
-	private thinkingBulkExpanded: boolean | null = null;
+	// Thinking block visibility state
+	private hideThinkingBlock = false;
 	private outputPad = 1;
 	private readonly mermaidMarkdownTransformer: MarkdownTransformer = createMermaidMarkdownTransformer({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
@@ -694,7 +682,7 @@ export class InteractiveMode {
 			embedWorkingStatus: true,
 		});
 		this.editor = this.defaultEditor;
-		this.editorContainer = new SelectorHost(this.ui, () => [this.widgetContainerBelow, this.footerContainer]);
+		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
@@ -702,8 +690,8 @@ export class InteractiveMode {
 		this.footerContainer = new Container();
 		this.footerContainer.addChild(this.footer);
 
-		// Load thinking display mode setting
-		this.thinkingDisplayMode = this.settingsManager.getThinkingDisplayMode();
+		// Load hide thinking block setting
+		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.outputPad = this.settingsManager.getOutputPad();
 
 		// Register themes from resource loader and initialize
@@ -985,7 +973,6 @@ export class InteractiveMode {
 
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
-		markStartupBenchmarkStage("init-entered");
 
 		this.registerSignalHandlers();
 
@@ -1045,14 +1032,12 @@ export class InteractiveMode {
 		this.ui.start();
 		this.isInitialized = true;
 		this.programStatus.report();
-		markStartupBenchmarkStage("tui-started");
 		this.ensurePngTranscoder();
 
 		this.themeController.applyFromSettings();
 		// The header and startup notices bake theme colors into their text, so build them once the terminal
 		// reported its colors. This ends at the terminal's DA1 reply, or after 100 ms if it answers nothing.
 		await this.themeController.waitForTerminalColors();
-		markStartupBenchmarkStage("theme-applied");
 
 		// Add header with keybindings from config (unless silenced)
 		if (this.shouldShowStartupHeader()) {
@@ -1085,13 +1070,13 @@ export class InteractiveMode {
 					),
 					hint("app.model.select", "to select model"),
 					hint("app.tools.expand", "to expand tools"),
-					hint("app.thinking.toggle", "to cycle thinking display"),
+					hint("app.thinking.toggle", "to expand thinking"),
 					hint("app.editor.external", "for external editor"),
 					rawKeyHint("/", "for commands"),
 					rawKeyHint("!", "to run bash"),
 					rawKeyHint("!!", "to run bash (no context)"),
 					hint("app.message.followUp", "to queue follow-up"),
-					hint("app.message.dequeue", "to edit queued terminal drafts"),
+					hint("app.message.dequeue", "to edit all queued messages"),
 					hint("app.clipboard.pasteImage", "to paste files on macOS, images, or text"),
 					rawKeyHint("drop files", "to attach"),
 				].join("\n");
@@ -1139,7 +1124,6 @@ export class InteractiveMode {
 			ensureTool("rg", (status) => this.showManagedToolStatus(status)),
 		]);
 		this.fdPath = fdPath;
-		markStartupBenchmarkStage("tools-ready");
 
 		// Enable the remaining input handlers only after managed-tool setup completes.
 		this.setupKeyHandlers();
@@ -1147,7 +1131,6 @@ export class InteractiveMode {
 
 		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
-		markStartupBenchmarkStage("session-rebound");
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
@@ -1166,7 +1149,6 @@ export class InteractiveMode {
 
 		// Initialize available provider count for footer display
 		await this.updateAvailableProviderCount();
-		markStartupBenchmarkStage("providers-counted");
 
 		// Flush the completed startup state before loading the remaining syntax grammars.
 		this.ui.renderNow();
@@ -1212,8 +1194,7 @@ export class InteractiveMode {
 
 		if (!process.env.PI_OFFLINE) {
 			const controller = new AbortController();
-			const timeoutMs = this.session.settingsManager.getModelRefreshTimeoutMs();
-			const timeout = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
+			const timeout = setTimeout(() => controller.abort(), 15_000);
 			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
 				.then(() => this.updateAvailableProviderCount())
 				.catch(() => {})
@@ -1308,7 +1289,7 @@ export class InteractiveMode {
 		// Process initial messages
 		if (initialMessage) {
 			try {
-				await this.promptWithPendingDisplay(initialMessage, initialImages, "cli");
+				await this.promptWithPendingDisplay(initialMessage, initialImages);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -1318,7 +1299,7 @@ export class InteractiveMode {
 		if (initialMessages) {
 			for (const message of initialMessages) {
 				try {
-					await this.promptWithPendingDisplay(message, undefined, "cli");
+					await this.promptWithPendingDisplay(message);
 				} catch (error: unknown) {
 					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 					this.showError(errorMessage);
@@ -1338,14 +1319,10 @@ export class InteractiveMode {
 		}
 	}
 
-	private async promptWithPendingDisplay(
-		text: string,
-		images?: ImageContent[],
-		source: "interactive" | "cli" = "interactive",
-	): Promise<void> {
+	private async promptWithPendingDisplay(text: string, images?: ImageContent[]): Promise<void> {
 		this.submittedInput = text;
 		try {
-			await this.session.prompt(text, { images, source });
+			await this.session.prompt(text, { images });
 		} catch (error) {
 			this.restoreSubmittedInput();
 			throw error;
@@ -1448,15 +1425,15 @@ export class InteractiveMode {
 		const entries = parseChangelog(changelogPath);
 
 		if (!lastVersion) {
-			// Fresh install - record the changelog baseline version, send telemetry, don't show changelog
-			this.settingsManager.setLastChangelogVersion(CHANGELOG_VERSION);
+			// Fresh install - record the version, send telemetry, don't show changelog
+			this.settingsManager.setLastChangelogVersion(VERSION);
 			this.reportInstallTelemetry(VERSION);
 			return undefined;
 		}
 
 		const newEntries = getNewEntries(entries, lastVersion);
 		if (newEntries.length > 0) {
-			this.settingsManager.setLastChangelogVersion(CHANGELOG_VERSION);
+			this.settingsManager.setLastChangelogVersion(VERSION);
 			this.reportInstallTelemetry(VERSION);
 			return newEntries.map((e) => normalizeChangelogLinks(e.content, e)).join("\n\n");
 		}
@@ -2181,7 +2158,7 @@ export class InteractiveMode {
 		this.footer.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
-		this.thinkingDisplayMode = this.settingsManager.getThinkingDisplayMode();
+		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.outputPad = this.settingsManager.getOutputPad();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		const clearOnShrink = this.settingsManager.getClearOnShrink();
@@ -2324,7 +2301,6 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
-		this.pendingFailure = undefined;
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
@@ -3551,7 +3527,7 @@ export class InteractiveMode {
 				if (this.isExtensionCommand(text)) {
 					this.editor.addToHistory?.(text);
 					this.editor.setText("");
-					await this.session.prompt(text, { source: "interactive" });
+					await this.session.prompt(text);
 				} else {
 					this.queueCompactionMessage(text, "steer");
 				}
@@ -3563,7 +3539,7 @@ export class InteractiveMode {
 			if (this.session.isStreaming) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, { streamingBehavior: "steer", source: "interactive" });
+				await this.session.prompt(text, { streamingBehavior: "steer" });
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -3637,8 +3613,16 @@ export class InteractiveMode {
 				} else if (event.entry.type === "usage" && event.entry.kind === "cache_warm") {
 					this.addCacheWarmingUsage(event.entry);
 					this.ui.requestRender();
-				} else if (event.entry.type === "custom_message") {
-					for (const message of sessionEntryToContextMessages(event.entry)) this.addMessageToChat(message);
+				} else if (event.entry.type === "custom_message" && event.entry.display) {
+					this.addMessageToChat(
+						createCustomMessage(
+							event.entry.customType,
+							event.entry.content,
+							event.entry.display,
+							event.entry.details,
+							event.entry.timestamp,
+						),
+					);
 					this.ui.requestRender();
 				} else if (event.entry.type === "compaction") {
 					const entries = this.sessionManager.buildContextEntries();
@@ -3688,20 +3672,15 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
-					this.clearPendingModelSwitch(event.message);
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
-						this.thinkingDisplayMode,
+						this.hideThinkingBlock,
 						this.getMarkdownThemeWithSettings(),
 						this.hiddenThinkingLabel,
 						this.outputPad,
 						this.getMarkdownTransformers(),
 					);
-					if (this.thinkingBulkExpanded !== null) {
-						this.streamingComponent.setExpanded(this.thinkingBulkExpanded);
-					}
 					this.streamingMessage = event.message;
-					this.streamingComponent.setFailureText(null);
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
 					this.ui.requestRender();
@@ -3711,12 +3690,7 @@ export class InteractiveMode {
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					const streamEvent = event.assistantMessageEvent;
-					const activeThinkingIndex =
-						streamEvent?.type === "thinking_start" || streamEvent?.type === "thinking_delta"
-							? streamEvent.contentIndex
-							: null;
-					this.streamingComponent.updateContent(this.streamingMessage, true, activeThinkingIndex);
+					this.streamingComponent.updateContent(this.streamingMessage, true);
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -3768,21 +3742,20 @@ export class InteractiveMode {
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					const failed =
-						this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error";
-					if (failed) {
-						// message_end precedes the core's retry/compaction decision.
-						this.streamingComponent.setFailureText(null);
-						this.pendingFailure = { message: this.streamingMessage, component: this.streamingComponent };
-					} else {
-						this.pendingFailure = undefined;
-					}
 					this.streamingComponent.updateContent(this.streamingMessage, false);
 
-					if (failed) {
-						// These previews never executed. Keep completed tool results untouched.
-						for (const component of this.pendingTools.values()) this.chatContainer.removeChild(component);
+					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
+						if (!errorMessage) {
+							errorMessage = this.streamingMessage.errorMessage || "Error";
+						}
+						for (const [, component] of this.pendingTools.entries()) {
+							component.updateResult({
+								content: [{ type: "text", text: errorMessage }],
+								isError: true,
+							});
+						}
 						this.pendingTools.clear();
+						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
 						// Args are now complete - trigger diff computation for edit tools
 						for (const [, component] of this.pendingTools.entries()) {
@@ -3865,31 +3838,6 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
-				if (this.pendingFailure) {
-					const failure = this.pendingFailure;
-					this.pendingFailure = undefined;
-					const text = failure.text;
-					const omitted =
-						text !== undefined &&
-						this.sessionManager
-							.buildSessionProjection()
-							.entries.some(
-								({ sourceEntry, messages }) =>
-									sourceEntry.type === "message" &&
-									sourceEntry.message === failure.message &&
-									messages.length === 0,
-							);
-					if (omitted) {
-						// Backoff cancellation has no new assistant message. Preserve the core's
-						// settled outcome as display-only history, never as model context.
-						this.sessionManager.appendCustomEntry(RETRY_OUTCOME_ENTRY_TYPE, text);
-						this.showError(text);
-					} else {
-						failure.component.setFailureText(failure.text);
-					}
-					this.maybeSuggestBugReport(failure.message);
-					this.ui.requestRender();
-				}
 				await this.checkShutdownRequested();
 				this.ui.requestRender();
 				break;
@@ -3993,9 +3941,7 @@ export class InteractiveMode {
 				this.clearStatusIndicator("retry");
 				// Show error only on final failure (success shows normal response)
 				if (!event.success) {
-					const text = `Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`;
-					if (this.pendingFailure) this.pendingFailure.text = text;
-					else this.showError(text);
+					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 				}
 				this.ui.requestRender();
 				break;
@@ -4087,47 +4033,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private pendingModelSwitch:
-		| { oldModel: Model<any>; newModel: Model<any>; spacer: Spacer; text: ThemedText }
-		| undefined;
-
-	private setPendingModelSwitch(oldModel: Model<any>, newModel: Model<any>): void {
-		this.clearPendingModelSwitch();
-		const spacer = new Spacer(1);
-		const text = new ThemedText(() => theme.fg("dim", `Model: ${oldModel.id} → ${newModel.id}`), 1, 0);
-		this.chatContainer.addChild(spacer);
-		this.chatContainer.addChild(text);
-		this.pendingModelSwitch = { oldModel, newModel, spacer, text };
-		this.ui.requestRender();
-	}
-
-	private clearPendingModelSwitch(assistantMessage?: AgentMessage): void {
-		if (!this.pendingModelSwitch) return;
-		// If an assistant message arrived, only clear when it matches the new model.
-		if (assistantMessage && assistantMessage.role === "assistant") {
-			const { newModel } = this.pendingModelSwitch;
-			const matches = assistantMessage.provider === newModel.provider && assistantMessage.model === newModel.id;
-			if (!matches) {
-				// Keep the indicator but move it to the bottom so it stays visible.
-				this.chatContainer.removeChild(this.pendingModelSwitch.spacer);
-				this.chatContainer.removeChild(this.pendingModelSwitch.text);
-				this.chatContainer.addChild(this.pendingModelSwitch.spacer);
-				this.chatContainer.addChild(this.pendingModelSwitch.text);
-				this.ui.requestRender();
-				return;
-			}
-		}
-		this.chatContainer.removeChild(this.pendingModelSwitch.spacer);
-		this.chatContainer.removeChild(this.pendingModelSwitch.text);
-		this.pendingModelSwitch = undefined;
-		this.ui.requestRender();
-	}
-
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
-		if (entry.customType === RETRY_OUTCOME_ENTRY_TYPE && typeof entry.data === "string") {
-			this.showError(entry.data);
-			return;
-		}
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
 			return;
@@ -4149,10 +4055,7 @@ export class InteractiveMode {
 		this.chatContainer.addChild(component);
 	}
 
-	private addMessageToChat(
-		message: AgentMessage,
-		options?: { populateHistory?: boolean; failureText?: string | null },
-	): void {
+	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(
@@ -4171,6 +4074,20 @@ export class InteractiveMode {
 					message.fullOutputPath,
 				);
 				this.chatContainer.addChild(component);
+				break;
+			}
+			case "custom": {
+				if (message.display) {
+					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
+					const component = new CustomMessageComponent(
+						message,
+						renderer,
+						this.getMarkdownThemeWithSettings(),
+						this.outputPad,
+					);
+					component.setExpanded(this.toolOutputExpanded);
+					this.chatContainer.addChild(component);
+				}
 				break;
 			}
 			case "compactionSummary": {
@@ -4197,23 +4114,7 @@ export class InteractiveMode {
 			}
 			case "system":
 				break;
-			case "custom":
 			case "user": {
-				if (message.role === "custom" || message.origin?.type !== "interactive") {
-					if (!hasMeaningfulContent(message.content)) break;
-					const component = new OriginMessageComponent(
-						message,
-						message.role === "custom"
-							? this.session.extensionRunner.getMessageRenderer(message.customType)
-							: undefined,
-						this.outputPad,
-						this.settingsManager.getShowImages(),
-						this.settingsManager.getImageWidthCells(),
-					);
-					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
-					break;
-				}
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
 					if (this.chatContainer.children.length > 0) {
@@ -4249,7 +4150,7 @@ export class InteractiveMode {
 						);
 						this.chatContainer.addChild(userComponent);
 					}
-					if (options?.populateHistory && message.origin?.type === "interactive") {
+					if (options?.populateHistory) {
 						this.editor.addToHistory?.(textContent);
 					}
 				}
@@ -4258,21 +4159,13 @@ export class InteractiveMode {
 			case "assistant": {
 				const assistantComponent = new AssistantMessageComponent(
 					message,
-					this.thinkingDisplayMode,
+					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
 					this.hiddenThinkingLabel,
 					this.outputPad,
 					this.getMarkdownTransformers(),
 				);
-				if (this.thinkingBulkExpanded !== null) {
-					assistantComponent.setExpanded(this.thinkingBulkExpanded);
-				}
 				this.chatContainer.addChild(assistantComponent);
-				assistantComponent.setFailureText(options?.failureText);
-				if (this.pendingFailure?.message === message) {
-					assistantComponent.setFailureText(null);
-					this.pendingFailure.component = assistantComponent;
-				}
 				break;
 			}
 			case "toolResult": {
@@ -4291,11 +4184,7 @@ export class InteractiveMode {
 
 	private renderSessionItems(
 		items: readonly RenderSessionItem[],
-		options: {
-			updateFooter?: boolean;
-			populateHistory?: boolean;
-			suppressedFailures?: ReadonlySet<AssistantMessage>;
-		} = {},
+		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
@@ -4327,11 +4216,7 @@ export class InteractiveMode {
 			const message = item;
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				this.addMessageToChat(message, {
-					failureText: options.suppressedFailures?.has(message) ? null : undefined,
-				});
-				// Failed model responses never dispatch their tool calls.
-				if (message.stopReason === "aborted" || message.stopReason === "error") continue;
+				this.addMessageToChat(message);
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
@@ -4351,11 +4236,27 @@ export class InteractiveMode {
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
 
-						renderedPendingTools.set(content.id, component);
+						if (message.stopReason === "aborted" || message.stopReason === "error") {
+							let errorMessage: string;
+							if (message.stopReason === "aborted") {
+								const retryAttempt = this.session.retryAttempt;
+								errorMessage =
+									retryAttempt > 0
+										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
+										: "Operation aborted";
+							} else {
+								errorMessage = message.errorMessage || "Error";
+							}
+							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+						} else {
+							renderedPendingTools.set(content.id, component);
+						}
 					}
 				}
-				const miss = cacheMisses.get(message);
-				if (miss) this.addCacheMissNotice(miss);
+				if (message.stopReason !== "aborted" && message.stopReason !== "error") {
+					const miss = cacheMisses.get(message);
+					if (miss) this.addCacheMissNotice(miss);
+				}
 			} else if (message.role === "toolResult") {
 				// Match tool results to pending tool components
 				const component = renderedPendingTools.get(message.toolCallId);
@@ -4397,15 +4298,7 @@ export class InteractiveMode {
 			}
 			return messages;
 		});
-		// Preserve partial attempt text in history without presenting omitted recovery
-		// attempts as terminal errors. The core's projection owns these omissions.
-		const suppressedFailures = new Set<AssistantMessage>();
-		for (const { sourceEntry, messages } of this.sessionManager.buildSessionProjection().entries) {
-			if (messages.length === 0 && sourceEntry.type === "message" && sourceEntry.message.role === "assistant") {
-				suppressedFailures.add(sourceEntry.message);
-			}
-		}
-		this.renderSessionItems(items, { ...options, suppressedFailures });
+		this.renderSessionItems(items, options);
 	}
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {
@@ -4836,7 +4729,7 @@ export class InteractiveMode {
 			if (this.isExtensionCommand(text)) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, { source: "interactive" });
+				await this.session.prompt(text);
 			} else {
 				this.queueCompactionMessage(text, "followUp");
 			}
@@ -4848,7 +4741,7 @@ export class InteractiveMode {
 		if (this.session.isStreaming) {
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
-			await this.session.prompt(text, { streamingBehavior: "followUp", source: "interactive" });
+			await this.session.prompt(text, { streamingBehavior: "followUp" });
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}
@@ -4917,7 +4810,6 @@ export class InteractiveMode {
 		if (expanded === this.toolOutputExpanded) return;
 
 		this.toolOutputExpanded = expanded;
-		this.thinkingBulkExpanded = expanded;
 		const activeHeader = this.customHeader ?? this.builtInHeader;
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
@@ -4936,27 +4828,17 @@ export class InteractiveMode {
 	private updateThinkingBlockVisibility(): void {
 		for (const child of this.chatContainer.children) {
 			if (child instanceof AssistantMessageComponent) {
-				child.setThinkingDisplayMode(this.thinkingDisplayMode);
-				if (this.thinkingBulkExpanded !== null) {
-					child.setExpanded(this.thinkingBulkExpanded);
-				}
+				child.setHideThinkingBlock(this.hideThinkingBlock);
 			}
 		}
 		this.ui.requestRender();
 	}
 
 	private toggleThinkingBlockVisibility(): void {
-		const next: ThinkingDisplayMode =
-			this.thinkingDisplayMode === "preview"
-				? "expanded"
-				: this.thinkingDisplayMode === "expanded"
-					? "collapsed"
-					: "preview";
-		this.thinkingDisplayMode = next;
-		this.thinkingBulkExpanded = null;
-		this.settingsManager.setThinkingDisplayMode(next);
+		this.hideThinkingBlock = !this.hideThinkingBlock;
+		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
 		this.updateThinkingBlockVisibility();
-		this.showStatus(`Thinking display: ${next}`);
+		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
 	}
 
 	private async handleOpenExternalEditor(): Promise<void> {
@@ -5055,18 +4937,13 @@ export class InteractiveMode {
 	 * Combines session queue and compaction queue.
 	 */
 	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
-		const inputs = this.session.getQueuedInputs();
-		const label = (message: (typeof inputs.steering)[number]) => {
-			const text = this.getUserMessageText(message);
-			return message.origin?.type === "interactive" ? text : `[${formatMessageOrigin(message.origin)}] ${text}`;
-		};
 		return {
 			steering: [
-				...inputs.steering.map(label),
+				...this.session.getSteeringMessages(),
 				...this.compactionQueuedMessages.filter((msg) => msg.mode === "steer").map((msg) => msg.text),
 			],
 			followUp: [
-				...inputs.followUp.map(label),
+				...this.session.getFollowUpMessages(),
 				...this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text),
 			],
 		};
@@ -5077,7 +4954,7 @@ export class InteractiveMode {
 	 * Clears both session queue and compaction queue.
 	 */
 	private clearAllQueues(): { steering: string[]; followUp: string[] } {
-		const { steering, followUp } = this.session.takeInteractiveDrafts();
+		const { steering, followUp } = this.session.clearQueue();
 		const compactionSteering = this.compactionQueuedMessages
 			.filter((msg) => msg.mode === "steer")
 			.map((msg) => msg.text);
@@ -5111,7 +4988,7 @@ export class InteractiveMode {
 				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
-			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit queued terminal drafts`);
+			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
 			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}
@@ -5180,11 +5057,11 @@ export class InteractiveMode {
 				// When retry is pending, queue messages for the retry turn
 				for (const message of queuedMessages) {
 					if (this.isExtensionCommand(message.text)) {
-						await this.session.prompt(message.text, { source: "interactive" });
+						await this.session.prompt(message.text);
 					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text, undefined, { source: "interactive" });
+						await this.session.followUp(message.text);
 					} else {
-						await this.session.steer(message.text, undefined, { source: "interactive" });
+						await this.session.steer(message.text);
 					}
 				}
 				this.updatePendingMessagesDisplay();
@@ -5196,7 +5073,7 @@ export class InteractiveMode {
 			if (firstPromptIndex === -1) {
 				// All extension commands - execute them all
 				for (const message of queuedMessages) {
-					await this.session.prompt(message.text, { source: "interactive" });
+					await this.session.prompt(message.text);
 				}
 				return;
 			}
@@ -5207,12 +5084,12 @@ export class InteractiveMode {
 			const rest = queuedMessages.slice(firstPromptIndex + 1);
 
 			for (const message of preCommands) {
-				await this.session.prompt(message.text, { source: "interactive" });
+				await this.session.prompt(message.text);
 			}
 
 			// Start a prompt when idle, or queue it into a run still finishing compaction.
 			const promptPromise = this.session
-				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode, source: "interactive" })
+				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
 				.catch((error) => {
 					restoreQueue(error);
 				});
@@ -5220,11 +5097,11 @@ export class InteractiveMode {
 			// Queue remaining messages
 			for (const message of rest) {
 				if (this.isExtensionCommand(message.text)) {
-					await this.session.prompt(message.text, { source: "interactive" });
+					await this.session.prompt(message.text);
 				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text, undefined, { source: "interactive" });
+					await this.session.followUp(message.text);
 				} else {
-					await this.session.steer(message.text, undefined, { source: "interactive" });
+					await this.session.steer(message.text);
 				}
 			}
 			this.updatePendingMessagesDisplay();
@@ -5312,7 +5189,7 @@ export class InteractiveMode {
 					currentTheme: this.themeController.getThemeSelection() || SYSTEM_THEME_NAME,
 					terminalTheme: this.themeController.getTerminalTheme(),
 					availableThemes: getAvailableThemes(),
-					thinkingDisplayMode: this.thinkingDisplayMode,
+					hideThinkingBlock: this.hideThinkingBlock,
 					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					collapseChangelog: this.settingsManager.getCollapseChangelog(),
 					enableInstallTelemetry: this.settingsManager.getEnableInstallTelemetry(),
@@ -5342,7 +5219,7 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof OriginMessageComponent) {
+							if (child instanceof ToolExecutionComponent) {
 								child.setShowImages(enabled);
 							}
 						}
@@ -5350,7 +5227,7 @@ export class InteractiveMode {
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof OriginMessageComponent) {
+							if (child instanceof ToolExecutionComponent) {
 								child.setImageWidthCells(width);
 							}
 						}
@@ -5413,10 +5290,9 @@ export class InteractiveMode {
 						this.themeController.setThemeSetting(themeSetting);
 					},
 					onThemePreview: (themeName) => this.themeController.preview(themeName),
-					onThinkingDisplayModeChange: (mode) => {
-						this.thinkingDisplayMode = mode;
-						this.thinkingBulkExpanded = null;
-						this.settingsManager.setThinkingDisplayMode(mode);
+					onHideThinkingBlockChange: (hidden) => {
+						this.hideThinkingBlock = hidden;
+						this.settingsManager.setHideThinkingBlock(hidden);
 						this.updateThinkingBlockVisibility();
 					},
 					onMermaidRenderingModeChange: (mode) => {
@@ -5582,13 +5458,11 @@ export class InteractiveMode {
 		const model = await this.findExactModelMatch(searchTerm);
 		if (model) {
 			try {
-				const previousModel = this.session.model;
 				await this.session.setModel(model, { persist: false });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
 				this.showStatus(`Model: ${model.id}`);
 				void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
-				if (previousModel) this.setPendingModelSwitch(previousModel, model);
 			} catch (error) {
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
@@ -5609,14 +5483,10 @@ export class InteractiveMode {
 		this.showStatus("Refreshing model catalogs…");
 		const controller = new AbortController();
 		let timedOut = false;
-		const timeoutMs = this.session.settingsManager.getModelRefreshTimeoutMs();
-		const timeout =
-			timeoutMs === undefined
-				? undefined
-				: setTimeout(() => {
-						timedOut = true;
-						controller.abort();
-					}, timeoutMs);
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+		}, 15_000);
 		try {
 			const result = await refreshModelCatalogs(this.session.modelRuntime, controller.signal);
 			if (result.aborted && timedOut) {
@@ -5731,7 +5601,6 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selectModel = async (model: Model<any>, persist: boolean) => {
 				try {
-					const previousModel = this.session.model;
 					await this.session.setModel(model, { persist });
 					this.updateAvailableProviderCount();
 					this.footer.invalidate();
@@ -5739,7 +5608,6 @@ export class InteractiveMode {
 					done();
 					this.showStatus(persist ? `Default model: ${model.provider}/${model.id}` : `Model: ${model.id}`);
 					void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
-					if (previousModel) this.setPendingModelSwitch(previousModel, model);
 				} catch (error) {
 					done();
 					this.showError(error instanceof Error ? error.message : String(error));
@@ -5810,14 +5678,10 @@ export class InteractiveMode {
 			let disposed = false;
 			let timedOut = false;
 			const controller = new AbortController();
-			const timeoutMs = this.session.settingsManager.getModelRefreshTimeoutMs();
-			const timeout =
-				timeoutMs === undefined
-					? undefined
-					: setTimeout(() => {
-							timedOut = true;
-							controller.abort();
-						}, timeoutMs);
+			const timeout = setTimeout(() => {
+				timedOut = true;
+				controller.abort();
+			}, 15_000);
 			const selector = new ScopedModelsSelectorComponent(
 				{
 					allModels: availableModels,
@@ -6528,8 +6392,7 @@ export class InteractiveMode {
 		}
 
 		const controller = new AbortController();
-		const timeoutMs = session.settingsManager.getModelRefreshTimeoutMs();
-		const timeout = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
+		const timeout = setTimeout(() => controller.abort(), 15_000);
 		void session.modelRuntime
 			.refresh({ providers: [providerId], signal: controller.signal })
 			.then(async (result) => {
@@ -6868,7 +6731,7 @@ export class InteractiveMode {
 			if (chatRestoredBeforeSessionStart) {
 				return;
 			}
-			this.thinkingDisplayMode = this.settingsManager.getThinkingDisplayMode();
+			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 			this.outputPad = this.settingsManager.getOutputPad();
 			this.rebuildChatFromMessages();
 			chatRestoredBeforeSessionStart = true;
@@ -7281,8 +7144,8 @@ export class InteractiveMode {
 | \`${cycleThinkingLevel}\` | Cycle thinking level |
 | \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
 | \`${selectModel}\` | Open model selector |
-| \`${expandTools}\` | Expand or collapse tool output and thinking blocks |
-| \`${toggleThinking}\` | Cycle thinking display (preview/expanded/collapsed) |
+| \`${expandTools}\` | Toggle tool output expansion |
+| \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${externalEditor}\` | Edit message in external editor |
 | \`${copyMessage}\` | Copy selection or last assistant message |
 | \`${followUp}\` | Queue follow-up message |
