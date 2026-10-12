@@ -3702,13 +3702,13 @@ export class InteractiveMode {
 				break;
 
 			case "message_end":
-				if (event.message.role === "user") break;
 				if (
 					this.submittedInput !== undefined &&
 					event.message.role === "assistant" &&
 					(event.message.stopReason === "error" || event.message.stopReason === "aborted")
 				)
 					this.restoreSubmittedInput();
+				if (event.message.role === "user") break;
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
