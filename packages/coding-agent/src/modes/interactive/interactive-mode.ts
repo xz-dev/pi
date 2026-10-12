@@ -505,13 +505,8 @@ export class InteractiveMode {
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private readonly entriesRenderedByBoundaryCompaction = new Set<string>();
 	private streamingMessage: AssistantMessage | undefined = undefined;
-	private pendingFailure:
-		| {
-				message: AssistantMessage;
-				component: AssistantMessageComponent;
-				text?: string;
-		  }
-		| undefined;
+	// Final retry outcome waiting for settlement; rendered as display-only history.
+	private settledRetryText: string | undefined;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -2220,7 +2215,7 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
-		this.pendingFailure = undefined;
+		this.settledRetryText = undefined;
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
@@ -3524,7 +3519,6 @@ export class InteractiveMode {
 						this.getMarkdownTransformers(),
 					);
 					this.streamingMessage = event.message;
-					this.streamingComponent.setFailureText(null);
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
 					this.ui.requestRender();
@@ -3569,43 +3563,46 @@ export class InteractiveMode {
 
 			case "message_end":
 				if (event.message.role === "user") break;
-				if (this.streamingComponent && event.message.role === "assistant") {
+				if (event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					let errorMessage: string | undefined;
+					const failed =
+						this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error";
 					if (this.streamingMessage.stopReason === "aborted") {
 						const retryAttempt = this.session.retryAttempt;
-						errorMessage =
+						const errorMessage =
 							retryAttempt > 0
 								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					const failed =
-						this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error";
-					if (failed) {
-						// message_end precedes the core's retry/compaction decision.
-						this.streamingComponent.setFailureText(null);
-						this.pendingFailure = { message: this.streamingMessage, component: this.streamingComponent };
-					} else {
-						this.pendingFailure = undefined;
-					}
-					this.streamingComponent.updateContent(this.streamingMessage, false);
+					if (failed) this.maybeSuggestBugReport(this.streamingMessage);
+					if (this.streamingComponent) {
+						// Provider errors are shown as they happen; the session still owns
+						// retry/compaction decisions after message_end.
+						this.streamingComponent.updateContent(this.streamingMessage, false);
 
-					if (failed) {
-						// These previews never executed. Keep completed tool results untouched.
-						for (const component of this.pendingTools.values()) this.chatContainer.removeChild(component);
-						this.pendingTools.clear();
-					} else {
-						// Args are now complete - trigger diff computation for edit tools
-						for (const [, component] of this.pendingTools.entries()) {
-							component.setArgsComplete();
+						if (failed) {
+							// These previews never executed. Keep completed tool results untouched.
+							for (const component of this.pendingTools.values()) this.chatContainer.removeChild(component);
+							this.pendingTools.clear();
+						} else {
+							// Args are now complete - trigger diff computation for edit tools
+							for (const [, component] of this.pendingTools.entries()) {
+								component.setArgsComplete();
+							}
+							this.maybeShowThinkingDropNotice(this.streamingMessage);
+							this.maybeShowCacheMissNotice(this.streamingMessage);
 						}
-						this.maybeShowThinkingDropNotice(this.streamingMessage);
-						this.maybeShowCacheMissNotice(this.streamingMessage);
+						this.streamingComponent = undefined;
+						this.streamingMessage = undefined;
+						this.footer.invalidate();
+					} else if (failed) {
+						// The failure arrived without a preceding message_start (pre-stream).
+						// Render it immediately instead of deferring through agent_settled.
+						this.showError(this.streamingMessage.errorMessage || "Unknown error");
+						this.streamingMessage = undefined;
+						this.footer.invalidate();
 					}
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
-					this.footer.invalidate();
 				}
 				this.ui.requestRender();
 				break;
@@ -3677,30 +3674,14 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
-				if (this.pendingFailure) {
-					const failure = this.pendingFailure;
-					this.pendingFailure = undefined;
-					const text = failure.text;
-					const omitted =
-						text !== undefined &&
-						this.sessionManager
-							.buildSessionProjection()
-							.entries.some(
-								({ sourceEntry, messages }) =>
-									sourceEntry.type === "message" &&
-									sourceEntry.message === failure.message &&
-									messages.length === 0,
-							);
-					if (omitted) {
-						// Backoff cancellation has no new assistant message. Preserve the core's
-						// settled outcome as display-only history, never as model context.
-						this.sessionManager.appendCustomEntry(RETRY_OUTCOME_ENTRY_TYPE, text);
-						this.showError(text);
-					} else {
-						failure.component.setFailureText(failure.text);
-					}
-					this.maybeSuggestBugReport(failure.message);
-					this.ui.requestRender();
+				// The settled outcome has no assistant message to carry it (e.g. backoff
+				// cancellation, which leaves the omitted attempt visible instead).
+				// Keep it as display-only history, never model context.
+				if (this.settledRetryText) {
+					const text = this.settledRetryText;
+					this.settledRetryText = undefined;
+					this.sessionManager.appendCustomEntry(RETRY_OUTCOME_ENTRY_TYPE, text);
+					this.showError(text);
 				}
 				await this.checkShutdownRequested();
 				break;
@@ -3791,11 +3772,15 @@ export class InteractiveMode {
 					this.retryEscapeHandler = undefined;
 				}
 				this.clearStatusIndicator("retry");
-				// Show error only on final failure (success shows normal response)
+				// Show error only on final failure (success shows normal response).
+				// Backoff cancellation has no assistant message to carry its outcome;
+				// an exhausted run repeats only the count since each attempt already
+				// displays its own error.
 				if (!event.success) {
-					const text = `Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`;
-					if (this.pendingFailure) this.pendingFailure.text = text;
-					else this.showError(text);
+					this.settledRetryText =
+						event.finalError === "Retry cancelled"
+							? `Retry failed after ${event.attempt} attempts: ${event.finalError}`
+							: `Retry failed after ${event.attempt} attempts`;
 				}
 				this.ui.requestRender();
 				break;
@@ -3907,10 +3892,7 @@ export class InteractiveMode {
 		this.chatContainer.addChild(component);
 	}
 
-	private addMessageToChat(
-		message: AgentMessage,
-		options?: { populateHistory?: boolean; failureText?: string | null },
-	): void {
+	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(
@@ -4021,11 +4003,6 @@ export class InteractiveMode {
 					this.getMarkdownTransformers(),
 				);
 				this.chatContainer.addChild(assistantComponent);
-				assistantComponent.setFailureText(options?.failureText);
-				if (this.pendingFailure?.message === message) {
-					assistantComponent.setFailureText(null);
-					this.pendingFailure.component = assistantComponent;
-				}
 				break;
 			}
 			case "toolResult": {
@@ -4043,7 +4020,6 @@ export class InteractiveMode {
 		options: {
 			updateFooter?: boolean;
 			populateHistory?: boolean;
-			suppressedFailures?: ReadonlySet<AssistantMessage>;
 		} = {},
 	): void {
 		this.pendingTools.clear();
@@ -4076,9 +4052,7 @@ export class InteractiveMode {
 			const message = item;
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				this.addMessageToChat(message, {
-					failureText: options.suppressedFailures?.has(message) ? null : undefined,
-				});
+				this.addMessageToChat(message, options);
 				// Failed model responses never dispatch their tool calls.
 				if (message.stopReason === "aborted" || message.stopReason === "error") continue;
 				// Render tool call components
@@ -4146,15 +4120,7 @@ export class InteractiveMode {
 			}
 			return messages;
 		});
-		// Preserve partial attempt text in history without presenting omitted recovery
-		// attempts as terminal errors. The core's projection owns these omissions.
-		const suppressedFailures = new Set<AssistantMessage>();
-		for (const { sourceEntry, messages } of this.sessionManager.buildSessionProjection().entries) {
-			if (messages.length === 0 && sourceEntry.type === "message" && sourceEntry.message.role === "assistant") {
-				suppressedFailures.add(sourceEntry.message);
-			}
-		}
-		this.renderSessionItems(items, { ...options, suppressedFailures });
+		this.renderSessionItems(items, options);
 	}
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {

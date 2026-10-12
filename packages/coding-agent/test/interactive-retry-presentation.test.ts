@@ -92,10 +92,6 @@ function createView(harness: Harness) {
 			InteractiveMode.prototype,
 			"renderSessionEntries",
 		) as InteractiveMode["renderSessionEntries"],
-		settlePendingModelSwitch: Reflect.get(
-			InteractiveMode.prototype,
-			"settlePendingModelSwitch",
-		) as InteractiveMode["settlePendingModelSwitch"],
 		rebuildChatFromMessages: Reflect.get(
 			InteractiveMode.prototype,
 			"rebuildChatFromMessages",
@@ -207,7 +203,7 @@ describe("Interactive retry presentation", () => {
 		harness.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") {
 				statuses.push(stripAnsi(view.statusContainer.render(100).join("\n")));
-				// Repainting during backoff must not restore a provisional error.
+				// The failed attempt's own error stays visible through backoff repaints.
 				view.chatContainer.invalidate();
 				duringRetry.push(view.renderChat());
 			}
@@ -217,77 +213,95 @@ describe("Interactive retry presentation", () => {
 		expect(calls()).toBe(2);
 		expect(statuses).toHaveLength(1);
 		expect(statuses[0]).toContain("1/10");
-		expect(duringRetry.join("\n")).not.toContain(WEBSOCKET_1006);
+		// The original failure remains visible exactly once during backoff; the retry
+		// status line carries the attempt state instead of duplicating the error.
+		expect(occurrences(duringRetry.join("\n"), WEBSOCKET_1006)).toBe(1);
 		for (const reconstruct of [false, true]) {
 			if (reconstruct) view.rebuildChatFromMessages();
 			expect(view.renderChat()).toContain("recovered");
 			expect(view.renderChat()).toContain("Partial response");
-			expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
+			expect(occurrences(view.renderChat(), WEBSOCKET_1006)).toBe(1);
 			expect(view.renderChat()).not.toContain("never_ran");
 		}
 		expect(harness.eventsOfType("tool_execution_start")).toEqual([]);
+		// The failed attempt stays out of model context while remaining in display history.
+		expect(JSON.stringify(harness.session.messages)).not.toContain(WEBSOCKET_1006);
 	});
 
-	it.each([true, false])("defers a pre-start failure through message_end hooks with retry=%s", async (enabled) => {
-		const hookEntered = Promise.withResolvers<void>();
-		const hookReleased = Promise.withResolvers<void>();
-		const harness = await createHarness({
-			settings: { retry: { enabled, maxRetries: 1, baseDelayMs: 1 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("message_end", async (event) => {
-						if (event.message.role === "assistant" && event.message.stopReason === "error") {
-							hookEntered.resolve();
-							await hookReleased.promise;
-						}
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		const view = createView(harness);
-		let calls = 0;
-		harness.session.agent.streamFunction = (model) => {
-			const failed = ++calls === 1;
-			const response = {
-				...fauxAssistantMessage(
-					failed ? "" : "recovered",
-					failed ? { stopReason: "error", errorMessage: WEBSOCKET_1006 } : {},
-				),
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
+	it.each([true, false])(
+		"shows a pre-start failure immediately through message_end hooks with retry=%s",
+		async (enabled) => {
+			const hookEntered = Promise.withResolvers<void>();
+			const hookReleased = Promise.withResolvers<void>();
+			const harness = await createHarness({
+				settings: { retry: { enabled, maxRetries: 1, baseDelayMs: 1 } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("message_end", async (event) => {
+							if (event.message.role === "assistant" && event.message.stopReason === "error") {
+								hookEntered.resolve();
+								await hookReleased.promise;
+							}
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const view = createView(harness);
+			let calls = 0;
+			harness.session.agent.streamFunction = (model) => {
+				const failed = ++calls === 1;
+				const response = {
+					...fauxAssistantMessage(
+						failed ? "" : "recovered",
+						failed ? { stopReason: "error", errorMessage: WEBSOCKET_1006 } : {},
+					),
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+				};
+				const stream = createAssistantMessageEventStream();
+				// No start event: exercise the agent loop's synthetic message_start.
+				stream.push(
+					failed
+						? { type: "error", reason: "error", error: response }
+						: { type: "done", reason: "stop", message: response },
+				);
+				stream.end(response);
+				return stream;
 			};
-			const stream = createAssistantMessageEventStream();
-			// No start event: exercise the agent loop's synthetic message_start.
-			stream.push(
-				failed
-					? { type: "error", reason: "error", error: response }
-					: { type: "done", reason: "stop", message: response },
-			);
-			stream.end(response);
-			return stream;
-		};
-		const prompt = harness.session.prompt("test");
-		await hookEntered.promise;
-		try {
-			await view.flush();
-			expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
-			view.chatContainer.invalidate();
-			expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
-		} finally {
-			hookReleased.resolve();
-			await prompt;
-			await view.flush();
-		}
-		expect(calls).toBe(enabled ? 2 : 1);
-		if (enabled) {
-			expect(view.renderChat()).toContain("recovered");
-			expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
-		} else {
-			expect(occurrences(view.renderChat(), WEBSOCKET_1006)).toBe(1);
-		}
-	});
+			// The view subscribed first, so by the time this listener sees message_end
+			// the view has already applied it — before agent_settled runs.
+			const atMessageEnd = Promise.withResolvers<string>();
+			harness.session.subscribe((event) => {
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					atMessageEnd.resolve(view.renderChat());
+				}
+			});
+			const prompt = harness.session.prompt("test");
+			await hookEntered.promise;
+			try {
+				await view.flush();
+				expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
+				view.chatContainer.invalidate();
+				// The synthetic message_start already carries the finalized pre-stream
+				// failure; it stays visible while the message_end hook is paused.
+				expect(occurrences(view.renderChat(), WEBSOCKET_1006)).toBe(1);
+			} finally {
+				hookReleased.resolve();
+				await prompt;
+				await view.flush();
+			}
+			expect(calls).toBe(enabled ? 2 : 1);
+			// Once message_end dispatches, the failure is on screen before agent_settled.
+			expect(occurrences(await atMessageEnd.promise, WEBSOCKET_1006)).toBe(1);
+			for (const reconstruct of [false, true]) {
+				if (reconstruct) view.rebuildChatFromMessages();
+				if (enabled) expect(view.renderChat()).toContain("recovered");
+				expect(occurrences(view.renderChat(), WEBSOCKET_1006)).toBe(1);
+			}
+		},
+	);
 
 	it.each([
 		{ name: "disabled retry", enabled: false, maxRetries: 10, error: WEBSOCKET_1006 },
@@ -310,20 +324,45 @@ describe("Interactive retry presentation", () => {
 		expect(harness.eventsOfType("tool_execution_start")).toEqual([]);
 	});
 
-	it.each([WEBSOCKET_1006, "invalid_api_key"])("shows the final retry failure once: %s", async (lastError) => {
-		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } } });
-		harnesses.push(harness);
-		const view = createView(harness);
-		useScriptedStream(harness, [failedPreview(), failedPreview(lastError)]);
-		await harness.session.prompt("test");
-		await view.flush();
-		for (const reconstruct of [false, true]) {
-			if (reconstruct) view.rebuildChatFromMessages();
-			expect(occurrences(view.renderChat(), lastError)).toBe(1);
-			expect(view.renderChat()).not.toContain("never_ran");
-		}
-		expect(harness.eventsOfType("auto_retry_end")).toMatchObject([{ success: false, finalError: lastError }]);
-	});
+	it.each([WEBSOCKET_1006, "invalid_api_key"])(
+		"shows each attempt error plus the settled failure once: %s",
+		async (lastError) => {
+			const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } } });
+			harnesses.push(harness);
+			const view = createView(harness);
+			useScriptedStream(harness, [failedPreview(), failedPreview(lastError)]);
+			await harness.session.prompt("test");
+			await view.flush();
+			for (const reconstruct of [false, true]) {
+				if (reconstruct) view.rebuildChatFromMessages();
+				// Each failed attempt keeps its own error; exhaustion adds only a
+				// count-only outcome line, never a copy of the final error.
+				expect(occurrences(view.renderChat(), "Retry failed after 1 attempts")).toBe(1);
+				// Two failed attempts: same error shows twice, a distinct final error once.
+				expect(occurrences(view.renderChat(), lastError)).toBe(lastError === WEBSOCKET_1006 ? 2 : 1);
+				expect(view.renderChat()).not.toContain("never_ran");
+			}
+			expect(harness.eventsOfType("auto_retry_end")).toMatchObject([{ success: false, finalError: lastError }]);
+			// The persisted outcome entry survives a session reopen unchanged.
+			const sessionFile = join(harness.tempDir, `final-${lastError === WEBSOCKET_1006 ? "same" : "distinct"}.jsonl`);
+			writeFileSync(
+				sessionFile,
+				`${[harness.sessionManager.getHeader(), ...harness.sessionManager.getEntries()]
+					.map((entry) => JSON.stringify(entry))
+					.join("\n")}\n`,
+			);
+			const restored = await createHarness({
+				sessionManager: SessionManager.open(sessionFile, harness.tempDir),
+			});
+			harnesses.push(restored);
+			const resumedView = createView(restored);
+			resumedView.rebuildChatFromMessages();
+			expect(occurrences(resumedView.renderChat(), "Retry failed after 1 attempts")).toBe(1);
+			expect(occurrences(resumedView.renderChat(), lastError)).toBe(lastError === WEBSOCKET_1006 ? 2 : 1);
+			expect(resumedView.renderChat()).not.toContain("never_ran");
+			expect(JSON.stringify(restored.session.messages)).not.toContain("Retry failed");
+		},
+	);
 
 	it("shows direct stream cancellation once after previews, also on reconstruction", async () => {
 		const harness = await createHarness();
@@ -369,9 +408,10 @@ describe("Interactive retry presentation", () => {
 		expect(calls()).toBe(1);
 		for (const reconstruct of [false, true]) {
 			if (reconstruct) view.rebuildChatFromMessages();
+			// The cancelled attempt's own error and the settled cancellation both stay.
 			expect(occurrences(view.renderChat(), "Retry cancelled")).toBe(1);
 			expect(view.renderChat()).not.toContain("never_ran");
-			expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
+			expect(occurrences(view.renderChat(), WEBSOCKET_1006)).toBe(1);
 		}
 		const sessionFile = join(harness.tempDir, "cancelled.jsonl");
 		writeFileSync(
@@ -385,7 +425,7 @@ describe("Interactive retry presentation", () => {
 		const resumedView = createView(restored);
 		resumedView.rebuildChatFromMessages();
 		expect(occurrences(resumedView.renderChat(), "Retry cancelled")).toBe(1);
-		expect(resumedView.renderChat()).not.toContain(WEBSOCKET_1006);
+		expect(occurrences(resumedView.renderChat(), WEBSOCKET_1006)).toBe(1);
 		expect(JSON.stringify(restored.session.messages)).not.toContain("Retry cancelled");
 	});
 
@@ -419,67 +459,10 @@ describe("Interactive retry presentation", () => {
 		for (const reconstruct of [false, true]) {
 			if (reconstruct) view.rebuildChatFromMessages();
 			expect(occurrences(view.renderChat(), "actual tool failure")).toBe(1);
-			expect(view.renderChat()).not.toContain(WEBSOCKET_1006);
+			// The failed provider attempt also stays visible once; executed tool
+			// results are untouched by its abandoned previews.
+			expect(occurrences(view.renderChat(), WEBSOCKET_1006)).toBe(1);
 			expect(view.renderChat()).not.toContain("never_ran");
 		}
-	});
-});
-
-describe("Interactive model switch indicator", () => {
-	const harnesses: Harness[] = [];
-	beforeAll(() => initTheme("dark"));
-	afterEach(() => {
-		for (const harness of harnesses.splice(0)) harness.cleanup();
-	});
-
-	function createModelSwitchView(harness: Harness) {
-		return createView(harness);
-	}
-
-	it("shows old → new until the next request starts, then settles to the new model in place", async () => {
-		const harness = await createHarness({ models: [{ id: "model-a" }, { id: "model-b" }] });
-		harnesses.push(harness);
-		const view = createModelSwitchView(harness);
-		useScriptedStream(harness, [fauxAssistantMessage("answer")]);
-
-		const setPendingModelSwitch = Reflect.get(
-			InteractiveMode.prototype,
-			"setPendingModelSwitch",
-		) as InteractiveMode["setPendingModelSwitch"];
-		const settlePendingModelSwitch = Reflect.get(
-			InteractiveMode.prototype,
-			"settlePendingModelSwitch",
-		) as InteractiveMode["settlePendingModelSwitch"];
-
-		const [oldModel, newModel] = harness.models;
-		await harness.session.setModel(newModel);
-		setPendingModelSwitch.call(view as unknown as InteractiveMode, oldModel, newModel);
-		await view.flush();
-
-		// Pending: arrow form, before any request.
-		expect(view.renderChat()).toContain("Model: model-a → model-b");
-
-		// turn_start fires before the provider request; the indicator settles in place.
-		settlePendingModelSwitch.call(view as unknown as InteractiveMode);
-		await view.flush();
-		expect(view.renderChat()).toContain("Model: model-b");
-		expect(view.renderChat()).not.toContain("→");
-	});
-
-	it("ignores a no-op reselection of the current model", async () => {
-		const harness = await createHarness({ models: [{ id: "model-a" }, { id: "model-b" }] });
-		harnesses.push(harness);
-		const view = createModelSwitchView(harness);
-
-		const setPendingModelSwitch = Reflect.get(
-			InteractiveMode.prototype,
-			"setPendingModelSwitch",
-		) as InteractiveMode["setPendingModelSwitch"];
-
-		const current = harness.session.model;
-		if (!current) throw new Error("session model missing");
-		setPendingModelSwitch.call(view as unknown as InteractiveMode, current, current);
-		await view.flush();
-		expect(view.renderChat()).not.toContain("Model:");
 	});
 });

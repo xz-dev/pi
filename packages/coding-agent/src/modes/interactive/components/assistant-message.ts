@@ -19,7 +19,6 @@ export class AssistantMessageComponent extends Container {
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private lastMessage?: AssistantMessage;
-	private failureText: string | null | undefined;
 	private hasToolCalls = false;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
@@ -69,12 +68,6 @@ export class AssistantMessageComponent extends Container {
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
-	}
-
-	/** null defers failure display until the session decides its final outcome. */
-	setFailureText(text: string | null | undefined): void {
-		this.failureText = text;
-		if (this.lastMessage) this.updateContent(this.lastMessage);
 	}
 
 	setOutputPad(padding: number): void {
@@ -189,17 +182,16 @@ export class AssistantMessageComponent extends Container {
 			this.contentContainer.addChild(
 				new Text(theme.fg("error", "Response was truncated before completion."), this.outputPad, 0),
 			);
-		} else if (this.failureText !== null) {
+		} else {
 			if (message.stopReason === "aborted") {
 				const abortMessage =
-					this.failureText ??
-					(message.errorMessage && message.errorMessage !== "Request was aborted"
+					message.errorMessage && message.errorMessage !== "Request was aborted"
 						? message.errorMessage
-						: "Operation aborted");
+						: "Operation aborted";
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), this.outputPad, 0));
 			} else if (message.stopReason === "error") {
-				const errorMsg = this.failureText ?? (message.errorMessage || "Unknown error");
+				const errorMsg = message.errorMessage || "Unknown error";
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
 			}
