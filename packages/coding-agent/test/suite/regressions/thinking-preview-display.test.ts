@@ -1,5 +1,4 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
 import { Container, setKeybindings, TuiMainScreen, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, test } from "vitest";
 import { defaultEditorTheme } from "../../../../tui/test/test-themes.ts";
@@ -7,7 +6,6 @@ import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../../../src/core/settings-manager.ts";
 import { createAllToolRenderers } from "../../../src/core/tools/renderers/index.ts";
-import { ExperimentalChatView } from "../../../src/experimental/client-tui-chat.ts";
 import { AssistantMessageComponent } from "../../../src/modes/interactive/components/assistant-message.ts";
 import { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
@@ -433,35 +431,15 @@ describe("thinking preview display", () => {
 		expect(item.description.toLowerCase()).toContain(binding);
 	});
 
-	test("experimental chat view keeps streaming and completed reasoning visible", () => {
-		const ui = new TuiMainScreen(new VirtualTerminal());
-		const chat = new ExperimentalChatView(ui, process.cwd());
-		const conversation = { id: 1 as ConversationId };
+	test("expanded assistant keeps streaming, completed, and historical reasoning visible", () => {
 		const message = fauxAssistantMessage([{ type: "thinking", thinking: "formerly visible reasoning" }]);
-		try {
-			chat.apply({
-				conversation,
-				entries: [],
-				docs: {
-					"pi.live": JSON.parse(JSON.stringify({ generation: { attempt: 0, message } })),
-				},
-			});
-			expect(renderText(chat.transcript)).toContain("formerly visible reasoning");
-			chat.apply({
-				conversation,
-				docs: {},
-				entries: [{ id: 1 as EntryId, conversationId: conversation.id, kind: "pi.assistant", model: [message] }],
-			});
-			expect(renderText(chat.transcript)).toContain("formerly visible reasoning");
-			// A historical message also goes through the non-streaming constructor.
-			chat.apply({
-				conversation,
-				docs: {},
-				entries: [{ id: 2 as EntryId, conversationId: conversation.id, kind: "pi.assistant", model: [message] }],
-			});
-			expect(renderText(chat.transcript)).toContain("formerly visible reasoning");
-		} finally {
-			chat.dispose();
-		}
+		const component = new AssistantMessageComponent(undefined, "expanded");
+		component.updateContent(message, true);
+		expect(renderText(component)).toContain("formerly visible reasoning");
+		component.updateContent(message, false);
+		expect(renderText(component)).toContain("formerly visible reasoning");
+		const historical = new AssistantMessageComponent(undefined, "expanded");
+		historical.updateContent(message, false);
+		expect(renderText(historical)).toContain("formerly visible reasoning");
 	});
 });
