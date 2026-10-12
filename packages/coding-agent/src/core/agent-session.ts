@@ -118,8 +118,8 @@ import {
 } from "./extensions/index.ts";
 import {
 	type BeforeAgentStartTrigger,
-	emitSessionShutdownEvent,
 	type ExtensionShutdownProgressListener,
+	emitSessionShutdownEvent,
 } from "./extensions/runner.ts";
 import { planContinuation } from "./manual-retry.ts";
 import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
