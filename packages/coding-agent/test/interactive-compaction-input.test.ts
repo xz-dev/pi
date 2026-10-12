@@ -15,47 +15,53 @@ const prototype = InteractiveMode.prototype as unknown as {
 };
 
 describe("compaction input display", () => {
-	it.each(["rejection", "error-event"] as const)("restores undelivered text after %s", async (failure) => {
-		initTheme("dark");
-		const editor = { getText: () => "new draft", setText: vi.fn() };
-		const pendingMessagesContainer = new Container();
-		const fake = {
-			isInitialized: true,
-			submittedInput: undefined as string | undefined,
-			showSubmittedInput: false,
-			pendingMessagesContainer,
-			editor,
-			ui: { requestRender: vi.fn() },
-			footer: { invalidate: vi.fn() },
-			programStatus: { handleEvent: vi.fn() },
-			getAllQueuedMessages: () => ({ steering: [], followUp: [] }),
-			updatePendingMessagesDisplay() {
-				prototype.updatePendingMessagesDisplay.call(this);
-			},
-			restoreSubmittedInput() {
-				prototype.restoreSubmittedInput.call(this);
-			},
-			clearSubmittedInput() {
-				prototype.clearSubmittedInput.call(this);
-			},
-			maybeSuggestBugReport: vi.fn(),
-			showError: vi.fn(),
-			session: {
-				prompt: async () => {
-					if (failure === "rejection") throw new Error("preflight failed");
-					await prototype.handleEvent.call(fake, {
-						type: "message_end",
-						message: fauxAssistantMessage("", { stopReason: "error", errorMessage: "lifecycle failed" }),
-					});
+	it.each(["rejection", "error-event", "abort-event"] as const)(
+		"restores undelivered text after %s",
+		async (failure) => {
+			initTheme("dark");
+			const editor = { getText: () => "new draft", setText: vi.fn() };
+			const pendingMessagesContainer = new Container();
+			const fake = {
+				isInitialized: true,
+				submittedInput: undefined as string | undefined,
+				showSubmittedInput: false,
+				pendingMessagesContainer,
+				editor,
+				ui: { requestRender: vi.fn() },
+				footer: { invalidate: vi.fn() },
+				programStatus: { handleEvent: vi.fn() },
+				getAllQueuedMessages: () => ({ steering: [], followUp: [] }),
+				updatePendingMessagesDisplay() {
+					prototype.updatePendingMessagesDisplay.call(this);
 				},
-			},
-		};
-		const prompt = prototype.promptWithPendingDisplay.call(fake, "saved input");
-		if (failure === "rejection") await expect(prompt).rejects.toThrow("preflight failed");
-		else await prompt;
-		expect(editor.setText).toHaveBeenCalledWith("saved input\n\nnew draft");
-		expect(pendingMessagesContainer.render(80).join("\n")).not.toContain("saved input");
-	});
+				restoreSubmittedInput() {
+					prototype.restoreSubmittedInput.call(this);
+				},
+				clearSubmittedInput() {
+					prototype.clearSubmittedInput.call(this);
+				},
+				maybeSuggestBugReport: vi.fn(),
+				showError: vi.fn(),
+				session: {
+					prompt: async () => {
+						if (failure === "rejection") throw new Error("preflight failed");
+						await prototype.handleEvent.call(fake, {
+							type: "message_end",
+							message: fauxAssistantMessage("", {
+								stopReason: failure === "abort-event" ? "aborted" : "error",
+								errorMessage: "lifecycle failed",
+							}),
+						});
+					},
+				},
+			};
+			const prompt = prototype.promptWithPendingDisplay.call(fake, "saved input");
+			if (failure === "rejection") await expect(prompt).rejects.toThrow("preflight failed");
+			else await prompt;
+			expect(editor.setText).toHaveBeenCalledWith("saved input\n\nnew draft");
+			expect(pendingMessagesContainer.render(80).join("\n")).not.toContain("saved input");
+		},
+	);
 
 	function compactionFake(prompt: () => Promise<void>) {
 		const chat: string[] = [];
@@ -105,6 +111,11 @@ describe("compaction input display", () => {
 		const { fake, pendingMessagesContainer } = compactionFake(() => pending);
 		const prompt = prototype.promptWithPendingDisplay.call(fake, "quick input");
 		expect(pendingMessagesContainer.render(80).join("\n")).not.toContain("quick input");
+		await prototype.handleEvent.call(fake, {
+			type: "message_end",
+			message: { role: "user", content: "previous input", timestamp: Date.now() },
+		});
+		expect(fake.submittedInput).toBe("quick input");
 		await prototype.handleEvent.call(fake, {
 			type: "message_start",
 			message: { role: "user", content: "quick input", timestamp: Date.now() },
