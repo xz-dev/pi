@@ -34,12 +34,7 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import {
-	contentText,
-	getAssistantRetryPlan,
-	getCurrentSystemMessage,
-	getCurrentTools,
-} from "@earendil-works/pi-ai";
+import { contentText, getCurrentSystemMessage, getCurrentTools, retryDelayMs } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -515,7 +510,6 @@ export class AgentSession {
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 
 	// Retry state
-	private _retryGlobalAttempt = 0;
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
 	/** Single-use input preparation handed to the immediately following request. */
@@ -585,7 +579,6 @@ export class AgentSession {
 
 	private _modelRuntime: ModelRuntime;
 	private _cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
-	private _unsubscribeModelsChanged: () => void;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -614,7 +607,6 @@ export class AgentSession {
 		if (this._cacheWarmer) {
 			this._cacheWarmer.onWarmed = (entry) => this._emit({ type: "entry_appended", entry });
 		}
-		this._unsubscribeModelsChanged = this._modelRuntime.onModelsChanged(() => this._refreshModelsFromRuntime());
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._usesDefaultTools = config.usesDefaultTools ?? false;
@@ -1531,7 +1523,6 @@ export class AgentSession {
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
-					this._retryGlobalAttempt = 0;
 				}
 			}
 		}
@@ -1549,14 +1540,14 @@ export class AgentSession {
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		if (this._agentRunAbortRequested) return false;
 		const settings = this.settingsManager.getRetrySettings();
+		if (!settings.enabled || this._retryAttempt >= settings.maxRetries) {
+			return false;
+		}
 
 		for (let i = event.messages.length - 1; i >= 0; i--) {
 			const message = event.messages[i];
 			if (message.role === "assistant") {
-				return (
-					this._isRetryableError(message as AssistantMessage) &&
-					getAssistantRetryPlan(message as AssistantMessage, settings, this._retryGlobalAttempt) !== undefined
-				);
+				return this._isRetryableError(message as AssistantMessage);
 			}
 		}
 		return false;
@@ -1791,7 +1782,6 @@ export class AgentSession {
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
 		this._disconnectFromAgent();
-		this._unsubscribeModelsChanged();
 		this._eventListeners = [];
 		if (this._cacheWarmer) {
 			this._cacheWarmer.onWarmed = undefined;
@@ -2510,7 +2500,6 @@ export class AgentSession {
 				finalError: message.errorMessage,
 			});
 			this._retryAttempt = 0;
-			this._retryGlobalAttempt = 0;
 		}
 
 		if (await this._checkCompaction(message, true, true)) {
@@ -3989,27 +3978,18 @@ export class AgentSession {
 			: undefined;
 	}
 
-	private _refreshModelsFromRuntime(): void {
+	private _refreshCurrentModelFromRegistry(): void {
 		const currentModel = this.model;
-		if (currentModel) {
-			const refreshed = this._modelRuntime.getModel(currentModel.provider, currentModel.id);
-			if (refreshed) {
-				// Spread-merge so runtime-attached fields (e.g. inputLimits set in-memory by
-				// extensions/tests) survive when the registry copy lacks them. The registry
-				// copy may carry inputLimits as an explicit undefined key, so use ?? fallback
-				// after the spread rather than relying on key absence.
-				this.agent.state.model = {
-					...currentModel,
-					...refreshed,
-					inputLimits: refreshed.inputLimits ?? currentModel.inputLimits,
-					thinkingLevelMap: refreshed.thinkingLevelMap ?? currentModel.thinkingLevelMap,
-				};
-			}
+		if (!currentModel) {
+			return;
 		}
-		this._scopedModels = this._scopedModels.map((scoped) => ({
-			...scoped,
-			model: this._modelRuntime.getModel(scoped.model.provider, scoped.model.id) ?? scoped.model,
-		}));
+
+		const refreshedModel = this._modelRuntime.getModel(currentModel.provider, currentModel.id);
+		if (!refreshedModel || refreshedModel === currentModel) {
+			return;
+		}
+
+		this.agent.state.model = refreshedModel;
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -4125,18 +4105,23 @@ export class AgentSession {
 			{
 				registerProvider: (name, config) => {
 					this._modelRuntime.registerProvider(name, config);
+					this._refreshCurrentModelFromRegistry();
 				},
 				registerNativeProvider: (provider) => {
 					this._modelRuntime.registerNativeProvider(provider);
+					this._refreshCurrentModelFromRegistry();
 				},
 				unregisterProvider: (name) => {
 					this._modelRuntime.unregisterProvider(name);
+					this._refreshCurrentModelFromRegistry();
 				},
 				registerVirtualModel: (definition) => {
 					this._modelRuntime.registerVirtualModel(definition);
+					this._refreshCurrentModelFromRegistry();
 				},
 				unregisterVirtualModel: (provider, id) => {
 					this._modelRuntime.unregisterVirtualModel(provider, id);
+					this._refreshCurrentModelFromRegistry();
 				},
 			},
 		);
@@ -4366,8 +4351,7 @@ export class AgentSession {
 	private _isRetryableError(message: AssistantMessage): boolean {
 		// Context overflow is handled by compaction, not retry.
 		if (isContextOverflow(message, (this._modelForMessage(message) ?? this.model)?.contextWindow ?? 0)) return false;
-		const { nonRetryableErrorPatterns } = this.settingsManager.getRetrySettings();
-		return isRetryableAssistantError(message, { nonRetryableErrorPatterns });
+		return isRetryableAssistantError(message);
 	}
 
 	/**
@@ -4405,7 +4389,6 @@ export class AgentSession {
 		if (this._retryAttempt === 0) return;
 		const attempt = this._retryAttempt;
 		this._retryAttempt = 0;
-		this._retryGlobalAttempt = 0;
 		this._emit({
 			type: "auto_retry_end",
 			success: false,
@@ -4419,35 +4402,45 @@ export class AgentSession {
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
 	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
-		const plan = getAssistantRetryPlan(message, this.settingsManager.getRetrySettings(), this._retryGlobalAttempt);
-		if (!plan) return false;
-		this._retryAttempt = plan.attempt;
-		this._retryGlobalAttempt = plan.globalAttempt;
+		const settings = this.settingsManager.getRetrySettings();
+		if (!settings.enabled) {
+			return false;
+		}
 
-		// Install cancellation before notifying listeners; an Esc/abort from a retry
-		// listener must cancel this wait rather than miss the not-yet-created controller.
+		this._retryAttempt++;
+
+		if (this._retryAttempt > settings.maxRetries) {
+			// Preserve the completed attempt count so post-run handling can emit the final failure.
+			this._retryAttempt--;
+			return false;
+		}
+
+		const delayMs = retryDelayMs(settings, this._retryAttempt);
+
+		this._emit({
+			type: "auto_retry_start",
+			attempt: this._retryAttempt,
+			maxAttempts: settings.maxRetries,
+			delayMs,
+			errorMessage: message.errorMessage || "Unknown error",
+		});
+
+		// Keep the failed attempt in raw history while durably omitting it from model projection.
+		this._omitRecoveryAttempt(message);
+
+		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
 		try {
-			this._emit({
-				type: "auto_retry_start",
-				attempt: plan.attempt,
-				maxAttempts: plan.maxAttempts,
-				delayMs: plan.delayMs,
-				errorMessage: message.errorMessage || "Unknown error",
-			});
-
-			// Keep the failed attempt in raw history while durably omitting it from model projection.
-			this._omitRecoveryAttempt(message);
-			try {
-				await sleep(plan.delayMs, this._retryAbortController.signal);
-			} catch {
-				this._finishCancelledRetry();
-				return false;
-			}
-			return true;
+			await sleep(delayMs, this._retryAbortController.signal);
+		} catch {
+			// Aborted during sleep - emit end event so UI can clean up
+			this._finishCancelledRetry();
+			return false;
 		} finally {
 			this._retryAbortController = undefined;
 		}
+
+		return true;
 	}
 
 	/**
