@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type MessageOrigin } from "@earendi
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
+	BeforeAgentStartEvent,
 	ExtensionAPI,
 	InputEvent,
 	MessageEndEvent,
@@ -21,6 +22,7 @@ describe("message origin", () => {
 	it("distinguishes identical interactive and extension inputs in events, restored history and model context", async () => {
 		const apis: ExtensionAPI[] = [];
 		const inputs: InputEvent[] = [];
+		const prepared: BeforeAgentStartEvent[] = [];
 		const delivered: AgentMessage[] = [];
 		const requests: string[][] = [];
 		const harness = await createHarness({
@@ -29,6 +31,9 @@ describe("message origin", () => {
 					apis.push(pi);
 					pi.on("input", (event) => {
 						inputs.push(event);
+					});
+					pi.on("before_agent_start", (event) => {
+						prepared.push(event);
 					});
 					pi.on("message_end", (event) => {
 						if (event.message.role === "user") delivered.push(event.message);
@@ -64,6 +69,8 @@ describe("message origin", () => {
 		expect(origins.slice(1).map((origin) => origin?.type)).toEqual(["extension", "extension"]);
 		expect(origins[1]).not.toEqual(origins[2]);
 		expect(delivered.map((m) => (m.role === "user" ? m.origin : undefined))).toEqual(origins);
+		expect(prepared.map((event) => event.origin)).toEqual(origins);
+		expect(prepared.every((event) => event.messageType === "user")).toBe(true);
 		expect(delivered.map(getMessageText)).toEqual(["continue", "continue", "continue"]);
 
 		const file = harness.session.exportToJsonl(`${harness.tempDir}/origin.jsonl`);
@@ -148,9 +155,15 @@ describe("message origin", () => {
 				{
 					name: "hook-author",
 					factory: (pi) => {
-						pi.on("before_agent_start", () => ({
-							message: { customType: "context", content: "hidden", display: false },
-						}));
+						pi.on("before_agent_start", () => {
+							const message = {
+								customType: "context",
+								content: "hidden",
+								display: false,
+								origin: { type: "sdk" as const },
+							};
+							return { message };
+						});
 						pi.on("turn_end", (event) => ({
 							entries: [
 								...event.entries,
@@ -268,6 +281,50 @@ describe("message origin", () => {
 			expect(modelText).toContain("redacted");
 		},
 	);
+
+	it("preserves custom origin through deferred settled re-entry and preparation", async () => {
+		let queued = false;
+		const prepared: BeforeAgentStartEvent[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				{
+					name: "settled-sender",
+					factory: (pi) => {
+						pi.on("before_agent_start", (event) => {
+							if (event.messageType === "custom") prepared.push(event);
+						});
+						pi.on("agent_settled", () => {
+							if (queued) return;
+							queued = true;
+							pi.sendMessage(
+								{ customType: "settled-notice", content: "continue", display: true },
+								{ triggerTurn: true },
+							);
+						});
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("seed"), fauxAssistantMessage("continued")]);
+		await harness.session.prompt("start", { source: "interactive" });
+		expect(harness.faux.state.callCount).toBe(2);
+		const custom = harness.session.messages.find(
+			(message) => message.role === "custom" && message.customType === "settled-notice",
+		);
+		if (custom?.role !== "custom") throw new Error("custom message missing");
+		expect(custom.origin).toMatchObject({ type: "extension", extensionName: "inline:settled-sender" });
+		expect(prepared).toHaveLength(1);
+		expect(prepared[0]).toMatchObject({
+			messageType: "custom",
+			origin: custom.origin,
+			message: { origin: custom.origin },
+		});
+		const restored = SessionManager.open(harness.session.exportToJsonl(`${harness.tempDir}/settled-origin.jsonl`))
+			.buildSessionContext()
+			.messages.find((message) => message.role === "custom" && message.customType === "settled-notice");
+		expect(restored).toMatchObject({ origin: custom.origin, content: "continue" });
+	});
 
 	it("keeps empty control content empty and preserves image-only input without mutating it", () => {
 		const origin: MessageOrigin = { type: "extension", extensionId: "ext-a", extensionName: "A" };

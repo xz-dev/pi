@@ -696,7 +696,8 @@ describe("AgentSession prompt characterization", () => {
 					? message.content.flatMap((part) => (part.type === "text" ? [part.text] : []))
 					: [],
 			);
-			expect(texts).toEqual(["task one finished", "task two finished"]);
+			const source = "[Pi source: SDK input; not direct terminal input.]";
+			expect(texts).toEqual([source, "task one finished", source, "task two finished"]);
 		});
 
 		it("includes a custom message sent without triggerTurn while the run starts in its first request", async () => {
