@@ -23,6 +23,15 @@ export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch tha
 
 export const BRANCH_SUMMARY_SUFFIX = `</summary>`;
 
+export const MANUAL_RETRY_RECOVERY_CUE =
+	"The previous assistant response was interrupted. Continue it from the preserved partial text without repeating completed content or replaying prior tool calls.";
+
+export function createManualRetryRecoveryCue(partialAssistantText?: string): string {
+	return partialAssistantText
+		? `${MANUAL_RETRY_RECOVERY_CUE}\n\nPreserved partial assistant text (JSON): ${JSON.stringify(partialAssistantText)}`
+		: MANUAL_RETRY_RECOVERY_CUE;
+}
+
 /**
  * Message type for bash executions via the ! command.
  */
@@ -52,6 +61,12 @@ export interface CustomMessage<T = unknown> {
 	timestamp: number;
 }
 
+export interface ManualRetryRecoveryMessage {
+	role: "manualRetryRecovery";
+	partialAssistantText?: string;
+	timestamp: number;
+}
+
 export interface BranchSummaryMessage {
 	role: "branchSummary";
 	summary: string;
@@ -71,6 +86,7 @@ declare module "@earendil-works/pi-agent-core" {
 	interface CustomAgentMessages {
 		bashExecution: BashExecutionMessage;
 		custom: CustomMessage;
+		manualRetryRecovery: ManualRetryRecoveryMessage;
 		branchSummary: BranchSummaryMessage;
 		compactionSummary: CompactionSummaryMessage;
 	}
@@ -167,6 +183,12 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				}
+				case "manualRetryRecovery":
+					return {
+						role: "user",
+						content: [{ type: "text", text: createManualRetryRecoveryCue(m.partialAssistantText) }],
+						timestamp: m.timestamp,
+					};
 				case "branchSummary":
 					return {
 						role: "user",
