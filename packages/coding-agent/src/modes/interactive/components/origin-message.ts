@@ -72,7 +72,7 @@ export class OriginMessageComponent extends Container {
 		return new MouseRegion(component, (event) => {
 			if (event.type !== "click" || event.button !== "left") return undefined;
 			this.setExpanded(!this.expanded);
-			return { handled: true };
+			return { handled: true, preserveScroll: this.expanded };
 		});
 	}
 
