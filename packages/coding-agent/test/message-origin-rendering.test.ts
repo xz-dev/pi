@@ -1,11 +1,13 @@
 import { stripVTControlCharacters } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Text, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, MouseRegion, Text, TuiAltScreen, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { CustomMessageEntryDraft, MessageRenderer } from "../src/core/extensions/types.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
+import { createChatViewport } from "../src/modes/interactive/chat-viewport.ts";
 import { OriginMessageComponent } from "../src/modes/interactive/components/origin-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -116,6 +118,147 @@ describe("message origin rendering", () => {
 		click(component, "· hidden");
 		click(component, "hidden body");
 		expect(text(component)).not.toContain("hidden body");
+	});
+
+	it.each([false, true])("keeps an expanded source heading in view (scrolled up: %s)", async (scrolledUp) => {
+		const terminal = new VirtualTerminal(80, 16);
+		const ui = new TuiAltScreen(terminal, false, "/var/tmp");
+		const document = new Container();
+		const previousReply = new Text("Previous answer", 0, 0);
+		document.addChild(new Text(Array.from({ length: 20 }, (_, i) => `Earlier line ${i}`).join("\n"), 0, 0));
+		document.addChild(previousReply);
+		document.addChild(
+			new OriginMessageComponent({
+				...message,
+				content: [
+					"Continuation check starts here",
+					...Array.from({ length: 40 }, (_, i) => `Review context ${i}`),
+					"Previous answer",
+				].join("\n"),
+			}),
+		);
+		document.addChild(new Text("Next reply\nSecond line\nThird line", 0, 0));
+		const viewport = createChatViewport({
+			document,
+			pendingMessages: new Container(),
+			status: new Container(),
+			editor: new Container(),
+			footer: new Container(),
+		});
+		ui.setLayoutRoot(viewport.root);
+		ui.start();
+		try {
+			for (let attempt = 0; attempt < 2; attempt++) {
+				ui.scrollToBottom();
+				await terminal.waitForRender();
+				if (scrolledUp) {
+					ui.scrollBy(-1);
+					await terminal.waitForRender();
+				}
+				const row = terminal.getViewport().findIndex((line) => line.includes("· hidden]"));
+				expect(row).toBeGreaterThanOrEqual(0);
+				terminal.sendInput(`\x1b[<0;3;${row + 1}M`);
+				terminal.sendInput(`\x1b[<0;3;${row + 1}m`);
+				await terminal.waitForRender();
+				const screen = terminal.getViewport();
+				expect(screen.join("\n")).toContain("[Extension · pi-subagents]");
+				expect(screen.join("\n")).toContain("Continuation check starts here");
+				expect(previousReply.render(80)).toEqual(new Text("Previous answer", 0, 0).render(80));
+				const expandedRow = screen.findIndex((line) => line.includes("[Extension · pi-subagents]"));
+				terminal.sendInput(`\x1b[<0;3;${expandedRow + 1}M`);
+				terminal.sendInput(`\x1b[<0;3;${expandedRow + 1}m`);
+				await terminal.waitForRender();
+				expect(terminal.getViewport().join("\n")).toContain("· hidden]");
+				expect(terminal.getViewport().join("\n")).not.toContain("Continuation check starts here");
+			}
+		} finally {
+			ui.stop();
+		}
+	});
+
+	it.each([false, true])(
+		"preserves normal clicks and layout replacement (replace layout: %s)",
+		async (replaceLayout) => {
+			const terminal = new VirtualTerminal(80, 10);
+			const ui = new TuiAltScreen(terminal, false, "/var/tmp");
+			const document = new Container();
+			document.addChild(new Text(Array.from({ length: 20 }, (_, i) => `Earlier line ${i}`).join("\n"), 0, 0));
+			document.addChild(
+				new MouseRegion(new Text("Ordinary action", 0, 0), (event) => {
+					if (event.type !== "click") return undefined;
+					if (replaceLayout) ui.setLayoutRoot(new Text("Replacement layout", 0, 0));
+					return { handled: true, render: replaceLayout, preserveScroll: replaceLayout };
+				}),
+			);
+			ui.addChild(document);
+			ui.start();
+			try {
+				await terminal.waitForRender();
+				const row = terminal.getViewport().findIndex((line) => line.includes("Ordinary action"));
+				expect(row).toBeGreaterThanOrEqual(0);
+				terminal.sendInput(`\x1b[<0;3;${row + 1}M`);
+				expect(() => terminal.sendInput(`\x1b[<0;3;${row + 1}m`)).not.toThrow();
+				await terminal.waitForRender();
+				if (replaceLayout) {
+					expect(terminal.getViewport().join("\n")).toContain("Replacement layout");
+				} else {
+					document.addChild(new Text("NEW OUTPUT", 0, 0));
+					ui.requestRender();
+					await terminal.waitForRender();
+					expect(terminal.getViewport().join("\n")).toContain("NEW OUTPUT");
+				}
+			} finally {
+				ui.stop();
+			}
+		},
+	);
+
+	it("preserves reading position for press-owned expansion without affecting overlays", async () => {
+		const terminal = new VirtualTerminal(80, 10);
+		const ui = new TuiAltScreen(terminal, false, "/var/tmp");
+		const document = new Container();
+		const details = new Text("Collapsed control", 0, 0);
+		document.addChild(new Text(Array.from({ length: 20 }, (_, i) => `Earlier line ${i}`).join("\n"), 0, 0));
+		document.addChild(
+			new MouseRegion(details, (event) => {
+				if (event.type === "press") return { handled: true, capture: true };
+				if (event.type !== "click") return undefined;
+				details.setText(["Expanded control", ...Array.from({ length: 20 }, (_, i) => `Detail ${i}`)].join("\n"));
+				return { handled: true, preserveScroll: true };
+			}),
+		);
+		document.addChild(new Text("Following reply\nLast line", 0, 0));
+		ui.addChild(document);
+		ui.start();
+		try {
+			await terminal.waitForRender();
+			const row = terminal.getViewport().findIndex((line) => line.includes("Collapsed control"));
+			expect(row).toBeGreaterThanOrEqual(0);
+			terminal.sendInput(`\x1b[<0;3;${row + 1}M`);
+			terminal.sendInput(`\x1b[<0;3;${row + 1}m`);
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("Expanded control");
+			expect(terminal.getViewport().join("\n")).toContain("Detail 0");
+			ui.scrollToBottom();
+			const overlay = ui.showOverlay(
+				new MouseRegion(new Text("Overlay action", 0, 0), (event) =>
+					event.type === "press"
+						? { handled: true, capture: true }
+						: { handled: true, preserveScroll: event.type === "click" },
+				),
+				{ anchor: "top-left", width: 30 },
+			);
+			await terminal.waitForRender();
+			terminal.sendInput("\x1b[<0;3;1M");
+			terminal.sendInput("\x1b[<0;3;1m");
+			overlay.hide();
+			document.addChild(new Text("NEW OUTPUT", 0, 0));
+			ui.requestRender();
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("NEW OUTPUT");
+		} finally {
+			ui.stop();
+		}
 	});
 
 	it("lets global expansion override per-message choices in both directions", () => {
