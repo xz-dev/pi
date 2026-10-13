@@ -25,6 +25,6 @@ const target = process.env.PI_ENV_DAEMON_TARGET;
 if (process.env.PI_ENV_DAEMON && target === undefined) {
 	throw new Error("PI_ENV_DAEMON requires independently selected PI_ENV_DAEMON_TARGET metadata");
 }
+if (target !== undefined && !Object.hasOwn(targets, target)) throw new Error(`Unknown PI_ENV_DAEMON_TARGET: ${target}`);
 export const expectedDaemonPlatform =
 	target === undefined ? { platform: process.platform, arch: process.arch } : targets[target];
-if (!expectedDaemonPlatform) throw new Error(`Unknown PI_ENV_DAEMON_TARGET: ${target}`);
