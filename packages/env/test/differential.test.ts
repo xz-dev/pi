@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ToolExecutionApi } from "@earendil-works/pi-durable";
-import type { ExecutionEnv, FileError, Result } from "@earendil-works/pi-durable/env";
+import { type ExecutionEnv, type FileError, getOrThrow, type Result } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createBashTool, createReadTool } from "@earendil-works/pi-durable/tools";
 import { afterAll, describe, expect, it } from "vitest";
@@ -323,7 +323,9 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 			({
 				env,
 				outputWindow: undefined,
-				output: (chunk: string | Uint8Array) => output.push(String(chunk)),
+				output: (chunk: string | Uint8Array) =>
+					output.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk)),
+				retainedOutput: () => ({ text: output.join(""), truncated: false }),
 				diagnostic: () => {},
 				details: async () => {},
 			}) as unknown as ToolExecutionApi;
@@ -333,12 +335,23 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 			args: object,
 		) => {
 			const output: string[] = [];
-			try {
-				const result = await tool.execute(args as never, api(env, output), context);
-				return { result, output: output.join("") };
-			} catch (error) {
-				return { error: (error as Error).message, output: output.join("") };
+			const result = await tool.execute(args as never, api(env, output), context);
+			if ("command" in args) {
+				const exitCode = args.command === "exit 3" ? 3 : 0;
+				expect(result.isError).toBe(exitCode === 0 ? undefined : true);
+				expect(result.structuredOutput).toEqual({ output: output.join(""), truncated: false, exitCode });
+				if (exitCode !== 0) {
+					expect(result.diagnostics).toEqual([
+						{ severity: "error", code: "exit_code", message: "Command exited with code 3" },
+					]);
+				}
+				if (args.command === "cat text.txt") expect(output.join("")).toBe("one\ntwo\n\nthree");
+				if (args.command === "echo err >&2") expect(output.join("")).toBe("err\n");
+			} else {
+				expect(result.isError).toBeUndefined();
+				expect(result.output).toBeDefined();
 			}
+			return { result, output: output.join("") };
 		};
 		const cases: [ReturnType<typeof createReadTool> | ReturnType<typeof createBashTool>, object][] = [
 			[createReadTool(), { path: "text.txt" }],
@@ -347,8 +360,8 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 			[createReadTool(), { path: "long.txt" }],
 			[createReadTool(), { path: "bom.txt" }],
 			[createReadTool(), { path: "bad.txt" }],
-			[createReadTool(), { path: "missing.txt" }],
-			[createBashTool(), { command: "cat text.txt; echo err >&2; exit 0" }],
+			[createBashTool(), { command: "cat text.txt" }],
+			[createBashTool(), { command: "echo err >&2" }],
 			[createBashTool(), { command: "exit 3" }],
 			[createBashTool(), { command: "printf 'a\\nb'; ls" }],
 		];
@@ -356,6 +369,35 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 			const expected = normalize(await run(local, tool, args), roots[0]);
 			const actual = normalize(await run(remote, tool, args), roots[1]);
 			expect(actual, JSON.stringify(args)).toEqual(expected);
+		}
+		const missing = async (env: ExecutionEnv, output: string[], root: string) => {
+			const result = createReadTool().execute({ path: "missing.txt" }, api(env, output), context);
+			await expect(result).rejects.toMatchObject({ code: "not_found" });
+			return result.catch((error: unknown) => {
+				if (!(error instanceof Error)) throw error;
+				return normalize({ error: error.message, output: output.join("") }, root);
+			});
+		};
+		const localOutput: string[] = [];
+		const remoteOutput: string[] = [];
+		expect(await missing(remote, remoteOutput, roots[1])).toEqual(await missing(local, localOutput, roots[0]));
+		expect(localOutput.join("")).toBe("");
+		expect(remoteOutput.join("")).toBe("");
+		for (const env of [local, remote]) {
+			// Pipes arrive independently; preserve exact order/content within each stream, not their combined scheduling.
+			const output = { stdout: "", stderr: "" };
+			const result = await env.exec(
+				"cat text.txt; echo err >&2; exit 0",
+				{
+					onOutput: (text, _context, info) => {
+						expect(info.skipped).toBeUndefined();
+						output[info.stream] += text;
+					},
+				},
+				context,
+			);
+			expect(getOrThrow(result).exitCode).toBe(0);
+			expect(output).toEqual({ stdout: "one\ntwo\n\nthree", stderr: "err\n" });
 		}
 	}, 60_000);
 });
