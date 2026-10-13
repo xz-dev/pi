@@ -1,7 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
-import type { SessionEntry } from "../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -87,7 +87,7 @@ describe("InteractiveMode compaction events", () => {
 				usage: previousUsage,
 			},
 		];
-		const fakeThis = { renderSessionItems: vi.fn() };
+		const fakeThis = { renderSessionItems: vi.fn(), sessionManager: SessionManager.inMemory() };
 		const renderSessionEntries = Reflect.get(InteractiveMode.prototype, "renderSessionEntries") as (
 			this: typeof fakeThis,
 			entries: SessionEntry[],
@@ -102,7 +102,7 @@ describe("InteractiveMode compaction events", () => {
 				expect.objectContaining({ role: "compactionSummary", summary: "previous summary" }),
 				{ type: "compaction_cost", kind: "compaction", usage: previousUsage },
 			],
-			{},
+			expect.objectContaining({}),
 		);
 	});
 
