@@ -283,6 +283,26 @@ export const SettingsSchema = Type.Object(
 				default: SETTINGS_DEFAULTS.quietStartup,
 			}),
 		),
+		slowSyncHookThresholdMs: Type.Optional(
+			Type.Number({
+				description:
+					"Sync extension handler warning threshold in milliseconds; -1 disables, >=0 enables TUI notices.",
+				default: SETTINGS_DEFAULTS.slowSyncHookThresholdMs,
+			}),
+		),
+		slowAsyncHookThresholdMs: Type.Optional(
+			Type.Number({
+				description:
+					"Async extension handler warning threshold in milliseconds; -1 disables, >=0 enables TUI notices.",
+				default: SETTINGS_DEFAULTS.slowAsyncHookThresholdMs,
+			}),
+		),
+		showStartupDiagnostics: Type.Optional(
+			Type.Boolean({
+				description: "Show startup resource conflict and extension issue diagnostics.",
+				default: SETTINGS_DEFAULTS.showStartupDiagnostics,
+			}),
+		),
 		defaultProjectTrust: Type.Optional(
 			Type.Union([Type.Literal("ask"), Type.Literal("always"), Type.Literal("never")], {
 				description: "Global setting only.",
