@@ -182,6 +182,10 @@ class PendingMessageQueue {
 	clear(): void {
 		this.messages = [];
 	}
+
+	remove(messages: ReadonlySet<AgentMessage>): void {
+		this.messages = this.messages.filter((message) => !messages.has(message));
+	}
 }
 
 type ActiveRun = {
@@ -358,6 +362,12 @@ export class Agent {
 	clearAllQueues(): void {
 		this.clearSteeringQueue();
 		this.clearFollowUpQueue();
+	}
+
+	/** Remove selected pending messages by identity without disturbing either queue's remaining order. */
+	removeQueuedMessages(messages: ReadonlySet<AgentMessage>): void {
+		this.steeringQueue.remove(messages);
+		this.followUpQueue.remove(messages);
 	}
 
 	/** Returns true when either queue still contains pending messages. */
