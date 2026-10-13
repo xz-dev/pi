@@ -262,7 +262,14 @@ export const SettingsSchema = Type.Object(
 		compaction: Type.Optional(CompactionSettingsSchema),
 		branchSummary: Type.Optional(BranchSummarySettingsSchema),
 		retry: Type.Optional(RetrySettingsSchema),
-		hideThinkingBlock: Type.Optional(Type.Boolean({ default: SETTINGS_DEFAULTS.hideThinkingBlock })),
+		thinkingDisplay: Type.Optional(
+			Type.Union([Type.Literal("preview"), Type.Literal("expanded"), Type.Literal("collapsed")], {
+				default: SETTINGS_DEFAULTS.thinkingDisplay,
+			}),
+		),
+		hideThinkingBlock: Type.Optional(
+			Type.Boolean({ description: "Legacy setting migrated to thinkingDisplay.", deprecated: true }),
+		),
 		showCacheMissNotices: Type.Optional(
 			Type.Boolean({
 				description: "Show cache cost and provider recovery notices.",
@@ -524,6 +531,7 @@ export type SkillOverrides = Static<typeof SkillOverridesSchema>;
 export type CodemodeMode = Static<typeof CodemodeModeSchema>;
 export interface CodemodeSettings extends Static<typeof CodemodeSettingsSchema> {}
 export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
+export type ThinkingDisplayMode = NonNullable<SettingsInput["thinkingDisplay"]>;
 export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
 export type TransportSetting = NonNullable<SettingsInput["transport"]>;
 export interface BackgroundToolCallSetting extends Static<typeof BackgroundToolCallSettingSchema> {}
@@ -532,7 +540,8 @@ export type PackageSource = Static<typeof PackageSourceSchema>;
 export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutput"]>;
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
 export type CacheWarmingMode = NonNullable<SettingsInput["cacheWarming"]>;
-export interface Settings extends Omit<SettingsInput, "queueMode" | "retry" | "skills" | "websockets"> {
+export interface Settings
+	extends Omit<SettingsInput, "hideThinkingBlock" | "queueMode" | "retry" | "skills" | "websockets"> {
 	retry?: RetrySettings;
 	skills?: string[];
 }
