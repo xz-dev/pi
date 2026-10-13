@@ -50,6 +50,8 @@ export interface TuiMouseEventResult {
 	capture?: boolean;
 	/** Give keyboard focus to this component. Implies handled. */
 	focus?: boolean;
+	/** Keep enclosing scroll views at their current offset when revealing content. */
+	preserveScroll?: boolean;
 	/**
 	 * Explicitly request or suppress a render. Move and release default to false;
 	 * press, click, drag, and wheel default to true.
