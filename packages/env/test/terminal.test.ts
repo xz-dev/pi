@@ -88,7 +88,7 @@ describe.skipIf(process.platform === "win32")("openTerminal", () => {
 		expect(await terminal.foreground()).toBeUndefined();
 		terminal.write("sleep 100\n");
 		let foreground = await terminal.foreground();
-		for (let tries = 0; !foreground && tries < 100; tries++) {
+		for (let tries = 0; foreground?.name !== "sleep" && tries < 100; tries++) {
 			await new Promise((resolve) => setTimeout(resolve, 20));
 			foreground = await terminal.foreground();
 		}
