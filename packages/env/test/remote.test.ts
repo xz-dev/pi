@@ -1,19 +1,27 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { getOrThrow, type ShellOutputInfo } from "@earendil-works/pi-durable/env";
 import { afterAll, describe, expect, it } from "vitest";
 import { Connection, nodePlatform } from "../src/connection.ts";
 import { RemoteExecutionEnv } from "../src/remote-env.ts";
-import { daemon } from "./daemon.ts";
+import { daemon, expectedDaemonPlatform } from "./daemon.ts";
 
 const context = BACKGROUND_CONTEXT;
 const connections: Connection[] = [];
 const dirs: string[] = [];
+const listingPhases = new Map<Connection, (phase: string) => void>();
 afterAll(() => {
-	for (const connection of connections) connection.close();
+	for (const connection of connections) {
+		listingPhases.get(connection)?.("close-start");
+		connection.close();
+		listingPhases.get(connection)?.("close-return");
+	}
+	for (const mark of listingPhases.values()) mark("suite-fixture-cleanup-start");
 	for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });
+	for (const mark of listingPhases.values()) mark("suite-fixture-cleanup-return");
 });
 
 function environment(): { env: RemoteExecutionEnv; connection: Connection } {
@@ -72,11 +80,7 @@ describe("RemoteExecutionEnv", () => {
 
 	it("reports the remote system in Node's names", async () => {
 		const { connection } = environment();
-		const { platform, arch } = nodePlatform(await connection.info());
-		expect(platform).toBe(process.platform);
-		// CI runs the darwin-x64 release daemon on arm64 macOS through Rosetta, so it reports x64 to arm64 Node.
-		const rosetta = process.platform === "darwin" && process.arch === "arm64" && arch === "x64";
-		if (!rosetta) expect(arch).toBe(process.arch);
+		expect(nodePlatform(await connection.info())).toEqual(expectedDaemonPlatform);
 		expect(nodePlatform({ os: "windows", arch: "aarch64" })).toEqual({ platform: "win32", arch: "arm64" });
 		expect(nodePlatform({ os: "macos", arch: "x86_64" })).toEqual({ platform: "darwin", arch: "x64" });
 	});
@@ -92,22 +96,44 @@ describe("RemoteExecutionEnv", () => {
 	});
 
 	it("cancels a listing in the daemon", async () => {
+		const started = performance.now();
+		const mark = (phase: string, fields: Record<string, number> = {}) => {
+			console.error(
+				JSON.stringify({ test: "daemon-listing-cancel", phase, elapsedMs: performance.now() - started, ...fields }),
+			);
+		};
+		mark("fixture-start");
 		const { env, connection } = environment();
+		listingPhases.set(connection, mark);
 		for (let dir = 0; dir < 100; dir++) {
 			mkdirSync(join(env.cwd, `d${dir}`));
 			for (let file = 0; file < 100; file++) writeFileSync(join(env.cwd, `d${dir}`, `f${file}`), "");
 		}
+		mark("fixture-ready");
 		// The cancel follows the request at once, bypassing the client's own abort check, so the daemon stops the walk.
 		const controller = new AbortController();
 		controller.abort();
-		const cancelled = connection.request("listFiles", { path: env.cwd }, { signal: controller.signal });
+		mark("cold-request-call");
+		const cancelled = connection.request(
+			"listFiles",
+			{ path: env.cwd },
+			{
+				signal: controller.signal,
+				// onStart follows cold hello, but precedes both writes; it is not a frame-transmission observation.
+				onStart: (id, session) => mark("hello-ready-request-registered-before-write", { id, session }),
+			},
+		);
 		await expect(cancelled).rejects.toMatchObject({ code: "aborted" });
+		mark("daemon-aborted-error-asserted");
+		mark("full-recovery-start");
 		const listed = getOrThrow(await env.listFiles(".", undefined, context));
 		expect([listed.entries.length, listed.truncated]).toEqual([10_100, false]);
+		mark("full-recovery-asserted");
+		mark("bounded-recovery-start");
 		const bounded = getOrThrow(await env.listFiles(".", { maxEntries: 5000 }, context));
 		expect([bounded.entries.length, bounded.truncated]).toEqual([5000, true]);
-		// Creating 10,000 files takes several seconds on Windows CI.
-	}, 30_000);
+		mark("bounded-recovery-asserted");
+	}, 5000);
 
 	it("times out a command that produces no output", async () => {
 		const { env } = environment();
