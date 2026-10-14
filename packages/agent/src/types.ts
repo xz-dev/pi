@@ -520,6 +520,10 @@ export type AgentEvent =
 	// Turn lifecycle - a turn is one assistant response + any tool calls/results
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+	// Actual client→provider/proxy transport for an in-flight request, as reported
+	// by the active adapter. `transport` is undefined when the transport is lost or
+	// the adapter clears it; the event is transient and never persisted.
+	| { type: "transport_status"; transport: string | undefined; model: Model<any> }
 	// Message lifecycle - emitted for system, user, assistant, and toolResult messages
 	| { type: "message_start"; message: AgentMessage }
 	// Only emitted for assistant messages during streaming

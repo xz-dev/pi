@@ -486,6 +486,7 @@ export class InteractiveMode {
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: WorkingIndicatorOptions | undefined = undefined;
+	private currentTransport: string | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
@@ -2345,18 +2346,28 @@ export class InteractiveMode {
 		}
 	}
 
+	private updateWorkingIndicatorMessage(): void {
+		if (this.activeStatusIndicator?.kind === "working") {
+			this.activeStatusIndicator.setMessage(this.formatWorkingMessage());
+		}
+	}
+
+	private formatWorkingMessage(): string {
+		// An extension-provided message stays verbatim; the transport suffix only
+		// decorates the built-in default label.
+		if (this.workingMessage !== undefined) return this.workingMessage;
+		return this.currentTransport
+			? `${this.defaultWorkingMessage}(${this.currentTransport})`
+			: this.defaultWorkingMessage;
+	}
+
 	private showWorkingStatusIndicator(): void {
 		const colorFn = isEmbeddedStatus(this.editor)
 			? (text: string) =>
 					(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(text)
 			: undefined;
 		this.showStatusIndicator(
-			new WorkingStatusIndicator(
-				this.ui,
-				this.workingMessage ?? this.defaultWorkingMessage,
-				this.workingIndicatorOptions,
-				colorFn,
-			),
+			new WorkingStatusIndicator(this.ui, this.formatWorkingMessage(), this.workingIndicatorOptions, colorFn),
 		);
 	}
 
@@ -2476,7 +2487,7 @@ export class InteractiveMode {
 		this.setWorkingIndicator();
 		if (this.activeStatusIndicator?.kind === "working") {
 			this.activeStatusIndicator.setMessage(
-				`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`,
+				`${this.formatWorkingMessage()} (${keyText("app.interrupt")} to interrupt)`,
 			);
 		}
 		this.setHiddenThinkingLabel();
@@ -2640,9 +2651,7 @@ export class InteractiveMode {
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
-				if (this.activeStatusIndicator?.kind === "working") {
-					this.activeStatusIndicator.setMessage(message ?? this.defaultWorkingMessage);
-				}
+				this.updateWorkingIndicatorMessage();
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
 			setWorkingIndicator: (options) => this.setWorkingIndicator(options),
@@ -3380,6 +3389,7 @@ export class InteractiveMode {
 				break;
 
 			case "turn_start":
+				this.currentTransport = undefined;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3452,6 +3462,12 @@ export class InteractiveMode {
 			case "thinking_level_changed":
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
+				break;
+
+			case "transport_status":
+				this.currentTransport = event.transport;
+				this.updateWorkingIndicatorMessage();
+				this.ui.requestRender();
 				break;
 
 			case "message_start":
@@ -3611,6 +3627,7 @@ export class InteractiveMode {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
+				this.currentTransport = undefined;
 				this.clearStatusIndicator("working");
 				if (this.streamingComponent) {
 					this.chatContainer.removeChild(this.streamingComponent);
