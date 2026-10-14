@@ -1,8 +1,13 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, createAssistantMessageEventStream, getModel } from "@earendil-works/pi-ai/compat";
+import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
+import {
+	type AssistantMessage,
+	createAssistantMessageEventStream,
+	getModel,
+	type Model,
+} from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -52,13 +57,13 @@ describe("transport_status events", () => {
 	});
 
 	async function createSession(
-		streamFn: (model: any, context: any, options: any) => ReturnType<typeof createAssistantMessageEventStream>,
-		model = getModel("anthropic", "claude-sonnet-4-5")!,
+		streamFn: StreamFn,
+		model: Model<string> = getModel("anthropic", "claude-sonnet-4-5")!,
 	): Promise<AgentSession> {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },
-			streamFn: streamFn as any,
+			streamFn,
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
@@ -98,7 +103,10 @@ describe("transport_status events", () => {
 		created.subscribe((event) => events.push(event));
 		await created.prompt("hello");
 
-		expect(transportEvents(events)).toEqual([{ transport: "SSE", modelId: "claude-sonnet-4-5" }]);
+		expect(transportEvents(events)).toEqual([
+			{ transport: "SSE", modelId: "claude-sonnet-4-5" },
+			{ transport: undefined, modelId: "claude-sonnet-4-5" },
+		]);
 	});
 
 	it("reports a mid-stream WS->SSE transition and clears at request start", async () => {
@@ -119,7 +127,7 @@ describe("transport_status events", () => {
 		created.subscribe((event) => events.push(event));
 		await created.prompt("hello");
 
-		expect(transportEvents(events).map((t) => t.transport)).toEqual(["WS", undefined, "SSE"]);
+		expect(transportEvents(events).map((t) => t.transport)).toEqual(["WS", undefined, "SSE", undefined]);
 	});
 
 	it("tags the transport event with the model that issued the request", async () => {
@@ -139,8 +147,9 @@ describe("transport_status events", () => {
 		await created.prompt("hello");
 
 		const transports = transportEvents(events);
-		expect(transports).toHaveLength(1);
-		expect(transports[0].modelId).toBe("claude-sonnet-4-5");
+		expect(transports).toHaveLength(2);
+		expect(transports[0]).toEqual({ transport: "SSE", modelId: "claude-sonnet-4-5" });
+		expect(transports[1].transport).toBeUndefined();
 	});
 
 	it("ignores late callbacks fired after the request stream completed", async () => {
@@ -185,8 +194,8 @@ describe("transport_status events", () => {
 		await created.prompt("two");
 
 		const labels = transportEvents(events).map((t) => t.transport);
-		// Each request reports exactly its own label; nothing leaks between runs.
-		expect(labels).toEqual(["SSE", "WS"]);
+		// Each request reports its own label then clears it; nothing leaks between runs.
+		expect(labels).toEqual(["SSE", undefined, "WS", undefined]);
 	});
 
 	it("does not emit transport_status for opaque streams that never report", async () => {
@@ -208,8 +217,33 @@ describe("transport_status events", () => {
 	});
 });
 
+// Structural view of the private state handleEvent/formatWorkingMessage need.
+// InteractiveMode has private fields, so the prototype crosses via `unknown`.
+type WorkingLabelMode = {
+	isInitialized: boolean;
+	workingMessage: string | undefined;
+	currentTransport: string | undefined;
+	defaultWorkingMessage: string;
+	workingVisible: boolean;
+	activeStatusIndicator: { kind: string; setMessage: (message: string) => void } | undefined;
+	ui: { requestRender: () => void; terminal: { setProgress: (on: boolean) => void } };
+	settingsManager: { getShowTerminalProgress: () => boolean };
+	footer: { invalidate: () => void };
+	programStatus: { handleEvent: (event: AgentSessionEvent) => void };
+	clearStatusIndicator: () => void;
+	showWorkingStatusIndicator: () => void;
+	updateWorkingIndicatorMessage: () => void;
+	formatWorkingMessage: () => string;
+	handleEvent: (event: AgentSessionEvent) => Promise<void>;
+};
+
 describe("InteractiveMode working label", () => {
-	function fakeMode(): any {
+	const proto = InteractiveMode.prototype as unknown as Pick<
+		WorkingLabelMode,
+		"updateWorkingIndicatorMessage" | "formatWorkingMessage" | "handleEvent"
+	>;
+
+	function fakeMode(): WorkingLabelMode {
 		return {
 			isInitialized: true,
 			workingMessage: undefined,
@@ -223,44 +257,43 @@ describe("InteractiveMode working label", () => {
 			programStatus: { handleEvent: vi.fn() },
 			clearStatusIndicator: vi.fn(),
 			showWorkingStatusIndicator: vi.fn(),
-			updateWorkingIndicatorMessage: (InteractiveMode as any).prototype.updateWorkingIndicatorMessage,
-			formatWorkingMessage: (InteractiveMode as any).prototype.formatWorkingMessage,
+			updateWorkingIndicatorMessage: proto.updateWorkingIndicatorMessage,
+			formatWorkingMessage: proto.formatWorkingMessage,
+			handleEvent: proto.handleEvent,
 		};
 	}
 
+	const fakeModel = {} as Model<string>;
+
 	it("shows Working(SSE) once the adapter reports and Working after it clears", async () => {
 		const mode = fakeMode();
-		const format = (InteractiveMode as any).prototype.formatWorkingMessage;
-		const handleEvent = (InteractiveMode as any).prototype.handleEvent;
 
 		// No report yet: bare default label.
-		expect(format.call(mode)).toBe("Working");
+		expect(mode.formatWorkingMessage()).toBe("Working");
 
-		await handleEvent.call(mode, { type: "transport_status", transport: "SSE", model: {} });
-		expect(format.call(mode)).toBe("Working(SSE)");
-		expect(mode.activeStatusIndicator.setMessage).toHaveBeenLastCalledWith("Working(SSE)");
+		await mode.handleEvent({ type: "transport_status", transport: "SSE", model: fakeModel });
+		expect(mode.formatWorkingMessage()).toBe("Working(SSE)");
+		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith("Working(SSE)");
 
-		await handleEvent.call(mode, { type: "transport_status", transport: "WS", model: {} });
-		expect(format.call(mode)).toBe("Working(WS)");
+		await mode.handleEvent({ type: "transport_status", transport: "WS", model: fakeModel });
+		expect(mode.formatWorkingMessage()).toBe("Working(WS)");
 
-		await handleEvent.call(mode, { type: "transport_status", transport: undefined, model: {} });
-		expect(format.call(mode)).toBe("Working");
-		expect(mode.activeStatusIndicator.setMessage).toHaveBeenLastCalledWith("Working");
+		await mode.handleEvent({ type: "transport_status", transport: undefined, model: fakeModel });
+		expect(mode.formatWorkingMessage()).toBe("Working");
+		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith("Working");
 	});
 
 	it("keeps an extension working message verbatim and clears transport on turn_start", async () => {
 		const mode = fakeMode();
-		const format = (InteractiveMode as any).prototype.formatWorkingMessage;
-		const handleEvent = (InteractiveMode as any).prototype.handleEvent;
 
-		await handleEvent.call(mode, { type: "transport_status", transport: "SSE", model: {} });
+		await mode.handleEvent({ type: "transport_status", transport: "SSE", model: fakeModel });
 		mode.workingMessage = "Analyzing codebase...";
-		expect(format.call(mode)).toBe("Analyzing codebase...");
+		expect(mode.formatWorkingMessage()).toBe("Analyzing codebase...");
 
 		// turn_start resets the label before the next request reports its transport.
-		await handleEvent.call(mode, { type: "turn_start" });
+		await mode.handleEvent({ type: "turn_start" });
 		mode.workingMessage = undefined;
 		expect(mode.currentTransport).toBeUndefined();
-		expect(format.call(mode)).toBe("Working");
+		expect(mode.formatWorkingMessage()).toBe("Working");
 	});
 });
