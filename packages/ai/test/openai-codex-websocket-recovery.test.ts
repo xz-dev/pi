@@ -106,6 +106,13 @@ function mockTransport() {
 }
 
 describe("Codex retry policy", () => {
+	it("keeps caller routing headers separate from generated nonce headers", async () => {
+		const { run, sockets } = mockTransport();
+		await run({ headers: { "x-session-affinity": sessionId } });
+		await run();
+		expect(sockets).toHaveLength(2);
+	});
+
 	it.each([false, true])("tries auto WS four times before SSE with retry.enabled=%s", async (enabled) => {
 		vi.useFakeTimers();
 		const { run, onSend, sent, fetchMock } = mockTransport();
