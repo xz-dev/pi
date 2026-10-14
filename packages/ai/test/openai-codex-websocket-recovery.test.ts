@@ -511,12 +511,60 @@ describe("Codex transport recovery", () => {
 		expect(getOpenAICodexWebSocketDebugStats(sessionId)).toBeUndefined();
 	});
 
+	it("isolates SSE fallback cooldown per endpoint+credential for the same session", async () => {
+		const { run, recover, onSend, sent, fetchMock } = mockTransport();
+		const now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		onSend.mockImplementation((socket) => socket.fail());
+		await recover();
+		await run();
+		expect(sent).toHaveLength(4); // initial + 3 WS retries, all failed
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// A different endpoint on the same session still gets its own WS probe.
+		const movedModel = { ...model, baseUrl: "https://other.example.com/backend-api" };
+		onSend.mockImplementation((socket) => socket.complete());
+		await stream(movedModel, context, { apiKey, sessionId }).result();
+		expect(sent).toHaveLength(5);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// The original identity stays in cooldown until its deadline.
+		await run();
+		expect(sent).toHaveLength(5);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("reconnects with full context for a rotated same-account credential", async () => {
+		const { run, sent, sockets } = mockTransport();
+		await run();
+		const rotatedKey = `aaa.${Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test" }, iat: 2 }),
+		).toString("base64")}.ccc`;
+		const secondContext = normalizeContext({
+			messages: [...context.messages, { role: "user", content: "Second", timestamp: 2 }],
+		});
+		await run({ apiKey: rotatedKey }, secondContext);
+		expect(sent).toHaveLength(2);
+		expect(sockets).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBe(secondContext.messages.length);
+	});
+
 	it("keeps the fixed retry allowance with cacheRetention none and a stable session ID", async () => {
 		const { recover, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementation((socket) => socket.fail());
 		expect((await recover({ cacheRetention: "none" })).stopReason).toBe("stop");
 		expect(sent).toHaveLength(4);
 		expect(sent.every((request) => request.previous_response_id === undefined)).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the cache-none retry allowance even though the request nonce rotates", async () => {
+		const { recover, onSend, sent, fetchMock } = mockTransport();
+		onSend.mockImplementation((socket) => socket.fail());
+		// cacheRetention none reuses sessionId for recovery but generates a fresh
+		// per-attempt session-id/x-client-request-id nonce; the identity must not
+		// include it or the fixed three-retry budget would reset.
+		expect((await recover({ cacheRetention: "none" })).stopReason).toBe("stop");
+		expect(sent).toHaveLength(4);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 

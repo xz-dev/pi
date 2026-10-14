@@ -170,6 +170,63 @@ describe("openai-responses WebSocket transport", () => {
 		expect(sent[1].input?.length).toBeGreaterThan(1);
 	});
 
+	it("sends full context without previous_response_id when the endpoint changes for the same account", async () => {
+		const { run, sent, sockets } = mockTransport();
+		await run();
+		const secondContext = normalizeContext({
+			messages: [...context.messages, { role: "user", content: "Second", timestamp: 2 }],
+		});
+		const movedModel = { ...model, baseUrl: "https://moved.example.com/v1" };
+		await stream(movedModel, secondContext, { apiKey, sessionId }).result();
+		expect(sent).toHaveLength(2);
+		expect(sockets).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBe(secondContext.messages.length);
+	});
+
+	it("sends full context without previous_response_id when effective headers change for the same account", async () => {
+		const { run, sent, sockets } = mockTransport();
+		await run();
+		const secondContext = normalizeContext({
+			messages: [...context.messages, { role: "user", content: "Second", timestamp: 2 }],
+		});
+		await run({ headers: { "x-tenant": "tenant-b" } }, secondContext);
+		expect(sent).toHaveLength(2);
+		expect(sockets).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBe(secondContext.messages.length);
+	});
+
+	it("isolates SSE fallback cooldown per endpoint+identity for the same session", async () => {
+		const { run, recover, onSend, sent, fetchMock } = mockTransport();
+		const now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		onSend.mockImplementation((socket) => socket.fail());
+		await recover();
+		await run();
+		expect(sent).toHaveLength(4); // initial + 3 WS retries, all failed
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// A different endpoint on the same session still gets its own WS probe.
+		const movedModel = { ...model, baseUrl: "https://other.example.com/v1" };
+		onSend.mockImplementation((socket) => socket.complete());
+		await stream(movedModel, context, { apiKey, sessionId }).result();
+		expect(sent).toHaveLength(5);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// The original identity stays in cooldown until its deadline.
+		await run();
+		expect(sent).toHaveLength(5);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("keeps the fixed retry allowance with cacheRetention none and a stable session ID", async () => {
+		const { recover, onSend, sent, fetchMock } = mockTransport();
+		onSend.mockImplementation((socket) => socket.fail());
+		expect((await recover({ cacheRetention: "none" })).stopReason).toBe("stop");
+		expect(sent).toHaveLength(4);
+		expect(sent.every((request) => request.previous_response_id === undefined)).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
 	it("sends full context when history no longer extends the cached baseline", async () => {
 		const { run, sent } = mockTransport();
 		await run();
@@ -280,18 +337,78 @@ describe("openai-responses retry plan", () => {
 });
 
 describe("onTransport reporting", () => {
-	it("reports WS for websocket success", async () => {
+	it("reports WS only after the socket opens", async () => {
 		const { run } = mockTransport();
 		const transports: Array<string | undefined> = [];
 		await run({ onTransport: (t) => void transports.push(t) });
 		expect(transports).toEqual(["WS"]);
 	});
 
-	it("reports SSE for explicit sse", async () => {
+	it("never labels a pending handshake WS", async () => {
 		const { run } = mockTransport();
 		const transports: Array<string | undefined> = [];
-		await run({ transport: "sse", onTransport: (t) => void transports.push(t) });
-		expect(transports).toEqual(["SSE"]);
+		let sawOpen = false;
+		class PendingWebSocket extends EventTarget {
+			readyState = 0;
+			constructor() {
+				super();
+				queueMicrotask(() => {
+					this.readyState = 1;
+					sawOpen = true;
+					this.dispatchEvent(new Event("open"));
+				});
+			}
+			send(data: string): void {
+				const _parsed = JSON.parse(data) as { type?: string };
+				queueMicrotask(() => {
+					this.dispatchEvent(
+						Object.assign(new Event("message"), {
+							data: JSON.stringify({
+								type: "response.completed",
+								response: { id: "resp_delay", status: "completed" },
+							}),
+						}),
+					);
+				});
+			}
+			close(): void {}
+		}
+		vi.stubGlobal("WebSocket", PendingWebSocket);
+		const result = await run({
+			onTransport: (t) => {
+				// Before the socket fires open, the hook must never be told WS.
+				if (t === "WS") expect(sawOpen).toBe(true);
+				transports.push(t);
+			},
+		});
+		expect(result.stopReason).toBe("stop");
+		expect(transports).toEqual(["WS"]);
+	});
+
+	it("never labels a failed handshake WS", async () => {
+		const { run } = mockTransport();
+		const transports: Array<string | undefined> = [];
+		vi.stubGlobal(
+			"WebSocket",
+			class extends EventTarget {
+				readyState = 0;
+				constructor() {
+					super();
+					queueMicrotask(() =>
+						this.dispatchEvent(Object.assign(new Event("error"), { message: "handshake refused" })),
+					);
+				}
+				send(): void {
+					throw new Error("send before open");
+				}
+				close(): void {
+					this.readyState = 3;
+				}
+			},
+		);
+		const result = await run({ transport: "websocket", onTransport: (t) => void transports.push(t) });
+		expect(result.stopReason).toBe("error");
+		expect(transports).toEqual([]);
 	});
 
 	it("clears the label then reports SSE when auto falls back", async () => {
