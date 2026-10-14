@@ -290,19 +290,28 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			}
 			const websocketRequestId = codexSessionId || uuidv7();
 			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
-			const websocketHeaders = buildWebSocketHeaders(
-				model.headers,
-				options?.headers,
-				accountId,
-				apiKey,
-				websocketRequestId,
-			);
 			const bodyJson = JSON.stringify(body);
 			const httpTimeoutMs = normalizeWebSocketTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeWebSocketTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
 			const sessionId = options?.sessionId;
-			const fallbackState = sessionId ? getWebSocketSseFallbackState(CODEX_WEBSOCKET_SCOPE, sessionId) : undefined;
+			let websocketHeaders = new Headers();
+			let identityKey = accountId;
+			let recoveryKey = accountId;
+			if (transport !== "sse") {
+				websocketHeaders = buildWebSocketHeaders(
+					model.headers,
+					options?.headers,
+					accountId,
+					apiKey,
+					websocketRequestId,
+				);
+				identityKey = websocketIdentityKey(model, websocketHeaders);
+				recoveryKey = websocketRecoveryKey(model, websocketHeaders);
+			}
+			const fallbackState = sessionId
+				? getWebSocketSseFallbackState(CODEX_WEBSOCKET_SCOPE, sessionId, recoveryKey)
+				: undefined;
 			const recoveryProbe = (fallbackState?.retryAt ?? 0) > 0;
 			let startEmitted = false;
 			const websocketDisabledForSession =
@@ -312,7 +321,6 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			}
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
-				await emitTransport(options?.onTransport, "WS", model);
 				if (transport === "auto" && fallbackState) {
 					recoveryState = fallbackState;
 					recoveryState.recovering = true;
@@ -338,10 +346,12 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 									stream.push({ type: "start", partial: output });
 								}
 							},
+							onTransport: options?.onTransport,
 							idleTimeoutMs: httpTimeoutMs,
 							connectTimeoutMs: websocketConnectTimeoutMs,
 							cacheSessionId,
-							identityKey: accountId,
+							identityKey,
+							recoveryKey,
 							mapEvents: (events) => mapCodexEvents(events, output, model, options?.onProviderStreamEvent),
 							processStream: (events, out, s, m) =>
 								processResponsesStream(events, out, s, m, {
@@ -374,7 +384,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						}
 						assertSuccessfulOutput(output);
 						if (transport === "auto" && sessionId && recoveryState) {
-							clearWebSocketSseFallbackIfOwned(CODEX_WEBSOCKET_SCOPE, sessionId, recoveryState);
+							clearWebSocketSseFallbackIfOwned(CODEX_WEBSOCKET_SCOPE, sessionId, recoveryKey, recoveryState);
 						}
 						stream.push({
 							type: "done",
@@ -407,6 +417,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						const failureState = recordWebSocketFailure(
 							CODEX_WEBSOCKET_SCOPE,
 							sessionId,
+							recoveryKey,
 							error,
 							transport === "auto",
 						);
@@ -1005,4 +1016,27 @@ function buildWebSocketHeaders(
 	headers.set("x-client-request-id", requestId);
 	headers.set("session-id", requestId);
 	return headers;
+}
+
+/**
+ * Pool partition: normalized endpoint + effective credential + caller-supplied
+ * headers. The token value itself only scopes the in-memory entry; it never
+ * reaches diagnostics.
+ */
+function websocketIdentityKey(model: Model<"openai-codex-responses">, headers: Headers): string {
+	const callerHeaders = headersToRecord(headers);
+	delete callerHeaders.authorization;
+	delete callerHeaders["x-client-request-id"];
+	delete callerHeaders["session-id"];
+	delete callerHeaders["openai-beta"];
+	return `${resolveCodexUrl(model.baseUrl)}\n${headers.get("authorization") ?? ""}\n${JSON.stringify(callerHeaders)}`;
+}
+
+/**
+ * Recovery/cooldown partition: same endpoint+credential identity but without
+ * generated per-request nonces (session-id/x-client-request-id rotate on every
+ * cacheRetention:none attempt and must not replenish the fixed retry budget).
+ */
+function websocketRecoveryKey(model: Model<"openai-codex-responses">, headers: Headers): string {
+	return `${resolveCodexUrl(model.baseUrl)}\n${headers.get("authorization") ?? ""}`;
 }
