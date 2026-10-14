@@ -314,6 +314,161 @@ describe("openai-responses WebSocket transport", () => {
 		await stream(proxyModel, context, { apiKey: "gateway-key", sessionId }).result();
 		expect(sockets).toHaveLength(2);
 	});
+
+	it("partitions pooled connections by every effective auth header", async () => {
+		const { run, sent, sockets, connectHeaders } = mockTransport();
+		await run({ headers: { authorization: "Bearer upstream", "cf-aig-authorization": "Bearer gateway-a" } });
+		const secondContext = normalizeContext({
+			messages: [...context.messages, { role: "user", content: "Second", timestamp: 2 }],
+		});
+		await run(
+			{ headers: { authorization: "Bearer upstream", "cf-aig-authorization": "Bearer gateway-b" } },
+			secondContext,
+		);
+		expect(sockets).toHaveLength(2);
+		expect(connectHeaders[0]["cf-aig-authorization"]).toBe("Bearer gateway-a");
+		expect(connectHeaders[1]["cf-aig-authorization"]).toBe("Bearer gateway-b");
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBe(secondContext.messages.length);
+	});
+
+	it("partitions pooled connections by caller-supplied session routing headers", async () => {
+		const { run, sent, sockets, connectHeaders } = mockTransport();
+		await run({ headers: { session_id: "route-a" } });
+		const secondContext = normalizeContext({
+			messages: [...context.messages, { role: "user", content: "Second", timestamp: 2 }],
+		});
+		await run({ headers: { session_id: "route-b" } }, secondContext);
+		expect(sockets).toHaveLength(2);
+		expect(connectHeaders[0].session_id).toBe("route-a");
+		expect(connectHeaders[1].session_id).toBe("route-b");
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBe(secondContext.messages.length);
+	});
+
+	it("does not share SSE cooldown across caller session routing identities", async () => {
+		const { run, recover, onSend, sent, fetchMock } = mockTransport();
+		const now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		onSend.mockImplementation((socket) => socket.fail());
+		await recover({ headers: { session_id: "route-a" } });
+		await run({ headers: { session_id: "route-a" } });
+		expect(sent).toHaveLength(4); // initial + 3 WS retries, all failed
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// A different caller session identity gets its own WS probe, not the cooldown.
+		onSend.mockImplementation((socket) => socket.complete());
+		await run({ headers: { session_id: "route-b" } });
+		expect(sent).toHaveLength(5);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// The original identity stays in cooldown until its deadline.
+		await run({ headers: { session_id: "route-a" } });
+		expect(sent).toHaveLength(5);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("treats a malformed provider stream as a protocol failure, not transport", async () => {
+		const { run, onSend, sent, fetchMock } = mockTransport();
+		onSend.mockImplementation((socket) => {
+			socket.emit({ type: "response.created", response: { id: "resp_bad" } });
+			socket.emit({
+				type: "response.output_item.added",
+				output_index: 0,
+				item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "do_thing", arguments: "" },
+			});
+			socket.emit({ type: "response.function_call_arguments.delta", output_index: 0, delta: "{}" });
+			// No response.output_item.done: the call is unfinished at completion.
+			socket.emit({ type: "response.completed", response: { id: "resp_bad", status: "completed" } });
+		});
+		const result = await run();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("unfinished tool call");
+		expect(sent).toHaveLength(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(result.diagnostics?.some((d) => d.type === "provider_transport_failure")).not.toBe(true);
+		expect(getOpenAIResponsesWebSocketDebugStats(sessionId)?.websocketFailures ?? 0).toBe(0);
+		expect(getOpenAIResponsesWebSocketDebugStats(sessionId)?.websocketFallbackActive ?? false).toBe(false);
+	});
+
+	it("repairs a missing continuation once before the first event", async () => {
+		const { run, onSend, sent } = mockTransport();
+		let attempts = 0;
+		onSend.mockImplementation((socket) => {
+			attempts++;
+			if (attempts === 1) {
+				socket.emit({
+					type: "error",
+					error: { code: "previous_response_not_found", message: "stale continuation" },
+				});
+				return;
+			}
+			socket.complete();
+		});
+		const result = await run();
+		expect(result.stopReason).toBe("stop");
+		expect(sent).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBe(context.messages.length);
+	});
+
+	it("does not issue a second in-stream request after start when continuation is missing", async () => {
+		const { run, onSend, sent } = mockTransport();
+		onSend.mockImplementation((socket) => {
+			socket.emit({ type: "response.created", response: { id: "resp_started" } });
+			socket.emit({
+				type: "error",
+				error: { code: "previous_response_not_found", message: "stale continuation" },
+			});
+		});
+		const result = await run();
+		expect(result.stopReason).toBe("error");
+		expect(sent).toHaveLength(1);
+	});
+
+	it("does not treat an unserializable caller payload as a transport failure", async () => {
+		const { run, sent, fetchMock } = mockTransport();
+		const inject = (params: unknown) => ({
+			...(params as Record<string, unknown>),
+			badValue: 10n,
+		});
+		const result = await run({ onPayload: inject });
+		expect(result.stopReason).toBe("error");
+		expect(sent).toHaveLength(0);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(result.diagnostics?.some((d) => d.type === "provider_transport_failure")).not.toBe(true);
+		expect(getOpenAIResponsesWebSocketDebugStats(sessionId)?.websocketFailures ?? 0).toBe(0);
+		expect(getOpenAIResponsesWebSocketDebugStats(sessionId)?.websocketFallbackActive ?? false).toBe(false);
+	});
+
+	it("an unserializable caller payload stays nonretryable under the outer retry owner", async () => {
+		const { recover, sent, fetchMock } = mockTransport();
+		const inject = (params: unknown) => ({
+			...(params as Record<string, unknown>),
+			badValue: 10n,
+		});
+		const result = await recover({ onPayload: inject });
+		expect(result.stopReason).toBe("error");
+		expect(sent).toHaveLength(0);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(result.diagnostics?.some((d) => d.type === "provider_transport_failure")).not.toBe(true);
+	});
+
+	it("never forwards a caller-injected previous_response_id on a new connection", async () => {
+		const { run, sent, sockets } = mockTransport();
+		const inject = (params: unknown) => ({
+			...(params as Record<string, unknown>),
+			previous_response_id: "resp_foreign",
+		});
+		await run({ onPayload: inject });
+		expect(sent).toHaveLength(1);
+		expect(sent[0].previous_response_id).toBeUndefined();
+		const secondContext = normalizeContext({
+			messages: [...context.messages, { role: "user", content: "Second", timestamp: 2 }],
+		});
+		await run({ apiKey: "sk-rotated-key", onPayload: inject }, secondContext);
+		expect(sockets).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBe(secondContext.messages.length);
+	});
 });
 
 describe("openai-responses retry plan", () => {
