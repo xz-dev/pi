@@ -151,9 +151,25 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 				payload = nextPayload as MistralChatPayload;
 			}
 			const mistralStream = await requestMistralStream(model, payload, apiKey, options);
-			await emitTransport(options?.onTransport, "SSE", model);
+			let sseReported = false;
+			const reportSseOnce = async () => {
+				if (sseReported) return;
+				sseReported = true;
+				await emitTransport(options?.onTransport, "SSE", model);
+			};
+			// Media type proves SSE now; otherwise the first decoded event does.
+			if (mistralStream.sseObserved) {
+				await reportSseOnce();
+			}
 			stream.push({ type: "start", partial: output });
-			await consumeChatStream(model, output, stream, mistralStream, options?.onProviderStreamEvent);
+			await consumeChatStream(
+				model,
+				output,
+				stream,
+				mistralStream.events,
+				options?.onProviderStreamEvent,
+				reportSseOnce,
+			);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -293,7 +309,7 @@ async function requestMistralStream(
 	payload: MistralChatPayload,
 	apiKey: string,
 	options?: MistralOptions,
-): Promise<AsyncIterable<MistralCompletionEvent>> {
+): Promise<{ events: AsyncIterable<MistralCompletionEvent>; sseObserved: boolean }> {
 	const baseUrl = new URL(model.baseUrl);
 	baseUrl.pathname = `${baseUrl.pathname.replace(/\/+$/u, "")}/`;
 	const url = new URL("v1/chat/completions", baseUrl);
@@ -330,7 +346,8 @@ async function requestMistralStream(
 		throw new Error("Mistral response has no body");
 	}
 
-	return readMistralEvents(response.body, options?.signal);
+	const sseObserved = (response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
+	return { events: readMistralEvents(response.body, options?.signal), sseObserved };
 }
 
 class MistralHttpError extends Error {
@@ -572,6 +589,7 @@ async function consumeChatStream(
 	stream: AssistantMessageEventStream,
 	mistralStream: AsyncIterable<MistralCompletionEvent>,
 	onProviderStreamEvent: StreamOptions["onProviderStreamEvent"],
+	onFirstEvent?: () => Promise<void>,
 ): Promise<void> {
 	let currentBlock: TextContent | ThinkingContent | null = null;
 	const blocks = output.content;
@@ -601,6 +619,7 @@ async function consumeChatStream(
 	};
 
 	for await (const event of mistralStream) {
+		await onFirstEvent?.();
 		const chunk = event.data;
 		await onProviderStreamEvent?.(chunk, model);
 		// Mistral's streamed CompletionChunk carries an id field. Keep the first non-empty one,
