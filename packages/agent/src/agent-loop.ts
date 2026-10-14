@@ -410,27 +410,48 @@ async function streamAssistantResponse(
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 
 	// The transport hook is scoped to this request: callbacks arriving after the
-	// stream returned here (adapter internals, or a cancelled/replaced request)
-	// must not emit stale labels.
+	// request settled (adapter internals, or a cancelled/replaced request) or
+	// after the run's signal aborted must not emit stale labels.
 	let requestSettled = false;
-	const response = await streamFunction(config.model, llmContext, {
-		...config,
-		apiKey: resolvedApiKey,
-		identity: mergeClientIdentity(DEFAULT_AGENT_IDENTITY, config.identity),
-		signal,
-		onTransport: async (transport) => {
-			if (requestSettled) return;
-			await emit({ type: "transport_status", transport, model: config.model });
+	let lastTransport: string | undefined;
+	const notifyTransport = async (transport: string | undefined) => {
+		await emit({ type: "transport_status", transport, model: config.model });
+		try {
 			await config.onTransport?.(transport, config.model);
-		},
-	});
-	// Record the requested level, whichever stream function answered.
-	const result = async () => Object.assign(await response.result(), { thinkingLevel: config.reasoning ?? "off" });
-
+		} catch {
+			// Optional observer errors must not fail the request.
+		}
+	};
+	const clearTransport = async () => {
+		if (lastTransport === undefined) return;
+		lastTransport = undefined;
+		await notifyTransport(undefined);
+	};
+	// Abort retires the request synchronously and clears a known transport
+	// promptly; a late-arriving stream factory can no longer report or clear.
+	const onAbort = () => {
+		requestSettled = true;
+		void clearTransport().catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 
 	try {
+		const response = await streamFunction(config.model, llmContext, {
+			...config,
+			apiKey: resolvedApiKey,
+			identity: mergeClientIdentity(DEFAULT_AGENT_IDENTITY, config.identity),
+			signal,
+			onTransport: async (transport) => {
+				if (requestSettled || signal?.aborted) return;
+				lastTransport = transport;
+				await notifyTransport(transport);
+			},
+		});
+		// Record the requested level, whichever stream function answered.
+		const result = async () => Object.assign(await response.result(), { thinkingLevel: config.reasoning ?? "off" });
+
 		for await (const event of response) {
 			switch (event.type) {
 				case "start":
@@ -488,6 +509,8 @@ async function streamAssistantResponse(
 		return finalMessage;
 	} finally {
 		requestSettled = true;
+		signal?.removeEventListener("abort", onAbort);
+		await clearTransport();
 	}
 }
 
