@@ -124,6 +124,17 @@ function mockTransport() {
 }
 
 describe("openai-responses WebSocket transport", () => {
+	it("falls back to SSE in auto mode when the runtime has no WebSocket", async () => {
+		vi.useFakeTimers();
+		const { recover, sockets, fetchMock } = mockTransport();
+		vi.stubGlobal("WebSocket", undefined);
+		const request = recover();
+		await vi.runAllTimersAsync();
+		expect((await request).stopReason).toBe("stop");
+		expect(sockets).toHaveLength(0);
+		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
 	it("opens the public /responses WS URL with bearer auth and no stream field", async () => {
 		const { run, sent, connectHeaders, connectUrls, fetchMock } = mockTransport();
 		const result = await run();
