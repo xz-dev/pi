@@ -61,6 +61,7 @@ export {
 	type ReadToolInput,
 	type ReadToolOptions,
 } from "./read.ts";
+export { createToolTaskTool } from "./tool-task.ts";
 export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
