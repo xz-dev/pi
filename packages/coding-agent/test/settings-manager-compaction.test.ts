@@ -190,3 +190,22 @@ describe("compaction model overrides", () => {
 		expect(manager.getCompactionSettings(model)).toEqual({ enabled: true, reserveTokens: 0, keepRecentTokens: 0 });
 	});
 });
+
+describe("background compaction settings", () => {
+	it("defaults to enabled at 0.85 and returns undefined when disabled", () => {
+		expect(SettingsManager.inMemory().getCompactionBackgroundStartRatio()).toBe(0.85);
+		expect(
+			SettingsManager.inMemory({ compaction: { backgroundStartRatio: 0.6 } }).getCompactionBackgroundStartRatio(),
+		).toBe(0.6);
+		expect(
+			SettingsManager.inMemory({
+				compaction: { background: false, backgroundStartRatio: 0.6 },
+			}).getCompactionBackgroundStartRatio(),
+		).toBeUndefined();
+	});
+
+	it.each([0, 1, 1.5, -0.1, "0.5"])("rejects backgroundStartRatio %s", (ratio) => {
+		const manager = SettingsManager.inMemory({ compaction: { backgroundStartRatio: ratio as number } });
+		expect(() => manager.getCompactionBackgroundStartRatio()).toThrow("Invalid compaction.backgroundStartRatio");
+	});
+});
