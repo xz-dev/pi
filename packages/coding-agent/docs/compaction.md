@@ -40,6 +40,19 @@ This ordering guarantee covers input as submitted. Late `message_end` transforma
 
 During a multi-turn agent run, Pi checks the canonical projected context after tools finish and their results are appended, before starting the next assistant response. If the threshold is crossed, Pi compacts during `prepareNextTurn`, then performs the existing catch-up steering poll before `turn_start`. It skips this between-turn check when the completed tool batch terminates the run and no queued message requires another response. Pi retains a pre-request threshold fallback for context growth after input preparation and for requests without new input, and performs final-attempt overflow recovery after the low-level run ends. A run that ends above the threshold does not compact on its own: compaction waits until the next request needs the context, so an idle or abandoned session never pays for it.
 
+### Background Compaction
+
+Waiting for the summary at the threshold stalls the agent for the duration of a summarization request. With `compaction.background` enabled (the default), Pi starts the threshold compaction early instead:
+
+1. At the same points where it checks the threshold (before the next assistant response and before delivering new input), Pi starts summarizing in the background once the projected context reaches `backgroundStartRatio` (default `0.85`) of `contextWindow - reserveTokens`. It snapshots the current branch, runs `session_before_compact` with `reason: "threshold"`, and generates the summary without blocking the agent or showing a compaction indicator.
+2. The agent keeps working. Messages appended meanwhile come after the snapshot's `firstKeptEntryId`, so the compaction keeps them verbatim.
+3. At the next check after the summary is ready, Pi persists it as an ordinary threshold compaction (`compaction_start`, `session_compact`, `compaction_end`), even below the threshold.
+4. If the threshold is reached first, the threshold compaction waits for the pending summary instead of starting a second one.
+
+The result is discarded and the threshold falls back to blocking compaction when the snapshot leaf left the branch, another compaction was appended, or a later `context_edit` targets a summarized entry. Manual compaction and overflow recovery cancel a pending background summary. A failed background summary is not retried until history compacts again; its retry notices are not shown. Set `compaction.background` to `false` to compact only at the threshold.
+
+A summary that waited for the threshold keeps every entry after the earlier snapshot cut, so the context after compaction can stay above the start ratio and begin the next background summary immediately.
+
 A provider context-overflow error or an early final `stopReason: "length"` can select one compact-and-retry recovery attempt. Length responses with tool calls retain their synthetic failed tool results and follow the ordinary tool/queue scheduler rather than forcing the run to end.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
@@ -300,7 +313,7 @@ Extensions can intercept and customize both compaction and branch summarization.
 
 ### session_before_compact
 
-Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
+Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. With [background compaction](#background-compaction), threshold events fire when background summarization starts, while the agent is still running; the returned compaction is persisted later if the snapshot is still valid. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
 
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
@@ -437,6 +450,8 @@ Configure compaction in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settin
 | `enabled` | `true` | Enable auto-compaction |
 | `reserveTokens` | `16384` | Tokens to reserve for LLM response |
 | `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |
+| `background` | `true` | Summarize ahead of the threshold without blocking the agent |
+| `backgroundStartRatio` | `0.85` | Fraction of the threshold at which background summarization starts |
 
 Disable auto-compaction with `"enabled": false`. You can still compact manually with `/compact`.
 
