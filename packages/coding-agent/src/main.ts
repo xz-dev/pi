@@ -796,6 +796,7 @@ export async function main(args: string[], options?: MainOptions) {
 										hasUI: isInitialRuntime && trustPromptMode === "interactive",
 									}),
 								onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
+								getSlowHookThresholdMs: (kind) => runtimeSettingsManager.getSlowHookThresholdMs(kind),
 							});
 							projectTrustByCwd.set(cwd, trusted);
 							return trusted;
