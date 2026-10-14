@@ -326,6 +326,19 @@ describe("openai-responses WebSocket transport", () => {
 		expect(sockets).toHaveLength(2);
 	});
 
+	it("keeps caller routing headers even when they equal the session nonce", async () => {
+		const { run, sent, sockets, connectHeaders } = mockTransport();
+		const first = await run({ headers: { "x-session-affinity": sessionId } });
+		const next = normalizeContext({
+			messages: [...context.messages, first, { role: "user", content: "Next", timestamp: 2 }],
+		});
+		await run({}, next);
+		expect(sockets).toHaveLength(2);
+		expect(connectHeaders[0]["x-session-affinity"]).toBe(sessionId);
+		expect(connectHeaders[1]["x-session-affinity"]).toBeUndefined();
+		expect(sent[1].previous_response_id).toBeUndefined();
+	});
+
 	it("partitions pooled connections by every effective auth header", async () => {
 		const { run, sent, sockets, connectHeaders } = mockTransport();
 		await run({ headers: { authorization: "Bearer upstream", "cf-aig-authorization": "Bearer gateway-a" } });
