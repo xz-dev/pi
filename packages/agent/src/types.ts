@@ -506,6 +506,9 @@ export interface AgentContext {
 	tools?: AgentTool<any>[];
 }
 
+/** Minimal model identifiers carried by `transport_status`; never includes headers or credentials. */
+export type TransportStatusModel = Pick<Model<Api>, "id" | "api" | "provider">;
+
 /**
  * Events emitted by the Agent for UI updates.
  *
@@ -522,8 +525,9 @@ export type AgentEvent =
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
 	// Actual client→provider/proxy transport for an in-flight request, as reported
 	// by the active adapter. `transport` is undefined when the transport is lost or
-	// the adapter clears it; the event is transient and never persisted.
-	| { type: "transport_status"; transport: string | undefined; model: Model<Api> }
+	// the adapter clears it; the event is transient and never persisted. `model`
+	// carries identifiers only, never the caller's headers or credentials.
+	| { type: "transport_status"; transport: string | undefined; model: TransportStatusModel }
 	// Message lifecycle - emitted for system, user, assistant, and toolResult messages
 	| { type: "message_start"; message: AgentMessage }
 	// Only emitted for assistant messages during streaming
