@@ -119,6 +119,28 @@ export class ProviderStreamEventCallbackError extends Error {
 	}
 }
 
+/**
+ * Marks failures that happened at the real socket boundary: connect/handshake
+ * refusal, close/error events, send failures, connect/idle timeouts, and
+ * premature stream end. Only these consume the WS retry budget and SSE
+ * cooldown. Arbitrary local exceptions (unserializable payloads, parser or
+ * application errors) must stay unmarked so callers never promote them to
+ * transport retries.
+ */
+export class ResponsesTransportError extends Error {
+	readonly cause?: unknown;
+
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message);
+		this.name = "ResponsesTransportError";
+		this.cause = options?.cause;
+	}
+}
+
+export function isResponsesTransportError(error: unknown): boolean {
+	return error instanceof ResponsesTransportError;
+}
+
 class WebSocketCloseError extends Error {
 	readonly code?: number;
 	readonly reason?: string;
@@ -134,11 +156,7 @@ class WebSocketCloseError extends Error {
 }
 
 export function isResponsesNonTransportError(error: unknown): boolean {
-	return (
-		error instanceof ResponsesApiError ||
-		error instanceof ResponsesProtocolError ||
-		error instanceof ProviderStreamEventCallbackError
-	);
+	return !isResponsesTransportError(error);
 }
 
 export function isWebSocketConnectionLimitReachedError(error: unknown): boolean {
@@ -455,6 +473,9 @@ async function connectWebSocket(
 ): Promise<WebSocketLike> {
 	const WebSocketCtor = await getWebSocketConstructor(env);
 	if (!WebSocketCtor) {
+		// Missing WebSocket global is a runtime/environment limitation, not a
+		// socket failure — leave it unmarked so callers fall back or fail fast
+		// without consuming the transport retry budget.
 		throw new Error("WebSocket transport is not available in this runtime");
 	}
 
@@ -469,6 +490,9 @@ async function connectWebSocket(
 		try {
 			socket = new WebSocketCtor(url, { headers: wsHeaders });
 		} catch (error) {
+			// A synchronous ctor throw is usually a config/programming error
+			// (bad URL, unsupported protocols arg), not a network failure — leave
+			// it unmarked so it never consumes the transport retry budget.
 			reject(error instanceof Error ? error : new Error(String(error)));
 			return;
 		}
@@ -499,10 +523,10 @@ async function connectWebSocket(
 			resolve(socket);
 		};
 		const onError: WebSocketListener = (event) => {
-			fail(extractWebSocketError(event));
+			fail(new ResponsesTransportError(extractWebSocketError(event).message, { cause: event }));
 		};
 		const onClose: WebSocketListener = (event) => {
-			fail(extractWebSocketCloseError(event));
+			fail(new ResponsesTransportError(extractWebSocketCloseError(event).message, { cause: event }));
 		};
 		const onAbort = () => {
 			fail(new Error("Request was aborted"), "aborted");
@@ -515,7 +539,10 @@ async function connectWebSocket(
 
 		if (connectTimeoutMs > 0) {
 			timeout = setTimeout(() => {
-				fail(new Error(`WebSocket connect timeout after ${connectTimeoutMs}ms`), "connect_timeout");
+				fail(
+					new ResponsesTransportError(`WebSocket connect timeout after ${connectTimeoutMs}ms`),
+					"connect_timeout",
+				);
 			}, connectTimeoutMs);
 		}
 		if (signal?.aborted) {
@@ -727,7 +754,7 @@ export async function* parseWebSocket(
 	};
 
 	const onError: WebSocketListener = (event) => {
-		failed = extractWebSocketError(event);
+		failed = new ResponsesTransportError(extractWebSocketError(event).message, { cause: event });
 		done = true;
 		wake();
 	};
@@ -739,7 +766,7 @@ export async function* parseWebSocket(
 			return;
 		}
 		if (!failed) {
-			failed = extractWebSocketCloseError(event);
+			failed = new ResponsesTransportError(extractWebSocketCloseError(event).message, { cause: event });
 		}
 		done = true;
 		wake();
@@ -771,7 +798,7 @@ export async function* parseWebSocket(
 				pending = resolve;
 				if (idleTimeoutMs !== undefined && idleTimeoutMs > 0) {
 					timeout = setTimeout(() => {
-						const error = new Error(`WebSocket idle timeout after ${idleTimeoutMs}ms`);
+						const error = new ResponsesTransportError(`WebSocket idle timeout after ${idleTimeoutMs}ms`);
 						failed = error;
 						done = true;
 						pending = null;
@@ -790,7 +817,7 @@ export async function* parseWebSocket(
 			throw failed;
 		}
 		if (!sawCompletion) {
-			throw new Error("WebSocket stream closed before response.completed");
+			throw new ResponsesTransportError("WebSocket stream closed before response.completed");
 		}
 	} finally {
 		socket.removeEventListener("message", onMessage);
@@ -949,8 +976,11 @@ export async function processResponsesWebSocket<TApi extends Api>(
 	transportCleared = false;
 	const transport = options?.transport ?? "auto";
 	const useCachedContext = transport === "websocket-cached" || transport === "auto";
+	// A fresh socket never carries continuation state. Strip any
+	// caller-injected previous_response_id unconditionally; only the
+	// connection's own validated continuation may add it back below.
 	const fullBody = { ...body };
-	if (forceFresh) delete fullBody.previous_response_id;
+	delete fullBody.previous_response_id;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(getScope(scope), cacheSessionId) : undefined;
 	if (stats) {
@@ -971,7 +1001,15 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		}
 	}
 	try {
-		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		// Serialize outside the send boundary: an unserializable caller payload
+		// (BigInt, circular refs) is a local application failure, not a socket
+		// failure, and stays unmarked so it never consumes the transport budget.
+		const frame = JSON.stringify({ type: "response.create", ...requestBody });
+		try {
+			socket.send(frame);
+		} catch (error) {
+			throw new ResponsesTransportError(formatThrownValue(error), { cause: error });
+		}
 		let started = false;
 		const events = mapEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs));
 		const startedEvents = (async function* (): AsyncGenerator<ResponseStreamEvent> {
