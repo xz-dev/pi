@@ -1,0 +1,313 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	closeOpenAIResponsesWebSocketSessions,
+	getOpenAIResponsesWebSocketDebugStats,
+	type OpenAIResponsesOptions,
+	resetOpenAIResponsesWebSocketDebugStats,
+	stream,
+} from "../src/api/openai-responses.ts";
+import type { Model, TranscriptContext } from "../src/types.ts";
+import { type RetryPolicy, retryAssistantCall } from "../src/utils/retry.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
+
+const model: Model<"openai-responses"> = {
+	id: "gpt-5.5",
+	name: "GPT-5.5",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 400000,
+	maxTokens: 128000,
+};
+
+const apiKey = "sk-test-key";
+const context = normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] });
+const sessionId = "responses-ws";
+
+afterEach(() => {
+	closeOpenAIResponsesWebSocketSessions();
+	resetOpenAIResponsesWebSocketDebugStats();
+	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
+	vi.useRealTimers();
+});
+
+interface SentFrame {
+	connection: number;
+	url: string;
+	headers: Record<string, string>;
+	type?: string;
+	stream?: boolean;
+	store?: boolean;
+	input?: unknown[];
+	previous_response_id?: string;
+}
+
+function mockTransport() {
+	const sent: SentFrame[] = [];
+	const sockets: MockWebSocket[] = [];
+	const connectHeaders: Record<string, string>[] = [];
+	const connectUrls: string[] = [];
+	const onSend = vi.fn((socket: MockWebSocket) => socket.complete());
+	const sseItem = {
+		type: "message",
+		id: "msg_sse",
+		role: "assistant",
+		status: "completed",
+		content: [{ type: "output_text", text: "SSE response" }],
+	};
+	const fetchMock = vi.fn(
+		async () =>
+			new Response(
+				[
+					{ type: "response.output_item.added", item: { ...sseItem, content: [], status: "in_progress" } },
+					{ type: "response.output_item.done", item: sseItem },
+					{ type: "response.completed", response: { id: "sse", status: "completed" } },
+				]
+					.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+					.join(""),
+				{ headers: { "content-type": "text/event-stream" } },
+			),
+	);
+
+	class MockWebSocket extends EventTarget {
+		readyState = 1;
+		readonly connection = sockets.length + 1;
+		constructor(url: string, protocols?: string | string[] | { headers?: Record<string, string> }) {
+			super();
+			sockets.push(this);
+			connectUrls.push(url);
+			connectHeaders.push(
+				protocols && typeof protocols === "object" && !Array.isArray(protocols) ? (protocols.headers ?? {}) : {},
+			);
+			queueMicrotask(() => this.dispatchEvent(new Event("open")));
+		}
+		send(data: string): void {
+			sent.push({ ...JSON.parse(data), connection: this.connection, url: connectUrls.at(-1)!, headers: {} });
+			queueMicrotask(() => onSend(this));
+		}
+		emit(event: Record<string, unknown>): void {
+			this.dispatchEvent(Object.assign(new Event("message"), { data: JSON.stringify(event) }));
+		}
+		complete(): void {
+			const id = `resp_${sent.length}`;
+			const item = {
+				type: "message",
+				id: `msg_${sent.length}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "Hello" }],
+			};
+			this.emit({ type: "response.created", response: { id } });
+			this.emit({ type: "response.output_item.added", item: { ...item, content: [], status: "in_progress" } });
+			this.emit({ type: "response.output_item.done", item });
+			this.emit({ type: "response.completed", response: { id, status: "completed" } });
+		}
+		fail(): void {
+			this.dispatchEvent(Object.assign(new Event("error"), { message: "socket dropped" }));
+		}
+		close(): void {
+			this.readyState = 3;
+		}
+	}
+
+	vi.stubGlobal("WebSocket", MockWebSocket);
+	vi.stubGlobal("fetch", fetchMock);
+	const run = (options: Partial<OpenAIResponsesOptions> = {}, input: TranscriptContext = context) =>
+		stream(model, input, { apiKey, sessionId, ...options }).result();
+	const recover = (options: Partial<OpenAIResponsesOptions> = {}, input: TranscriptContext = context) =>
+		retryAssistantCall(() => run(options, input), { enabled: false, maxRetries: 0, baseDelayMs: 0 }, options.signal);
+	return { run, recover, onSend, fetchMock, sent, sockets, connectHeaders, connectUrls };
+}
+
+describe("openai-responses WebSocket transport", () => {
+	it("opens the public /responses WS URL with bearer auth and no stream field", async () => {
+		const { run, sent, connectHeaders, connectUrls, fetchMock } = mockTransport();
+		const result = await run();
+		expect(result.stopReason).toBe("stop");
+		expect(connectUrls).toEqual(["wss://api.openai.com/v1/responses"]);
+		expect(sent).toHaveLength(1);
+		expect(sent[0].type).toBe("response.create");
+		expect(sent[0].stream).toBeUndefined();
+		expect(sent[0].store).toBe(false);
+		expect(connectHeaders[0].authorization).toBe(`Bearer ${apiKey}`);
+		expect(connectHeaders[0]["openai-beta"]).toContain("responses_websockets");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("reuses the connection and sends only the delta with previous_response_id", async () => {
+		const { run, sent, sockets } = mockTransport();
+		const first = await run();
+		const secondContext = normalizeContext({
+			messages: [...context.messages, first, { role: "user", content: "Second", timestamp: 2 }],
+		});
+		const second = await run({}, secondContext);
+		expect(second.stopReason).toBe("stop");
+		expect(sent).toHaveLength(2);
+		expect(sent[1].connection).toBe(sent[0].connection);
+		expect(sockets).toHaveLength(1);
+		expect(sent[1].previous_response_id).toBe(first.responseId);
+		expect(sent[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Second" }] }]);
+		expect(getOpenAIResponsesWebSocketDebugStats(sessionId)).toMatchObject({
+			connectionsReused: 1,
+			deltaRequests: 1,
+		});
+	});
+
+	it("sends full context without previous_response_id when the credential changes", async () => {
+		const { run, sent, sockets } = mockTransport();
+		await run();
+		const secondContext = normalizeContext({
+			messages: [...context.messages, { role: "user", content: "Second", timestamp: 2 }],
+		});
+		await run({ apiKey: "sk-rotated-key" }, secondContext);
+		expect(sent).toHaveLength(2);
+		expect(sockets).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBeGreaterThan(1);
+	});
+
+	it("sends full context when history no longer extends the cached baseline", async () => {
+		const { run, sent } = mockTransport();
+		await run();
+		// Edited history: different content at the same position.
+		const editedContext = normalizeContext({ messages: [{ role: "user", content: "Edited", timestamp: 2 }] });
+		await run({}, editedContext);
+		expect(sent).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Edited" }] }]);
+	});
+
+	it("keeps explicit SSE on HTTP with stream:true and no continuation", async () => {
+		const { run, sent, fetchMock } = mockTransport();
+		const result = await run({ transport: "sse" });
+		expect(result.stopReason).toBe("stop");
+		expect(sent).toHaveLength(0);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const request = (fetchMock.mock.calls[0] as unknown[] | undefined)?.[1] as RequestInit | undefined;
+		const body = JSON.parse((request?.body ?? "{}") as string);
+		expect(body.stream).toBe(true);
+		expect(body.store).toBe(false);
+		expect(body.previous_response_id).toBeUndefined();
+	});
+
+	it("never downgrades explicit websocket transport to SSE", async () => {
+		const { run, onSend, sent, fetchMock } = mockTransport();
+		onSend.mockImplementation((socket) => socket.fail());
+		const result = await run({ transport: "websocket" });
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("socket dropped");
+		expect(sent).toHaveLength(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(result.diagnostics?.at(-1)?.details).not.toHaveProperty("fallbackTransport");
+	});
+
+	it("falls back to SSE after the fixed auto retry budget is exhausted", async () => {
+		const { recover, onSend, sent, fetchMock } = mockTransport();
+		onSend.mockImplementation((socket) => socket.fail());
+		const result = await recover();
+		expect(result.stopReason).toBe("stop");
+		expect(sent).toHaveLength(4); // initial + 3 outer WS retries
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(getOpenAIResponsesWebSocketDebugStats(sessionId)?.websocketFallbackActive).toBe(true);
+	});
+
+	it("does not replay a started response and recovers with full context", async () => {
+		const { run, onSend, sent, fetchMock } = mockTransport();
+		onSend.mockImplementationOnce((socket) => {
+			socket.emit({ type: "response.created", response: { id: "partial" } });
+			socket.emit({
+				type: "response.output_item.added",
+				item: { type: "message", id: "msg_partial", role: "assistant", content: [] },
+			});
+			socket.emit({ type: "response.output_text.delta", delta: "discarded" });
+			socket.fail();
+		});
+		const first = await run();
+		expect(first.stopReason).toBe("error");
+		expect(fetchMock).not.toHaveBeenCalled();
+		const second = await run();
+		expect(second.stopReason).toBe("stop");
+		expect(sent).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input?.length).toBe(context.messages.length);
+	});
+
+	it("surfaces nested WS error envelopes with the provider message", async () => {
+		const { run, onSend } = mockTransport();
+		onSend.mockImplementation((socket) =>
+			socket.emit({
+				type: "error",
+				error: { code: "session_closed", message: "session closed by server" },
+			}),
+		);
+		const result = await run({ transport: "websocket" });
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("session closed by server");
+		expect(result.errorMessage).not.toContain("undefined");
+	});
+
+	it("isolates pooled sockets by baseUrl for the same session", async () => {
+		const { run, sockets } = mockTransport();
+		await run();
+		const proxyModel = { ...model, baseUrl: "https://gateway.example.com/v1" };
+		await stream(proxyModel, context, { apiKey: "gateway-key", sessionId }).result();
+		expect(sockets).toHaveLength(2);
+	});
+});
+
+describe("openai-responses retry plan", () => {
+	it("uses the transport recovery budget for auto failures", async () => {
+		vi.useFakeTimers();
+		const { run, onSend, sent, fetchMock } = mockTransport();
+		onSend.mockImplementation((socket) => socket.fail());
+		const policy: RetryPolicy = { enabled: true, maxRetries: 1, baseDelayMs: 10, maxAgentDelayMs: 15 };
+		const request = retryAssistantCall(() => run(), policy, undefined);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sent).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(10);
+		expect(sent).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(15);
+		expect(sent).toHaveLength(3);
+		await vi.advanceTimersByTimeAsync(15);
+		expect((await request).stopReason).toBe("stop");
+		expect(sent).toHaveLength(4);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("onTransport reporting", () => {
+	it("reports WS for websocket success", async () => {
+		const { run } = mockTransport();
+		const transports: Array<string | undefined> = [];
+		await run({ onTransport: (t) => void transports.push(t) });
+		expect(transports).toEqual(["WS"]);
+	});
+
+	it("reports SSE for explicit sse", async () => {
+		const { run } = mockTransport();
+		const transports: Array<string | undefined> = [];
+		await run({ transport: "sse", onTransport: (t) => void transports.push(t) });
+		expect(transports).toEqual(["SSE"]);
+	});
+
+	it("clears the label then reports SSE when auto falls back", async () => {
+		const { recover, onSend } = mockTransport();
+		onSend.mockImplementation((socket) => socket.fail());
+		const transports: Array<string | undefined> = [];
+		await recover({ onTransport: (t) => void transports.push(t) });
+		expect(transports.at(-2)).toBe(undefined);
+		expect(transports.at(-1)).toBe("SSE");
+	});
+
+	it("a throwing hook does not become a transport failure", async () => {
+		const { run, sent } = mockTransport();
+		const result = await run({ onTransport: () => Promise.reject(new Error("hook boom")) });
+		expect(result.stopReason).toBe("stop");
+		expect(sent).toHaveLength(1);
+		expect(result.errorMessage).toBeUndefined();
+	});
+});

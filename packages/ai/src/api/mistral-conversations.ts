@@ -14,7 +14,7 @@ import type {
 	TranscriptContext,
 } from "../types.ts";
 import { combineAbortSignals } from "../utils/abort-signals.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
@@ -150,6 +150,7 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 				payload = nextPayload as MistralChatPayload;
 			}
 			const mistralStream = await requestMistralStream(model, payload, apiKey, options);
+			await emitTransport(options?.onTransport, "SSE", model);
 			stream.push({ type: "start", partial: output });
 			await consumeChatStream(model, output, stream, mistralStream, options?.onProviderStreamEvent);
 
