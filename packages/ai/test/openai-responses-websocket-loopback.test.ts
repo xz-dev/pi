@@ -85,7 +85,7 @@ describe("openai-responses native WebSocket loopback", () => {
 				expect(result.stopReason).toBe("stop");
 				expect(authorization).toBe("Bearer fake-local-key");
 				expect(events.indexOf("handshake")).toBeGreaterThanOrEqual(0);
-				expect(events.indexOf("transport:WS")).toBeGreaterThan(events.indexOf("handshake"));
+				expect(events.indexOf("transport:WS/full")).toBeGreaterThan(events.indexOf("handshake"));
 			} finally {
 				clearTimeout(timeout);
 			}

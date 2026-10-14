@@ -211,15 +211,19 @@ describe("Codex transport recovery", () => {
 		"recovers %s with full context after cooldown, then resumes deltas",
 		async (transport) => {
 			const { run, recover, onSend, fetchMock, sent, sockets } = mockTransport();
+			const transports: Array<string | undefined> = [];
+			const options = { transport, onTransport: (value: string | undefined) => void transports.push(value) };
 			let now = 1000;
 			vi.spyOn(Date, "now").mockImplementation(() => now);
-			const first = await run({ transport });
+			const first = await run(options);
+			expect(transports.at(-1)).toBe("WS/full");
 			onSend.mockImplementation((socket) => socket.fail());
 			const secondContext = normalizeContext({
 				messages: [...context.messages, first, { role: "user", content: "Second", timestamp: 2 }],
 			});
-			const fallback = await recover({ transport }, secondContext);
+			const fallback = await recover(options, secondContext);
 			expect(fallback.stopReason).toBe("stop");
+			expect(transports.at(-1)).toBe("SSE");
 			expect(sent).toHaveLength(5);
 			expect(fetchMock).toHaveBeenCalledTimes(1);
 			const recoveryContext = normalizeContext({
@@ -227,8 +231,9 @@ describe("Codex transport recovery", () => {
 			});
 			now += 300_000;
 			onSend.mockImplementation((socket) => socket.complete());
-			const recovered = await run({ transport }, recoveryContext);
+			const recovered = await run(options, recoveryContext);
 			expect(recovered.stopReason).toBe("stop");
+			expect(transports.at(-1)).toBe("WS/full");
 			expect(sent).toHaveLength(6);
 			expect(sockets).toHaveLength(5);
 			expect(sockets[0].readyState).toBe(3);
@@ -248,11 +253,12 @@ describe("Codex transport recovery", () => {
 				{ role: "user", content: [{ type: "input_text", text: "Third" }] },
 			]);
 			await run(
-				{ transport },
+				options,
 				normalizeContext({
 					messages: [...recoveryContext.messages, recovered, { role: "user", content: "Fourth", timestamp: 4 }],
 				}),
 			);
+			expect(transports.at(-1)).toBe("WS/continuation");
 			expect(sent[6].connection).toBe(sent[5].connection);
 			expect(sent[6].previous_response_id).toBe(recovered.responseId);
 			expect(sent[6].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Fourth" }] }]);

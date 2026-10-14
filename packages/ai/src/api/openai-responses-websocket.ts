@@ -972,8 +972,6 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		transportCleared = true;
 		await emitTransport(onTransport, undefined, model);
 	};
-	await emitTransport(onTransport, "WS", model);
-	transportCleared = false;
 	const transport = options?.transport ?? "auto";
 	const useCachedContext = transport === "websocket-cached" || transport === "auto";
 	// A fresh socket never carries continuation state. Strip any
@@ -982,6 +980,8 @@ export async function processResponsesWebSocket<TApi extends Api>(
 	const fullBody = { ...body };
 	delete fullBody.previous_response_id;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	await emitTransport(onTransport, requestBody.previous_response_id ? "WS/continuation" : "WS/full", model);
+	transportCleared = false;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(getScope(scope), cacheSessionId) : undefined;
 	if (stats) {
 		stats.requests++;
