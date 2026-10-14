@@ -405,8 +405,11 @@ async function streamAssistantResponse(
 	// after the run's signal aborted must not emit stale labels.
 	let requestSettled = false;
 	let lastTransport: string | undefined;
+	// Events expose model identifiers only; headers and other caller-supplied
+	// credentials stay on the full model object passed to onTransport.
+	const eventModel = { id: config.model.id, api: config.model.api, provider: config.model.provider };
 	const notifyTransport = async (transport: string | undefined) => {
-		await emit({ type: "transport_status", transport, model: config.model });
+		await emit({ type: "transport_status", transport, model: eventModel });
 		try {
 			await config.onTransport?.(transport, config.model);
 		} catch {
