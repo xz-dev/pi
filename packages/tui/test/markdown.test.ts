@@ -1771,4 +1771,92 @@ bar`,
 			assert.strictEqual(partial.render(80).length, complete.render(80).length);
 		});
 	});
+
+	describe("Preserve overflow", () => {
+		it("keeps real code spaces without viewport or syntax-highlighter-dependent padding", () => {
+			for (const codeBlockIndent of ["", "        "]) {
+				for (const colorTrailingSpaces of [true, false]) {
+					const theme: MarkdownTheme = {
+						...defaultMarkdownTheme,
+						codeBlockIndent,
+						codeBlockBorder: () => "",
+						highlightCode: (code) =>
+							code
+								.split("\n")
+								.map((line) =>
+									colorTrailingSpaces
+										? `\x1b[31m${line}\x1b[39m`
+										: `\x1b[31m${line.trimEnd()}\x1b[39m${line.slice(line.trimEnd().length)}`,
+								),
+					};
+					const markdown = new Markdown("```\n  a  \n  \nb\n```", 0, 0, theme, undefined, {
+						overflow: "preserve",
+					});
+					for (const width of [2, 40, 80]) {
+						assert.deepStrictEqual(markdown.render(width).map(stripAnsi), ["  a  ", "  ", "b"]);
+					}
+				}
+			}
+		});
+
+		it("removes list continuation padding but leaves default layout unchanged", () => {
+			const source = "- p\n  - a\n    b";
+			const preserved = new Markdown(source, 0, 0, defaultMarkdownTheme, undefined, { overflow: "preserve" });
+			assert.deepStrictEqual(preserved.render(40).map(stripAnsi), ["- p", "- a", "b"]);
+			assert.deepStrictEqual(
+				new Markdown(source, 0, 0, defaultMarkdownTheme).render(40).map((line) => stripAnsi(line).trimEnd()),
+				["- p", "    - a", "      b"],
+			);
+		});
+
+		it("renders styled table body rows without alignment spaces, borders, or narrow raw fallback", () => {
+			const source = "| a | long |\n|---|---|\n| `x` | **y** |";
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme, undefined, { overflow: "preserve" });
+			for (const width of [1, 8, 60]) {
+				const lines = markdown.render(width);
+				assert.deepStrictEqual(lines.map(stripAnsi), ["a│long", "x│y"]);
+				assert.ok(lines[0].includes("\x1b[1m"));
+				assert.ok(lines[1].includes("\x1b[33m"));
+				assert.ok(lines[1].includes("\x1b[1m"));
+			}
+			const full = new Markdown(source, 0, 0, defaultMarkdownTheme).render(60).map(stripAnsi);
+			assert.ok(full[0].startsWith("┌"));
+			assert.ok(full.at(-1)!.startsWith("└"));
+		});
+
+		it("keeps hard lines unclipped and unwrapped so callers can crop styled output", () => {
+			const markdown = new Markdown(
+				"short\nthis line is much longer than twenty columns",
+				0,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				{
+					overflow: "preserve",
+				},
+			);
+			const lines = markdown.render(20).map((line) => stripAnsi(line).trimEnd());
+			assert.deepStrictEqual(lines, ["short", "this line is much longer than twenty columns"]);
+		});
+
+		it("keeps nested styles and list prefixes intact on unclipped hard lines", () => {
+			const markdown = new Markdown("- **bold** item that exceeds width", 0, 0, defaultMarkdownTheme, undefined, {
+				overflow: "preserve",
+			});
+			const lines = markdown.render(10);
+			assert.strictEqual(lines.length, 1);
+			assert.strictEqual(stripAnsi(lines[0]), "- bold item that exceeds width");
+			assert.strictEqual(lines[0].includes("\x1b[1m"), true);
+		});
+
+		it("still splits literal newlines inside styled paragraphs", () => {
+			const markdown = new Markdown("one\ntwo", 0, 0, defaultMarkdownTheme, undefined, {
+				overflow: "preserve",
+			});
+			assert.deepStrictEqual(
+				markdown.render(40).map((line) => stripAnsi(line).trimEnd()),
+				["one", "two"],
+			);
+		});
+	});
 });
