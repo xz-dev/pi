@@ -298,6 +298,7 @@ function isUsageSessionEntry(item: RenderSessionItem): item is Extract<SessionEn
 
 // EIO: tty reads/ioctls from an orphaned background process group, or writes after hangup.
 // ENOTTY: the tty was revoked (macOS) and stdin is no longer a terminal.
+const RETRY_OUTCOME_ENTRY_TYPE = "pi:retry-outcome";
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN", "ENOTTY"]);
 
 function isDeadTerminalError(error: unknown): boolean {
@@ -530,6 +531,8 @@ export class InteractiveMode {
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private readonly entriesRenderedByBoundaryCompaction = new Set<string>();
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	// Final retry outcome waiting for settlement; rendered as display-only history.
+	private settledRetryText: string | undefined;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -2311,6 +2314,7 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
+		this.settledRetryText = undefined;
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
@@ -3809,42 +3813,46 @@ export class InteractiveMode {
 				)
 					this.restoreSubmittedInput();
 				if (event.message.role === "user") break;
-				if (this.streamingComponent && event.message.role === "assistant") {
+				if (event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					let errorMessage: string | undefined;
+					const failed =
+						this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error";
 					if (this.streamingMessage.stopReason === "aborted") {
 						const retryAttempt = this.session.retryAttempt;
-						errorMessage =
+						const errorMessage =
 							retryAttempt > 0
 								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.streamingComponent.updateContent(this.streamingMessage, false);
+					if (failed) this.maybeSuggestBugReport(this.streamingMessage);
+					if (this.streamingComponent) {
+						// Provider errors are shown as they happen; the session still owns
+						// retry/compaction decisions after message_end.
+						this.streamingComponent.updateContent(this.streamingMessage, false);
 
-					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
-						if (!errorMessage) {
-							errorMessage = this.streamingMessage.errorMessage || "Error";
+						if (failed) {
+							// These previews never executed. Keep completed tool results untouched.
+							for (const component of this.pendingTools.values()) this.chatContainer.removeChild(component);
+							this.pendingTools.clear();
+						} else {
+							// Args are now complete - trigger diff computation for edit tools
+							for (const [, component] of this.pendingTools.entries()) {
+								component.setArgsComplete();
+							}
+							this.maybeShowThinkingDropNotice(this.streamingMessage);
+							this.maybeShowCacheMissNotice(this.streamingMessage);
 						}
-						for (const [, component] of this.pendingTools.entries()) {
-							component.updateResult({
-								content: [{ type: "text", text: errorMessage }],
-								isError: true,
-							});
-						}
-						this.pendingTools.clear();
-						this.maybeSuggestBugReport(this.streamingMessage);
-					} else {
-						// Args are now complete - trigger diff computation for edit tools
-						for (const [, component] of this.pendingTools.entries()) {
-							component.setArgsComplete();
-						}
-						this.maybeShowThinkingDropNotice(this.streamingMessage);
-						this.maybeShowCacheMissNotice(this.streamingMessage);
+						this.streamingComponent = undefined;
+						this.streamingMessage = undefined;
+						this.footer.invalidate();
+					} else if (failed) {
+						// The failure arrived without a preceding message_start (pre-stream).
+						// Render it immediately instead of deferring through agent_settled.
+						this.showError(this.streamingMessage.errorMessage || "Unknown error");
+						this.streamingMessage = undefined;
+						this.footer.invalidate();
 					}
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
-					this.footer.invalidate();
 				}
 				this.ui.requestRender();
 				break;
@@ -3917,6 +3925,15 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
+				// The settled outcome has no assistant message to carry it (e.g. backoff
+				// cancellation, which leaves the omitted attempt visible instead).
+				// Keep it as display-only history, never model context.
+				if (this.settledRetryText) {
+					const text = this.settledRetryText;
+					this.settledRetryText = undefined;
+					this.sessionManager.appendCustomEntry(RETRY_OUTCOME_ENTRY_TYPE, text);
+					this.showError(text);
+				}
 				await this.checkShutdownRequested();
 				this.ui.requestRender();
 				break;
@@ -4018,9 +4035,15 @@ export class InteractiveMode {
 					this.retryEscapeHandler = undefined;
 				}
 				this.clearStatusIndicator("retry");
-				// Show error only on final failure (success shows normal response)
+				// Show error only on final failure (success shows normal response).
+				// Backoff cancellation has no assistant message to carry its outcome;
+				// an exhausted run repeats only the count since each attempt already
+				// displays its own error.
 				if (!event.success) {
-					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
+					this.settledRetryText =
+						event.finalError === "Retry cancelled"
+							? `Retry failed after ${event.attempt} attempts: ${event.finalError}`
+							: `Retry failed after ${event.attempt} attempts`;
 				}
 				this.ui.requestRender();
 				break;
@@ -4113,6 +4136,10 @@ export class InteractiveMode {
 	}
 
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
+		if (entry.customType === RETRY_OUTCOME_ENTRY_TYPE && typeof entry.data === "string") {
+			this.showError(entry.data);
+			return;
+		}
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
 			return;
@@ -4266,7 +4293,10 @@ export class InteractiveMode {
 
 	private renderSessionItems(
 		items: readonly RenderSessionItem[],
-		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
+		options: {
+			updateFooter?: boolean;
+			populateHistory?: boolean;
+		} = {},
 	): void {
 		this.pendingTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
@@ -4298,7 +4328,9 @@ export class InteractiveMode {
 			const message = item;
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				this.addMessageToChat(message);
+				this.addMessageToChat(message, options);
+				// Failed model responses never dispatch their tool calls.
+				if (message.stopReason === "aborted" || message.stopReason === "error") continue;
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
@@ -4318,27 +4350,11 @@ export class InteractiveMode {
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
 
-						if (message.stopReason === "aborted" || message.stopReason === "error") {
-							let errorMessage: string;
-							if (message.stopReason === "aborted") {
-								const retryAttempt = this.session.retryAttempt;
-								errorMessage =
-									retryAttempt > 0
-										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-										: "Operation aborted";
-							} else {
-								errorMessage = message.errorMessage || "Error";
-							}
-							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-						} else {
-							renderedPendingTools.set(content.id, component);
-						}
+						renderedPendingTools.set(content.id, component);
 					}
 				}
-				if (message.stopReason !== "aborted" && message.stopReason !== "error") {
-					const miss = cacheMisses.get(message);
-					if (miss) this.addCacheMissNotice(miss);
-				}
+				const miss = cacheMisses.get(message);
+				if (miss) this.addCacheMissNotice(miss);
 			} else if (message.role === "toolResult") {
 				// Match tool results to pending tool components
 				const component = renderedPendingTools.get(message.toolCallId);
