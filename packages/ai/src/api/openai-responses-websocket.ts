@@ -3,7 +3,7 @@ import type { ResponseInput, ResponseStreamEvent } from "openai/resources/respon
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type { Api, AssistantMessage, Model, ProviderEnv, StreamOptions } from "../types.ts";
 import { formatThrownValue } from "../utils/diagnostics.ts";
-import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { type AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { CODEX_AUTO_WEBSOCKET_RETRIES } from "../utils/retry.ts";
@@ -170,8 +170,9 @@ interface WebSocketPoolScope {
 	// sessionId -> identityKey -> connection
 	connections: Map<string, Map<string, CachedWebSocketConnection>>;
 	debugStats: Map<string, ResponsesWebSocketDebugStats>;
-	// Pi's outer retry owner retries three times before a session enters SSE cooldown.
-	sseFallbackSessions: Map<string, WebSocketRecoveryState>;
+	// Pi's outer retry owner retries three times before an endpoint+credential
+	// identity enters SSE cooldown, partitioned per session.
+	sseFallbackSessions: Map<string, Map<string, WebSocketRecoveryState>>;
 }
 
 const poolScopes = new Map<string, WebSocketPoolScope>();
@@ -209,8 +210,11 @@ export function getResponsesWebSocketDebugStats(
 	scope: string,
 	sessionId: string,
 ): ResponsesWebSocketDebugStats | undefined {
-	const stats = poolScopes.get(scope)?.debugStats.get(sessionId);
-	return stats ? { ...stats, websocketFallbackActive: isWebSocketSseFallbackActive(scope, sessionId) } : undefined;
+	const entry = poolScopes.get(scope);
+	const stats = entry?.debugStats.get(sessionId);
+	return stats && entry
+		? { ...stats, websocketFallbackActive: findActiveFallbackState(entry, sessionId) !== undefined }
+		: undefined;
 }
 
 export function resetResponsesWebSocketDebugStats(scope: string, sessionId?: string): void {
@@ -223,6 +227,31 @@ export function resetResponsesWebSocketDebugStats(scope: string, sessionId?: str
 	}
 	entry.debugStats.clear();
 	entry.sseFallbackSessions.clear();
+}
+
+function getIdentityRecoveryMap(
+	entry: WebSocketPoolScope,
+	sessionId: string,
+	create: boolean,
+): Map<string, WebSocketRecoveryState> | undefined {
+	let map = entry.sseFallbackSessions.get(sessionId);
+	if (!map && create) {
+		map = new Map();
+		entry.sseFallbackSessions.set(sessionId, map);
+	}
+	return map;
+}
+
+function findActiveFallbackState(entry: WebSocketPoolScope, sessionId: string): WebSocketRecoveryState | undefined {
+	const map = entry.sseFallbackSessions.get(sessionId);
+	if (!map) return undefined;
+	let active: WebSocketRecoveryState | undefined;
+	for (const state of map.values()) {
+		if (state.retryAt > 0 || state.recovering) {
+			if (!active || state.retryAt > active.retryAt) active = state;
+		}
+	}
+	return active;
 }
 
 function closeScopeSessions(scope: string, sessionId?: string): void {
@@ -253,26 +282,30 @@ export function closeResponsesWebSocketSessions(scope: string, sessionId?: strin
 	closeScopeSessions(scope, sessionId);
 }
 
-export function getWebSocketSseFallbackState(scope: string, sessionId: string): WebSocketRecoveryState | undefined {
-	return poolScopes.get(scope)?.sseFallbackSessions.get(sessionId);
+export function getWebSocketSseFallbackState(
+	scope: string,
+	sessionId: string,
+	recoveryKey: string,
+): WebSocketRecoveryState | undefined {
+	return poolScopes.get(scope)?.sseFallbackSessions.get(sessionId)?.get(recoveryKey);
 }
 
-function isWebSocketSseFallbackActive(scope: string | WebSocketPoolScope, sessionId: string | undefined): boolean {
-	if (!sessionId) return false;
-	const entry = typeof scope === "string" ? poolScopes.get(scope) : scope;
-	return (entry?.sseFallbackSessions.get(sessionId)?.retryAt ?? 0) > 0;
+function isWebSocketSseFallbackActive(entry: WebSocketPoolScope, sessionId: string): boolean {
+	return findActiveFallbackState(entry, sessionId) !== undefined;
 }
 
 export function recordWebSocketSseFallback(scope: string, sessionId: string | undefined): void {
 	if (!sessionId) return;
-	const stats = getOrCreateWebSocketDebugStats(getScope(scope), sessionId);
+	const entry = getScope(scope);
+	const stats = getOrCreateWebSocketDebugStats(entry, sessionId);
 	stats.sseFallbacks++;
-	stats.websocketFallbackActive = isWebSocketSseFallbackActive(scope, sessionId);
+	stats.websocketFallbackActive = isWebSocketSseFallbackActive(entry, sessionId);
 }
 
 export function recordWebSocketFailure(
 	scope: string,
 	sessionId: string | undefined,
+	recoveryKey: string,
 	error: unknown,
 	autoFallback: boolean,
 ): WebSocketRecoveryState | undefined {
@@ -280,10 +313,11 @@ export function recordWebSocketFailure(
 	const entry = getScope(scope);
 	let state: WebSocketRecoveryState | undefined;
 	if (autoFallback) {
-		state = entry.sseFallbackSessions.get(sessionId);
+		const map = getIdentityRecoveryMap(entry, sessionId, true)!;
+		state = map.get(recoveryKey);
 		if (!state) {
 			state = { failures: 0, retryAt: 0, recovering: false };
-			entry.sseFallbackSessions.set(sessionId, state);
+			map.set(recoveryKey, state);
 		}
 		state.failures++;
 		if (state.retryAt > 0 || state.failures > CODEX_AUTO_WEBSOCKET_RETRIES) {
@@ -302,11 +336,13 @@ export function recordWebSocketFailure(
 export function clearWebSocketSseFallbackIfOwned(
 	scope: string,
 	sessionId: string,
+	recoveryKey: string,
 	state: WebSocketRecoveryState,
 ): void {
-	const entry = poolScopes.get(scope);
-	if (entry?.sseFallbackSessions.get(sessionId) === state) {
-		entry.sseFallbackSessions.delete(sessionId);
+	const map = poolScopes.get(scope)?.sseFallbackSessions.get(sessionId);
+	if (map?.get(recoveryKey) === state) {
+		map.delete(recoveryKey);
+		if (map.size === 0) poolScopes.get(scope)?.sseFallbackSessions.delete(sessionId);
 	}
 }
 
@@ -839,6 +875,11 @@ export interface ProcessResponsesWebSocketOptions<TApi extends Api> {
 	model: Model<TApi>;
 	/** Invoked when the first provider stream event arrives (before push of start). */
 	onStart: () => void;
+	/** Invoked when the actual transport becomes known: acquired socket, loss, or stream end. */
+	onTransport?: (transport: string | undefined, model: Model<TApi>) => void | Promise<void>;
+	/** Recovery/cooldown partition key used by callers when passing fallback
+	 * state; recorded failures are keyed by the caller's own recoveryKey. */
+	recoveryKey?: string;
 	idleTimeoutMs: number | undefined;
 	connectTimeoutMs: number | undefined;
 	cacheSessionId: string | undefined;
@@ -875,6 +916,7 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		stream,
 		model,
 		onStart,
+		onTransport,
 		idleTimeoutMs,
 		connectTimeoutMs,
 		cacheSessionId,
@@ -897,6 +939,14 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		forceFresh,
 	});
 	let keepConnection = true;
+	let transportCleared = true;
+	const clearTransport = async () => {
+		if (transportCleared) return;
+		transportCleared = true;
+		await emitTransport(onTransport, undefined, model);
+	};
+	await emitTransport(onTransport, "WS", model);
+	transportCleared = false;
 	const transport = options?.transport ?? "auto";
 	const useCachedContext = transport === "websocket-cached" || transport === "auto";
 	const fullBody = { ...body };
@@ -936,12 +986,14 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		await processStream(startedEvents, output, stream, model);
 		if (options?.signal?.aborted) {
 			keepConnection = false;
+			await clearTransport();
 		} else if (output.responseId) {
 			if (config.isTerminalError?.(output)) {
 				// Terminal failures never become the delta baseline, and the socket
 				// is not retained: the connection-scoped server state is poisoned.
 				if (entry) entry.continuation = undefined;
 				keepConnection = false;
+				await clearTransport();
 			} else if (useCachedContext && entry) {
 				entry.continuation = {
 					lastRequestBody: fullBody,
@@ -955,6 +1007,7 @@ export async function processResponsesWebSocket<TApi extends Api>(
 			entry.continuation = undefined;
 		}
 		keepConnection = false;
+		await clearTransport();
 		throw error;
 	} finally {
 		release({ keep: keepConnection });
