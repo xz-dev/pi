@@ -252,7 +252,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 					cacheSessionId,
 					options?.identity,
 				);
-				identityKey = websocketIdentityKey(model, apiKey, websocketHeaders, cacheSessionId);
+				identityKey = websocketIdentityKey(model, apiKey, websocketHeaders);
 			}
 			const fallbackState = sessionId
 				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
@@ -621,27 +621,9 @@ function isSseMediaType(contentType: string | null | undefined): boolean {
 	return contentType?.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
 }
 
-function websocketIdentityKey(
-	model: Model<"openai-responses">,
-	apiKey: string,
-	headers: Headers,
-	generatedNonce: string | undefined,
-): string {
-	const identityHeaders = headersToRecord(headers);
-	// Generated per-request session/request-id nonces rotate on every attempt
-	// under cacheRetention:none and must not reset the fixed retry budget.
-	// They are removed only when still equal to the generated value: a caller
-	// override (buildMergedHeaders applied options headers last) keeps its own
-	// value in the key and partitions the pool.
-	if (generatedNonce !== undefined) {
-		for (const name of ["x-client-request-id", "session-id", "session_id", "x-session-id", "x-session-affinity"]) {
-			if (identityHeaders[name] === generatedNonce) delete identityHeaders[name];
-		}
-	}
-	// Endpoint + apiKey + every effective auth/routing header (authorization,
-	// cf-aig-authorization, x-api-key, caller session ids, tenant ids, ...)
-	// partition pool and recovery state.
-	return `${model.baseUrl}\n${apiKey}\n${JSON.stringify(identityHeaders)}`;
+function websocketIdentityKey(model: Model<"openai-responses">, apiKey: string, headers: Headers): string {
+	// Ordinary affinity headers are session-stable, or absent with cacheRetention:none.
+	return `${model.baseUrl}\n${apiKey}\n${JSON.stringify(headersToRecord(headers))}`;
 }
 
 function resolveResponsesWebSocketUrl(baseUrl?: string): string {
