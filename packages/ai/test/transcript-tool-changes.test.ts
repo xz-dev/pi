@@ -12,6 +12,7 @@ function tool(name: string): Tool {
 async function capturePayload<T>(model: Model<Api>, context: Context): Promise<T> {
 	let captured: T | undefined;
 	const stream = streamSimple(model, context, {
+		...(model.api === "openai-responses" ? { transport: "sse" as const } : {}),
 		apiKey: "test-key",
 		onPayload: (payload) => {
 			captured = payload as T;
