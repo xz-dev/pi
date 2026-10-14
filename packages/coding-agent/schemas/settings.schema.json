@@ -125,6 +125,18 @@
           "maximum": 9007199254740991,
           "default": 20000
         },
+        "background": {
+          "type": "boolean",
+          "description": "Summarize in the background before the threshold so the agent keeps working.",
+          "default": true
+        },
+        "backgroundStartRatio": {
+          "type": "number",
+          "description": "Fraction of the compaction threshold at which background summarization starts.",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.85
+        },
         "modelOverrides": {
           "type": "object",
           "patternProperties": {
