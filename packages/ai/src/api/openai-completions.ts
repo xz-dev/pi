@@ -381,7 +381,18 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				},
 			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			await emitTransport(options?.onTransport, "SSE", model);
+			let sseReported = false;
+			const reportSseOnce = async () => {
+				if (sseReported) return;
+				sseReported = true;
+				await emitTransport(options?.onTransport, "SSE", model);
+			};
+			// Report SSE only once observed: a text/event-stream media type proves
+			// it now; otherwise the first decoded chunk is the proof (the SDK picks
+			// its decoder from stream:true, not the response media type).
+			if (response.body && isSseMediaType(response.headers.get("content-type"))) {
+				await reportSseOnce();
+			}
 			stream.push({ type: "start", partial: output });
 
 			interface StreamingToolCallBlock extends ToolCall {
@@ -557,6 +568,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			};
 
 			for await (const chunk of openaiStream) {
+				await reportSseOnce();
 				await options?.onProviderStreamEvent?.(chunk, model);
 				if (!chunk || typeof chunk !== "object") continue;
 
@@ -756,6 +768,10 @@ export const streamSimple: StreamFunction<"openai-completions", SimpleStreamOpti
 		thinkingBudgets: options?.thinkingBudgets,
 	} satisfies OpenAICompletionsOptions);
 };
+
+function isSseMediaType(contentType: string | null | undefined): boolean {
+	return contentType?.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
+}
 
 function createClient(
 	model: Model<"openai-completions">,

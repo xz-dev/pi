@@ -415,16 +415,17 @@ describe("Codex transport recovery", () => {
 			const result = await run();
 			expect(result.stopReason).toBe("error");
 			expect(fetchMock).not.toHaveBeenCalled();
-			// Partial content forbids internal repair; otherwise a safe repair may fail on a new socket.
-			expect(sent).toHaveLength(partial ? 5 : 6);
+			// Once response.created marks the stream started, the missing-continuation
+			// error can never be repaired in-stream — with or without partial content.
+			expect(sent).toHaveLength(5);
 			if (partial)
 				expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "discarded partial" })]);
-			else
-				expect(result.diagnostics?.at(-1)?.details).toMatchObject({
-					eventsEmitted: true,
-					phase: "after_message_stream_start",
-					fallbackTransport: "sse",
-				});
+			else {
+				// previous_response_not_found after start is an API error, not a
+				// transport failure: surfaced directly, no transport diagnostic.
+				expect(result.errorMessage).toContain("Previous response not found");
+				expect(result.diagnostics?.some((d) => d.type === "provider_transport_failure")).not.toBe(true);
+			}
 		},
 	);
 
