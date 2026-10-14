@@ -42,6 +42,8 @@ export class SettingsList implements Component {
 	private selectedIndex = 0;
 	private mousePressedIndex: number | undefined;
 	private maxVisible: number;
+	private renderedMaxVisible: number;
+	private searchRows = 2;
 	private onChange: (id: string, newValue: string) => void;
 	private onCancel: () => void;
 	private searchInput?: Input;
@@ -63,6 +65,7 @@ export class SettingsList implements Component {
 		this.items = items;
 		this.filteredItems = items;
 		this.maxVisible = maxVisible;
+		this.renderedMaxVisible = maxVisible;
 		this.theme = theme;
 		this.onChange = onChange;
 		this.onCancel = onCancel;
@@ -99,7 +102,28 @@ export class SettingsList implements Component {
 			return this.submenuComponent.render(width);
 		}
 
+		this.renderedMaxVisible = this.maxVisible;
+		this.searchRows = 2;
 		return this.renderMainList(width);
+	}
+
+	renderInBounds(width: number, height: number): string[] {
+		const rows = Math.max(0, Math.floor(height));
+		if (this.submenuComponent) {
+			return this.submenuComponent.renderInBounds?.(width, rows) ?? this.submenuComponent.render(width);
+		}
+		this.searchRows = 1;
+		this.renderedMaxVisible = Math.min(this.maxVisible, Math.max(1, rows - (this.searchInput ? 1 : 0) - 2));
+		const lines = this.renderMainList(width);
+		if (lines.length <= rows) return lines;
+		// Keep the search and selected row even when only two rows are allocated.
+		const minimum = (this.searchInput ? 1 : 0) + 1;
+		if (rows <= minimum) return lines.slice(0, rows);
+		const result = lines.slice(0, rows - 1);
+		if (result.length > minimum + 1)
+			result[result.length - 1] = this.theme.hint(truncateToWidth("  … resize for full details", width));
+		result.push(lines[lines.length - 1]!);
+		return result;
 	}
 
 	private renderMainList(width: number): string[] {
@@ -107,7 +131,7 @@ export class SettingsList implements Component {
 
 		if (this.searchEnabled && this.searchInput) {
 			lines.push(...this.searchInput.render(width));
-			lines.push("");
+			if (this.searchRows === 2) lines.push("");
 		}
 
 		if (this.items.length === 0) {
@@ -187,7 +211,7 @@ export class SettingsList implements Component {
 				const result = this.searchInput.handleMouse?.(event);
 				return result ? { ...result, focus: true } : undefined;
 			}
-			if (event.y === 1) return undefined;
+			if (event.y < this.searchRows) return undefined;
 		}
 
 		const displayItems = this.getDisplayItems();
@@ -201,7 +225,7 @@ export class SettingsList implements Component {
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 
-		const rowOffset = this.searchEnabled ? 2 : 0;
+		const rowOffset = this.searchEnabled ? this.searchRows : 0;
 		const { startIndex, endIndex } = this.getVisibleRange(displayItems);
 		const itemIndex = startIndex + event.y - rowOffset;
 		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
@@ -256,9 +280,12 @@ export class SettingsList implements Component {
 	private getVisibleRange(displayItems: readonly SettingItem[]): { startIndex: number; endIndex: number } {
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
+			Math.min(
+				this.selectedIndex - Math.floor(this.renderedMaxVisible / 2),
+				displayItems.length - this.renderedMaxVisible,
+			),
 		);
-		return { startIndex, endIndex: Math.min(startIndex + this.maxVisible, displayItems.length) };
+		return { startIndex, endIndex: Math.min(startIndex + this.renderedMaxVisible, displayItems.length) };
 	}
 
 	private activateItem(): void {
