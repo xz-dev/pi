@@ -3,6 +3,7 @@ import {
 	createAssistantMessageEventStream,
 	getModel,
 	type Message,
+	type Model,
 } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
@@ -431,6 +432,52 @@ describe("transport_status request lifecycle", () => {
 		await secondRun;
 
 		expect(transportEvents(sharedEvents)).toEqual(["WS", undefined, "SSE", undefined]);
+	});
+
+	it("does not leak model headers or secrets into serialized transport events", async () => {
+		const secret = "Bearer test-tenant-secret";
+		const secretModel = {
+			...getModel("openai", "gpt-4o-mini")!,
+			headers: { Authorization: secret },
+		} satisfies Model<"openai-responses">;
+		const config: AgentLoopConfig = { ...loopConfig(secretModel) };
+
+		const events: AgentEvent[] = [];
+		await runAgentLoop(
+			[{ role: "user", content: "hi", timestamp: Date.now() }],
+			{ messages: [] },
+			config,
+			async (event) => {
+				events.push(event);
+			},
+			undefined,
+			(_model, _context, options) => {
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.onTransport?.("SSE", _model);
+					const msg = createAssistantMessage("ok");
+					stream.push({ type: "start", partial: msg });
+					stream.push({ type: "done", reason: "stop", message: msg });
+				});
+				return stream;
+			},
+		);
+
+		const statusEvents = events.filter((e) => e.type === "transport_status");
+		expect(statusEvents).toHaveLength(2);
+		for (const event of statusEvents) {
+			const serialized = JSON.stringify(event);
+			expect(serialized).not.toContain(secret);
+			expect(serialized).not.toContain("headers");
+			expect(serialized).not.toContain("Authorization");
+			if (event.type === "transport_status") {
+				expect(event.model).toEqual({
+					id: secretModel.id,
+					api: secretModel.api,
+					provider: secretModel.provider,
+				});
+			}
+		}
 	});
 
 	it("does not persist transport into assistant messages", async () => {
