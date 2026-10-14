@@ -3434,10 +3434,10 @@ export class InteractiveMode {
 				break;
 
 			case "turn_start":
-				this.currentTransport = undefined;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
+				this.currentTransport = undefined;
 				if (this.workingVisible) {
 					if (this.activeStatusIndicator?.kind !== "working") {
 						this.showWorkingStatusIndicator();
