@@ -283,6 +283,19 @@ describe("InteractiveMode working label", () => {
 		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith("Working");
 	});
 
+	it.each(["WS/full", "WS/continuation"])("renders and clears the actual %s request label", async (transport) => {
+		const mode = fakeMode();
+		await mode.handleEvent({ type: "transport_status", transport, model: fakeModel });
+		expect(mode.formatWorkingMessage()).toBe(`Working(${transport})`);
+		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith(`Working(${transport})`);
+		mode.workingMessage = "Custom progress";
+		await mode.handleEvent({ type: "transport_status", transport, model: fakeModel });
+		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith("Custom progress");
+		mode.workingMessage = undefined;
+		await mode.handleEvent({ type: "transport_status", transport: undefined, model: fakeModel });
+		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith("Working");
+	});
+
 	it("keeps an extension working message verbatim and clears transport on turn_start", async () => {
 		const mode = fakeMode();
 
