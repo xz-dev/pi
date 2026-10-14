@@ -17,11 +17,13 @@ import { createProjectTrustContext } from "./cli/project-trust.ts";
 import {
 	APP_NAME,
 	CONFIG_DIR_NAME,
+	DISTRIBUTION,
 	detectInstallMethod,
 	getAgentDir,
-	getPackageDir,
+	getInstallDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
+	getXzDevSourceUpdateGuidance,
 	PACKAGE_NAME,
 	type SelfUpdateCommand,
 	type SelfUpdatePackageTarget,
@@ -42,6 +44,12 @@ import {
 	cleanupWindowsSelfUpdateQuarantine,
 	quarantineWindowsNativeDependencies,
 } from "./utils/windows-self-update.ts";
+import {
+	cleanXzBackups,
+	DEFAULT_XZ_RELEASE_MIRRORS,
+	getLatestXzRelease,
+	runXzSelfUpdate,
+} from "./utils/xz-release-update.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -49,6 +57,31 @@ type UpdateTarget = { type: "all" } | { type: "self" } | { type: "extensions"; s
 
 const DEFAULT_INSTALLER_API_BASE = "https://pi.dev/api/installer/releases";
 const MANAGED_INSTALL_MARKER = "managed-install.json";
+const CHANNEL_LOCK_SUFFIX = ".managed.lock";
+
+/**
+ * Package-manager channel that owns this installation, for example "scoop" or
+ * "portage". A channel marks its install by writing an empty
+ * `.<channel>.managed.lock` file next to the executable. When present,
+ * `pi update --self` must not replace the binary itself; the channel upgrades
+ * it instead.
+ */
+function getChannelManager(): string | undefined {
+	let entries: string[];
+	try {
+		// Channel lock files live next to the physical executable; embedded
+		// `/$bunfs` asset paths must never be read for this check.
+		entries = readdirSync(getInstallDir());
+	} catch {
+		return undefined;
+	}
+	for (const entry of entries) {
+		if (entry.endsWith(CHANNEL_LOCK_SUFFIX) && entry.length > CHANNEL_LOCK_SUFFIX.length) {
+			return entry.slice(0, entry.length - CHANNEL_LOCK_SUFFIX.length).replace(/^\.+/, "");
+		}
+	}
+	return undefined;
+}
 const MANAGED_RELEASE_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 function getActiveManagedInstallRoot(): string | undefined {
@@ -59,7 +92,7 @@ function getActiveManagedInstallRoot(): string | undefined {
 	const releasesDir = canonicalizePath(join(managedRoot, "releases"));
 	// The launcher environment is inherited by child processes. Do not classify a
 	// source checkout or another Pi installation launched from managed Pi as managed.
-	if (getCwdRelativePath(canonicalizePath(getPackageDir()), releasesDir) === undefined) return undefined;
+	if (getCwdRelativePath(canonicalizePath(getInstallDir()), releasesDir) === undefined) return undefined;
 
 	const markerPath = join(managedRoot, MANAGED_INSTALL_MARKER);
 	try {
@@ -266,6 +299,9 @@ interface PackageCommandOptions {
 	showExtensionsSkippedNote: boolean;
 	local: boolean;
 	force: boolean;
+	clean: boolean;
+	mirrors?: string[];
+	permanent: boolean;
 	projectTrustOverride?: boolean;
 	help: boolean;
 	invalidOption?: string;
@@ -291,7 +327,7 @@ function getPackageCommandUsage(command: PackageCommand): string {
 		case "remove":
 			return `${APP_NAME} remove <source> [-l] [--approve|--no-approve]`;
 		case "update":
-			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force]`;
+			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force|--clean] [--mirror|--mirror-url <url>|--no-mirror] [--permanent]`;
 		case "list":
 			return `${APP_NAME} list [--approve|--no-approve]`;
 	}
@@ -370,6 +406,11 @@ Options:
   -a, --approve           Trust project-local files for this command
   -na, --no-approve       Ignore project-local files for this command
   --force                 Reinstall pi even if the current version is latest
+  --clean                 Remove old pi-<version> executable backups next to the running pi
+  --mirror                Try GH-Proxy, GHFast, then GitHub for xz-dev Release downloads
+  --mirror-url <url>       Append a custom base replacing https://github.com (repeatable)
+  --no-mirror              Use direct GitHub instead of the saved mirror setting
+  --permanent              Only save/clear the mirror choice globally; do not update
 
 Short forms:
   ${APP_NAME} update                Update pi only
@@ -408,6 +449,10 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 
 	let local = false;
 	let force = false;
+	let clean = false;
+	let mirrors: string[] | undefined;
+	let mirrorFlag: string | undefined;
+	let permanent = false;
 	let projectTrustOverride: boolean | undefined;
 	let help = false;
 	let invalidOption: string | undefined;
@@ -492,6 +537,45 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			continue;
 		}
 
+		if (arg === "--clean") {
+			if (command === "update") {
+				clean = true;
+			} else {
+				invalidOption = invalidOption ?? arg;
+			}
+			continue;
+		}
+
+		if (arg === "--permanent") {
+			if (command === "update") permanent = true;
+			else invalidOption = invalidOption ?? arg;
+			continue;
+		}
+
+		if (arg === "--mirror" || arg === "--mirror-url" || arg === "--no-mirror") {
+			if (command !== "update") {
+				invalidOption = invalidOption ?? arg;
+				continue;
+			}
+			if (mirrorFlag !== undefined && (arg !== "--mirror-url" || mirrorFlag !== arg)) {
+				conflictingOptions = conflictingOptions ?? "--mirror, --mirror-url, and --no-mirror cannot be combined";
+			}
+			mirrorFlag = arg;
+			if (arg === "--mirror-url") {
+				const value = rest[index + 1];
+				if (value === undefined || value.startsWith("-")) {
+					missingOptionValue = missingOptionValue ?? arg;
+				} else {
+					mirrors ??= [];
+					mirrors.push(value);
+					index++;
+				}
+			} else {
+				mirrors = arg === "--mirror" ? [...DEFAULT_XZ_RELEASE_MIRRORS] : [];
+			}
+			continue;
+		}
+
 		if (arg === "--extension") {
 			if (command !== "update") {
 				invalidOption = invalidOption ?? arg;
@@ -526,6 +610,9 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let updateTarget: UpdateTarget | undefined;
 	let showExtensionsSkippedNote = false;
 	if (command === "update") {
+		if (clean && (source || selfFlag || extensionsFlag || modelsFlag || allFlag || extensionFlagSource || force)) {
+			conflictingOptions = conflictingOptions ?? "--clean cannot be combined with another update target or --force";
+		}
 		if (allFlag && (selfFlag || extensionsFlag || modelsFlag || extensionFlagSource)) {
 			conflictingOptions =
 				conflictingOptions ?? "--all cannot be combined with --self, --extensions, --models, or --extension";
@@ -576,6 +663,13 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			updateTarget = { type: "self" };
 			showExtensionsSkippedNote = true;
 		}
+		if (mirrors !== undefined && (clean || !updateTargetIncludesSelf(updateTarget))) {
+			conflictingOptions = conflictingOptions ?? "Mirror options only apply to Pi self-updates";
+		}
+		if (permanent && (mirrors === undefined || clean || force || updateTarget.type !== "self")) {
+			conflictingOptions =
+				conflictingOptions ?? "--permanent requires a mirror choice and cannot be combined with other operations";
+		}
 	}
 
 	return {
@@ -585,6 +679,9 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		showExtensionsSkippedNote,
 		local,
 		force,
+		clean,
+		mirrors,
+		permanent,
 		projectTrustOverride,
 		help,
 		invalidOption,
@@ -738,7 +835,7 @@ function prepareWindowsNpmSelfUpdate(): void {
 		return;
 	}
 
-	const packageDir = getPackageDir();
+	const packageDir = getInstallDir();
 	cleanupWindowsSelfUpdateQuarantine(packageDir);
 	quarantineWindowsNativeDependencies(packageDir);
 }
@@ -937,6 +1034,35 @@ export async function handlePackageCommand(
 		return true;
 	}
 
+	if (options.permanent) {
+		const settingsManager = SettingsManager.create(process.cwd(), getAgentDir(), { projectTrusted: false });
+		settingsManager.setUpdateMirrors(options.mirrors?.length ? options.mirrors : undefined);
+		await settingsManager.flush();
+		const errors = settingsManager.drainErrors();
+		if (errors.length > 0) {
+			for (const { error } of errors) console.error(chalk.red(`Could not save mirror setting: ${error.message}`));
+			process.exitCode = 1;
+		} else {
+			console.log(chalk.green("Mirror setting saved globally. No update performed."));
+		}
+		return true;
+	}
+
+	if (options.command === "update" && options.clean) {
+		try {
+			const { removed, retained } = cleanXzBackups();
+			console.log(chalk.green(`Removed ${removed.length} old backup(s)`));
+			for (const { file, error } of retained) {
+				console.warn(chalk.yellow(`Kept ${file}: ${error}`));
+			}
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : "Unknown backup cleanup error";
+			console.error(chalk.red(`Error: ${message}`));
+			process.exitCode = 1;
+		}
+		return true;
+	}
+
 	if (options.command === "update" && options.updateTarget?.type === "models") {
 		try {
 			const settingsManager = SettingsManager.create(process.cwd(), getAgentDir(), { projectTrusted: false });
@@ -1047,6 +1173,20 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
+					// A channel-managed installation owns the binary; never replace it
+					// from here. Check for a `*.<channel>.managed.lock` marker before any
+					// release lookup so the refusal works offline.
+					const channelManager = getChannelManager();
+					if (channelManager) {
+						console.error(
+							chalk.red(
+								`error: this ${APP_NAME} installation is managed by ${channelManager}; self-update is disabled.`,
+							),
+						);
+						console.error(chalk.dim(`Upgrade ${APP_NAME} through ${channelManager} instead.`));
+						process.exitCode = 1;
+						return true;
+					}
 					const managedInstallRoot = getActiveManagedInstallRoot();
 					if (managedInstallRoot && options.force) {
 						console.error(
@@ -1055,6 +1195,33 @@ export async function handlePackageCommand(
 							),
 						);
 						process.exitCode = 1;
+						return true;
+					}
+					if (DISTRIBUTION === "xz-dev" && PACKAGE_NAME === "@earendil-works/pi-coding-agent") {
+						if (detectInstallMethod() === "bun-binary") {
+							const mirrorOptions = {
+								mirrors: options.mirrors ?? settingsManager.getUpdateMirrors(),
+								onMirrorError: (message: string) => console.error(chalk.gray(message)),
+							};
+							const latestRelease = await getLatestXzRelease(VERSION, { retry: true, ...mirrorOptions });
+							if (!latestRelease) {
+								throw new Error(`Could not determine latest ${APP_NAME} version.`);
+							}
+							if (!options.force && !isNewerPackageVersion(latestRelease.version, VERSION)) {
+								console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
+								return true;
+							}
+							console.log(chalk.dim(`Updating ${APP_NAME} from the xz-dev Release...`));
+							await runXzSelfUpdate(latestRelease, VERSION, options.force, mirrorOptions);
+							console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${latestRelease.version}`));
+							console.log(
+								chalk.dim(
+									`Running ${APP_NAME} sessions keep ${VERSION} in memory; new child processes use ${latestRelease.version}. Restart ${APP_NAME} to switch fully.`,
+								),
+							);
+							return true;
+						}
+						console.log(chalk.dim(getXzDevSourceUpdateGuidance()));
 						return true;
 					}
 					const selfUpdatePlan = await getSelfUpdatePlan(options.force);
