@@ -476,7 +476,7 @@ async function connectWebSocket(
 		// Missing WebSocket global is a runtime/environment limitation, not a
 		// socket failure — leave it unmarked so callers fall back or fail fast
 		// without consuming the transport retry budget.
-		throw new Error("WebSocket transport is not available in this runtime");
+		throw new ResponsesTransportError("WebSocket transport is not available in this runtime");
 	}
 
 	const wsHeaders = headersToRecord(headers);
