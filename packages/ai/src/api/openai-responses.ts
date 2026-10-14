@@ -241,8 +241,21 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 
 			const transport = options?.transport || "auto";
 			const sessionId = options?.sessionId;
+			let identityKey = "";
+			let websocketHeaders = new Headers();
+			if (transport !== "sse") {
+				websocketHeaders = buildWebSocketHeaders(
+					model,
+					normalizedContext,
+					apiKey,
+					options?.headers,
+					cacheSessionId,
+					options?.identity,
+				);
+				identityKey = websocketIdentityKey(model, apiKey, websocketHeaders);
+			}
 			const fallbackState = sessionId
-				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId)
+				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
 				: undefined;
 			const recoveryProbe = (fallbackState?.retryAt ?? 0) > 0;
 			let startEmitted = false;
@@ -253,7 +266,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			}
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
-				await emitTransport(options?.onTransport, "WS", model);
 				if (transport === "auto" && fallbackState) {
 					recoveryState = fallbackState;
 					recoveryState.recovering = true;
@@ -261,14 +273,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
 				let retriedMissingWebSocketContinuation = false;
-				const websocketHeaders = buildWebSocketHeaders(
-					model,
-					normalizedContext,
-					apiKey,
-					options?.headers,
-					cacheSessionId,
-					options?.identity,
-				);
 				while (true) {
 					websocketStarted = false;
 					try {
@@ -287,10 +291,12 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 									stream.push({ type: "start", partial: output });
 								}
 							},
+							onTransport: options?.onTransport,
 							idleTimeoutMs: normalizeWebSocketTimeoutMs(options?.timeoutMs),
 							connectTimeoutMs: normalizeWebSocketTimeoutMs(options?.websocketConnectTimeoutMs),
 							cacheSessionId,
-							identityKey: websocketIdentityKey(model, apiKey, websocketHeaders),
+							identityKey,
+							recoveryKey: identityKey,
 							mapEvents: (events) => mapOrdinaryResponsesEvents(events, model, options?.onProviderStreamEvent),
 							processStream: (events, out, s, m) =>
 								processResponsesStream(events, out, s, m, {
@@ -334,7 +340,12 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							throw new ResponsesApiError(output.errorMessage || "An unknown error occurred");
 						}
 						if (transport === "auto" && sessionId && recoveryState) {
-							clearWebSocketSseFallbackIfOwned(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, recoveryState);
+							clearWebSocketSseFallbackIfOwned(
+								OPENAI_RESPONSES_WEBSOCKET_SCOPE,
+								sessionId,
+								identityKey,
+								recoveryState,
+							);
 						}
 						stream.push({
 							type: "done",
@@ -367,6 +378,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 						const failureState = recordWebSocketFailure(
 							OPENAI_RESPONSES_WEBSOCKET_SCOPE,
 							sessionId,
+							identityKey,
 							error,
 							transport === "auto",
 						);
@@ -590,9 +602,15 @@ function websocketIdentityKey(model: Model<"openai-responses">, apiKey: string, 
 	const nonSecretHeaders = headersToRecord(headers);
 	delete nonSecretHeaders.authorization;
 	delete nonSecretHeaders["cf-aig-authorization"];
+	delete nonSecretHeaders["x-client-request-id"];
+	delete nonSecretHeaders["session-id"];
+	delete nonSecretHeaders.session_id;
+	delete nonSecretHeaders["x-session-id"];
 	// Partition by endpoint and effective credential/header identity. The
 	// credential value itself never reaches diagnostics; it only scopes the
-	// pool entry so a rotated key or header gets a fresh socket.
+	// pool entry so a rotated key or header gets a fresh socket. Generated
+	// per-request session/request-id nonces are excluded: cacheRetention none
+	// rotates them every attempt and must not reset the fixed retry budget.
 	const credential = headers.get("authorization") ?? headers.get("cf-aig-authorization") ?? apiKey;
 	return `${model.baseUrl}\n${credential}\n${JSON.stringify(nonSecretHeaders)}`;
 }
