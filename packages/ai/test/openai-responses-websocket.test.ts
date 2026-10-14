@@ -243,7 +243,9 @@ describe("openai-responses WebSocket transport", () => {
 		await run();
 		// Edited history: different content at the same position.
 		const editedContext = normalizeContext({ messages: [{ role: "user", content: "Edited", timestamp: 2 }] });
-		await run({}, editedContext);
+		const transports: Array<string | undefined> = [];
+		await run({ onTransport: (value) => void transports.push(value) }, editedContext);
+		expect(transports).toEqual(["WS/full"]);
 		expect(sent).toHaveLength(2);
 		expect(sent[1].previous_response_id).toBeUndefined();
 		expect(sent[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Edited" }] }]);
@@ -516,11 +518,34 @@ describe("openai-responses retry plan", () => {
 });
 
 describe("onTransport reporting", () => {
+	it.each(["auto", "websocket-cached", "websocket"] as const)(
+		"reports the actual request mode for %s, including a fresh connection",
+		async (transport) => {
+			const { run, sent } = mockTransport();
+			const transports: Array<string | undefined> = [];
+			const options = { transport, onTransport: (value: string | undefined) => void transports.push(value) };
+			const first = await run(options);
+			const secondContext = normalizeContext({
+				messages: [...context.messages, first, { role: "user", content: "Second", timestamp: 2 }],
+			});
+			const second = await run(options, secondContext);
+			closeOpenAIResponsesWebSocketSessions(sessionId);
+			const thirdContext = normalizeContext({
+				messages: [...secondContext.messages, second, { role: "user", content: "Third", timestamp: 3 }],
+			});
+			const third = await run(options, thirdContext);
+			expect([first.stopReason, second.stopReason, third.stopReason]).toEqual(["stop", "stop", "stop"]);
+			expect(transports).toEqual(["WS/full", transport === "websocket" ? "WS/full" : "WS/continuation", "WS/full"]);
+			expect(sent[2].connection).not.toBe(sent[1].connection);
+			expect(sent[2].previous_response_id).toBeUndefined();
+		},
+	);
+
 	it("reports WS only after the socket opens", async () => {
 		const { run } = mockTransport();
 		const transports: Array<string | undefined> = [];
 		await run({ onTransport: (t) => void transports.push(t) });
-		expect(transports).toEqual(["WS"]);
+		expect(transports).toEqual(["WS/full"]);
 	});
 
 	it("never labels a pending handshake WS", async () => {
@@ -556,12 +581,12 @@ describe("onTransport reporting", () => {
 		const result = await run({
 			onTransport: (t) => {
 				// Before the socket fires open, the hook must never be told WS.
-				if (t === "WS") expect(sawOpen).toBe(true);
+				if (t !== undefined) expect(sawOpen).toBe(true);
 				transports.push(t);
 			},
 		});
 		expect(result.stopReason).toBe("stop");
-		expect(transports).toEqual(["WS"]);
+		expect(transports).toEqual(["WS/full"]);
 	});
 
 	it("never labels a failed handshake WS", async () => {
