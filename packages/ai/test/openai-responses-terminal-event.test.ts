@@ -288,6 +288,7 @@ describe("OpenAI Responses terminal event handling", () => {
 		const providerEvents: unknown[] = [];
 		const eventModels: Model<Api>[] = [];
 		const stream = streamOpenAIResponses(model, context, {
+			transport: "sse",
 			apiKey: "test",
 			onProviderStreamEvent: async (event, eventModel) => {
 				await Promise.resolve();
