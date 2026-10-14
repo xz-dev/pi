@@ -931,6 +931,19 @@ export class SettingsManager {
 		return override ?? ordinary ?? DEFAULT_COMPACTION_TOKEN_SETTINGS[field];
 	}
 
+	/** Fraction of the compaction threshold at which background summarization starts, or undefined when disabled. */
+	getCompactionBackgroundStartRatio(): number | undefined {
+		const compaction = this.settings.compaction;
+		if (!(compaction?.background ?? SETTINGS_DEFAULTS.compaction.background)) return undefined;
+		const ratio = compaction?.backgroundStartRatio;
+		if (ratio !== undefined && (typeof ratio !== "number" || !(ratio > 0 && ratio < 1))) {
+			throw new Error(
+				`Invalid compaction.backgroundStartRatio setting: ${String(ratio)}. Expected a number greater than 0 and less than 1.`,
+			);
+		}
+		return ratio ?? SETTINGS_DEFAULTS.compaction.backgroundStartRatio;
+	}
+
 	getCompactionReserveTokens(model?: Pick<Model<string>, "provider" | "id">): number {
 		return this.getCompactionTokenSetting("reserveTokens", model);
 	}
