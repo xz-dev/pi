@@ -320,8 +320,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					apiKey,
 					websocketRequestId,
 				);
-				identityKey = websocketIdentityKey(model, websocketHeaders);
-				recoveryKey = websocketRecoveryKey(model, websocketHeaders);
+				identityKey = websocketIdentityKey(model, websocketHeaders, websocketRequestId);
+				recoveryKey = websocketRecoveryKey(model, websocketHeaders, websocketRequestId);
 			}
 			const fallbackState = sessionId
 				? getWebSocketSseFallbackState(CODEX_WEBSOCKET_SCOPE, sessionId, recoveryKey)
@@ -411,10 +411,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						const aborted = options?.signal?.aborted;
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
-						// A replacement socket would append to this same message; only repair before output.
+						// A replacement socket would append to this same message; only repair before start.
 						if (
 							!aborted &&
 							previousResponseNotFound &&
+							!startEmitted &&
 							output.content.length === 0 &&
 							!retriedMissingWebSocketContinuation
 						) {
@@ -555,12 +556,21 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				throw new Error("No response body");
 			}
 
-			await emitTransport(options?.onTransport, "SSE", model);
+			let sseReported = false;
+			const reportSseOnce = async () => {
+				if (sseReported) return;
+				sseReported = true;
+				await emitTransport(options?.onTransport, "SSE", model);
+			};
+			if (isSseMediaType(response.headers.get("content-type"))) {
+				await reportSseOnce();
+			}
 			if (!startEmitted) {
 				startEmitted = true;
 				stream.push({ type: "start", partial: output });
 			}
-			await processStream(response, output, stream, model, grammarToolInputProperties, options);
+			// When the media type did not prove SSE, the first parsed event does.
+			await processStream(response, output, stream, model, grammarToolInputProperties, options, reportSseOnce);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -754,6 +764,10 @@ function resolveCodexWebSocketUrl(baseUrl?: string): string {
 // Response Processing
 // ============================================================================
 
+function isSseMediaType(contentType: string | null | undefined): boolean {
+	return contentType?.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
+}
+
 async function processStream(
 	response: Response,
 	output: AssistantMessage,
@@ -761,19 +775,21 @@ async function processStream(
 	model: Model<"openai-codex-responses">,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
+	onFirstEvent?: () => Promise<void>,
 ): Promise<void> {
-	await processResponsesStream(
-		mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent),
-		output,
-		stream,
-		model,
-		{
-			serviceTier: options?.serviceTier,
-			grammarToolInputProperties,
-			resolveServiceTier: resolveCodexServiceTier,
-			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
-		},
-	);
+	const events = mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent);
+	const proofedEvents = (async function* () {
+		for await (const event of events) {
+			await onFirstEvent?.();
+			yield event;
+		}
+	})();
+	await processResponsesStream(proofedEvents, output, stream, model, {
+		serviceTier: options?.serviceTier,
+		grammarToolInputProperties,
+		resolveServiceTier: resolveCodexServiceTier,
+		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+	});
 }
 
 class CodexApiError extends ResponsesApiError {
@@ -1043,24 +1059,33 @@ function buildWebSocketHeaders(
 }
 
 /**
- * Pool partition: normalized endpoint + effective credential + caller-supplied
- * headers. The token value itself only scopes the in-memory entry; it never
- * reaches diagnostics.
+ * Pool partition: normalized endpoint + every effective auth/routing header.
+ * Secret header values only scope the in-memory entry; they never reach
+ * diagnostics. Generated per-request nonces are dropped only while they still
+ * equal the generated value: a caller override of session-id or
+ * x-client-request-id stays in the key and partitions the pool.
  */
-function websocketIdentityKey(model: Model<"openai-codex-responses">, headers: Headers): string {
-	const callerHeaders = headersToRecord(headers);
-	delete callerHeaders.authorization;
-	delete callerHeaders["x-client-request-id"];
-	delete callerHeaders["session-id"];
-	delete callerHeaders["openai-beta"];
-	return `${resolveCodexUrl(model.baseUrl)}\n${headers.get("authorization") ?? ""}\n${JSON.stringify(callerHeaders)}`;
+function websocketIdentityKey(
+	model: Model<"openai-codex-responses">,
+	headers: Headers,
+	generatedRequestId: string,
+): string {
+	const identityHeaders = headersToRecord(headers);
+	for (const name of ["x-client-request-id", "session-id", "session_id", "x-session-id", "x-session-affinity"]) {
+		if (identityHeaders[name] === generatedRequestId) delete identityHeaders[name];
+	}
+	return `${resolveCodexUrl(model.baseUrl)}\n${JSON.stringify(identityHeaders)}`;
 }
 
 /**
- * Recovery/cooldown partition: same endpoint+credential identity but without
- * generated per-request nonces (session-id/x-client-request-id rotate on every
- * cacheRetention:none attempt and must not replenish the fixed retry budget).
+ * Recovery/cooldown partition: same identity as the pool minus generated
+ * per-request nonces, so a cacheRetention:none rotation cannot replenish the
+ * fixed retry budget. Auth and caller routing headers still isolate recovery.
  */
-function websocketRecoveryKey(model: Model<"openai-codex-responses">, headers: Headers): string {
-	return `${resolveCodexUrl(model.baseUrl)}\n${headers.get("authorization") ?? ""}`;
+function websocketRecoveryKey(
+	model: Model<"openai-codex-responses">,
+	headers: Headers,
+	generatedRequestId: string,
+): string {
+	return websocketIdentityKey(model, headers, generatedRequestId);
 }

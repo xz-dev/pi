@@ -252,7 +252,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 					cacheSessionId,
 					options?.identity,
 				);
-				identityKey = websocketIdentityKey(model, apiKey, websocketHeaders);
+				identityKey = websocketIdentityKey(model, apiKey, websocketHeaders, cacheSessionId);
 			}
 			const fallbackState = sessionId
 				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
@@ -358,10 +358,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 						const aborted = options?.signal?.aborted;
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
-						// A replacement socket would append to this same message; only repair before output.
+						// A replacement socket would append to this same message; only repair before start.
 						if (
 							!aborted &&
 							previousResponseNotFound &&
+							!startEmitted &&
 							output.content.length === 0 &&
 							!retriedMissingWebSocketContinuation
 						) {
@@ -416,13 +417,31 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				},
 			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			await emitTransport(options?.onTransport, "SSE", model);
+			let sseReported = false;
+			const reportSseOnce = async () => {
+				if (sseReported) return;
+				sseReported = true;
+				await emitTransport(options?.onTransport, "SSE", model);
+			};
+			if (response.body && isSseMediaType(response.headers.get("content-type"))) {
+				await reportSseOnce();
+			}
 			if (!startEmitted) {
 				startEmitted = true;
 				stream.push({ type: "start", partial: output });
 			}
 
-			await processResponsesStream(openaiStream, output, stream, model, {
+			// The SDK picks its SSE decoder from the requested stream:true, not the
+			// observed media type. When headers did not prove SSE (hidden headers,
+			// gateway mislabeling), the first decoded event is the earliest proof.
+			const proofedStream = (async function* () {
+				for await (const event of openaiStream) {
+					await reportSseOnce();
+					yield event;
+				}
+			})();
+
+			await processResponsesStream(proofedStream, output, stream, model, {
 				onProviderStreamEvent: options?.onProviderStreamEvent,
 				serviceTier: options?.serviceTier,
 				grammarToolInputProperties,
@@ -598,21 +617,31 @@ function buildWebSocketHeaders(
 	return headers;
 }
 
-function websocketIdentityKey(model: Model<"openai-responses">, apiKey: string, headers: Headers): string {
-	const nonSecretHeaders = headersToRecord(headers);
-	delete nonSecretHeaders.authorization;
-	delete nonSecretHeaders["cf-aig-authorization"];
-	delete nonSecretHeaders["x-client-request-id"];
-	delete nonSecretHeaders["session-id"];
-	delete nonSecretHeaders.session_id;
-	delete nonSecretHeaders["x-session-id"];
-	// Partition by endpoint and effective credential/header identity. The
-	// credential value itself never reaches diagnostics; it only scopes the
-	// pool entry so a rotated key or header gets a fresh socket. Generated
-	// per-request session/request-id nonces are excluded: cacheRetention none
-	// rotates them every attempt and must not reset the fixed retry budget.
-	const credential = headers.get("authorization") ?? headers.get("cf-aig-authorization") ?? apiKey;
-	return `${model.baseUrl}\n${credential}\n${JSON.stringify(nonSecretHeaders)}`;
+function isSseMediaType(contentType: string | null | undefined): boolean {
+	return contentType?.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
+}
+
+function websocketIdentityKey(
+	model: Model<"openai-responses">,
+	apiKey: string,
+	headers: Headers,
+	generatedNonce: string | undefined,
+): string {
+	const identityHeaders = headersToRecord(headers);
+	// Generated per-request session/request-id nonces rotate on every attempt
+	// under cacheRetention:none and must not reset the fixed retry budget.
+	// They are removed only when still equal to the generated value: a caller
+	// override (buildMergedHeaders applied options headers last) keeps its own
+	// value in the key and partitions the pool.
+	if (generatedNonce !== undefined) {
+		for (const name of ["x-client-request-id", "session-id", "session_id", "x-session-id", "x-session-affinity"]) {
+			if (identityHeaders[name] === generatedNonce) delete identityHeaders[name];
+		}
+	}
+	// Endpoint + apiKey + every effective auth/routing header (authorization,
+	// cf-aig-authorization, x-api-key, caller session ids, tenant ids, ...)
+	// partition pool and recovery state.
+	return `${model.baseUrl}\n${apiKey}\n${JSON.stringify(identityHeaders)}`;
 }
 
 function resolveResponsesWebSocketUrl(baseUrl?: string): string {
