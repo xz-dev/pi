@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
@@ -15,13 +15,14 @@ import type {
 	TranscriptContext,
 	Usage,
 } from "../types.ts";
+import { appendAssistantMessageDiagnostic, createAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { headersToRecord } from "../utils/headers.ts";
+import { AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
+import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getDeclaredTools, normalizeContext, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -31,6 +32,25 @@ import {
 	getResponsesToolSupport,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
+import {
+	clearWebSocketSseFallbackIfOwned,
+	closeResponsesWebSocketSessions,
+	extractEventError,
+	getResponsesWebSocketDebugStats,
+	getWebSocketSseFallbackState,
+	isPreviousResponseNotFoundError,
+	isResponsesNonTransportError,
+	isWebSocketConnectionLimitReachedError,
+	normalizeWebSocketTimeoutMs,
+	OPENAI_BETA_RESPONSES_WEBSOCKETS,
+	ProviderStreamEventCallbackError,
+	processResponsesWebSocket,
+	ResponsesApiError,
+	type ResponsesWebSocketDebugStats,
+	recordWebSocketFailure,
+	recordWebSocketSseFallback,
+	resetResponsesWebSocketDebugStats,
+} from "./openai-responses-websocket.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -41,6 +61,7 @@ const CHATGPT_WORKSPACE_LIMIT_HINT =
 	"You've reached your ChatGPT workspace's usage limit. Ask your workspace admin to increase it at admin.openai.com → Workspace → Usage limits.";
 // Fixed reasoning.effort while configuration_update items carry the thinking level.
 const CONFIGURATION_UPDATE_REQUEST_EFFORT = "medium";
+const OPENAI_RESPONSES_WEBSOCKET_SCOPE = "openai-responses";
 
 /**
  * OpenAI API keys start with `sk-`; a different credential sent directly to OpenAI
@@ -182,8 +203,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			timestamp: Date.now(),
 		};
 
+		let recoveryState = undefined as ReturnType<typeof getWebSocketSseFallbackState> | undefined;
 		try {
-			// Create OpenAI client
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
@@ -217,6 +238,163 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: 0,
 			};
+
+			const transport = options?.transport || "auto";
+			const sessionId = options?.sessionId;
+			const fallbackState = sessionId
+				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId)
+				: undefined;
+			const recoveryProbe = (fallbackState?.retryAt ?? 0) > 0;
+			let startEmitted = false;
+			const websocketDisabledForSession =
+				transport === "auto" && fallbackState && (fallbackState.recovering || Date.now() < fallbackState.retryAt);
+			if (websocketDisabledForSession) {
+				recordWebSocketSseFallback(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId);
+			}
+
+			if (transport !== "sse" && !websocketDisabledForSession) {
+				await emitTransport(options?.onTransport, "WS", model);
+				if (transport === "auto" && fallbackState) {
+					recoveryState = fallbackState;
+					recoveryState.recovering = true;
+				}
+				let websocketStarted = false;
+				let retriedWebSocketConnectionLimit = false;
+				let retriedMissingWebSocketContinuation = false;
+				const websocketHeaders = buildWebSocketHeaders(
+					model,
+					normalizedContext,
+					apiKey,
+					options?.headers,
+					cacheSessionId,
+					options?.identity,
+				);
+				while (true) {
+					websocketStarted = false;
+					try {
+						await processResponsesWebSocket({
+							scope: OPENAI_RESPONSES_WEBSOCKET_SCOPE,
+							url: resolveResponsesWebSocketUrl(model.baseUrl),
+							body: toWebSocketBody(params),
+							headers: websocketHeaders,
+							output,
+							stream,
+							model,
+							onStart: () => {
+								websocketStarted = true;
+								if (!startEmitted) {
+									startEmitted = true;
+									stream.push({ type: "start", partial: output });
+								}
+							},
+							idleTimeoutMs: normalizeWebSocketTimeoutMs(options?.timeoutMs),
+							connectTimeoutMs: normalizeWebSocketTimeoutMs(options?.websocketConnectTimeoutMs),
+							cacheSessionId,
+							identityKey: websocketIdentityKey(model, apiKey, websocketHeaders),
+							mapEvents: (events) => mapOrdinaryResponsesEvents(events, model, options?.onProviderStreamEvent),
+							processStream: (events, out, s, m) =>
+								processResponsesStream(events, out, s, m, {
+									serviceTier: options?.serviceTier,
+									grammarToolInputProperties,
+									applyServiceTierPricing: (usage, serviceTier) =>
+										applyServiceTierPricing(usage, serviceTier, m),
+								}),
+							getResponseItems: () =>
+								convertResponsesMessages(
+									model,
+									normalizeContext({ messages: [output] }),
+									OPENAI_TOOL_CALL_PROVIDERS,
+									{
+										includeSystemPrompt: false,
+										grammarToolInputProperties,
+										supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
+										supportsAdditionalTools: compat.supportsAdditionalTools,
+										supportsToolSearch: compat.supportsToolSearch,
+										toolOptions: {
+											supportsStrictMode: compat.supportsStrictMode,
+											supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
+										},
+									},
+								).filter(
+									(item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output",
+								),
+							isTerminalError: (out) =>
+								out.stopReason === "error" || out.stopReason === "aborted" || out.stopReason === "pending",
+							forceFresh: recoveryState !== undefined,
+							options,
+						});
+
+						if (options?.signal?.aborted) {
+							throw new Error("Request was aborted");
+						}
+						if (output.stopReason === "pending") {
+							throw new Error("OpenAI Responses stream ended without a stop reason");
+						}
+						if (output.stopReason === "aborted" || output.stopReason === "error") {
+							throw new ResponsesApiError(output.errorMessage || "An unknown error occurred");
+						}
+						if (transport === "auto" && sessionId && recoveryState) {
+							clearWebSocketSseFallbackIfOwned(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, recoveryState);
+						}
+						stream.push({
+							type: "done",
+							reason: output.stopReason,
+							message: output,
+						});
+						stream.end();
+						return;
+					} catch (error) {
+						const aborted = options?.signal?.aborted;
+						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
+						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
+						// A replacement socket would append to this same message; only repair before output.
+						if (
+							!aborted &&
+							previousResponseNotFound &&
+							output.content.length === 0 &&
+							!retriedMissingWebSocketContinuation
+						) {
+							retriedMissingWebSocketContinuation = true;
+							continue;
+						}
+						if (!aborted && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
+							retriedWebSocketConnectionLimit = true;
+							continue;
+						}
+						if (aborted || (isResponsesNonTransportError(error) && !connectionLimitBeforeStart)) {
+							throw error;
+						}
+						const failureState = recordWebSocketFailure(
+							OPENAI_RESPONSES_WEBSOCKET_SCOPE,
+							sessionId,
+							error,
+							transport === "auto",
+						);
+						const fallbackToSse = transport === "auto" && (!failureState || failureState.retryAt > 0);
+						appendAssistantMessageDiagnostic(
+							output,
+							createAssistantMessageDiagnostic("provider_transport_failure", error, {
+								configuredTransport: transport,
+								...(fallbackToSse ? { fallbackTransport: "sse" } : {}),
+								...(failureState ? { retryAttempt: fallbackToSse ? 0 : failureState.failures } : {}),
+								...(failureState && fallbackToSse && !recoveryProbe ? { resetRetryBudget: true } : {}),
+								eventsEmitted: startEmitted,
+								phase: startEmitted ? "after_message_stream_start" : "before_message_stream_start",
+								requestBytes: new TextEncoder().encode(JSON.stringify(toWebSocketBody(params))).byteLength,
+							}),
+						);
+						// The outer retry owner applies the configured backoff and discards failed
+						// assistant attempts. Never replay a started response in this stream.
+						if (!fallbackToSse || startEmitted) {
+							throw error;
+						}
+						recordWebSocketSseFallback(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId);
+						await emitTransport(options?.onTransport, undefined, model);
+						break;
+					}
+				}
+			}
+
 			const { data: openaiStream, response } = await retryProviderRequest(
 				() => client.responses.create(params, requestOptions).withResponse(),
 				{
@@ -226,7 +404,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				},
 			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
+			await emitTransport(options?.onTransport, "SSE", model);
+			if (!startEmitted) {
+				startEmitted = true;
+				stream.push({ type: "start", partial: output });
+			}
 
 			await processResponsesStream(openaiStream, output, stream, model, {
 				onProviderStreamEvent: options?.onProviderStreamEvent,
@@ -265,6 +447,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			}
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
+		} finally {
+			if (recoveryState) recoveryState.recovering = false;
 		}
 	})();
 
@@ -291,6 +475,28 @@ export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOption
 	} satisfies OpenAIResponsesOptions);
 };
 
+// ============================================================================
+// WebSocket session state (shared Responses transport, ordinary scope)
+// ============================================================================
+
+export type OpenAIResponsesWebSocketDebugStats = ResponsesWebSocketDebugStats;
+
+export function getOpenAIResponsesWebSocketDebugStats(sessionId: string): ResponsesWebSocketDebugStats | undefined {
+	return getResponsesWebSocketDebugStats(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId);
+}
+
+export function resetOpenAIResponsesWebSocketDebugStats(sessionId?: string): void {
+	resetResponsesWebSocketDebugStats(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId);
+}
+
+export function closeOpenAIResponsesWebSocketSessions(sessionId?: string): void {
+	closeResponsesWebSocketSessions(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId);
+}
+
+// ============================================================================
+// Request / transport plumbing
+// ============================================================================
+
 function createClient(
 	model: Model<"openai-responses">,
 	context: TranscriptContext,
@@ -300,6 +506,27 @@ function createClient(
 	fetch?: typeof globalThis.fetch,
 	sessionId?: string,
 ) {
+	const headers = buildMergedHeaders(model, context, sessionId, optionsHeaders, identity);
+	return new OpenAI({
+		apiKey,
+		baseURL: model.baseUrl,
+		dangerouslyAllowBrowser: true,
+		fetch,
+		defaultHeaders: headers,
+	});
+}
+
+/**
+ * Default + model + session-affinity + option headers merged exactly like the SDK
+ * client's defaultHeaders, including null suppression for provider/API defaults.
+ */
+function buildMergedHeaders(
+	model: Model<"openai-responses">,
+	context: TranscriptContext,
+	sessionId: string | undefined,
+	optionsHeaders?: ProviderHeaders,
+	identity?: ClientIdentity,
+): ProviderHeaders {
 	const compat = getCompat(model);
 	const headers: ProviderHeaders = { ...getIdentityHeaders(model, identity), ...model.headers };
 	if (model.provider === "github-copilot") {
@@ -322,19 +549,104 @@ function createClient(
 		}
 	}
 
-	// Merge options headers last so they can override defaults
+	// Merge options headers last so they can override defaults (null deletes).
 	if (optionsHeaders) {
 		Object.assign(headers, optionsHeaders);
 	}
-
-	return new OpenAI({
-		apiKey,
-		baseURL: model.baseUrl,
-		dangerouslyAllowBrowser: true,
-		fetch,
-		defaultHeaders: headers,
-	});
+	return headers;
 }
+
+function buildWebSocketHeaders(
+	model: Model<"openai-responses">,
+	context: TranscriptContext,
+	apiKey: string,
+	optionsHeaders: ProviderHeaders | undefined,
+	sessionId: string | undefined,
+	identity?: ClientIdentity,
+): Headers {
+	const merged = buildMergedHeaders(model, context, sessionId, optionsHeaders, identity);
+	const headers = new Headers();
+	for (const [key, value] of Object.entries(providerHeadersToRecord(merged) ?? {})) {
+		headers.set(key, value);
+	}
+	headers.delete("accept");
+	headers.delete("content-type");
+	// Responses WS auth: Authorization unless the caller supplied their own
+	// credential header (mirrors getClientApiKey's "unused" path).
+	if (!hasHeader(merged, "authorization") && !hasHeader(merged, "cf-aig-authorization")) {
+		headers.set("Authorization", `Bearer ${apiKey}`);
+	}
+	headers.set("OpenAI-Beta", OPENAI_BETA_RESPONSES_WEBSOCKETS);
+	return headers;
+}
+
+function websocketIdentityKey(model: Model<"openai-responses">, apiKey: string, headers: Headers): string {
+	const nonSecretHeaders = headersToRecord(headers);
+	delete nonSecretHeaders.authorization;
+	delete nonSecretHeaders["cf-aig-authorization"];
+	// Partition by endpoint and effective credential/header identity. The
+	// credential value itself never reaches diagnostics; it only scopes the
+	// pool entry so a rotated key or header gets a fresh socket.
+	const credential = headers.get("authorization") ?? headers.get("cf-aig-authorization") ?? apiKey;
+	return `${model.baseUrl}\n${credential}\n${JSON.stringify(nonSecretHeaders)}`;
+}
+
+function resolveResponsesWebSocketUrl(baseUrl?: string): string {
+	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : "https://api.openai.com/v1";
+	const normalized = raw.replace(/\/+$/, "");
+	const http = normalized.endsWith("/responses") ? normalized : `${normalized}/responses`;
+	const url = new URL(http);
+	if (url.protocol === "https:") url.protocol = "wss:";
+	if (url.protocol === "http:") url.protocol = "ws:";
+	return url.toString();
+}
+
+/** WS frame shape: no `stream` (the socket itself streams); keep store:false. */
+function toWebSocketBody(params: ResponseCreateParamsStreaming): { [key: string]: unknown } {
+	const { stream: _stream, ...rest } = params as unknown as Record<string, unknown>;
+	return rest;
+}
+
+async function* mapOrdinaryResponsesEvents(
+	events: AsyncIterable<Record<string, unknown>>,
+	model: Model<"openai-responses">,
+	onProviderStreamEvent: StreamOptions["onProviderStreamEvent"] | undefined,
+): AsyncGenerator<ResponseStreamEvent> {
+	for await (const event of events) {
+		try {
+			await onProviderStreamEvent?.(event, model);
+		} catch (error) {
+			// Keep callback failures out of the transport retry/fallback path.
+			throw new ProviderStreamEventCallbackError(error);
+		}
+		const type = typeof event.type === "string" ? event.type : undefined;
+		if (!type) continue;
+
+		if (type === "error") {
+			const { code, message } = extractEventError(event);
+			throw new ResponsesApiError(message || code || "Responses WebSocket error", {
+				code,
+				payload: event,
+			});
+		}
+
+		if (type === "response.failed") {
+			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
+			const code = response?.error?.code;
+			const message = response?.error?.message;
+			throw new ResponsesApiError(message ? `${code || "unknown"}: ${message}` : "OpenAI response failed", {
+				code,
+				payload: event,
+			});
+		}
+
+		yield event as unknown as ResponseStreamEvent;
+	}
+}
+
+// ============================================================================
+// Request Building
+// ============================================================================
 
 function buildParams(
 	model: Model<"openai-responses">,

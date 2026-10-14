@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "../types.ts";
+import type { Api, AssistantMessage } from "../types.ts";
 
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
 	return new RegExp(patterns.join("|"), "i");
@@ -145,6 +145,13 @@ export interface RetryPolicy {
 export const DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000;
 export const CODEX_AUTO_WEBSOCKET_RETRIES = 3;
 
+/** Chat APIs whose auto transport failures carry provider_transport_failure diagnostics. */
+const WEBSOCKET_TRANSPORT_RECOVERY_APIS = new Set<Api>(["openai-codex-responses", "openai-responses"]);
+
+function supportsWebSocketTransportRecovery(api: Api): boolean {
+	return WEBSOCKET_TRANSPORT_RECOVERY_APIS.has(api);
+}
+
 export interface AssistantRetryPlan {
 	attempt: number;
 	maxAttempts: number;
@@ -160,10 +167,9 @@ export function getAssistantRetryPlan(
 	globalAttempt: number,
 ): AssistantRetryPlan | undefined {
 	if (!policy || !isRetryableAssistantError(message, policy)) return undefined;
-	const failure =
-		message.api === "openai-codex-responses"
-			? message.diagnostics?.findLast((diagnostic) => diagnostic.type === "provider_transport_failure")?.details
-			: undefined;
+	const failure = supportsWebSocketTransportRecovery(message.api)
+		? message.diagnostics?.findLast((diagnostic) => diagnostic.type === "provider_transport_failure")?.details
+		: undefined;
 	if (failure?.configuredTransport === "auto") {
 		if (failure.resetRetryBudget === true) globalAttempt = 0;
 		const attempt = failure.retryAttempt;
@@ -336,7 +342,7 @@ export function isRetryableAssistantError(message: AssistantMessage, options?: R
 	const errorMessage = message.errorMessage;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
 	if (matchesNonRetryableErrorPatterns(errorMessage, options?.nonRetryableErrorPatterns)) return false;
-	if (message.api === "openai-codex-responses") {
+	if (supportsWebSocketTransportRecovery(message.api)) {
 		const failure = message.diagnostics?.findLast((diagnostic) => diagnostic.type === "provider_transport_failure");
 		// A prior WS failure must not classify a subsequent, possibly terminal SSE error.
 		if (failure && (failure.details?.fallbackTransport !== "sse" || failure.details.eventsEmitted === true))

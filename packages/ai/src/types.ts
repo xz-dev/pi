@@ -229,6 +229,15 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 * Adapter support is explicit; unsupported adapters do not invoke it.
 	 */
 	onProviderStreamEvent?: (data: unknown, model: Model<Api>) => void | Promise<void>;
+	/**
+	 * Optional observer for the actual client→provider/proxy transport in use.
+	 * Adapters report a short label ("SSE", "WS", "AWS-EventStream", "HTTP-Stream")
+	 * once the transport is selected and its request starts, and `undefined` when
+	 * the transport is lost or transitions. Adapters that cannot observe their
+	 * transport never call it. Hook failures are swallowed; they are not transport
+	 * failures.
+	 */
+	onTransport?: (transport: string | undefined, model: Model<Api>) => void | Promise<void>;
 	temperature?: number;
 	/**
 	 * Arbitrary sampling parameters merged into the request body as-is, after the named request
