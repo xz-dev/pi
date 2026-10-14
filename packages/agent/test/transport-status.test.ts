@@ -297,6 +297,7 @@ describe("transport_status request lifecycle", () => {
 		// run can start while the aborted request's stream is still open.
 		const firstEvents: AgentEvent[] = [];
 		const controller = new AbortController();
+		const abortReason = new Error("Controlled first-request cancellation");
 		const firstRun = runAgentLoop(
 			[{ role: "user", content: "one", timestamp: Date.now() }],
 			{ messages: [] },
@@ -306,9 +307,13 @@ describe("transport_status request lifecycle", () => {
 			},
 			controller.signal,
 			streamFn,
-		);
+		).catch((error: unknown) => {
+			if (!controller.signal.aborted || !(error instanceof Error) || error.message !== abortReason.message) {
+				throw error;
+			}
+		});
 		await vi.waitFor(() => expect(transportEvents(firstEvents)).toEqual(["WS"]));
-		controller.abort();
+		controller.abort(abortReason);
 		// Abort retires the known transport promptly; a late report stays dead.
 		await vi.waitFor(() => expect(transportEvents(firstEvents)).toEqual(["WS", undefined]));
 		await firstOnTransport?.("WS");
@@ -383,6 +388,7 @@ describe("transport_status request lifecycle", () => {
 		const secondStream = createAssistantMessageEventStream();
 		const secondReported = createDeferred();
 		const firstAbort = new AbortController();
+		const abortReason = new Error("Controlled delayed-factory cancellation");
 
 		const firstRun = runAgentLoop(
 			[{ role: "user", content: "one", timestamp: Date.now() }],
@@ -396,9 +402,13 @@ describe("transport_status request lifecycle", () => {
 					await firstFactoryGate.promise;
 					return firstStream;
 				})(),
-		);
+		).catch((error: unknown) => {
+			if (!firstAbort.signal.aborted || !(error instanceof Error) || error.message !== abortReason.message) {
+				throw error;
+			}
+		});
 		await vi.waitFor(() => expect(transportEvents(sharedEvents)).toEqual(["WS"]));
-		firstAbort.abort();
+		firstAbort.abort(abortReason);
 		// Prompt abort clear retires request 1's transport immediately.
 		await vi.waitFor(() => expect(transportEvents(sharedEvents)).toEqual(["WS", undefined]));
 
