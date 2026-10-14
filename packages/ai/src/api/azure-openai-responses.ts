@@ -97,10 +97,28 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 				},
 			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			await emitTransport(options?.onTransport, "SSE", model);
+			let sseReported = false;
+			const reportSseOnce = async () => {
+				if (sseReported) return;
+				sseReported = true;
+				await emitTransport(options?.onTransport, "SSE", model);
+			};
+			// Report SSE only once observed: media type proves it now, otherwise
+			// the first decoded event does (the SDK decoder keys off stream:true,
+			// not the response media type).
+			if (response.body && isSseMediaType(response.headers.get("content-type"))) {
+				await reportSseOnce();
+			}
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model, {
+			const proofedStream = (async function* () {
+				for await (const event of openaiStream) {
+					await reportSseOnce();
+					yield event;
+				}
+			})();
+
+			await processResponsesStream(proofedStream, output, stream, model, {
 				onProviderStreamEvent: options?.onProviderStreamEvent,
 				grammarToolInputProperties,
 			});
@@ -151,6 +169,10 @@ export const streamSimple: StreamFunction<"azure-openai-responses", SimpleStream
 		reasoningEffort,
 	} satisfies AzureOpenAIResponsesOptions);
 };
+
+function isSseMediaType(contentType: string | null | undefined): boolean {
+	return contentType?.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
+}
 
 function createClient(model: Model<"azure-openai-responses">, apiKey: string, options?: AzureOpenAIResponsesOptions) {
 	const headers = { ...getIdentityHeaders(model, options?.identity), ...model.headers };
