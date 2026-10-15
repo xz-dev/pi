@@ -11,17 +11,17 @@
 - main 由 sync workflow 重建（upstream + patch 分支 squash），main-only 的 `Release vX.Y.Z` commit 会在下次重建时被丢弃 → package.json 版本回退 → 后续 publish 产出更低 semver 的更新构建 → GitHub 将其标为 Latest → `pi update self` 因 `latest < current` 拒绝安装 → 用户永久卡在旧版。
 - 若误发了一个高 semver 的下游 release（如 `0.87.2-xz.210` 在上游仍是 `0.87.1` 时），必须删除该 GitHub Release + 其 `xz-v*` tag + 对应本地/远端 `v*` tag，否则版本链断裂后所有用户无法 update。
 
-下游需要"发版"时的正确动作：直接触发 sync（`gh workflow run "Upstream Sync" --ref ci`），或等下一次 upstream sync。修复随 sync 后的 publish workflow 自动上线，不需要任何版本号操作。
+下游需要"发版"时的正确动作：直接触发 sync（`gh workflow run "Upstream Sync" --ref ci`）。修复随 sync 后的 publish workflow 自动上线，不需要任何版本号操作。
 
-# Known Pre-existing Failures — Always Ignore
+# 下游不等上游 — Downstream Never Waits for Upstream
 
-The pre-commit hook (`npm run check` → `tsgo --noEmit`) fails with model-catalog type errors in `packages/ai/test/*` (e.g. `"..." is not assignable to parameter of type ...`). Cause: test fixtures reference model IDs from models.dev's live catalog, which renames/retires models faster than the branch baseline tracks. These errors:
+原则：下游完全不等上游。上游带进来的问题（失败测试、过期 fixture、catalog drift、构建或发版阻断）由我们直接修复，不以"等上游修"或"下次 sync 自愈"作为处理方式。
 
-- Never relate to the change being committed (they live in upstream-maintained test files).
-- Self-heal on the next upstream sync.
-- Have been hit hundreds of times.
+- Upstream breakage that blocks our CI, sync, or publish is our blocker. Fix it in the downstream branch that owns the area (`ci` for workflow/scripts/gates, a `patch/*` branch for product code and its tests), then trigger sync so the fix ships.
+- Do not leave publish red waiting for upstream, and do not hide a real failure by widening skip lists or allow-lists when a direct fix is possible. A skip is acceptable only when the test needs unavailable external resources, and must name the reason.
+- When upstream later lands an equivalent fix, retire ours (drop the patch or overlay, or rebase it away) instead of carrying duplicates.
 
-Rule: when `tsgo` failures are confined to model-ID/catalog type mismatches in `packages/ai/test/` (and equivalents such as stale model IDs in `packages/coding-agent/test/`), commit with `git commit --no-verify` without asking. Do not fix those test files, do not regenerate model data to satisfy the hook, and do not treat this as a blocker. Any other hook failure still requires fixing before commit.
+Model-catalog drift is the most common case. Provider model data is hydrated from a live catalog, so test fixtures can reference model IDs that no longer exist (e.g. `"..." is not assignable to parameter of type ...` in `packages/*/test`, or runtime assertions on a dropped model). Update the fixtures to current catalog IDs on the owning downstream branch. A local commit may still use `git commit --no-verify` when its hook failure is confined to this drift class and the drift is unrelated to the change, but the drift itself must be fixed downstream, not ignored.
 
 # Development Rules
 

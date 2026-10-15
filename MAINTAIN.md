@@ -37,7 +37,7 @@ When an explicitly authorized commit touches `ci`-owned files:
 
 1. Inspect status and stage only the intended files; preserve other sessions' work.
 2. Run `npm run check` and retain full output and the actual exit code.
-3. If failures are confined to the known stale-model-ID/catalog type mismatch class documented in `AGENTS.md`, the repository policy permits `git commit --no-verify`. Do not edit product fixtures or regenerate catalogs merely to make that hook green.
+3. If failures are confined to the stale-model-ID/catalog drift class documented in `AGENTS.md` and are unrelated to the change, the commit may use `git commit --no-verify`. Downstream does not wait for upstream: fix the drifted fixtures on their owning downstream branch (see `AGENTS.md`), rather than leaving them for a later upstream sync.
 4. Any other failure must be fixed or reported as a blocker before committing. Do not swap whole product directories to upstream, clean untracked source files, or alter Git identity/signing to bypass a failure.
 
 ## README synchronization checklist
