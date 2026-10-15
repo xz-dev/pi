@@ -127,6 +127,10 @@ Model catalog refresh, selection, and provider-facing fixes.
   - Use case: Stop after an answer without paying for a summary that would only be useful if the session continued.
   - Details: [Automatic compaction](../packages/coding-agent/docs/compaction.md#when-it-triggers)
   - Patch branch: [`patch/defer-threshold-compaction`](https://github.com/xz-dev/pi/tree/patch/defer-threshold-compaction)
+- Summarize threshold compaction in the background. Once context reaches `compaction.backgroundStartRatio` (default `0.85`) of the threshold, Pi snapshots the branch, runs `session_before_compact` and the summary while the agent keeps working, and persists it at the next request boundary; messages appended meanwhile stay verbatim. If the threshold arrives first, compaction waits for the pending summary instead of generating another. Stale results are discarded in favor of ordinary blocking compaction. Disable with `compaction.background: false`. Limits: compaction starts earlier, so long sessions compact somewhat more often; a summary that waited for the threshold keeps a longer tail and can start the next background summary immediately.
+  - Use case: Keep a long tool-heavy run going instead of stalling on a summarization request every time context fills.
+  - Details: [Background compaction](../packages/coding-agent/docs/compaction.md#background-compaction)
+  - Patch branch: [`patch/async-compaction`](https://github.com/xz-dev/pi/tree/patch/async-compaction)
 
 ## Extensions and environment
 

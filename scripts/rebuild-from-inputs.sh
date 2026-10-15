@@ -127,6 +127,7 @@ PATCH_ORDER=(
 	defer-threshold-compaction
 	startup-submit-readiness
 	cold-start-retry
+	async-compaction
 	compact-input-dock
 	responsive-selectors
 	thinking-preview
@@ -155,6 +156,7 @@ CHAIN_EDGES=(
 	slow-hook-tui-only:defer-threshold-compaction
 	defer-threshold-compaction:startup-submit-readiness
 	startup-submit-readiness:cold-start-retry
+	cold-start-retry:async-compaction
 	cold-start-retry:message-origin
 	compact-input-dock:responsive-selectors
 )

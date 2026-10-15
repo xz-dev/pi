@@ -494,6 +494,7 @@ for (const [ancestor, descendant] of [
 	["defer-threshold-compaction", "startup-submit-readiness"],
 	["startup-submit-readiness", "cold-start-retry"],
 	["cold-start-retry", "message-origin"],
+	["cold-start-retry", "async-compaction"],
 	["retry-non-retryable-patterns", "ws-cached-empty-delta"],
 	["codex-websocket-recovery", "responses-websocket-transport"],
 	["responses-websocket-transport", "provider-transport-indicator"],
@@ -586,7 +587,7 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 30);
+	assert.equal(order.length, 31);
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
 	assert.equal(order.at(-1), "env-native-test-fixtures");
