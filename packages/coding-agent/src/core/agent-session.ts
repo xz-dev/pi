@@ -39,12 +39,14 @@ import type {
 	AuthResult,
 	ImageContent,
 	Message,
+	MessageOrigin,
 	Model,
 	ProviderHeaders,
 	SystemMessage,
 	TextContent,
 	ToolResultMessage,
 	Usage,
+	UserMessage,
 } from "@earendil-works/pi-ai/compat";
 import {
 	clampThinkingLevel,
@@ -116,6 +118,7 @@ import {
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
+import { getExtensionOrigin } from "./extensions/origin.ts";
 import {
 	type BeforeAgentStartTrigger,
 	type ExtensionShutdownProgressListener,
@@ -127,7 +130,9 @@ import {
 	type BashExecutionMessage,
 	type CustomMessage,
 	convertToLlm,
+	inputOrigin,
 	type ManualRetryRecoveryMessage,
+	sameImages,
 } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -379,8 +384,10 @@ export interface PromptOptions {
 	images?: ImageContent[];
 	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
 	streamingBehavior?: "steer" | "followUp";
-	/** Source of input for extension input event handlers. Defaults to "interactive". */
+	/** Source of input for extension input event handlers. Defaults to "sdk". */
 	source?: InputSource;
+	/** Recorded message provenance. SDK calls without a source are not terminal input. */
+	origin?: MessageOrigin;
 	/** Internal hook used by RPC mode to observe how an accepted prompt was dispatched. Not called if the prompt is rejected. */
 	preflightResult?: (disposition: PromptDisposition) => void;
 }
@@ -491,13 +498,15 @@ export class AgentSession {
 	private _continuationBranchLeafId: string | undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
-	private _steeringMessages: string[] = [];
+	private _steeringMessages: UserMessage[] = [];
 	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
-	private _followUpMessages: string[] = [];
+	private _followUpMessages: UserMessage[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	/** Inputs swallowed by an extension input handler (action: "handled"), pending re-issue. */
+	private _swallowedInputs: { text: string; images: ImageContent[] | undefined; origin: MessageOrigin }[] = [];
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -1384,6 +1393,7 @@ export class AgentSession {
 						draft.content,
 						draft.display,
 						draft.details,
+						draft.origin,
 					);
 					break;
 				case "context_edit":
@@ -1472,8 +1482,8 @@ export class AgentSession {
 	private _emitQueueUpdate(): void {
 		this._emit({
 			type: "queue_update",
-			steering: [...this._steeringMessages],
-			followUp: [...this._followUpMessages],
+			steering: this.getSteeringMessages(),
+			followUp: this.getFollowUpMessages(),
 		});
 	}
 
@@ -1568,20 +1578,12 @@ export class AgentSession {
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecoveryAttempted = false;
-			const messageText = contentText(event.message.content, "");
-			if (messageText) {
-				// Check steering queue first
-				const steeringIndex = this._steeringMessages.indexOf(messageText);
-				if (steeringIndex !== -1) {
-					this._steeringMessages.splice(steeringIndex, 1);
+			for (const queue of [this._steeringMessages, this._followUpMessages]) {
+				const index = queue.indexOf(event.message);
+				if (index !== -1) {
+					queue.splice(index, 1);
 					this._emitQueueUpdate();
-				} else {
-					// Check follow-up queue
-					const followUpIndex = this._followUpMessages.indexOf(messageText);
-					if (followUpIndex !== -1) {
-						this._followUpMessages.splice(followUpIndex, 1);
-						this._emitQueueUpdate();
-					}
+					break;
 				}
 			}
 		}
@@ -1657,6 +1659,7 @@ export class AgentSession {
 					event.message.content,
 					event.message.display,
 					event.message.details,
+					event.message.origin,
 				);
 			} else if (
 				!bufferedFirstRetryMessage &&
@@ -2452,6 +2455,7 @@ export class AgentSession {
 			messages.push({
 				role: "user",
 				content: [{ type: "text", text }, ...normalized.images],
+				origin: trigger.origin,
 				timestamp: Date.now(),
 			});
 		}
@@ -2466,6 +2470,7 @@ export class AgentSession {
 				content: msg.content ?? [],
 				display: msg.display,
 				details: msg.details,
+				origin: msg.origin,
 				timestamp: Date.now(),
 			});
 		}
@@ -2672,13 +2677,19 @@ export class AgentSession {
 		images: ImageContent[] | undefined,
 		source: InputSource,
 		streamingBehavior?: "steer" | "followUp",
+		origin?: MessageOrigin,
 	): Promise<{ text: string; images: ImageContent[] | undefined } | undefined> {
 		if (!this._extensionRunner.hasHandlers("input")) {
 			return { text, images };
 		}
 
-		const inputResult = await this._extensionRunner.emitInput(text, images, source, streamingBehavior);
+		const inputResult = await this._extensionRunner.emitInput(text, images, source, streamingBehavior, origin);
 		if (inputResult.action === "handled") {
+			// An extension swallowed this input (e.g. takeover capture) and will re-issue it via
+			// sendUserMessage. Remember the swallowed payload so the re-issue can be attributed
+			// to this original origin instead of the re-issuing extension.
+			this._swallowedInputs.push({ text, images, origin: origin ?? inputOrigin(source) });
+			if (this._swallowedInputs.length > 8) this._swallowedInputs.shift();
 			return undefined;
 		}
 		if (inputResult.action === "transform") {
@@ -2724,6 +2735,7 @@ export class AgentSession {
 			return;
 		}
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		const origin = options?.origin ?? inputOrigin(options?.source);
 		const preflightResult = options?.preflightResult;
 		// Handle extension commands first (execute immediately, even during streaming)
 		// Extension commands manage their own LLM interaction via pi.sendMessage()
@@ -2746,8 +2758,9 @@ export class AgentSession {
 		const processedInput = await this._runInputHandlers(
 			text,
 			options?.images,
-			options?.source ?? "interactive",
+			origin.type,
 			this.isStreaming ? options?.streamingBehavior : undefined,
+			origin,
 		);
 		if (!processedInput) {
 			preflightResult?.("handled");
@@ -2770,9 +2783,9 @@ export class AgentSession {
 				);
 			}
 			if (options.streamingBehavior === "followUp") {
-				await this._queueFollowUp(expandedText, currentImages);
+				await this._queueFollowUp(expandedText, currentImages, origin);
 			} else {
-				await this._queueSteer(expandedText, currentImages);
+				await this._queueSteer(expandedText, currentImages, origin);
 			}
 			preflightResult?.("queued");
 			return;
@@ -2798,7 +2811,7 @@ export class AgentSession {
 			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 		}
 
-		await this._startRun({ messageType: "user", prompt: expandedText, images: currentImages }, () =>
+		await this._startRun({ messageType: "user", prompt: expandedText, images: currentImages, origin }, () =>
 			preflightResult?.("started"),
 		);
 	}
@@ -2816,7 +2829,7 @@ export class AgentSession {
 		if (!command) return false;
 
 		// Get command context from extension runner (includes session control methods)
-		const ctx = this._extensionRunner.createCommandContext();
+		const ctx = this._extensionRunner.createCommandContext(getExtensionOrigin(command.sourceInfo));
 
 		try {
 			await command.handler(args, ctx);
@@ -2868,6 +2881,7 @@ export class AgentSession {
 		images: ImageContent[] | undefined,
 		behavior: "steer" | "followUp",
 		source: InputSource,
+		origin: MessageOrigin,
 	): Promise<QueuedInputDisposition> {
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
@@ -2878,6 +2892,7 @@ export class AgentSession {
 			images,
 			source,
 			this.isStreaming ? behavior : undefined,
+			origin,
 		);
 		if (!processedInput) return "handled";
 
@@ -2885,9 +2900,9 @@ export class AgentSession {
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		if (behavior === "steer") {
-			await this._queueSteer(expandedText, processedInput.images);
+			await this._queueSteer(expandedText, processedInput.images, origin);
 		} else {
-			await this._queueFollowUp(expandedText, processedInput.images);
+			await this._queueFollowUp(expandedText, processedInput.images, origin);
 		}
 		return "queued";
 	}
@@ -2906,7 +2921,7 @@ export class AgentSession {
 		images?: ImageContent[],
 		options?: { source?: InputSource },
 	): Promise<QueuedInputDisposition> {
-		return this._queueUserInput(text, images, "steer", options?.source ?? "interactive");
+		return this._queueUserInput(text, images, "steer", options?.source ?? "sdk", inputOrigin(options?.source));
 	}
 
 	/**
@@ -2922,37 +2937,37 @@ export class AgentSession {
 		images?: ImageContent[],
 		options?: { source?: InputSource },
 	): Promise<QueuedInputDisposition> {
-		return this._queueUserInput(text, images, "followUp", options?.source ?? "interactive");
+		return this._queueUserInput(text, images, "followUp", options?.source ?? "sdk", inputOrigin(options?.source));
 	}
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
-		this._steeringMessages.push(text);
-		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
-		}
-		this.agent.steer({
+	private async _queueSteer(text: string, images?: ImageContent[], origin?: MessageOrigin): Promise<void> {
+		const message: UserMessage = {
 			role: "user",
-			content,
+			content: [{ type: "text", text }, ...(images ?? [])],
+			origin,
 			timestamp: Date.now(),
-		});
+		};
+		this._steeringMessages.push(message);
+		this.agent.steer(message);
+		this._emitQueueUpdate();
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
-		this._followUpMessages.push(text);
+	private async _queueFollowUp(text: string, images?: ImageContent[], origin?: MessageOrigin): Promise<void> {
+		const message: UserMessage = {
+			role: "user",
+			content: [{ type: "text", text }, ...(images ?? [])],
+			origin,
+			timestamp: Date.now(),
+		};
+		this._followUpMessages.push(message);
+		this.agent.followUp(message);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
-		}
-		this.agent.followUp({ role: "user", content, timestamp: Date.now() });
 	}
 
 	/**
@@ -2986,6 +3001,7 @@ export class AgentSession {
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		origin: MessageOrigin = { type: "sdk" },
 	): Promise<void> {
 		const appMessage = {
 			role: "custom" as const,
@@ -2994,6 +3010,7 @@ export class AgentSession {
 			content: message.content ?? [],
 			display: message.display,
 			details: message.details,
+			origin,
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
@@ -3006,10 +3023,10 @@ export class AgentSession {
 			}
 		} else if (options?.triggerTurn) {
 			if (this._isEmittingAgentSettled) {
-				this._deferredSettledActions.push(async () => await this.sendCustomMessage(message, options));
+				this._deferredSettledActions.push(async () => await this.sendCustomMessage(message, options, origin));
 				return;
 			}
-			await this._startRun({ messageType: "custom", message: appMessage });
+			await this._startRun({ messageType: "custom", message: appMessage, origin: appMessage.origin });
 		} else if (this.isStreaming) {
 			// Appending now would put the message between an assistant tool call and its
 			// result, which providers that validate message order reject on replay. Defer
@@ -3027,6 +3044,7 @@ export class AgentSession {
 			appMessage.content,
 			appMessage.display,
 			appMessage.details,
+			appMessage.origin,
 		);
 		this._refreshFinalizedContext();
 		this._emit({ type: "message_start", message: appMessage });
@@ -3058,6 +3076,7 @@ export class AgentSession {
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
+		origin: MessageOrigin = { type: "sdk" },
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -3079,11 +3098,22 @@ export class AgentSession {
 			if (images.length === 0) images = undefined;
 		}
 
+		// A re-issued swallowed input is attributed to its original origin, not the
+		// re-issuing extension. Exact-content match, oldest first, one-time claim.
+		const claim = this._swallowedInputs.findIndex(
+			(s) => s.text === text && sameImages(s.images, images) && s.origin.type !== "extension",
+		);
+		if (claim >= 0) {
+			origin = this._swallowedInputs[claim].origin;
+			this._swallowedInputs.splice(claim, 1);
+		}
+
 		await this.prompt(text, {
 			expandPromptTemplates: options?.expandPromptTemplates ?? false,
 			streamingBehavior: options?.deliverAs,
 			images,
-			source: "extension",
+			source: origin.type,
+			origin,
 		});
 	}
 
@@ -3093,8 +3123,8 @@ export class AgentSession {
 	 * @returns Object with steering and followUp arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
-		const steering = [...this._steeringMessages];
-		const followUp = [...this._followUpMessages];
+		const steering = [...this.getSteeringMessages()];
+		const followUp = [...this.getFollowUpMessages()];
 		this._steeringMessages = [];
 		this._followUpMessages = [];
 		this.agent.clearAllQueues();
@@ -3109,12 +3139,35 @@ export class AgentSession {
 
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly string[] {
-		return this._steeringMessages;
+		return this._steeringMessages.map((message) => contentText(message.content, ""));
 	}
 
 	/** Get pending follow-up messages (read-only) */
 	getFollowUpMessages(): readonly string[] {
-		return this._followUpMessages;
+		return this._followUpMessages.map((message) => contentText(message.content, ""));
+	}
+
+	/** Structured queue snapshots preserve origin and attachments for UI/SDK consumers. */
+	getQueuedInputs(): { steering: readonly UserMessage[]; followUp: readonly UserMessage[] } {
+		return { steering: this._steeringMessages.slice(), followUp: this._followUpMessages.slice() };
+	}
+
+	/** Retrieve only terminal drafts; plugin/custom messages and image attachments stay queued. */
+	takeInteractiveDrafts(): { steering: string[]; followUp: string[] } {
+		const isDraft = (message: UserMessage) =>
+			message.origin?.type === "interactive" &&
+			(typeof message.content === "string" || !message.content.some((part) => part.type === "image"));
+		const steering = this._steeringMessages.filter(isDraft);
+		const followUp = this._followUpMessages.filter(isDraft);
+		const selected = new Set<AgentMessage>([...steering, ...followUp]);
+		this.agent.removeQueuedMessages(selected);
+		this._steeringMessages = this._steeringMessages.filter((message) => !selected.has(message));
+		this._followUpMessages = this._followUpMessages.filter((message) => !selected.has(message));
+		this._emitQueueUpdate();
+		return {
+			steering: steering.map((message) => contentText(message.content, "")),
+			followUp: followUp.map((message) => contentText(message.content, "")),
+		};
 	}
 
 	get resourceLoader(): ResourceLoader {
@@ -4155,8 +4208,8 @@ export class AgentSession {
 
 		runner.bindCore(
 			{
-				sendMessage: (message, options) => {
-					this.sendCustomMessage(message, options).catch((err) => {
+				sendMessage: (message, options, origin) => {
+					this.sendCustomMessage(message, options, origin).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_message",
@@ -4164,8 +4217,8 @@ export class AgentSession {
 						});
 					});
 				},
-				sendUserMessage: (content, options) => {
-					this.sendUserMessage(content, options).catch((err) => {
+				sendUserMessage: (content, options, origin) => {
+					this.sendUserMessage(content, options, origin).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_user_message",
@@ -5154,13 +5207,13 @@ export class AgentSession {
 	// Extension System
 	// =========================================================================
 
-	createReplacedSessionContext(): ReplacedSessionContext {
+	createReplacedSessionContext(origin: MessageOrigin = { type: "sdk" }): ReplacedSessionContext {
 		const context = Object.defineProperties(
 			{},
-			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext()),
+			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext(origin)),
 		) as ReplacedSessionContext;
-		context.sendMessage = (message, options) => this.sendCustomMessage(message, options);
-		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options);
+		context.sendMessage = (message, options) => this.sendCustomMessage(message, options, origin);
+		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options, origin);
 		return context;
 	}
 
