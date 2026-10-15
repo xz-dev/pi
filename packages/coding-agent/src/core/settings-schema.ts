@@ -27,7 +27,8 @@ const CompactionSettingsSchema = Type.Object({
 	),
 	backgroundStartRatio: Type.Optional(
 		Type.Number({
-			description: "Fraction of the compaction threshold at which background summarization starts.",
+			description:
+				"Earliest-start guard for background summarization, as a fraction of the compaction threshold. The actual start point is threshold - min(32768, (1 - ratio) * threshold).",
 			exclusiveMinimum: 0,
 			exclusiveMaximum: 1,
 			default: SETTINGS_DEFAULTS.compaction.backgroundStartRatio,
