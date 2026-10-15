@@ -36,7 +36,7 @@ Features:
 - WebSocket recovery and incremental context for OpenAI Responses and Codex
 - Actual connection and request mode beside Working (`SSE`, `WS/full`, `WS/continuation`, or another reported protocol)
 - Detach long tool calls, keep chatting (`tool_task`)
-- Compaction summarizes in the background, no stall at the context limit
+- Optional background compaction (`/settings`, off by default): summarize ahead of the context limit while the agent keeps working
 - Thinking shown as one preview line (`Ctrl+T` to expand)
 - Smaller input dock when reading history
 - See where each message came from (you, extension, RPC, SDK)

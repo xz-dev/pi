@@ -259,6 +259,13 @@ jobs:
               test/cli-responsive-selectors.test.ts \
               test/chat-viewport.test.ts
           )
+          # Deterministic background-compaction ownership, accounting and threshold gates.
+          (
+            cd packages/coding-agent
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/suite/agent-session-background-compaction.test.ts \
+              test/suite/background-compaction-boundaries.test.ts
+          )
           # Deterministic origin attribution gates, independent of catalog exclusions.
           (
             cd packages/coding-agent
