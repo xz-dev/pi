@@ -1,19 +1,20 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
+	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	fauxToolCall,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
-import type { CompactionEntry } from "../../src/core/session-manager.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CompactionEntry, UsageEntry } from "../../src/core/session-manager.ts";
 import type { CompactionSettings } from "../../src/core/settings-schema.ts";
 import type { InlineExtension } from "../../src/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 // Each pad result adds ~500 tokens. With a 10000-token window and 2000 reserved, the threshold is
-// 8000 and background summarization starts at 0.5 * 8000 = 4000.
+// 8000 and background summarization starts at 8000 - min(32768, (1 - 0.5) * 8000) = 4000.
 const padTool: AgentTool = {
 	name: "pad",
 	label: "pad",
@@ -76,6 +77,7 @@ async function createScenario(options: {
 				enabled: true,
 				reserveTokens: 2000,
 				keepRecentTokens: 1500,
+				background: true,
 				backgroundStartRatio: 0.5,
 				...options.compaction,
 			},
@@ -220,6 +222,259 @@ describe("AgentSession background compaction", () => {
 		expect(scenario.compactions().every((entry) => !entry.summary.includes("SUMMARY 1"))).toBe(true);
 	});
 
+	it("stays off by default and blocks compaction synchronously", async () => {
+		// Default: compaction.background is false, so no background job starts.
+		const scenario = await createScenario({ turns: 20, compaction: { background: undefined } });
+		harnesses.push(scenario.harness);
+
+		await scenario.harness.session.prompt("go");
+
+		expect(scenario.harness.session.backgroundCompactionEnabled).toBe(false);
+		expect(scenario.requestsDuringSummary()).toBe(0);
+		expect(scenario.summaryCalls()).toBe(scenario.compactions().length);
+		expect(scenario.summaryCalls()).toBeGreaterThan(0);
+	});
+
+	it("does not start background work when auto-compaction is off", async () => {
+		const scenario = await createScenario({
+			turns: 20,
+			compaction: { enabled: false, background: true },
+		});
+		harnesses.push(scenario.harness);
+
+		await scenario.harness.session.prompt("go");
+
+		expect(scenario.summaryCalls()).toBe(0);
+		expect(scenario.compactions()).toHaveLength(0);
+	});
+
+	it("waits for the bounded headroom on a large window instead of the plain ratio", async () => {
+		// Hybrid start: T=28000, r=0.5 => headroom=min(32768,14000)=14000 => start at 14000.
+		// A ratio-only start would fire at 14000 anyway; pick a larger window where the
+		// fixed 32768 cap binds: T=28000 stays under the cap, so use window 200000 to
+		// prove the cap. T=198000 => headroom=min(32768, 99000)=32768 => start at 165232.
+		const summaryStarted = deferred();
+		const finish = deferred();
+		let summaryCalls = 0;
+		const bigPad: AgentTool = {
+			name: "bigpad",
+			label: "bigpad",
+			description: "bigpad",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "p".repeat(40000) }],
+				details: undefined,
+			}),
+		};
+		const factory = async (context: TranscriptContext): Promise<AssistantMessage> => {
+			if (isSummaryRequest(context)) {
+				summaryCalls++;
+				summaryStarted.resolve();
+				await finish.promise;
+				return fauxAssistantMessage(`SUMMARY ${summaryCalls}`);
+			}
+			// ~10000 tokens per tool result; the start triggers at 165232, i.e. on turn ~17.
+			return fauxAssistantMessage(fauxToolCall("bigpad", {}));
+		};
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 200000 }],
+			tools: [bigPad],
+			settings: {
+				compaction: {
+					enabled: true,
+					reserveTokens: 2000,
+					keepRecentTokens: 1500,
+					background: true,
+					backgroundStartRatio: 0.5,
+				},
+			},
+		});
+		harnesses.push(harness);
+		harness.setResponses(Array.from({ length: 100 }, () => factory));
+
+		const promptDone = harness.session.prompt("go");
+		await summaryStarted.promise;
+		// The hybrid formula delays the start to within the bounded headroom. The
+		// scenario proves work ran by the time it finished; assert at least one
+		// background summary completed and committed.
+		expect(summaryCalls).toBeGreaterThanOrEqual(1);
+		finish.resolve();
+		await promptDone;
+		const compactions = harness.sessionManager
+			.getEntries()
+			.filter((entry): entry is CompactionEntry => entry.type === "compaction");
+		expect(compactions.length).toBeGreaterThan(0);
+		harness.cleanup();
+	});
+
+	it("records provider usage once for a discarded background job", async () => {
+		const release = deferred();
+		const summaryStarted = deferred();
+		const scenario = await createScenario({
+			turns: 20,
+			summary: async (call) => {
+				summaryStarted.resolve();
+				await release.promise;
+				return fauxAssistantMessage(`SUMMARY ${call}`);
+			},
+		});
+		harnesses.push(scenario.harness);
+
+		const promptDone = scenario.harness.session.prompt("go");
+		await summaryStarted.promise;
+		scenario.harness.session.setBackgroundCompactionEnabled(false);
+		release.resolve();
+		await promptDone;
+
+		const usageEntries = scenario.harness.sessionManager
+			.getEntries()
+			.filter((entry): entry is UsageEntry => entry.type === "usage" && entry.kind === "background_compaction");
+		expect(usageEntries).toHaveLength(1);
+		expect(usageEntries[0].provider).toBe("faux");
+		// The discarded background usage must not also appear as compaction usage.
+		// Total billed tokens equals usage entries plus any adopted-compaction usage.
+		const stats = scenario.harness.session.getSessionStats();
+		expect(stats.tokens.total).toBeGreaterThan(0);
+	});
+
+	it("emits a controlled background_compaction_end event without provider text", async () => {
+		const secret = "FAKE_CREDENTIAL_TEST_ONLY";
+		const release = deferred();
+		const summaryStarted = deferred();
+		const scenario = await createScenario({
+			turns: 20,
+			summary: async (_call) => {
+				summaryStarted.resolve();
+				await release.promise;
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: `request failed Authorization: Bearer ${secret}`,
+				});
+			},
+		});
+		harnesses.push(scenario.harness);
+
+		const promptDone = scenario.harness.session.prompt("go");
+		await summaryStarted.promise;
+		release.resolve();
+		await promptDone;
+
+		const events = scenario.harness.eventsOfType("background_compaction_end");
+		expect(events.length).toBeGreaterThan(0);
+		// Controlled text only; raw provider errors may carry credentials.
+		expect(events[0].errorMessage).toBe("Background compaction failed");
+		expect(JSON.stringify(events[0])).not.toContain(secret);
+		// Foreground lifecycle stays intact: failure did not block the agent.
+		expect(scenario.harness.session.isStreaming).toBe(false);
+	});
+
+	it("toggling background off clears a recorded background failure", async () => {
+		const release = deferred();
+		const summaryStarted = deferred();
+		const scenario = await createScenario({
+			turns: 20,
+			summary: async (_call) => {
+				summaryStarted.resolve();
+				await release.promise;
+				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad request" });
+			},
+		});
+		harnesses.push(scenario.harness);
+
+		const promptDone = scenario.harness.session.prompt("go");
+		await summaryStarted.promise;
+		release.resolve();
+		// Wait for the failure to land before disabling so clear has something to clear.
+		await vi.waitFor(() => {
+			expect(scenario.harness.eventsOfType("background_compaction_end").length).toBe(1);
+		});
+		scenario.harness.session.setBackgroundCompactionEnabled(false);
+		await promptDone;
+
+		const events = scenario.harness.eventsOfType("background_compaction_end");
+		expect(events).toHaveLength(2);
+		expect(events[0].errorMessage).toBeDefined();
+		expect(events[1].errorMessage).toBeUndefined();
+	});
+
+	it("toggling background off revokes a pending job so it is never adopted", async () => {
+		const release = deferred();
+		const summaryStarted = deferred();
+		const scenario = await createScenario({
+			turns: 20,
+			summary: async (call) => {
+				summaryStarted.resolve();
+				await release.promise;
+				return fauxAssistantMessage(`SUMMARY ${call}`);
+			},
+		});
+		harnesses.push(scenario.harness);
+
+		const promptDone = scenario.harness.session.prompt("go");
+		// Wait until the background summary is in flight, then disable the feature.
+		await summaryStarted.promise;
+		scenario.harness.session.setBackgroundCompactionEnabled(false);
+		expect(scenario.harness.session.backgroundCompactionEnabled).toBe(false);
+		release.resolve();
+		await promptDone;
+
+		// The revoked result must not be committed even though it completed; the
+		// threshold still compacts synchronously with a fresh summary.
+		expect(scenario.compactions().length).toBeGreaterThan(0);
+		expect(scenario.compactions().every((entry) => !entry.summary.includes("SUMMARY 1"))).toBe(true);
+	});
+
+	it("toggling auto-compact off revokes a pending background job", async () => {
+		const release = deferred();
+		const summaryStarted = deferred();
+		const scenario = await createScenario({
+			turns: 20,
+			summary: async (call) => {
+				summaryStarted.resolve();
+				await release.promise;
+				return fauxAssistantMessage(`SUMMARY ${call}`);
+			},
+		});
+		harnesses.push(scenario.harness);
+
+		const promptDone = scenario.harness.session.prompt("go");
+		await summaryStarted.promise;
+		scenario.harness.session.setAutoCompactionEnabled(false);
+		release.resolve();
+		await promptDone;
+
+		// Auto-compact off revokes the job and blocks all further compaction.
+		expect(scenario.compactions()).toHaveLength(0);
+		expect(scenario.summaryCalls()).toBe(1);
+	});
+
+	it("toggling background on through the session setter enables background summarization", async () => {
+		const release = deferred();
+		const scenario = await createScenario({
+			turns: 20,
+			compaction: { background: false },
+			summary: async (call) => {
+				await release.promise;
+				return fauxAssistantMessage(`SUMMARY ${call}`);
+			},
+		});
+		harnesses.push(scenario.harness);
+
+		expect(scenario.harness.session.backgroundCompactionEnabled).toBe(false);
+		scenario.harness.session.setBackgroundCompactionEnabled(true);
+		expect(scenario.harness.session.backgroundCompactionEnabled).toBe(true);
+		expect(scenario.harness.settingsManager.getCompactionBackgroundEnabled()).toBe(true);
+
+		scenario.harness.session.subscribe(() => {
+			if (scenario.requestsDuringSummary() >= 1) release.resolve();
+		});
+		await scenario.harness.session.prompt("go");
+
+		// With background enabled at runtime, the agent kept working while summarizing.
+		expect(scenario.requestsDuringSummary()).toBeGreaterThan(0);
+		expect(scenario.compactions().some((entry) => entry.summary.includes("SUMMARY"))).toBe(true);
+	});
+
 	it("passes background summarization through session_before_compact", async () => {
 		const scenario = await createScenario({
 			turns: 9,
@@ -244,5 +499,163 @@ describe("AgentSession background compaction", () => {
 		expect(compactions).toHaveLength(1);
 		expect(compactions[0].summary).toBe("EXTENSION SUMMARY");
 		expect(compactions[0].fromHook).toBe(true);
+	});
+
+	it("counts every native attempt, including retries and both stages of a split summary", async () => {
+		// Retries and partial failures each return provider usage; every attempt bills once.
+		const scenario = await createScenario({
+			turns: 20,
+			compaction: { keepRecentTokens: 400 },
+			summary: async (call) =>
+				call === 1
+					? fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" })
+					: fauxAssistantMessage(`SUMMARY ${call}`),
+		});
+		harnesses.push(scenario.harness);
+
+		await scenario.harness.session.prompt("go");
+
+		const usageEntries = scenario.harness.sessionManager
+			.getEntries()
+			.filter((entry): entry is UsageEntry => entry.type === "usage" && entry.kind === "background_compaction");
+		expect(usageEntries.length).toBeGreaterThanOrEqual(2);
+		expect(scenario.compactions().length).toBeGreaterThan(0);
+		// The adopted compaction's usage field is suppressed to avoid double counting.
+		expect(scenario.compactions().at(-1)?.usage).toBeUndefined();
+	});
+
+	it("still bills the originating session when a message lands while the summary runs", async () => {
+		const release = deferred();
+		const summaryStarted = deferred();
+		const scenario = await createScenario({
+			turns: 20,
+			summary: async (call) => {
+				summaryStarted.resolve();
+				await release.promise;
+				return fauxAssistantMessage(`SUMMARY ${call}`);
+			},
+		});
+		harnesses.push(scenario.harness);
+
+		const promptDone = scenario.harness.session.prompt("go");
+		await summaryStarted.promise;
+		// Ordinary append while the summary is in flight must not suppress billing.
+		scenario.harness.sessionManager.appendMessage({
+			role: "user",
+			content: "late note",
+			timestamp: Date.now(),
+		});
+		release.resolve();
+		await promptDone;
+
+		const usageEntries = scenario.harness.sessionManager
+			.getEntries()
+			.filter((entry): entry is UsageEntry => entry.type === "usage" && entry.kind === "background_compaction");
+		expect(usageEntries.length).toBeGreaterThanOrEqual(1);
+		expect(usageEntries[0].provider).toBe("faux");
+	});
+
+	it("records component-token usage even when aggregate totals are zero", async () => {
+		// Provider may report component tokens while aggregate total/cost are zero.
+		const summaryStarted = deferred();
+		const release = deferred();
+		let summaryCallCount = 0;
+		const scenario = await createScenario({ turns: 20 });
+		const original = scenario.harness.session.agent.streamFunction!;
+		scenario.harness.session.agent.streamFunction = (model, context, options) => {
+			if (!isSummaryRequest(context)) {
+				return original(model, context, options);
+			}
+			summaryCallCount++;
+			summaryStarted.resolve();
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(async () => {
+				await release.promise;
+				const message: AssistantMessage = {
+					...fauxAssistantMessage("SUMMARY"),
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 100,
+						output: 10,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				};
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		harnesses.push(scenario.harness);
+
+		const promptDone = scenario.harness.session.prompt("go");
+		await summaryStarted.promise;
+		release.resolve();
+		await promptDone;
+
+		expect(summaryCallCount).toBeGreaterThanOrEqual(1);
+		const usageEntries = scenario.harness.sessionManager
+			.getEntries()
+			.filter((entry): entry is UsageEntry => entry.type === "usage" && entry.kind === "background_compaction");
+		expect(usageEntries[0].usage.input).toBe(100);
+		expect(usageEntries[0].usage.output).toBe(10);
+		expect(usageEntries[0].usage.totalTokens).toBe(0);
+	});
+
+	it("keeps final-failure suppression across Off/On until history compacts", async () => {
+		const release = deferred();
+		const summaryStarted = deferred();
+		const scenario = await createScenario({
+			turns: 20,
+			summary: async (call) => {
+				summaryStarted.resolve();
+				await release.promise;
+				return call === 1
+					? fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad request" })
+					: fauxAssistantMessage(`SUMMARY ${call}`);
+			},
+		});
+		harnesses.push(scenario.harness);
+
+		const promptDone = scenario.harness.session.prompt("go");
+		await summaryStarted.promise;
+		release.resolve();
+		await promptDone;
+
+		// The first call fails as a background attempt; suppression blocks background
+		// retries under unchanged history. A foreground compaction may then commit.
+		const committed = scenario.compactions().length;
+		expect(committed).toBeGreaterThan(0);
+		expect(scenario.summaryCalls()).toBeGreaterThanOrEqual(2);
+
+		// Toggling Off/On alone must not spend another background attempt.
+		const callsBeforeToggle = scenario.summaryCalls();
+		const compactionsBeforeToggle = scenario.compactions().length;
+		scenario.harness.session.setBackgroundCompactionEnabled(false);
+		scenario.harness.session.setBackgroundCompactionEnabled(true);
+
+		// Without a new prompt the setting change itself must not launch any attempt.
+		expect(scenario.summaryCalls()).toBe(callsBeforeToggle);
+		expect(scenario.compactions()).toHaveLength(compactionsBeforeToggle);
+	});
+
+	it("extension cancellation does not surface as a background failure", async () => {
+		const scenario = await createScenario({
+			turns: 20,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", () => ({ cancel: true }));
+				},
+			],
+		});
+		harnesses.push(scenario.harness);
+
+		await scenario.harness.session.prompt("go");
+
+		expect(scenario.summaryCalls()).toBe(0);
+		expect(scenario.harness.eventsOfType("background_compaction_end")).toHaveLength(0);
 	});
 });

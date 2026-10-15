@@ -192,11 +192,17 @@ describe("compaction model overrides", () => {
 });
 
 describe("background compaction settings", () => {
-	it("defaults to enabled at 0.85 and returns undefined when disabled", () => {
-		expect(SettingsManager.inMemory().getCompactionBackgroundStartRatio()).toBe(0.85);
+	it("defaults to disabled and returns undefined until enabled", () => {
+		expect(SettingsManager.inMemory().getCompactionBackgroundStartRatio()).toBeUndefined();
+		expect(SettingsManager.inMemory().getCompactionBackgroundEnabled()).toBe(false);
 		expect(
-			SettingsManager.inMemory({ compaction: { backgroundStartRatio: 0.6 } }).getCompactionBackgroundStartRatio(),
+			SettingsManager.inMemory({
+				compaction: { background: true, backgroundStartRatio: 0.6 },
+			}).getCompactionBackgroundStartRatio(),
 		).toBe(0.6);
+		expect(SettingsManager.inMemory({ compaction: { background: true } }).getCompactionBackgroundStartRatio()).toBe(
+			0.85,
+		);
 		expect(
 			SettingsManager.inMemory({
 				compaction: { background: false, backgroundStartRatio: 0.6 },
@@ -204,8 +210,26 @@ describe("background compaction settings", () => {
 		).toBeUndefined();
 	});
 
-	it.each([0, 1, 1.5, -0.1, "0.5"])("rejects backgroundStartRatio %s", (ratio) => {
-		const manager = SettingsManager.inMemory({ compaction: { backgroundStartRatio: ratio as number } });
+	it("persists the background toggle across reload", async () => {
+		const storage = new InMemorySettingsStorage();
+		const manager = SettingsManager.fromStorage(storage);
+		expect(manager.getCompactionBackgroundEnabled()).toBe(false);
+		manager.setCompactionBackgroundEnabled(true);
+		await manager.flush();
+		await manager.reload();
+		expect(manager.getCompactionBackgroundEnabled()).toBe(true);
+		expect(manager.getCompactionBackgroundStartRatio()).toBe(0.85);
+		manager.setCompactionBackgroundEnabled(false);
+		await manager.flush();
+		await manager.reload();
+		expect(manager.getCompactionBackgroundEnabled()).toBe(false);
+		expect(manager.getCompactionBackgroundStartRatio()).toBeUndefined();
+	});
+
+	it.each([0, 1, 1.5, -0.1, "0.5"])("rejects backgroundStartRatio %s when background is enabled", (ratio) => {
+		const manager = SettingsManager.inMemory({
+			compaction: { background: true, backgroundStartRatio: ratio as number },
+		});
 		expect(() => manager.getCompactionBackgroundStartRatio()).toThrow("Invalid compaction.backgroundStartRatio");
 	});
 });
