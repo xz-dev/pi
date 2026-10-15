@@ -79,8 +79,8 @@ CLI tool options override this setting for one invocation. `--tools` with only `
 | `compaction.enabled` | boolean | `true` | Enable automatic compaction. |
 | `compaction.reserveTokens` | number | `16384` | Free context tokens below which automatic compaction starts. |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens retained without summarization. |
-| `compaction.background` | boolean | `true` | Summarize ahead of the threshold while the agent keeps working. |
-| `compaction.backgroundStartRatio` | number | `0.85` | Fraction of `contextWindow - reserveTokens` at which background summarization starts; greater than 0 and less than 1. |
+| `compaction.background` | boolean | `false` | Summarize ahead of the threshold while the agent keeps working. Requires `compaction.enabled`. |
+| `compaction.backgroundStartRatio` | number | `0.85` | Earliest-start guard for background summarization, as a fraction of `contextWindow - reserveTokens`; greater than 0 and less than 1. The actual start point is `threshold - min(32768, (1 - ratio) * threshold)`. |
 | `compaction.modelOverrides` | object | None | Per-model token settings keyed by exact `provider/modelId`. |
 
 <a id="per-model-compaction-overrides"></a>

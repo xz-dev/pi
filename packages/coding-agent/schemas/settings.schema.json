@@ -128,11 +128,11 @@
         "background": {
           "type": "boolean",
           "description": "Summarize in the background before the threshold so the agent keeps working.",
-          "default": true
+          "default": false
         },
         "backgroundStartRatio": {
           "type": "number",
-          "description": "Fraction of the compaction threshold at which background summarization starts.",
+          "description": "Earliest-start guard for background summarization, as a fraction of the compaction threshold. The actual start point is threshold - min(32768, (1 - ratio) * threshold).",
           "exclusiveMinimum": 0,
           "exclusiveMaximum": 1,
           "default": 0.85
