@@ -613,6 +613,10 @@ function createSummarizationOptions(
  * `terminated`, socket close) honor the configured retry policy instead of failing
  * the whole compaction on the first attempt. Deterministic errors and aborts return
  * immediately (see {@link retryAssistantCall}).
+ *
+ * `observe` is invoked once per actual provider attempt (including retried and
+ * discarded attempts) with the response. It enables background compaction to record
+ * native usage separately from the adopted compaction entry.
  */
 export async function completeSummarization(
 	model: Model<any>,
@@ -621,6 +625,7 @@ export async function completeSummarization(
 	streamFn?: StreamFn,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	observe?: (response: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
 	// Avoid cache writes for one-off summaries. Reuse caller-supplied routing when available;
 	// callers without a session ID, including branch summaries, receive a fresh routing ID.
@@ -629,10 +634,17 @@ export async function completeSummarization(
 		cacheRetention: "none",
 		sessionId: options.sessionId ?? uuidv7(),
 	};
-	const produce = async (): Promise<AssistantMessage> =>
-		streamFn
-			? (await streamFn(model, context, requestOptions)).result()
-			: completeSimple(model, context, requestOptions);
+	const produce = async (): Promise<AssistantMessage> => {
+		// Check revocation before every actual attempt: a revoked job (background Off,
+		// reload/dispose, foreground abort) must not start another stage or retry, but
+		// an attempt already in flight still delivers its response to `observe`.
+		requestOptions.signal?.throwIfAborted();
+		const response = streamFn
+			? await (await streamFn(model, context, requestOptions)).result()
+			: await completeSimple(model, context, requestOptions);
+		observe?.(response);
+		return response;
+	};
 	return retryAssistantCall(produce, retry, requestOptions.signal, callbacks);
 }
 
@@ -656,6 +668,7 @@ export async function generateSummary(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	observe?: (response: AssistantMessage) => void,
 ): Promise<string> {
 	return (
 		await generateSummaryWithUsage(
@@ -673,6 +686,7 @@ export async function generateSummary(
 			retry,
 			callbacks,
 			sessionId,
+			observe,
 		)
 	).text;
 }
@@ -708,6 +722,7 @@ export async function generateSummaryWithUsage(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	observe?: (response: AssistantMessage) => void,
 ): Promise<{ text: string; usage: Usage }> {
 	// Use update prompt if we have a previous summary, otherwise initial prompt
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
@@ -736,6 +751,7 @@ export async function generateSummaryWithUsage(
 		streamFn,
 		retry,
 		callbacks,
+		observe,
 	);
 
 	const failure = getSummarizationFailure(response, "Summarization");
@@ -962,6 +978,7 @@ export async function compact(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	observe?: (response: AssistantMessage) => void,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -996,6 +1013,7 @@ export async function compact(
 				retry,
 				callbacks,
 				sessionId,
+				observe,
 			);
 			historyText = historyResult.text;
 			historyUsage = historyResult.usage;
@@ -1013,6 +1031,7 @@ export async function compact(
 			callbacks,
 			sessionId,
 			customInstructions,
+			observe,
 		);
 		// Merge into single summary
 		summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`;
@@ -1034,6 +1053,7 @@ export async function compact(
 			retry,
 			callbacks,
 			sessionId,
+			observe,
 		);
 		summary = result.text;
 		summaryUsage = result.usage;
@@ -1072,6 +1092,7 @@ async function generateTurnPrefixSummary(
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
 	customInstructions?: string,
+	observe?: (response: AssistantMessage) => void,
 ): Promise<{ text: string; usage: Usage }> {
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
@@ -1087,6 +1108,7 @@ async function generateTurnPrefixSummary(
 		streamFn,
 		retry,
 		callbacks,
+		observe,
 	);
 
 	const failure = getSummarizationFailure(response, "Turn prefix summarization");
