@@ -288,7 +288,7 @@ describe("AgentSession virtual models", () => {
 		expect(dispatched()).toEqual(["faux/large:high", "faux/small:off"]);
 	});
 
-	it("projects the session once per request under a virtual selection", async () => {
+	it("projects the session at input and request boundaries under a virtual selection", async () => {
 		const { harness } = await createRoutedHarness();
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("echo", { text: "hi" }), { stopReason: "toolUse" }),
@@ -298,8 +298,8 @@ describe("AgentSession virtual models", () => {
 
 		await harness.session.prompt("hello");
 
-		// One per request, one between the turns, and one for the compaction check after the run.
-		expect(projections).toHaveBeenCalledTimes(4);
+		// One input check, one per request, one between turns, and one post-run compaction check.
+		expect(projections).toHaveBeenCalledTimes(5);
 	});
 
 	it("stores router state on the branch and passes it to later requests", async () => {
