@@ -1349,19 +1349,23 @@ export class SessionManager {
 		const appended: CustomEntry[] = [];
 		let parentId = commit.expectedLeafId;
 		for (const entry of newEntries) {
-			// Only custom state chained on the expected leaf qualifies; anything else, or an
-			// existing entry reached by moving the leaf, means the branch really changed.
-			if (entry.type !== "custom" || entry.parentId !== parentId) {
+			// Only custom state or usage entries chained on the expected leaf qualify.
+			// Usage is billed against the original leaf already and must not be cloned
+			// onto the recovered branch (which would double-count it); it stays on the
+			// abandoned sibling so the write is preserved exactly once.
+			// Anything else, or an existing entry reached by moving the leaf, means the
+			// branch really changed.
+			if ((entry.type !== "custom" && entry.type !== "usage") || entry.parentId !== parentId) {
 				throw new Error("Session branch changed before retry continuation could be committed");
 			}
-			appended.push(entry);
+			if (entry.type === "custom") appended.push(entry);
 			parentId = entry.id;
 		}
 		if (this.leafId !== parentId) {
 			throw new Error("Session branch changed before retry continuation could be committed");
 		}
 		// Each append advances the generation once; any other mutation (e.g. branch away and back) is stale.
-		if (this.generation !== commit.expectedGeneration + appended.length) {
+		if (this.generation !== commit.expectedGeneration + newEntries.length) {
 			throw new Error("Session changed before retry continuation could be committed");
 		}
 		return appended;
