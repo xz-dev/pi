@@ -931,7 +931,24 @@ export class SettingsManager {
 		return override ?? ordinary ?? DEFAULT_COMPACTION_TOKEN_SETTINGS[field];
 	}
 
-	/** Fraction of the compaction threshold at which background summarization starts, or undefined when disabled. */
+	getCompactionBackgroundEnabled(): boolean {
+		return this.settings.compaction?.background ?? SETTINGS_DEFAULTS.compaction.background;
+	}
+
+	setCompactionBackgroundEnabled(enabled: boolean): void {
+		if (!this.globalSettings.compaction) {
+			this.globalSettings.compaction = {};
+		}
+		this.globalSettings.compaction.background = enabled;
+		this.markModified("compaction", "background");
+		this.save();
+	}
+
+	/**
+	 * Earliest-start guard for background summarization, as a fraction of the compaction
+	 * threshold, or undefined when `compaction.background` is off. The actual start point
+	 * is `threshold - min(32768, (1 - ratio) * threshold)`.
+	 */
 	getCompactionBackgroundStartRatio(): number | undefined {
 		const compaction = this.settings.compaction;
 		if (!(compaction?.background ?? SETTINGS_DEFAULTS.compaction.background)) return undefined;

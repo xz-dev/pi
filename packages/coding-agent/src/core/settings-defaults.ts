@@ -10,7 +10,7 @@ export const SETTINGS_DEFAULTS = {
 		enabled: true,
 		reserveTokens: 16384,
 		keepRecentTokens: 20000,
-		background: true,
+		background: false,
 		backgroundStartRatio: 0.85,
 	},
 	branchSummary: {
