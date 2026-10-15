@@ -568,6 +568,8 @@ export class InteractiveMode {
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	// Whether the background-compaction failure warning is currently displayed.
+	private backgroundCompactionWarningShown = false;
 
 	// Shutdown state
 	private shutdownRequested = false;
@@ -4047,6 +4049,24 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 			}
+
+			case "background_compaction_end": {
+				// Nonblocking diagnostic: never touches the working/compaction indicator,
+				// input queue, or Esc handling. One warning per failure; the clear event
+				// acknowledges recovery so the notice is not left permanent.
+				if (event.errorMessage) {
+					if (!this.backgroundCompactionWarningShown) {
+						this.backgroundCompactionWarningShown = true;
+						this.showWarning(event.errorMessage);
+					}
+				} else if (this.backgroundCompactionWarningShown) {
+					this.backgroundCompactionWarningShown = false;
+					this.showStatus("Background compaction cleared");
+				}
+				this.footer.invalidate();
+				this.ui.requestRender();
+				break;
+			}
 		}
 	}
 
@@ -5238,6 +5258,7 @@ export class InteractiveMode {
 			selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
+					backgroundCompaction: this.session.backgroundCompactionEnabled,
 					defaultModel,
 					currentModel: this.session.model,
 					availableDefaultModels: this.session.modelRuntime.getAvailableSnapshot(),
@@ -5284,6 +5305,9 @@ export class InteractiveMode {
 					onAutoCompactChange: (enabled) => {
 						this.session.setAutoCompactionEnabled(enabled);
 						this.footer.setAutoCompactEnabled(enabled);
+					},
+					onBackgroundCompactionChange: (enabled) => {
+						this.session.setBackgroundCompactionEnabled(enabled);
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
