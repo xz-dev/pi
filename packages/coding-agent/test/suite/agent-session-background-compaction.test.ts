@@ -524,6 +524,88 @@ describe("AgentSession background compaction", () => {
 		}
 	});
 
+	it.each(["manual", "abort", "agent abort", "dispose", "manual abort", "manual reentrant abort"])(
+		"preserves input-threshold cancellation policy (%s)",
+		async (action) => {
+			const release = deferred();
+			const started = deferred();
+			const waiting = deferred();
+			let preparingInput = false;
+			let requestsAfterInput = 0;
+			const scenario = await createScenario({
+				turns: 9,
+				response: () => {
+					if (!preparingInput) return undefined;
+					requestsAfterInput++;
+					return fauxAssistantMessage("UNWANTED REQUEST");
+				},
+				summary: async () => {
+					started.resolve();
+					await release.promise;
+					return fauxAssistantMessage("BACKGROUND");
+				},
+			});
+			harnesses.push(scenario.harness);
+			const session = scenario.harness.session;
+			const first = session.prompt("go");
+			await started.promise;
+			await first;
+			const background = Reflect.get(session, "_backgroundCompaction") as { settled: Promise<void> };
+			session.subscribe((event) => {
+				if (event.type === "compaction_wait_start" && event.reason === "threshold") waiting.resolve();
+			});
+			preparingInput = true;
+			const incoming = "incoming ".repeat(6000);
+			const prompt = session.prompt(incoming);
+			const promptSettled = Promise.allSettled([prompt]);
+			await waiting.promise;
+			if (action === "manual reentrant abort") {
+				const active = Reflect.get(session.agent, "activeRun") as { abortController: AbortController };
+				active.abortController.signal.addEventListener("abort", () => session.abortCompaction(), { once: true });
+			}
+			const manual = action.startsWith("manual") ? session.compact("keep paths") : undefined;
+			const manualSettled = Promise.allSettled(manual ? [manual] : []);
+			const stop = action === "abort" ? session.abort() : Promise.resolve();
+			if (action === "agent abort") session.agent.abort();
+			if (action === "dispose") session.dispose();
+			if (action === "manual abort") session.abortCompaction();
+			try {
+				release.resolve();
+				await Promise.all([promptSettled, stop, background.settled]);
+				const results = await manualSettled;
+				if (action === "manual") {
+					expect(results).toMatchObject([
+						{ status: "fulfilled", value: { summary: expect.stringContaining("BACKGROUND") } },
+					]);
+					const entries = scenario.harness.sessionManager.getEntries();
+					const inputs = entries.filter(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "user" &&
+							JSON.stringify(entry.message.content).includes(incoming),
+					);
+					expect(inputs).toHaveLength(1);
+					expect(
+						scenario.harness.sessionManager
+							.buildSessionProjection()
+							.messages.filter(
+								(message) => message.role === "user" && JSON.stringify(message.content).includes(incoming),
+							),
+					).toHaveLength(1);
+				} else if (manual) {
+					expect(results).toMatchObject([{ status: "rejected", reason: { message: "Compaction cancelled" } }]);
+				}
+				expect(scenario.compactions()).toHaveLength(action === "manual" ? 1 : 0);
+				expect(scenario.summaryCalls()).toBe(1);
+				expect(scenario.maxPendingSummaries()).toBe(1);
+				expect(requestsAfterInput).toBe(0);
+			} finally {
+				release.resolve();
+				await Promise.allSettled([promptSettled, manualSettled, stop, background.settled]);
+			}
+		},
+	);
+
 	it("does not resume an interrupted overflow turn when manual compaction joins its waiter", async () => {
 		const release = deferred();
 		const waiting = deferred();
