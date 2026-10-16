@@ -416,6 +416,159 @@ describe("AgentSession background compaction", () => {
 		}
 	});
 
+	it.each(["abort", "dispose", "session replacement"])(
+		"rejects a manual request cancelled during preliminary abort (%s)",
+		async (action) => {
+			const release = deferred();
+			const started = deferred();
+			const scenario = await createScenario({
+				turns: 9,
+				summary: async (call) => {
+					if (call === 1) {
+						started.resolve();
+						await release.promise;
+					}
+					return fauxAssistantMessage(call === 1 ? "BACKGROUND" : "UNWANTED FALLBACK");
+				},
+			});
+			harnesses.push(scenario.harness);
+			const { session, sessionManager } = scenario.harness;
+			const prompt = session.prompt("go");
+			await started.promise;
+			await prompt;
+			const background = Reflect.get(session, "_backgroundCompaction") as { settled: Promise<void> };
+			const settled = Promise.allSettled([session.compact("keep paths")]);
+			try {
+				if (action === "abort") session.abortCompaction();
+				else if (action === "dispose") session.dispose();
+				else {
+					sessionManager.newSession();
+					for (let i = 0; i < 2; i++) {
+						sessionManager.appendMessage({
+							role: "user",
+							content: `new session ${i} `.repeat(1000),
+							timestamp: Date.now(),
+						});
+					}
+					session.refreshContext();
+				}
+				release.resolve();
+				expect(await settled).toMatchObject([{ status: "rejected", reason: { message: "Compaction cancelled" } }]);
+				await background.settled;
+				expect(scenario.summaryCalls()).toBe(1);
+				expect(scenario.compactions()).toHaveLength(0);
+			} finally {
+				release.resolve();
+				await settled;
+				await background.settled;
+			}
+		},
+	);
+
+	it.each(["manual", "overflow"])("shares fallback with a %s caller joining during generation", async (kind) => {
+		const release = deferred();
+		const started = deferred();
+		const fallbackStarted = deferred();
+		const releaseFallback = deferred();
+		const scenario = await createScenario({
+			turns: 9,
+			summary: async (call) => {
+				if (call === 1) {
+					started.resolve();
+					await release.promise;
+					return fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad request" });
+				}
+				fallbackStarted.resolve();
+				await releaseFallback.promise;
+				return fauxAssistantMessage("SHARED FALLBACK");
+			},
+		});
+		harnesses.push(scenario.harness);
+		const session = scenario.harness.session;
+		const prompt = session.prompt("go");
+		await started.promise;
+		await prompt;
+		const runAuto = Reflect.get(session, "_runAutoCompaction") as (
+			reason: "threshold" | "overflow",
+			willRetry: boolean,
+		) => Promise<boolean>;
+		const requests: Promise<unknown>[] = [runAuto.call(session, "threshold", false)];
+		try {
+			release.resolve();
+			await fallbackStarted.promise;
+			expect(
+				await Reflect.apply(Reflect.get(session, "_advanceBackgroundCompaction"), session, [
+					scenario.harness.getModel(),
+					scenario.harness.sessionManager.buildSessionProjection(),
+				]),
+			).toBe(false);
+			requests.push(kind === "manual" ? session.compact("keep paths") : runAuto.call(session, "overflow", true));
+			releaseFallback.resolve();
+			const results = await Promise.all(requests);
+			expect(results[0]).toBe(false);
+			if (kind === "manual")
+				expect(results[1]).toMatchObject({ summary: expect.stringContaining("SHARED FALLBACK") });
+			else expect(results[1]).toBe(true);
+			expect(scenario.summaryCalls()).toBe(2);
+			expect(scenario.maxPendingSummaries()).toBe(1);
+			expect(scenario.compactions()).toHaveLength(1);
+			expect(scenario.harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+				reason: kind,
+				willRetry: kind === "overflow",
+				reused: true,
+			});
+		} finally {
+			release.resolve();
+			releaseFallback.resolve();
+			await Promise.allSettled(requests);
+		}
+	});
+
+	it("does not resume an interrupted overflow turn when manual compaction joins its waiter", async () => {
+		const release = deferred();
+		const waiting = deferred();
+		let overflowed = false;
+		let requestsAfterOverflow = 0;
+		const scenario = await createScenario({
+			turns: 20,
+			response: (_request, pending) => {
+				if (pending && !overflowed) {
+					overflowed = true;
+					return fauxAssistantMessage("", { stopReason: "error", errorMessage: "context length exceeded" });
+				}
+				if (overflowed) {
+					requestsAfterOverflow++;
+					return fauxAssistantMessage("UNWANTED RETRY");
+				}
+				return undefined;
+			},
+			summary: async () => {
+				await release.promise;
+				return fauxAssistantMessage("BACKGROUND");
+			},
+		});
+		harnesses.push(scenario.harness);
+		scenario.harness.session.subscribe((event) => {
+			if (event.type === "compaction_wait_start" && event.reason === "overflow") waiting.resolve();
+		});
+		const prompt = scenario.harness.session.prompt("go");
+		await waiting.promise;
+		const manual = scenario.harness.session.compact("keep paths");
+		try {
+			release.resolve();
+			await prompt;
+			expect((await manual).summary).toContain("BACKGROUND");
+			expect(requestsAfterOverflow).toBe(0);
+			expect(scenario.summaryCalls()).toBe(1);
+			expect(scenario.compactions()).toHaveLength(1);
+			expect(scenario.harness.eventsOfType("agent_settled").at(-1)?.aborted).toBe(true);
+			expect(scenario.harness.session.isIdle).toBe(true);
+		} finally {
+			release.resolve();
+			await Promise.allSettled([prompt, manual]);
+		}
+	});
+
 	it("does not mark native fallback as extension output after a stale background result", async () => {
 		const release = deferred();
 		const started = deferred();
