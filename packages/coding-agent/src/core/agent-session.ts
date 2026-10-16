@@ -3660,7 +3660,7 @@ export class AgentSession {
 						usage: background.usageRecorded ? undefined : background.result.usage,
 					}
 				: undefined;
-			fromExtension = background?.fromExtension ?? false;
+			fromExtension = background?.result ? background.fromExtension : false;
 
 			if (!extensionCompaction && this._extensionRunner.hasHandlers("session_before_compact")) {
 				const result = (await this._extensionRunner.emit({
