@@ -40,23 +40,27 @@ interface Scenario {
 	summaryCalls: () => number;
 	/** Agent requests made while a summary request was pending. */
 	requestsDuringSummary: () => number;
+	maxPendingSummaries: () => number;
 	compactions: () => CompactionEntry[];
 }
 
 async function createScenario(options: {
 	turns: number;
+	response?: (request: number, backgroundPending: boolean) => AssistantMessage | undefined;
 	summary?: (call: number) => Promise<AssistantMessage>;
 	compaction?: Partial<CompactionSettings>;
 	extensionFactories?: InlineExtension[];
 }): Promise<Scenario> {
 	let summaryCalls = 0;
 	let pendingSummaries = 0;
+	let maxPendingSummaries = 0;
 	let requestsDuringSummary = 0;
 	let agentRequests = 0;
 	const factory = async (context: TranscriptContext): Promise<AssistantMessage> => {
 		if (isSummaryRequest(context)) {
 			const call = ++summaryCalls;
 			pendingSummaries++;
+			maxPendingSummaries = Math.max(maxPendingSummaries, pendingSummaries);
 			try {
 				return options.summary ? await options.summary(call) : fauxAssistantMessage(`SUMMARY ${call}`);
 			} finally {
@@ -65,9 +69,10 @@ async function createScenario(options: {
 		}
 		if (pendingSummaries > 0) requestsDuringSummary++;
 		agentRequests++;
-		return agentRequests <= options.turns
-			? fauxAssistantMessage(fauxToolCall("pad", {}))
-			: fauxAssistantMessage("done");
+		return (
+			options.response?.(agentRequests, pendingSummaries > 0) ??
+			(agentRequests <= options.turns ? fauxAssistantMessage(fauxToolCall("pad", {})) : fauxAssistantMessage("done"))
+		);
 	};
 	const harness = await createHarness({
 		models: [{ id: "faux-1", contextWindow: 10000 }],
@@ -89,6 +94,7 @@ async function createScenario(options: {
 		harness,
 		summaryCalls: () => summaryCalls,
 		requestsDuringSummary: () => requestsDuringSummary,
+		maxPendingSummaries: () => maxPendingSummaries,
 		compactions: () =>
 			harness.sessionManager.getEntries().filter((entry): entry is CompactionEntry => entry.type === "compaction"),
 	};
@@ -142,7 +148,7 @@ describe("AgentSession background compaction", () => {
 		harnesses.push(scenario.harness);
 		let summariesAtThreshold = -1;
 		scenario.harness.session.subscribe((event) => {
-			if (event.type !== "compaction_start" || summariesAtThreshold >= 0) return;
+			if (event.type !== "compaction_wait_start" || summariesAtThreshold >= 0) return;
 			summariesAtThreshold = scenario.summaryCalls();
 			setTimeout(() => release.resolve(), 10);
 		});
@@ -153,6 +159,261 @@ describe("AgentSession background compaction", () => {
 		expect(summariesAtThreshold).toBe(1);
 		expect(compactions[0].summary).toContain("SUMMARY 1");
 		expect(scenario.summaryCalls()).toBe(compactions.length);
+	});
+
+	it.each([false, true])(
+		"manual compaction waits for background work before reuse or fallback (failed=%s)",
+		async (failed) => {
+			const release = deferred();
+			const started = deferred();
+			const manualInstructions: Array<string | undefined> = [];
+			const scenario = await createScenario({
+				turns: 9,
+				summary: async (call) => {
+					if (call === 1) {
+						started.resolve();
+						await release.promise;
+						if (failed) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad request" });
+					}
+					return fauxAssistantMessage(`SUMMARY ${call}`);
+				},
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_before_compact", (event) => {
+							if (event.reason === "manual") manualInstructions.push(event.customInstructions);
+						});
+					},
+				],
+			});
+			harnesses.push(scenario.harness);
+			const prompt = scenario.harness.session.prompt("go");
+			await started.promise;
+			await prompt;
+			const manual = scenario.harness.session.compact("preserve exact file paths");
+			try {
+				await vi.waitFor(() => expect(scenario.harness.session.isCompacting).toBe(true));
+				release.resolve();
+				const result = await manual;
+				expect(result.summary).toContain(failed ? "SUMMARY 2" : "SUMMARY 1");
+				expect(scenario.summaryCalls()).toBe(failed ? 2 : 1);
+				expect(scenario.maxPendingSummaries()).toBe(1);
+				expect(scenario.compactions()).toHaveLength(1);
+				expect(manualInstructions).toEqual(failed ? ["preserve exact file paths"] : []);
+			} finally {
+				release.resolve();
+				await manual.catch(() => undefined);
+			}
+		},
+	);
+
+	it.each([false, true])("overflow recovery waits for background reuse or fallback (failed=%s)", async (failed) => {
+		const release = deferred();
+		let overflowed = false;
+		const scenario = await createScenario({
+			turns: 20,
+			response: (_request, pending) => {
+				if (pending && !overflowed) {
+					overflowed = true;
+					return fauxAssistantMessage("", { stopReason: "error", errorMessage: "context length exceeded" });
+				}
+				return overflowed ? fauxAssistantMessage("recovered") : undefined;
+			},
+			summary: async (call) => {
+				if (call === 1) {
+					await release.promise;
+					if (failed) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad request" });
+				}
+				return fauxAssistantMessage(`SUMMARY ${call}`);
+			},
+		});
+		harnesses.push(scenario.harness);
+		scenario.harness.session.subscribe((event) => {
+			if (event.type === "compaction_wait_start" && event.reason === "overflow") release.resolve();
+		});
+		try {
+			await scenario.harness.session.prompt("go");
+			expect(overflowed).toBe(true);
+			expect(scenario.compactions()).toHaveLength(1);
+			expect(scenario.compactions()[0].summary).toContain(failed ? "SUMMARY 2" : "SUMMARY 1");
+			expect(scenario.summaryCalls()).toBe(failed ? 2 : 1);
+			expect(scenario.maxPendingSummaries()).toBe(1);
+			expect(scenario.harness.eventsOfType("compaction_end")[0]).toMatchObject({
+				reason: "overflow",
+				willRetry: true,
+			});
+		} finally {
+			release.resolve();
+		}
+	});
+
+	it("cancels a foreground waiter without cancelling background work or starting fallback", async () => {
+		const release = deferred();
+		const started = deferred();
+		const scenario = await createScenario({
+			turns: 9,
+			summary: async () => {
+				started.resolve();
+				await release.promise;
+				return fauxAssistantMessage("BACKGROUND");
+			},
+		});
+		harnesses.push(scenario.harness);
+		const prompt = scenario.harness.session.prompt("go");
+		await started.promise;
+		await prompt;
+		const manual = scenario.harness.session.compact();
+		const rejected = expect(manual).rejects.toThrow("Compaction cancelled");
+		try {
+			await vi.waitFor(() => expect(scenario.harness.session.isCompacting).toBe(true));
+			scenario.harness.session.abortCompaction();
+			await rejected;
+			expect(scenario.summaryCalls()).toBe(1);
+			expect(scenario.compactions()).toHaveLength(0);
+			expect(scenario.harness.session.isBackgroundCompacting).toBe(true);
+			release.resolve();
+			await scenario.harness.session.prompt("next");
+			expect(scenario.compactions()).toHaveLength(1);
+			expect(scenario.compactions()[0].summary).toContain("BACKGROUND");
+		} finally {
+			release.resolve();
+			await manual.catch(() => undefined);
+		}
+	});
+
+	it.each([false, true])("shares one committed compaction between foreground callers (failed=%s)", async (failed) => {
+		const release = deferred();
+		const started = deferred();
+		const scenario = await createScenario({
+			turns: 9,
+			summary: async (call) => {
+				if (call === 1) {
+					started.resolve();
+					await release.promise;
+					if (failed) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad request" });
+				}
+				return fauxAssistantMessage("SHARED");
+			},
+		});
+		harnesses.push(scenario.harness);
+		const prompt = scenario.harness.session.prompt("go");
+		await started.promise;
+		await prompt;
+		const requests = [
+			scenario.harness.session.compact(),
+			scenario.harness.session.compact("preserve exact file paths"),
+		];
+		try {
+			await vi.waitFor(() => expect(scenario.harness.session.isCompacting).toBe(true));
+			release.resolve();
+			const results = await Promise.all(requests);
+			expect(results[0].summary).toContain("SHARED");
+			expect(results[1]).toEqual(results[0]);
+			expect(scenario.harness.eventsOfType("compaction_end").map((event) => event.reused)).toEqual([!failed, true]);
+			expect(scenario.summaryCalls()).toBe(failed ? 2 : 1);
+			expect(scenario.maxPendingSummaries()).toBe(1);
+			expect(scenario.compactions()).toHaveLength(1);
+		} finally {
+			release.resolve();
+			await Promise.allSettled(requests);
+		}
+	});
+
+	it.each([
+		{ kind: "manual", dispose: false },
+		{ kind: "manual", dispose: true },
+		{ kind: "automatic", dispose: false },
+		{ kind: "automatic", dispose: true },
+	])("does not restart queued $kind compaction after cancellation (dispose=$dispose)", async ({ kind, dispose }) => {
+		const release = deferred();
+		const started = deferred();
+		const scenario = await createScenario({
+			turns: 9,
+			summary: async (call) => {
+				if (call === 1) {
+					started.resolve();
+					await release.promise;
+					return fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad request" });
+				}
+				return fauxAssistantMessage("UNWANTED FALLBACK");
+			},
+		});
+		harnesses.push(scenario.harness);
+		const session = scenario.harness.session;
+		const prompt = session.prompt("go");
+		await started.promise;
+		await prompt;
+		const runAuto = Reflect.get(session, "_runAutoCompaction") as (
+			reason: "threshold" | "overflow",
+			willRetry: boolean,
+		) => Promise<boolean>;
+		const requests: Promise<unknown>[] =
+			kind === "manual"
+				? [session.compact(), session.compact("keep exact file paths")]
+				: [runAuto.call(session, "threshold", false), runAuto.call(session, "overflow", true)];
+		const settled = Promise.allSettled(requests);
+		try {
+			await vi.waitFor(() => expect(session.isCompacting).toBe(true));
+			if (dispose) session.dispose();
+			else session.abortCompaction();
+			release.resolve();
+			const results = await settled;
+			if (kind === "manual") {
+				expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+			} else {
+				expect(results).toEqual([
+					{ status: "fulfilled", value: false },
+					{ status: "fulfilled", value: false },
+				]);
+			}
+			expect(scenario.summaryCalls()).toBe(1);
+			expect(scenario.compactions()).toHaveLength(0);
+		} finally {
+			release.resolve();
+			await settled;
+		}
+	});
+
+	it("keeps a queued overflow caller's retry intent after shared foreground fallback", async () => {
+		const release = deferred();
+		const started = deferred();
+		const scenario = await createScenario({
+			turns: 9,
+			summary: async (call) => {
+				if (call === 1) {
+					started.resolve();
+					await release.promise;
+					return fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad request" });
+				}
+				return fauxAssistantMessage("SHARED FALLBACK");
+			},
+		});
+		harnesses.push(scenario.harness);
+		const session = scenario.harness.session;
+		const prompt = session.prompt("go");
+		await started.promise;
+		await prompt;
+		const runAuto = Reflect.get(session, "_runAutoCompaction") as (
+			reason: "threshold" | "overflow",
+			willRetry: boolean,
+		) => Promise<boolean>;
+		const requests = [runAuto.call(session, "threshold", false), runAuto.call(session, "overflow", true)];
+		try {
+			await vi.waitFor(() => expect(session.isCompacting).toBe(true));
+			release.resolve();
+			expect(await Promise.all(requests)).toEqual([false, true]);
+			expect(scenario.summaryCalls()).toBe(2);
+			expect(scenario.maxPendingSummaries()).toBe(1);
+			expect(scenario.compactions()).toHaveLength(1);
+			expect(
+				scenario.harness.eventsOfType("compaction_end").map(({ reason, willRetry }) => ({ reason, willRetry })),
+			).toEqual([
+				{ reason: "threshold", willRetry: false },
+				{ reason: "overflow", willRetry: true },
+			]);
+		} finally {
+			release.resolve();
+			await Promise.allSettled(requests);
+		}
 	});
 
 	it("falls back to blocking compaction when disabled", async () => {

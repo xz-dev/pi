@@ -274,6 +274,8 @@ export type AgentSessionEvent =
 			followUp: readonly string[];
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+	| { type: "compaction_wait_start"; reason: "manual" | "threshold" | "overflow" }
+	| { type: "background_compaction_state"; active: boolean }
 	| {
 			type: "background_compaction_end";
 			/** Set when the background summary attempt failed; absent when cleared. */
@@ -288,6 +290,7 @@ export type AgentSessionEvent =
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
+			reused?: boolean;
 			errorMessage?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
@@ -452,6 +455,10 @@ interface BackgroundCompaction {
 	fromExtension: boolean;
 	/** True once any native summary attempt recorded usage for this job. */
 	usageRecorded: boolean;
+	/** Settings toggles cannot revoke a summary already claimed by foreground compaction. */
+	claimed?: boolean;
+	/** Joined foreground callers reuse the same committed result rather than appending it twice. */
+	adopted?: { entryId: string; result: CompactionResult };
 }
 
 function estimateMessagesTokens(messages: AgentMessage[]): number {
@@ -517,6 +524,9 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _backgroundCompaction: BackgroundCompaction | undefined = undefined;
+	private _backgroundCompactionBarrier: Promise<void> | undefined;
+	private _foregroundCompactionLock: Promise<void> | undefined;
+	private _compactionGeneration = 0;
 	/** Latest compaction entry ID (null: none) when a background attempt failed; no retry until history compacts. */
 	private _backgroundCompactionFailedAt: string | null | undefined = undefined;
 	/** Whether a failure notification is currently shown to listeners; cleared on recovery or discard. */
@@ -984,7 +994,13 @@ export class AgentSession {
 			}
 			this._backgroundCompaction = undefined;
 		}
-		if (this._backgroundCompaction || model.contextWindow <= 0) return false;
+		if (
+			this._backgroundCompaction ||
+			this._backgroundCompactionBarrier ||
+			this._foregroundCompactionLock ||
+			model.contextWindow <= 0
+		)
+			return false;
 
 		const settings = this.settingsManager.getCompactionSettings(this.model);
 		const startRatio = this.settingsManager.getCompactionBackgroundStartRatio();
@@ -1052,6 +1068,8 @@ export class AgentSession {
 				this._emit({ type: "entry_appended", entry });
 			}
 		};
+		this._backgroundCompaction = background;
+		this._emit({ type: "background_compaction_state", active: true });
 		background.settled = this._summarizeAutoCompaction(
 			sessionModel,
 			branch,
@@ -1079,7 +1097,14 @@ export class AgentSession {
 				background.done = true;
 			},
 		);
-		this._backgroundCompaction = background;
+		const barrier = background.settled;
+		this._backgroundCompactionBarrier = barrier;
+		void barrier.then(() => {
+			if (this._backgroundCompactionBarrier === barrier) this._backgroundCompactionBarrier = undefined;
+			if (this._backgroundCompaction === background) {
+				this._emit({ type: "background_compaction_state", active: false });
+			}
+		});
 		return false;
 	}
 
@@ -1098,9 +1123,15 @@ export class AgentSession {
 		);
 	}
 
-	private _discardBackgroundCompaction(): void {
-		this._backgroundCompaction?.controller.abort();
+	private _discardBackgroundCompaction(preserveClaimed = false): void {
+		const background = this._backgroundCompaction;
+		if (preserveClaimed && background?.claimed) {
+			this._clearBackgroundCompactionFailureNotice();
+			return;
+		}
+		background?.controller.abort();
 		this._backgroundCompaction = undefined;
+		if (background && !background.done) this._emit({ type: "background_compaction_state", active: false });
 		this._clearBackgroundCompactionFailureNotice();
 	}
 
@@ -3462,6 +3493,63 @@ export class AgentSession {
 	// Compaction
 	// =========================================================================
 
+	private async _withCompactionLock<T>(run: () => Promise<T>): Promise<T | undefined> {
+		const generation = this._compactionGeneration;
+		const sessionId = this.sessionManager.getSessionId();
+		const previous = this._foregroundCompactionLock;
+		let release!: () => void;
+		const lock = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		this._foregroundCompactionLock = lock;
+		try {
+			if (previous) await previous;
+			if (generation !== this._compactionGeneration || sessionId !== this.sessionManager.getSessionId()) {
+				return undefined;
+			}
+			return await run();
+		} finally {
+			if (this._foregroundCompactionLock === lock) this._foregroundCompactionLock = undefined;
+			release();
+		}
+	}
+
+	private async _waitForBackgroundCompaction(
+		background: BackgroundCompaction | undefined,
+		signal: AbortSignal,
+		reason: "manual" | "threshold" | "overflow",
+	): Promise<BackgroundCompaction | undefined> {
+		signal.throwIfAborted();
+		const barrier = this._backgroundCompactionBarrier;
+		if (barrier) {
+			this._emit({ type: "compaction_wait_start", reason });
+			let onAbort!: () => void;
+			try {
+				await new Promise<void>((resolve, reject) => {
+					onAbort = () => reject(new Error("Compaction cancelled"));
+					signal.addEventListener("abort", onAbort, { once: true });
+					barrier.then(resolve, reject);
+					if (signal.aborted) onAbort();
+				});
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+				if (signal.aborted && background) background.claimed = false;
+			}
+		}
+		signal.throwIfAborted();
+		if (this._backgroundCompaction === background) this._backgroundCompaction = undefined;
+		if (!background) return undefined;
+		if (background.adopted) {
+			return this.sessionManager.getBranch().some((entry) => entry.id === background.adopted?.entryId)
+				? background
+				: undefined;
+		}
+		if (background.controller.signal.aborted || !this._isBackgroundCompactionCurrent(background)) {
+			background.result = undefined;
+		}
+		return background;
+	}
+
 	/** Generate Pi's built-in compaction summary for manual and automatic compaction. */
 	private async _runDefaultCompaction(
 		preparation: CompactionPreparation,
@@ -3512,14 +3600,42 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		const background = this._backgroundCompaction;
 		await this.abort();
-		this._discardBackgroundCompaction();
-		this._compactionAbortController = new AbortController();
-		this._emit({ type: "compaction_start", reason: "manual" });
+		if (background) background.claimed = true;
+		const result = await this._withCompactionLock(() => this._compactManual(customInstructions, background));
+		if (result === undefined) throw new Error("Compaction cancelled");
+		return result;
+	}
+
+	private async _compactManual(
+		customInstructions: string | undefined,
+		pendingBackground: BackgroundCompaction | undefined,
+	): Promise<CompactionResult> {
+		const abortController = new AbortController();
+		this._compactionAbortController = abortController;
 		let fromExtension = false;
 		let cancelledByExtension = false;
 
 		try {
+			const background = await this._waitForBackgroundCompaction(
+				pendingBackground,
+				abortController.signal,
+				"manual",
+			);
+			if (background?.adopted) {
+				this._clearManualCompactionState();
+				this._emit({
+					type: "compaction_end",
+					reason: "manual",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					reused: true,
+				});
+				return background.adopted.result;
+			}
+			if (!background?.result) this._emit({ type: "compaction_start", reason: "manual" });
 			const model = this.model;
 			if (!model) {
 				throw new Error(formatNoModelSelectedMessage());
@@ -3537,9 +3653,16 @@ export class AgentSession {
 				throw new Error("Nothing to compact (session too small)");
 			}
 
-			let extensionCompaction: CompactionResult | undefined;
+			let extensionCompaction: CompactionResult | undefined = background?.result
+				? {
+						...background.result,
+						tokensBefore: preparation.tokensBefore,
+						usage: background.usageRecorded ? undefined : background.result.usage,
+					}
+				: undefined;
+			fromExtension = background?.fromExtension ?? false;
 
-			if (this._extensionRunner.hasHandlers("session_before_compact")) {
+			if (!extensionCompaction && this._extensionRunner.hasHandlers("session_before_compact")) {
 				const result = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -3547,7 +3670,7 @@ export class AgentSession {
 					customInstructions,
 					reason: "manual",
 					willRetry: false,
-					signal: this._compactionAbortController.signal,
+					signal: abortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (result?.cancel) {
@@ -3580,7 +3703,7 @@ export class AgentSession {
 					preparation,
 					model,
 					customInstructions,
-					this._compactionAbortController.signal,
+					abortController.signal,
 					"manual",
 				);
 				summary = result.summary;
@@ -3590,11 +3713,18 @@ export class AgentSession {
 				details = result.details;
 			}
 
-			if (this._compactionAbortController.signal.aborted) {
+			if (abortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			const entryId = this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+			);
 			// A committed compaction clears any outstanding background-failure notice.
 			this._clearBackgroundCompactionFailureNotice();
 			const newEntries = this.sessionManager.getEntries();
@@ -3624,6 +3754,7 @@ export class AgentSession {
 				usage,
 				details,
 			};
+			if (background) background.adopted = { entryId, result: compactionResult };
 			// compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
 			this._clearManualCompactionState();
 			this._emit({
@@ -3632,11 +3763,12 @@ export class AgentSession {
 				result: compactionResult,
 				aborted: false,
 				willRetry: false,
+				reused: background?.result !== undefined,
 			});
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const aborted = this._compactionAbortController.signal.aborted || cancelledByExtension;
+			const aborted = abortController.signal.aborted || cancelledByExtension;
 			const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
 			this._clearManualCompactionState();
 			this._emit({
@@ -3667,6 +3799,7 @@ export class AgentSession {
 		try {
 			if (this.isCompacting) this._finishRun("aborted");
 		} finally {
+			this._compactionGeneration++;
 			this._compactionAbortController?.abort();
 			this._autoCompactionAbortController?.abort();
 		}
@@ -3902,6 +4035,16 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		const background = this._backgroundCompaction;
+		if (background) background.claimed = true;
+		return (await this._withCompactionLock(() => this._compactAutomatically(reason, willRetry, background))) ?? false;
+	}
+
+	private async _compactAutomatically(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		pendingBackground: BackgroundCompaction | undefined,
+	): Promise<boolean> {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -3913,41 +4056,40 @@ export class AgentSession {
 				return false;
 			}
 
-			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, settings);
-			if (!preparation) {
-				return false;
-			}
-
 			abortController = new AbortController();
 			this._autoCompactionAbortController = abortController;
 			started = true;
-			this._emit({ type: "compaction_start", reason });
-			abortController.signal.throwIfAborted();
+			const waitedForBackground = this._backgroundCompactionBarrier !== undefined;
+			const background = await this._waitForBackgroundCompaction(pendingBackground, abortController.signal, reason);
+			if (background?.adopted) {
+				this._emit({
+					type: "compaction_end",
+					reason,
+					result: undefined,
+					aborted: false,
+					willRetry,
+					reused: true,
+				});
+				return willRetry || this.agent.hasQueuedMessages();
+			}
+			const pathEntries = this.sessionManager.getBranch();
+			const preparation = prepareCompaction(pathEntries, settings);
+			if (!preparation) {
+				if (waitedForBackground) {
+					this._emit({ type: "compaction_end", reason, result: undefined, aborted: false, willRetry: false });
+				}
+				return false;
+			}
 
 			let compaction: CompactionResult | undefined;
-			const background = this._backgroundCompaction;
-			this._backgroundCompaction = undefined;
-			if (background && reason === "threshold") {
-				// Reuse the summary started before the threshold instead of generating a second one.
-				const abortBackground = () => background.controller.abort();
-				abortController.signal.addEventListener("abort", abortBackground, { once: true });
-				try {
-					await background.settled;
-				} finally {
-					abortController.signal.removeEventListener("abort", abortBackground);
-				}
-				abortController.signal.throwIfAborted();
-				if (background.result && this._isBackgroundCompactionCurrent(background)) {
-					compaction = { ...background.result, tokensBefore: preparation.tokensBefore };
-					flags.fromExtension = background.fromExtension;
-					// Native usage was already recorded per attempt via UsageEntry; drop the
-					// aggregate so stats and UI do not double-count the same billed tokens.
-					if (background.usageRecorded) compaction.usage = undefined;
-				}
+			if (background?.result) {
+				compaction = { ...background.result, tokensBefore: preparation.tokensBefore };
+				flags.fromExtension = background.fromExtension;
+				if (background.usageRecorded) compaction.usage = undefined;
 			} else {
-				background?.controller.abort();
+				this._emit({ type: "compaction_start", reason });
 			}
+			abortController.signal.throwIfAborted();
 			compaction ??= await this._summarizeAutoCompaction(
 				model,
 				pathEntries,
@@ -3961,7 +4103,14 @@ export class AgentSession {
 			const { summary, firstKeptEntryId, tokensBefore, usage, details } = compaction;
 			const fromExtension = flags.fromExtension;
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			const entryId = this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+			);
 			// A committed compaction clears any outstanding background-failure notice.
 			this._clearBackgroundCompactionFailureNotice();
 			const newEntries = this.sessionManager.getEntries();
@@ -3991,7 +4140,15 @@ export class AgentSession {
 				usage,
 				details,
 			};
-			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+			if (background) background.adopted = { entryId, result };
+			this._emit({
+				type: "compaction_end",
+				reason,
+				result,
+				aborted: false,
+				willRetry,
+				reused: background?.result !== undefined,
+			});
 
 			if (willRetry) return true;
 
@@ -4039,7 +4196,7 @@ export class AgentSession {
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
 		this.settingsManager.setCompactionEnabled(enabled);
-		if (!enabled) this._discardBackgroundCompaction();
+		if (!enabled) this._discardBackgroundCompaction(true);
 	}
 
 	/**
@@ -4048,7 +4205,12 @@ export class AgentSession {
 	 */
 	setBackgroundCompactionEnabled(enabled: boolean): void {
 		this.settingsManager.setCompactionBackgroundEnabled(enabled);
-		if (!enabled) this._discardBackgroundCompaction();
+		if (!enabled) this._discardBackgroundCompaction(true);
+	}
+
+	/** Whether a background summary is currently running without blocking ordinary agent requests. */
+	get isBackgroundCompacting(): boolean {
+		return this._backgroundCompaction !== undefined && !this._backgroundCompaction.done;
 	}
 
 	/** Whether background compaction is enabled in settings. */
