@@ -971,6 +971,7 @@ export class AgentSession {
 		projection: SessionProjection,
 		additionalTokens = 0,
 	): Promise<boolean> {
+		if (this._foregroundCompactionLock) return false;
 		const job = this._backgroundCompaction;
 		if (job?.done) {
 			if (job.result && this._isBackgroundCompactionCurrent(job)) {
@@ -979,13 +980,7 @@ export class AgentSession {
 			}
 			this._backgroundCompaction = undefined;
 		}
-		if (
-			this._backgroundCompaction ||
-			this._backgroundCompactionBarrier ||
-			this._foregroundCompactionLock ||
-			model.contextWindow <= 0
-		)
-			return false;
+		if (this._backgroundCompaction || this._backgroundCompactionBarrier || model.contextWindow <= 0) return false;
 
 		const settings = this.settingsManager.getCompactionSettings(this.model);
 		const startRatio = this.settingsManager.getCompactionBackgroundStartRatio();
@@ -3151,6 +3146,10 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		return this._abortCurrentOperation(true);
+	}
+
+	private async _abortCurrentOperation(cancelCompaction: boolean): Promise<void> {
 		try {
 			this._finishRun("aborted");
 		} finally {
@@ -3158,7 +3157,7 @@ export class AgentSession {
 				this._agentRunAbortRequested = true;
 			}
 			this.abortRetry();
-			this.abortCompaction();
+			if (cancelCompaction) this.abortCompaction();
 			this.abortBranchSummary();
 			if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
 			this.agent.abort();
@@ -3449,12 +3448,22 @@ export class AgentSession {
 		this._foregroundCompactionLock = lock;
 		try {
 			if (previous) await previous;
-			if (generation !== this._compactionGeneration || sessionId !== this.sessionManager.getSessionId()) {
+			if (
+				this._isShuttingDown ||
+				generation !== this._compactionGeneration ||
+				sessionId !== this.sessionManager.getSessionId()
+			) {
 				return undefined;
 			}
 			return await run();
 		} finally {
-			if (this._foregroundCompactionLock === lock) this._foregroundCompactionLock = undefined;
+			if (this._foregroundCompactionLock === lock) {
+				this._foregroundCompactionLock = undefined;
+				// Keep the cohort discoverable until all joined foreground requests settle.
+				const background = this._backgroundCompaction;
+				if (background?.adopted) this._backgroundCompaction = undefined;
+				else if (background) background.claimed = false;
+			}
 			release();
 		}
 	}
@@ -3482,7 +3491,6 @@ export class AgentSession {
 			}
 		}
 		signal.throwIfAborted();
-		if (this._backgroundCompaction === background) this._backgroundCompaction = undefined;
 		if (!background) return undefined;
 		if (background.adopted) {
 			return this.sessionManager.getBranch().some((entry) => entry.id === background.adopted?.entryId)
@@ -3545,8 +3553,19 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
-		const background = this._backgroundCompaction;
-		await this.abort();
+		const generation = this._compactionGeneration;
+		const sessionId = this.sessionManager.getSessionId();
+		const pendingBackground = this._backgroundCompaction;
+		// Stop the agent without cancelling the summary this request is joining.
+		await this._abortCurrentOperation(false);
+		if (
+			this._isShuttingDown ||
+			generation !== this._compactionGeneration ||
+			sessionId !== this.sessionManager.getSessionId()
+		) {
+			throw new Error("Compaction cancelled");
+		}
+		const background = pendingBackground ?? this._backgroundCompaction;
 		if (background) background.claimed = true;
 		const result = await this._withCompactionLock(() => this._compactManual(customInstructions, background));
 		if (result === undefined) throw new Error("Compaction cancelled");
