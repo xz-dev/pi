@@ -44,18 +44,20 @@ During a multi-turn agent run, Pi checks the canonical projected context after t
 
 Waiting for the summary at the threshold stalls the agent for the duration of a summarization request. With `compaction.background` enabled (`false` by default), Pi starts the threshold compaction early instead:
 
-1. At the same points where it checks the threshold (before the next assistant response and before delivering new input), Pi starts summarizing in the background once the projected context reaches `contextWindow - reserveTokens` minus `min(32768, (1 - backgroundStartRatio) * (contextWindow - reserveTokens))`. The `backgroundStartRatio` setting (default `0.85`) bounds how early background work may start on small windows; the 32768-token fixed budget bounds it on large windows. It snapshots the current branch, runs `session_before_compact` with `reason: "threshold"`, and generates the summary without blocking the agent or showing a compaction indicator.
-2. The agent keeps working. Messages appended meanwhile come after the snapshot's `firstKeptEntryId`, so the compaction keeps them verbatim.
-3. At the next check after the summary is ready, Pi persists it as an ordinary threshold compaction (`compaction_start`, `session_compact`, `compaction_end`), even below the threshold.
-4. If the threshold is reached first, the threshold compaction waits for the pending summary instead of starting a second one.
+1. At the same points where it checks the threshold (before the next assistant response and before delivering new input), Pi starts summarizing in the background once the projected context reaches `contextWindow - reserveTokens` minus `min(32768, (1 - backgroundStartRatio) * (contextWindow - reserveTokens))`. The `backgroundStartRatio` setting (default `0.85`) bounds how early background work may start on small windows; the 32768-token fixed budget bounds it on large windows. It snapshots the current branch, runs `session_before_compact` with `reason: "threshold"`, and generates the summary without blocking the agent.
+2. The agent keeps working. Messages appended meanwhile come after the snapshot's `firstKeptEntryId`, so the compaction keeps them verbatim. Background work alone does not make `AgentSession.isCompacting` true.
+3. At the next check after the summary is ready, Pi persists it as an ordinary compaction, even below the threshold. A result is committed once, including when several foreground callers were waiting for it.
+4. If threshold compaction, overflow recovery, or manual `/compact` arrives first, it waits for the existing background request. It does not cancel that request or start a concurrent summary. Success reuses the still-valid result; failure or an invalid snapshot permits the original foreground path only after the background request settles.
 
-The result is discarded and the threshold falls back to blocking compaction when the snapshot leaf left the branch, another compaction was appended, or a later `context_edit` targets a summarized entry. Manual compaction and overflow recovery cancel a pending background summary. A failed background summary is not retried until history compacts again; its retry notices are not shown. Set `compaction.background` to `false` to compact only at the threshold.
+The TUI shows a separate `Compacting(background)...` indicator with an italic label. It coexists with Working, transport and retry statuses. Embedded editor indicators use ` ── ` between components; standalone indicators use ` | `. A foreground caller waiting for the background request does not show another compaction indicator. Each indicator clears independently.
+
+The result is discarded when the snapshot leaf left the branch, another compaction was appended, or a later `context_edit` targets a summarized entry. A failed background summary is not retried until history compacts again; its retry notices are not shown. Cancelling a foreground waiter does not start fallback summarization or cancel the background request. Disabling background compaction prevents new jobs and cancels unclaimed work; a summary already claimed by a foreground caller can finish for that caller.
 
 A summary that waited for the threshold keeps every entry after the earlier snapshot cut, so the context after compaction can stay above the start ratio and begin the next background summary immediately.
 
 A provider context-overflow error or an early final `stopReason: "length"` can select one compact-and-retry recovery attempt. Length responses with tool calls retain their synthetic failed tool results and follow the ordinary tool/queue scheduler rather than forcing the run to end.
 
-You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
+You can also trigger manually with `/compact [instructions]`, where optional instructions focus a newly generated summary. If an existing background result is reused, the TUI reports `Compaction skipped: reusing completed compaction`; instructions do not cause another summary request. If background work fails or its result is invalid, manual fallback preserves those instructions and the normal extension hooks.
 
 ### How It Works
 
