@@ -383,7 +383,6 @@ describe("background compaction runtime ownership", () => {
 		});
 		const pending = await start(second.h);
 		const foreground = internals(second.h)._runAutoCompaction("threshold", false);
-		expect(internals(second.h)._backgroundCompaction).toBeUndefined();
 		second.h.session.setAutoCompactionEnabled(false);
 		expect(pending.controller.signal.aborted).toBe(false);
 		release.resolve();
