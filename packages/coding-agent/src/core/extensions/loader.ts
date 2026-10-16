@@ -20,6 +20,7 @@ import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
+import { getExtensionOrigin } from "./origin.ts";
 import type {
 	EntryRenderer,
 	Extension,
@@ -383,12 +384,12 @@ function createExtensionAPI(
 		// Action methods - delegate to shared runtime
 		sendMessage(message, options): void {
 			assertActive();
-			runtime.sendMessage(message, options);
+			runtime.sendMessage(message, options, getExtensionOrigin(extension.sourceInfo));
 		},
 
 		sendUserMessage(content, options): void {
 			assertActive();
-			runtime.sendUserMessage(content, options);
+			runtime.sendUserMessage(content, options, getExtensionOrigin(extension.sourceInfo));
 		},
 
 		appendEntry(customType: string, data?: unknown): void {
