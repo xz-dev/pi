@@ -165,9 +165,6 @@ Patches with no direct user-facing surface: test stability, fork CI plumbing, be
 - Diagnose native environment tests with an independent build-target architecture oracle, retained-output tool fixtures, per-stream output equality, real foreground-job readiness and monotonic cold listing cancellation/recovery observations.
   - Limits: Listing setup preserves all 10,100 entries and has its own measured 60000ms bound; the cold daemon request, actual aborted error and both same-connection recoveries retain their separate 5000ms operation deadline. Foreground readiness retains 100 polls at 20ms and the 20000ms case deadline. Independent stdout/stderr arrival order is not an equality oracle; exact content per stream, successful tool results, missing-file rejection and nonzero exit remain checked. Darwin wrong-target JSON exposes actual child status and selected failures only after strict equality-rejection checks. Observations do not prove REQUEST/CANCEL transmission or child exit.
   - Patch branch: [`patch/env-native-test-fixtures`](https://github.com/xz-dev/pi/tree/patch/env-native-test-fixtures)
-- Keep catalog-dependent provider test fixtures aligned with current model IDs, including Xiaomi MiMo 2.6, without changing assertions or skipping tests.
-  - Limits: Live-provider tests still require explicit credentials; offline catalog and payload tests remain enabled.
-  - Patch branch: [`patch/model-catalog-test-fixtures`](https://github.com/xz-dev/pi/tree/patch/model-catalog-test-fixtures)
 - Make the coalesced-reload auth-storage test deterministic by writing a different-size payload, so mtime-tick collisions cannot make the reader take the stale cached path.
   - Patch branch: [`patch/quarantine-auth-storage-flake`](https://github.com/xz-dev/pi/tree/patch/quarantine-auth-storage-flake)
 - Bound and report startup benchmarks: emit synchronous startup stage/completion markers, exit benchmark runs without waiting on arbitrary handles, and bound fd/rg version probes.
@@ -176,6 +173,8 @@ Patches with no direct user-facing surface: test stability, fork CI plumbing, be
 The Esc and manual-retry patches share [`patch/agent-run-failure-seam`](https://github.com/xz-dev/pi/tree/patch/agent-run-failure-seam). Managed tool executions are integrated before those two patches, and `patch/esc-abort` carries the managed-execution abort drain. See [downstream maintenance](../MAINTAIN.md) for the current integration rules.
 
 ## Temporarily disabled
+
+- `patch/model-catalog-test-fixtures` is retired from sync because upstream now supplies the Xiaomi MiMo 2.6 fixture updates. Tests and assertions remain upstream; no skip is added. The retained source differs only in descriptive names.
 
 - `patch/tui-synchronized-cursor-fleet` is temporarily retired from generated `main`. Its synchronized-output implementation can emit excessive terminal data and now conflicts with upstream's bounded main-screen writer. The source branch remains retained for a corrected design and independent validation; do not mask the product conflict with a CI resolver.
 
