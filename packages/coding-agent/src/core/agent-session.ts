@@ -514,6 +514,7 @@ export class AgentSession {
 	private _backgroundCompactionBarrier: Promise<void> | undefined;
 	private _foregroundCompactionLock: Promise<void> | undefined;
 	private _compactionGeneration = 0;
+	private _agentAbortCancelsCompaction = true;
 	/** Latest compaction entry ID (null: none) when a background attempt failed; no retry until history compacts. */
 	private _backgroundCompactionFailedAt: string | null | undefined = undefined;
 	/** Whether a failure notification is currently shown to listeners; cleared on recovery or discard. */
@@ -1185,7 +1186,9 @@ export class AgentSession {
 			if (
 				this._exceedsCompactionThreshold(route?.model ?? model, projection, estimateMessagesTokens(input.messages))
 			) {
-				const abortCompaction = () => this.abortCompaction();
+				const abortCompaction = () => {
+					if (this._agentAbortCancelsCompaction) this.abortCompaction();
+				};
 				signal?.addEventListener("abort", abortCompaction, { once: true });
 				try {
 					await this._runAutoCompaction("threshold", false);
@@ -3160,7 +3163,14 @@ export class AgentSession {
 			if (cancelCompaction) this.abortCompaction();
 			this.abortBranchSummary();
 			if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
-			this.agent.abort();
+			const previousPolicy = this._agentAbortCancelsCompaction;
+			this._agentAbortCancelsCompaction = cancelCompaction;
+			try {
+				// AbortSignal listeners run synchronously and must share this stop's compaction policy.
+				this.agent.abort();
+			} finally {
+				this._agentAbortCancelsCompaction = previousPolicy;
+			}
 			await this.waitForIdle();
 		}
 	}
