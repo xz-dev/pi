@@ -587,9 +587,13 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 31);
+	assert.equal(order.length, 32);
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
-	assert.equal(order.at(-1), "env-native-test-fixtures");
-	assert.ok(readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8").includes("patch/env-native-test-fixtures"));
+	assert.deepEqual(order.slice(-2), ["env-native-test-fixtures", "model-catalog-test-fixtures"]);
+	assert.ok(sync.includes("refs/heads/patch/model-catalog-test-fixtures:refs/remotes/origin/patch/model-catalog-test-fixtures"));
+	assert.ok(sync.includes("            model-catalog-test-fixtures \\\n"));
+	const downstreamChanges = readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8");
+	assert.ok(downstreamChanges.includes("patch/env-native-test-fixtures"));
+	assert.ok(downstreamChanges.includes("patch/model-catalog-test-fixtures"));
 });
