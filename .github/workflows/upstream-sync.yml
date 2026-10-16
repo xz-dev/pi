@@ -65,7 +65,8 @@ jobs:
             +refs/heads/patch/retry-error-presentation:refs/remotes/origin/patch/retry-error-presentation \
             +refs/heads/patch/message-origin:refs/remotes/origin/patch/message-origin \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort \
-            +refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures
+            +refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures \
+            +refs/heads/patch/model-catalog-test-fixtures:refs/remotes/origin/patch/model-catalog-test-fixtures
 
           # Driver source: the replay script comes
           # from the reviewed ci snapshot, never from a stale generated-main
@@ -112,6 +113,7 @@ jobs:
             message-origin \
             model-thinking-sort \
             env-native-test-fixtures \
+            model-catalog-test-fixtures \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done

@@ -135,6 +135,7 @@ PATCH_ORDER=(
 	message-origin
 	model-thinking-sort
 	env-native-test-fixtures
+	model-catalog-test-fixtures
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip
