@@ -416,6 +416,51 @@ describe("AgentSession background compaction", () => {
 		}
 	});
 
+	it("does not mark native fallback as extension output after a stale background result", async () => {
+		const release = deferred();
+		const started = deferred();
+		const scenario = await createScenario({
+			turns: 9,
+			summary: async () => fauxAssistantMessage("NATIVE FALLBACK"),
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						if (event.reason !== "threshold") return;
+						started.resolve();
+						await release.promise;
+						return {
+							compaction: {
+								summary: "STALE EXTENSION",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(scenario.harness);
+		const prompt = scenario.harness.session.prompt("go");
+		await started.promise;
+		await prompt;
+		const manual = scenario.harness.session.compact("preserve exact paths");
+		try {
+			await vi.waitFor(() => expect(scenario.harness.session.isCompacting).toBe(true));
+			const firstUser = scenario.harness.sessionManager
+				.getBranch()
+				.find((entry) => entry.type === "message" && entry.message.role === "user")!;
+			scenario.harness.sessionManager.appendContextEdit(firstUser.id, { content: "edited input" });
+			release.resolve();
+			expect((await manual).summary).toContain("NATIVE FALLBACK");
+			expect(scenario.compactions()).toHaveLength(1);
+			expect(scenario.compactions()[0].fromHook).toBe(false);
+			expect(scenario.summaryCalls()).toBe(1);
+		} finally {
+			release.resolve();
+			await manual.catch(() => undefined);
+		}
+	});
+
 	it("falls back to blocking compaction when disabled", async () => {
 		const scenario = await createScenario({ turns: 20, compaction: { background: false } });
 		harnesses.push(scenario.harness);
