@@ -398,11 +398,13 @@ describe("persisted agent run state", () => {
 		const finishStarted = (manager: SessionManager) => manager.appendRunState("finished", startedId);
 		// Older files have no `working` field; strip it to simulate the legacy record.
 		const stripWorking = (manager: SessionManager) => {
+			// biome-ignore lint/complexity/useLiteralKeys: private field access is the point — strip the persisted flag on the real store
 			for (const entry of manager["fileEntries"] as Array<{ working?: string }>) delete entry.working;
 		};
 		stripWorking(created.sessionManager);
 		expect(created.sessionManager.hasUnfinishedWork()).toBe(true);
 		finishStarted(created.sessionManager);
+		// biome-ignore lint/complexity/useLiteralKeys: private field access is the point — strip the persisted flag on the real store
 		delete (created.sessionManager["fileEntries"].at(-1) as { working?: string }).working;
 		expect(created.sessionManager.hasUnfinishedWork()).toBe(false);
 		// The derived flag must also survive a reload from disk.
