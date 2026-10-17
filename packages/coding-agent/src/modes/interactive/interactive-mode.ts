@@ -177,7 +177,9 @@ import {
 	CompactionStatusIndicator,
 	IdleStatus,
 	RetryStatusIndicator,
-	type StatusIndicator,
+	StatusIndicator,
+	StatusIndicatorGroup,
+	type StatusIndicatorRenderer,
 	WorkingStatusIndicator,
 } from "./components/status-indicator.ts";
 import { ThemedText } from "./components/themed-text.ts";
@@ -223,7 +225,7 @@ interface ActiveEditor extends EditorComponent {
 
 interface WorkingStatusEditor extends EditorComponent {
 	readonly embedWorkingStatus: boolean;
-	setWorkingStatusIndicator(indicator: StatusIndicator | undefined): void;
+	setWorkingStatusIndicator(indicator: StatusIndicatorRenderer | undefined): void;
 }
 
 function isEmbeddedStatus(editor: EditorComponent): editor is WorkingStatusEditor {
@@ -489,6 +491,7 @@ export class InteractiveMode {
 	private showSubmittedInput = false;
 	private pendingUserInputs: string[] = [];
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
+	private backgroundCompactionIndicator: StatusIndicator | undefined;
 	private activeWorkingIndicatorEmbedded = false;
 	private readonly idleStatus = new IdleStatus();
 	private workingMessage: string | undefined = undefined;
@@ -569,6 +572,8 @@ export class InteractiveMode {
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	// Whether the background-compaction failure warning is currently displayed.
+	private backgroundCompactionWarningShown = false;
 
 	// Shutdown state
 	private shutdownRequested = false;
@@ -1034,6 +1039,7 @@ export class InteractiveMode {
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
 		this.isInitialized = true;
+		if (this.session.isBackgroundCompacting) this.setBackgroundCompactionActive(true);
 		this.programStatus.report();
 		markStartupBenchmarkStage("tui-started");
 		this.ensurePngTranscoder();
@@ -2190,6 +2196,8 @@ export class InteractiveMode {
 
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.autoCompactionEscapeHandler?.();
+		this.autoCompactionEscapeHandler = undefined;
 		this.programStatus.reset();
 		this.applyRuntimeSettings();
 
@@ -2206,6 +2214,9 @@ export class InteractiveMode {
 
 		if (!options.renderBeforeBind) {
 			this.subscribeToAgent();
+		}
+		if (this.backgroundCompactionIndicator || session.isBackgroundCompacting) {
+			this.setBackgroundCompactionActive(session.isBackgroundCompacting);
 		}
 
 		await this.updateAvailableProviderCount();
@@ -2401,24 +2412,62 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private setEditorWorkingStatusIndicator(indicator: StatusIndicator | undefined): boolean {
+	private setEditorWorkingStatusIndicator(indicator: StatusIndicatorRenderer | undefined): boolean {
 		this.defaultEditor.setWorkingStatusIndicator(undefined);
 		if (!isEmbeddedStatus(this.editor)) return false;
 		this.editor.setWorkingStatusIndicator(indicator);
 		return true;
 	}
 
+	private refreshStatusIndicators(): void {
+		const indicators: StatusIndicator[] = [];
+		if (
+			this.activeStatusIndicator &&
+			!(this.backgroundCompactionIndicator && this.activeStatusIndicator.kind === "compaction")
+		) {
+			indicators.push(this.activeStatusIndicator);
+		}
+		if (this.backgroundCompactionIndicator) indicators.push(this.backgroundCompactionIndicator);
+		const indicator =
+			indicators.length > 1
+				? new StatusIndicatorGroup(indicators, (text) => this.editor.borderColor?.(text) ?? theme.fg("muted", text))
+				: indicators[0];
+		this.statusContainer.clear();
+		this.activeWorkingIndicatorEmbedded = false;
+		if (!indicator) {
+			this.setEditorWorkingStatusIndicator(undefined);
+		} else if (this.setEditorWorkingStatusIndicator(indicator)) {
+			this.activeWorkingIndicatorEmbedded = true;
+		} else {
+			this.statusContainer.addChild(indicator);
+		}
+	}
+
+	private setBackgroundCompactionActive(active: boolean): void {
+		if (active && !this.backgroundCompactionIndicator) {
+			const color = (text: string, fallback: "accent" | "muted") =>
+				isEmbeddedStatus(this.editor)
+					? (this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(text)
+					: theme.fg(fallback, text);
+			this.backgroundCompactionIndicator = new StatusIndicator(
+				"backgroundCompaction",
+				this.ui,
+				(text) => color(text, "accent"),
+				(text) => theme.italic(color(text, "muted")),
+				"Compacting(background)...",
+			);
+		} else if (!active) {
+			this.backgroundCompactionIndicator?.dispose();
+			this.backgroundCompactionIndicator = undefined;
+		}
+		this.refreshStatusIndicators();
+		this.ui.requestRender();
+	}
+
 	private showStatusIndicator(indicator: StatusIndicator): void {
 		this.activeStatusIndicator?.dispose();
 		this.activeStatusIndicator = indicator;
-		this.activeWorkingIndicatorEmbedded = false;
-		this.statusContainer.clear();
-		this.setEditorWorkingStatusIndicator(undefined);
-		if (this.setEditorWorkingStatusIndicator(indicator)) {
-			this.activeWorkingIndicatorEmbedded = true;
-			return;
-		}
-		this.statusContainer.addChild(indicator);
+		this.refreshStatusIndicators();
 	}
 
 	private clearStatusIndicator(kind?: StatusIndicator["kind"]): void {
@@ -2429,10 +2478,9 @@ export class InteractiveMode {
 		const clearedIndicatorWasEmbedded = this.activeWorkingIndicatorEmbedded;
 		clearedIndicator?.dispose();
 		this.activeStatusIndicator = undefined;
-		this.activeWorkingIndicatorEmbedded = false;
-		this.statusContainer.clear();
-		this.setEditorWorkingStatusIndicator(undefined);
+		this.refreshStatusIndicators();
 		if (
+			!this.backgroundCompactionIndicator &&
 			clearedIndicator &&
 			!clearedIndicatorWasEmbedded &&
 			this.options.tuiMode === "regular" &&
@@ -3120,13 +3168,7 @@ export class InteractiveMode {
 		}
 
 		this.editorContainer.addChild(this.editor as Component);
-		if (this.activeStatusIndicator) {
-			this.statusContainer.clear();
-			this.activeWorkingIndicatorEmbedded = this.setEditorWorkingStatusIndicator(this.activeStatusIndicator);
-			if (!this.activeWorkingIndicatorEmbedded) {
-				this.statusContainer.addChild(this.activeStatusIndicator);
-			}
-		}
+		if (this.activeStatusIndicator || this.backgroundCompactionIndicator) this.refreshStatusIndicators();
 		this.ui.setFocus(this.editor as Component);
 		this.ui.requestRender();
 	}
@@ -3903,22 +3945,30 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
+			case "compaction_wait_start":
 			case "compaction_start": {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
-				// Keep editor active; submissions are queued during compaction.
-				this.autoCompactionEscapeHandler = this.defaultEditor.onEscape;
-				this.defaultEditor.onEscape = () => {
-					this.session.abortCompaction();
-				};
-				const colorFn = isEmbeddedStatus(this.editor)
-					? (text: string) =>
-							(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(
-								text,
-							)
-					: undefined;
-				this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason, colorFn));
+				// Keep editor active; submissions are queued while waiting or compacting.
+				if (!this.autoCompactionEscapeHandler) {
+					const previous = this.defaultEditor.onEscape;
+					this.autoCompactionEscapeHandler = () => {
+						this.defaultEditor.onEscape = previous;
+					};
+					this.defaultEditor.onEscape = () => {
+						this.session.abortCompaction();
+					};
+				}
+				if (event.type === "compaction_start") {
+					const colorFn = isEmbeddedStatus(this.editor)
+						? (text: string) =>
+								(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(
+									text,
+								)
+						: undefined;
+					this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason, colorFn));
+				}
 				// Compaction runs before the submitted input is delivered; keep the text visible meanwhile.
 				if (this.submittedInput !== undefined) {
 					this.showSubmittedInput = true;
@@ -3929,11 +3979,14 @@ export class InteractiveMode {
 			}
 
 			case "compaction_end": {
-				if (this.settingsManager.getShowTerminalProgress()) {
+				if (
+					this.settingsManager.getShowTerminalProgress() &&
+					(!event.reused || this.activeStatusIndicator?.kind !== "working")
+				) {
 					this.ui.terminal.setProgress(false);
 				}
 				if (this.autoCompactionEscapeHandler) {
-					this.defaultEditor.onEscape = this.autoCompactionEscapeHandler;
+					this.autoCompactionEscapeHandler();
 					this.autoCompactionEscapeHandler = undefined;
 				}
 				this.clearStatusIndicator("compaction");
@@ -3960,6 +4013,9 @@ export class InteractiveMode {
 						const errorMessage = event.errorMessage;
 						this.chatContainer.addChild(new ThemedText(() => theme.fg("error", errorMessage), 1, 0));
 					}
+				}
+				if (event.reason === "manual" && event.reused) {
+					this.showStatus("Compaction skipped: reusing completed compaction");
 				}
 				void this.flushCompactionQueue({ willRetry: event.willRetry });
 				this.ui.requestRender();
@@ -4022,6 +4078,29 @@ export class InteractiveMode {
 
 			case "summarization_retry_finished": {
 				this.clearStatusIndicator("retry");
+				this.ui.requestRender();
+				break;
+			}
+
+			case "background_compaction_state": {
+				this.setBackgroundCompactionActive(event.active);
+				break;
+			}
+
+			case "background_compaction_end": {
+				// Nonblocking diagnostic: never touches the working/compaction indicator,
+				// input queue, or Esc handling. One warning per failure; the clear event
+				// acknowledges recovery so the notice is not left permanent.
+				if (event.errorMessage) {
+					if (!this.backgroundCompactionWarningShown) {
+						this.backgroundCompactionWarningShown = true;
+						this.showWarning(event.errorMessage);
+					}
+				} else if (this.backgroundCompactionWarningShown) {
+					this.backgroundCompactionWarningShown = false;
+					this.showStatus("Background compaction cleared");
+				}
+				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
 			}
@@ -5216,6 +5295,7 @@ export class InteractiveMode {
 			selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
+					backgroundCompaction: this.session.backgroundCompactionEnabled,
 					defaultModel,
 					currentModel: this.session.model,
 					availableDefaultModels: this.session.modelRuntime.getAvailableSnapshot(),
@@ -5262,6 +5342,9 @@ export class InteractiveMode {
 					onAutoCompactChange: (enabled) => {
 						this.session.setAutoCompactionEnabled(enabled);
 						this.footer.setAutoCompactEnabled(enabled);
+					},
+					onBackgroundCompactionChange: (enabled) => {
+						this.session.setBackgroundCompactionEnabled(enabled);
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
@@ -7422,6 +7505,10 @@ export class InteractiveMode {
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}
+		this.backgroundCompactionIndicator?.dispose();
+		this.backgroundCompactionIndicator = undefined;
+		this.autoCompactionEscapeHandler?.();
+		this.autoCompactionEscapeHandler = undefined;
 		this.clearStatusIndicator();
 		this.themeController.disableAutoSync();
 		this.clearExtensionTerminalInputListeners();
