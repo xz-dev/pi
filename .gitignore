@@ -41,6 +41,7 @@ packages/env/bin/
 packages/env/daemon/target/
 todo.md
 plans/
+PLAN/
 .pi/hf-sessions/
 .pi/hf-sessions-backup/
 collect.sh
