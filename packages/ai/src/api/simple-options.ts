@@ -63,6 +63,7 @@ export function buildBaseOptions(
 		fetch: options?.fetch,
 		transport: options?.transport,
 		cacheRetention: options?.cacheRetention,
+		responseCheckpointExclude: options?.responseCheckpointExclude,
 		sessionId: options?.sessionId,
 		disableContinuation: options?.disableContinuation,
 		headers: options?.headers,

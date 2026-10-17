@@ -1,11 +1,19 @@
 import type { ResponseInput, ResponseStreamEvent } from "openai/resources/responses/responses.js";
 
 import { registerSessionResourceCleanup } from "../session-resources.ts";
-import type { Api, AssistantMessage, Model, ProviderEnv, StreamOptions } from "../types.ts";
+import type { Api, AssistantMessage, Model, ProviderEnv, ResponseCheckpoint, StreamOptions } from "../types.ts";
 import { formatThrownValue } from "../utils/diagnostics.ts";
 import { type AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
+import {
+	captureCheckpoint,
+	isResponseCheckpoint,
+	planCheckpoint,
+	responseEventOutput,
+	responseOutputItemsCapturable,
+	sha256Hex,
+} from "../utils/response-checkpoints.ts";
 import { CODEX_AUTO_WEBSOCKET_RETRIES } from "../utils/retry.ts";
 
 // ============================================================================
@@ -54,6 +62,8 @@ interface CachedWebSocketContinuationState {
 	lastRequestBody: WebSocketRequestBody;
 	lastResponseId: string;
 	lastResponseItems: ResponseInput;
+	/** False when this connection still depends on caller-owned server history. */
+	fullHistory: boolean;
 }
 
 interface CachedWebSocketConnection {
@@ -902,6 +912,8 @@ export interface ProcessResponsesWebSocketOptions<TApi extends Api> {
 	model: Model<TApi>;
 	/** Invoked when the first provider stream event arrives (before push of start). */
 	onStart: () => void;
+	/** Successful send, independent of whether any provider output has arrived. */
+	onSent?: (fullHistory: boolean) => void;
 	/** Invoked when the actual transport becomes known: acquired socket, loss, or stream end. */
 	onTransport?: (transport: string | undefined, model: Model<TApi>) => void | Promise<void>;
 	/** Recovery/cooldown partition key used by callers when passing fallback
@@ -921,6 +933,28 @@ export interface ProcessResponsesWebSocketOptions<TApi extends Api> {
 	) => Promise<void>;
 	/** Response items produced by this turn, appended to the continuation baseline. */
 	getResponseItems: () => ResponseInput;
+	/**
+	 * Durable-checkpoint hooks. All are optional; when `durableCheckpoints` is
+	 * absent or returns undefined the driver keeps its connection-local cache
+	 * only. See utils/response-checkpoints.ts + CONTRACT-v1.md.
+	 */
+	durableCheckpoints?: {
+		/**
+		 * Scope digest binding this request to origin + effective credential /
+		 * account context. Called once per request, before planning.
+		 */
+		getScopeHash: () => Promise<string>;
+		/** Newest active-branch assistant checkpoint candidate, if any. */
+		getCandidate: () => { responseId: string; responseCheckpoint?: unknown } | undefined;
+		/** Attach validated v1 metadata to the finished assistant message. */
+		assign: (checkpoint: ResponseCheckpoint) => void;
+	};
+	/**
+	 * Skip durable planning for this attempt (capture still runs). Set by the
+	 * caller on a safe repair after a missing-reference rejection so the same
+	 * stale candidate is not re-planned into a second failed delta.
+	 */
+	suppressDurablePlanning?: boolean;
 	/**
 	 * Terminal non-success outcomes (error/aborted stop reasons, content-filter
 	 * incompletes, provider-asserted failures). Responses that end this way never
@@ -974,12 +1008,35 @@ export async function processResponsesWebSocket<TApi extends Api>(
 	};
 	const transport = options?.transport ?? "auto";
 	const useCachedContext = transport === "websocket-cached" || transport === "auto";
-	// A fresh socket never carries continuation state. Strip any
-	// caller-injected previous_response_id unconditionally; only the
-	// connection's own validated continuation may add it back below.
+	const durable = config.durableCheckpoints;
+	const callerOwned = durable !== undefined && body.previous_response_id !== undefined;
 	const fullBody = { ...body };
-	delete fullBody.previous_response_id;
-	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	// Preserve legacy non-checkpoint behavior; the checkpoint owner must not
+	// discard a caller's parent or certify its unknown server-side lineage.
+	if (!callerOwned) delete fullBody.previous_response_id;
+	let requestBody =
+		!callerOwned && useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	let fullHistory = !callerOwned && (requestBody === fullBody || entry?.continuation?.fullHistory === true);
+
+	// Durable planning is independent of connection-local state, but never
+	// layers over a caller-owned parent.
+	if (durable && !callerOwned && !config.suppressDurablePlanning && requestBody === fullBody) {
+		const candidate = durable.getCandidate();
+		if (candidate && isResponseCheckpoint(candidate.responseCheckpoint)) {
+			const scopeHash = await durable.getScopeHash();
+			const plan = await planCheckpoint({
+				request: fullBody,
+				candidate,
+				scopeHash,
+				now: Date.now(),
+				eligible: true,
+			});
+			if (plan) {
+				requestBody = plan.request as WebSocketRequestBody;
+				fullHistory = true;
+			}
+		}
+	}
 	await emitTransport(onTransport, requestBody.previous_response_id ? "WS/continuation" : "WS/full", model);
 	transportCleared = false;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(getScope(scope), cacheSessionId) : undefined;
@@ -1010,6 +1067,7 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		} catch (error) {
 			throw new ResponsesTransportError(formatThrownValue(error), { cause: error });
 		}
+		config.onSent?.(fullHistory);
 		let started = false;
 		const events = mapEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs));
 		const startedEvents = (async function* (): AsyncGenerator<ResponseStreamEvent> {
@@ -1021,7 +1079,19 @@ export async function processResponsesWebSocket<TApi extends Api>(
 				yield event;
 			}
 		})();
-		await processStream(startedEvents, output, stream, model);
+		// Capture the raw completion event alongside the SDK-shaped stream so the
+		// durable checkpoint can verify declared store state and output types.
+		let completionEvent: Record<string, unknown> | undefined;
+		const captureEvents = (async function* (): AsyncGenerator<ResponseStreamEvent> {
+			for await (const event of startedEvents) {
+				const type = (event as { type?: unknown }).type;
+				if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
+					completionEvent = event as unknown as Record<string, unknown>;
+				}
+				yield event;
+			}
+		})();
+		await processStream(captureEvents, output, stream, model);
 		if (options?.signal?.aborted) {
 			keepConnection = false;
 			await clearTransport();
@@ -1033,11 +1103,21 @@ export async function processResponsesWebSocket<TApi extends Api>(
 				keepConnection = false;
 				await clearTransport();
 			} else if (useCachedContext && entry) {
+				const responseItems = getResponseItems();
+				const completed = responseEventOutput(completionEvent ?? {});
+				// Validate even while disabled: a later opt-in may inherit this cache.
+				fullHistory &&= completed !== undefined && responseOutputItemsCapturable(completed.output, responseItems);
 				entry.continuation = {
 					lastRequestBody: fullBody,
 					lastResponseId: output.responseId,
-					lastResponseItems: getResponseItems(),
+					lastResponseItems: responseItems,
+					fullHistory,
 				};
+				if (fullHistory) {
+					await captureDurableCheckpoint(config, output, fullBody, requestBody, responseItems, completionEvent);
+				}
+			} else if (fullHistory) {
+				await captureDurableCheckpoint(config, output, fullBody, requestBody, getResponseItems(), completionEvent);
 			}
 		}
 	} catch (error) {
@@ -1061,3 +1141,73 @@ export function normalizeWebSocketTimeoutMs(value: number | undefined): number |
 }
 
 export const DEFAULT_RESPONSES_WEBSOCKET_CONNECT_TIMEOUT_MS = DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
+
+// ============================================================================
+// Durable checkpoint capture
+// ============================================================================
+
+/**
+ * Attach v1 checkpoint metadata to the completed assistant message when every
+ * contract condition holds: completed turn, server-stored response, capturable
+ * output types and an independently complete local full request. Fail-closed:
+ * any doubt leaves `output.responseCheckpoint` absent.
+ */
+async function captureDurableCheckpoint<TApi extends Api>(
+	config: ProcessResponsesWebSocketOptions<TApi>,
+	output: AssistantMessage,
+	fullBody: WebSocketRequestBody,
+	requestBody: WebSocketRequestBody,
+	responseItems: ResponseInput,
+	completionEvent: Record<string, unknown> | undefined,
+): Promise<void> {
+	const durable = config.durableCheckpoints;
+	if (!durable || (output.stopReason !== "stop" && output.stopReason !== "toolUse")) return;
+	const localFullInput = Array.isArray(fullBody.input) ? (fullBody.input as unknown[]) : undefined;
+	if (!localFullInput) return;
+	// Server-declared storage: the completion event must agree the response is
+	// stored. A missing field is tolerated only because WS responses default to
+	// the request's store value; an explicit store:false refuses capture.
+	const completed = responseEventOutput(completionEvent ?? {});
+	if (!completed || completed.id !== output.responseId) return;
+	if (completed.store === false) return;
+	if (requestBody.store !== true) return;
+	if (!responseOutputItemsCapturable(completed.output, responseItems)) return;
+	const encodedPrefix = [...localFullInput, ...responseItems];
+	const scopeHash = await durable.getScopeHash();
+	const checkpoint = await captureCheckpoint({
+		request: fullBody,
+		responseId: output.responseId,
+		encodedPrefix,
+		scopeHash,
+		completed: true,
+		stored: true,
+		fullHistory: true,
+		now: Date.now(),
+	});
+	if (checkpoint && !config.options?.signal?.aborted) durable.assign(checkpoint);
+}
+
+/**
+ * Scope digest input the adapter assembles from the actual destination and
+ * effective credential context. Never contains raw secrets; each part is a
+ * stable identity string the caller itself already sent to the endpoint.
+ */
+export async function responsesCheckpointScopeHash(parts: {
+	url: string;
+	apiFamily: string;
+	credential: string;
+	headers: Record<string, string>;
+}): Promise<string> {
+	const credential = await sha256Hex(parts.credential);
+	const headerDigests = Object.fromEntries(
+		await Promise.all(Object.entries(parts.headers).map(async ([k, v]) => [k, await sha256Hex(v)] as const)),
+	);
+	return sha256Hex(
+		JSON.stringify({
+			url: parts.url,
+			api: parts.apiFamily,
+			credential,
+			headers: headerDigests,
+		}),
+	);
+}
