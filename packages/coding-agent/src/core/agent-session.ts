@@ -432,6 +432,8 @@ interface ToolDefinitionEntry {
 interface BackgroundCompaction {
 	/** Branch leaf when the snapshot was taken; the result applies only while it remains on the branch. */
 	leafId: string;
+	/** Latest compaction when the snapshot was taken; a newer one (inserted before the leaf) invalidates the result. */
+	compactionId: string | null;
 	/** Entries folded into the summary; a later context edit of any of them invalidates the result. */
 	summarizedIds: ReadonlySet<string>;
 	controller: AbortController;
@@ -977,7 +979,8 @@ export class AgentSession {
 		if (job?.done) {
 			if (job.result && this._isBackgroundCompactionCurrent(job)) {
 				await this._runAutoCompaction("threshold", false);
-				return this.sessionManager.getLeafEntry()?.type === "compaction";
+				// The summary is inserted at its kept boundary, not at the leaf.
+				return (getLatestCompactionEntry(this.sessionManager.getBranch())?.id ?? null) !== job.compactionId;
 			}
 			this._backgroundCompaction = undefined;
 		}
@@ -1006,6 +1009,7 @@ export class AgentSession {
 		const flags = { fromExtension: false, cancelledByExtension: false };
 		const background: BackgroundCompaction = {
 			leafId,
+			compactionId: latestCompactionId,
 			summarizedIds: new Set(branch.slice(0, firstKeptIndex).map((entry) => entry.id)),
 			controller,
 			settled: Promise.resolve(),
@@ -1094,13 +1098,10 @@ export class AgentSession {
 		const leafIndex = branch.findIndex((entry) => entry.id === job.leafId);
 		return (
 			leafIndex >= 0 &&
+			(getLatestCompactionEntry(branch)?.id ?? null) === job.compactionId &&
 			!branch
 				.slice(leafIndex + 1)
-				.some(
-					(entry) =>
-						entry.type === "compaction" ||
-						(entry.type === "context_edit" && job.summarizedIds.has(entry.targetId)),
-				)
+				.some((entry) => entry.type === "context_edit" && job.summarizedIds.has(entry.targetId))
 		);
 	}
 
