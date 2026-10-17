@@ -430,6 +430,19 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+/**
+ * Entries on `path` recorded after its latest compaction, or undefined without one.
+ * A compaction precedes its kept entries in the tree, so path order alone cannot tell
+ * kept history from newer entries. Kept entries are timestamped strictly before the
+ * summary (see appendCompaction), later entries at or after it.
+ */
+export function getEntriesAfterLatestCompaction(path: SessionEntry[]): SessionEntry[] | undefined {
+	const compaction = getLatestCompactionEntry(path);
+	if (!compaction) return undefined;
+	const compactedAt = Date.parse(compaction.timestamp);
+	return path.slice(path.indexOf(compaction) + 1).filter((entry) => Date.parse(entry.timestamp) >= compactedAt);
+}
+
 function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntry>): Map<string, SessionEntry> {
 	if (byId) return byId;
 	const index = new Map<string, SessionEntry>();
@@ -1049,6 +1062,8 @@ export class SessionManager {
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
 	private generation = 0;
+	/** Entries recorded after a compaction must not predate it (see getEntriesAfterLatestCompaction). */
+	private latestCompactionTime = 0;
 	/** @internal Fault-injection seam for continuation publication tests. */
 	continuationFileWriter: ContinuationFileWriter = writeContinuationFile;
 
@@ -1161,10 +1176,14 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
+		this.latestCompactionTime = 0;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session" || entry.type === "run_state") continue;
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
+			if (entry.type === "compaction") {
+				this.latestCompactionTime = Math.max(this.latestCompactionTime, Date.parse(entry.timestamp) || 0);
+			}
 			if (entry.type === "label") {
 				if (entry.label) {
 					this.labelsById.set(entry.targetId, entry.label);
@@ -1175,6 +1194,19 @@ export class SessionManager {
 				}
 			}
 		}
+		// An inserted compaction is written after the entries it precedes but never moves
+		// the leaf; restore the leaf that was current when it was written.
+		const leaf = this.leafId ? this.byId.get(this.leafId) : undefined;
+		if (leaf?.type === "compaction" && this.byId.get(leaf.firstKeptEntryId)?.parentId === leaf.id) {
+			const previous = this.fileEntries.findLast(
+				(entry) => entry !== leaf && entry.type !== "session" && entry.type !== "run_state",
+			);
+			this.leafId = previous && previous.type !== "session" ? previous.id : null;
+		}
+	}
+
+	private _entryTimestamp(): string {
+		return new Date(Math.max(Date.now(), this.latestCompactionTime)).toISOString();
 	}
 
 	private _rewriteFile(): void {
@@ -1255,7 +1287,7 @@ export class SessionManager {
 			type: "run_state",
 			id,
 			parentId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			sessionId: this.sessionId,
 			runId: runId ?? id,
 			state,
@@ -1378,7 +1410,7 @@ export class SessionManager {
 				type: "message",
 				id: generateId(reservedIds),
 				parentId,
-				timestamp: new Date().toISOString(),
+				timestamp: this._entryTimestamp(),
 				message,
 			};
 			entries.push(entry);
@@ -1391,7 +1423,7 @@ export class SessionManager {
 		// the same atomic write so a late reply cannot orphan the cancelled run.
 		const cancellation: SessionRunEntry | undefined =
 			run?.state === "aborted" && run.sessionId === this.sessionId && run.parentId === commit.expectedLeafId
-				? { ...run, id: randomUUID(), parentId, timestamp: new Date().toISOString() }
+				? { ...run, id: randomUUID(), parentId, timestamp: this._entryTimestamp() }
 				: undefined;
 		const publishedEntries = cancellation ? [...entries, cancellation] : entries;
 		if (this.persist && this.sessionFile) {
@@ -1435,7 +1467,7 @@ export class SessionManager {
 			type: "message",
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			message,
 		};
 		this._appendEntry(entry);
@@ -1448,7 +1480,7 @@ export class SessionManager {
 			type: "thinking_level_change",
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			thinkingLevel,
 		};
 		this._appendEntry(entry);
@@ -1461,7 +1493,7 @@ export class SessionManager {
 			type: "model_change",
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			provider,
 			modelId,
 		};
@@ -1475,7 +1507,7 @@ export class SessionManager {
 			type: "usage",
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			kind,
 			provider,
 			model,
@@ -1486,7 +1518,20 @@ export class SessionManager {
 		return entry;
 	}
 
-	/** Append a compaction summary as child of current leaf, then advance leaf. Returns entry id. */
+	/**
+	 * Record a compaction summary at its boundary and return its id.
+	 *
+	 * The summary is inserted into the tree as the parent of `firstKeptEntryId`, so
+	 * every entry from the kept boundary onward (including entries added while a summary
+	 * was generated, and branches later started from them) inherits it. The leaf does not
+	 * move. The system checkpoint is taken at the insertion point; system messages in the
+	 * kept range replay after it. Retain-none summaries, kept entries off the current
+	 * branch, and legacy branches with a compaction after the kept boundary are appended
+	 * at the leaf instead.
+	 *
+	 * The entry is written at the end of the file to keep file order chronological; the
+	 * re-parented kept entry requires an atomic rewrite of a persisted file.
+	 */
 	appendCompaction<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string | null,
@@ -1495,13 +1540,28 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 	): string {
-		const timestamp = new Date().toISOString();
-		const systemMessage = getCurrentSystemMessage(this.buildSessionProjection().messages);
 		const id = generateId(this.byId);
+		const branch = this.getBranch();
+		const keptIndex = firstKeptEntryId ? branch.findIndex((entry) => entry.id === firstKeptEntryId) : -1;
+		const kept =
+			keptIndex >= 0 && !branch.slice(keptIndex).some((entry) => entry.type === "compaction")
+				? branch[keptIndex]
+				: undefined;
+		// Kept entries must be strictly older than the summary so that later readers can
+		// separate them from entries recorded after it (getEntriesAfterLatestCompaction).
+		const latestKept = kept
+			? Math.max(...branch.slice(keptIndex).map((entry) => Date.parse(entry.timestamp) || 0))
+			: Number.NEGATIVE_INFINITY;
+		const time = Math.max(Date.now(), latestKept + 1);
+		const timestamp = new Date(time).toISOString();
+		const parentId = kept ? kept.parentId : this.leafId;
+		const systemMessage = getCurrentSystemMessage(
+			parentId === null ? [] : buildSessionProjection(this.getEntries(), parentId, this.byId).messages,
+		);
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id,
-			parentId: this.leafId,
+			parentId,
 			timestamp,
 			summary,
 			firstKeptEntryId: firstKeptEntryId ?? id,
@@ -1511,7 +1571,35 @@ export class SessionManager {
 			fromHook,
 			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
 		};
-		this._appendEntry(entry);
+		if (!kept) {
+			this._appendEntry(entry);
+			this.latestCompactionTime = time;
+			return entry.id;
+		}
+
+		if (this.persist && this.sessionFile && this.flushed) {
+			const lines = this.fileEntries.map((fileEntry) =>
+				JSON.stringify(fileEntry === kept ? { ...kept, parentId: id } : fileEntry),
+			);
+			const temporaryFile = `${this.sessionFile}.compaction-${process.pid}-${randomUUID()}.tmp`;
+			try {
+				this.continuationFileWriter(
+					temporaryFile,
+					this.sessionFile,
+					Buffer.from([...lines, JSON.stringify(entry)].map((line) => `${line}\n`).join("")),
+				);
+			} catch (error) {
+				rmSync(temporaryFile, { force: true });
+				throw error;
+			}
+		}
+		// Re-parent in place only after the write succeeded; existing references stay valid.
+		kept.parentId = id;
+		this.latestCompactionTime = time;
+		this.fileEntries.push(entry);
+		this.byId.set(entry.id, entry);
+		this.generation++;
+		if (!this.flushed) this._persist(entry);
 		return entry.id;
 	}
 
@@ -1523,7 +1611,7 @@ export class SessionManager {
 			data,
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1536,7 +1624,7 @@ export class SessionManager {
 			type: "session_info",
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			name: sanitizedName,
 		};
 		this._appendEntry(entry);
@@ -1579,7 +1667,7 @@ export class SessionManager {
 			details,
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1618,7 +1706,7 @@ export class SessionManager {
 			type: "context_edit",
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			targetId,
 			replacement: normalizedReplacement,
 		};
@@ -1675,7 +1763,7 @@ export class SessionManager {
 			type: "label",
 			id: generateId(this.byId),
 			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			targetId,
 			label,
 		};
@@ -1845,7 +1933,7 @@ export class SessionManager {
 			type: "branch_summary",
 			id: generateId(this.byId),
 			parentId: branchFromId,
-			timestamp: new Date().toISOString(),
+			timestamp: this._entryTimestamp(),
 			fromId,
 			summary,
 			details,
@@ -1884,19 +1972,14 @@ export class SessionManager {
 				replacementByLabelId.set(labelId, entry.id);
 			}
 			pendingLabelIds.length = 0;
-			pathWithoutLabels.push(
-				entry.type === "compaction"
-					? {
-							...entry,
-							parentId: pathParentId,
-							firstKeptEntryId:
-								entry.firstKeptEntryId === entry.id
-									? entry.id
-									: (replacementByLabelId.get(entry.firstKeptEntryId) ?? entry.firstKeptEntryId),
-						}
-					: { ...entry, parentId: pathParentId },
-			);
+			pathWithoutLabels.push({ ...entry, parentId: pathParentId });
 			pathParentId = entry.id;
+		}
+		// A compaction precedes its kept boundary, so remap label boundaries after the walk.
+		for (const entry of pathWithoutLabels) {
+			if (entry.type === "compaction" && entry.firstKeptEntryId !== entry.id) {
+				entry.firstKeptEntryId = replacementByLabelId.get(entry.firstKeptEntryId) ?? entry.firstKeptEntryId;
+			}
 		}
 
 		const newSessionId = createSessionId();
