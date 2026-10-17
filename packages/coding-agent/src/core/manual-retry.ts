@@ -8,7 +8,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import {
-	buildContextEntries,
+	buildSessionContext,
 	type SessionEntry,
 	type SessionMessageEntry,
 	sessionEntryToContextMessages,
@@ -101,6 +101,18 @@ function findLatestConversationEntryIndex(entries: readonly SessionEntry[]): num
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i]!;
 		if (entry.type === "custom" || entry.type === "custom_message") continue;
+		// Automatic retry omits a failed attempt before waiting. A process exit
+		// during that wait still has the same interrupted assistant boundary.
+		if (entry.type === "context_edit" && entry.replacement === null) {
+			const target = entries.find((candidate) => candidate.id === entry.targetId);
+			if (
+				target?.type === "message" &&
+				target.message.role === "assistant" &&
+				target.message.stopReason === "error"
+			) {
+				continue;
+			}
+		}
 		if (isMessageEntry(entry)) {
 			if (entry.message.role === "custom") continue;
 			if (
@@ -233,7 +245,7 @@ function contextThrough(entries: readonly SessionEntry[], endEntryId: string): A
 		reject("invalid_anchor", `Continuation boundary ${endEntryId} is not on the provided branch.`);
 	}
 	const boundedEntries = entries.slice(0, endIndex + 1);
-	return buildContextEntries([...boundedEntries], endEntryId).flatMap(sessionEntryToContextMessages);
+	return buildSessionContext([...boundedEntries], endEntryId).messages;
 }
 
 function findEntryIndex(entries: readonly SessionEntry[], entryId: string): number {
