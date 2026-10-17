@@ -55,6 +55,14 @@ For a built-in AI provider, run `/login` inside Pi to connect a subscription or 
 
 See the [documentation](docs/index.md) for full setup and usage instructions.
 
+**Response checkpoints (downstream fork).** Resume eligible persisted
+Responses state after reconnect or session restore without replacing canonical
+JSONL history. Native use is opt-in; the independent plugin has its own absent
+setting default. Read [settings and privacy](docs/settings.md#response-checkpoints),
+[endpoint capability](docs/models.md#response-checkpoint-capability), and
+[implementation/validation limits](../ai/README.md#response-checkpoints). This is
+not a released upstream or real-service durability claim.
+
 ## Share your OSS coding agent sessions
 
 If you use Pi for open source work, please share your coding agent sessions.

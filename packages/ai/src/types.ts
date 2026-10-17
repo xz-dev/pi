@@ -277,6 +277,16 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
 	 */
 	metadata?: Record<string, unknown>;
+	/**
+	 * Optional glob exclusion patterns for durable Responses checkpoints,
+	 * matched against provider ID, model ID and `provider/model`, never display names.
+	 * Raw absence stays absent; the native owner defaults to `["*"]`, the plugin to `[]`.
+	 * An explicit `[]` enables
+	 * checkpoints on confirmed-capable endpoints. Matching any pattern disables
+	 * checkpoint capture/resume for that request. Providers that do not support
+	 * durable checkpoints ignore this option. See [policy](../README.md#response-checkpoints).
+	 */
+	responseCheckpointExclude?: string[];
 }
 
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
@@ -586,6 +596,29 @@ export interface SystemMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+/**
+ * Persisted checkpoint metadata v1 (Response checkpoint contract). Only small
+ * hashes, a count and times — never input, output or credential material.
+ * The full local history stays canonical; invalid metadata is ignored.
+ * See [policy and paired implementation](../README.md#response-checkpoints) and
+ * [portable kernel](utils/response-checkpoints.ts); responseId stays on AssistantMessage.
+ */
+export interface ResponseCheckpoint {
+	version: 1;
+	/** SHA-256 hex of the effective origin/protocol/account/adapter identity. */
+	scopeHash: string;
+	/** SHA-256 hex of the canonical request envelope (all except input/parent/stream/type). */
+	requestHash: string;
+	/** SHA-256 hex of [responseId, complete encoded input prefix]. */
+	prefixHash: string;
+	/** Length of that complete encoded prefix. */
+	inputCount: number;
+	/** Local Unix milliseconds at completed capture. */
+	createdAt: number;
+	/** Known service/receipt expiry in Unix milliseconds; absent when unknown. */
+	expiresAt?: number;
+}
+
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
@@ -600,6 +633,13 @@ export interface AssistantMessage {
 	model: string;
 	responseModel?: string; // Concrete model reported by the provider, when reported. May equal the requested `model`
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/**
+	 * Bounded v1 durable-continuation metadata for Responses APIs. Optional;
+	 * persisted with the message and lets a new connection resume this turn via
+	 * `previous_response_id` after scope/envelope/prefix validation. Absent for
+	 * legacy messages and uncheckpointed responses. See utils/response-checkpoints.ts.
+	 */
+	responseCheckpoint?: ResponseCheckpoint;
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;
 	/** Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses. */
