@@ -47,6 +47,7 @@ Unified LLM API with provider collections, automatic auth resolution, token and 
 - [Cross-Provider Handoffs](#cross-provider-handoffs)
 - [System Messages](#system-messages)
 - [Context Serialization](#context-serialization)
+- [Response checkpoints](#response-checkpoints)
 - [Browser Usage](#browser-usage)
 - [Bundling and Tree Shaking](#bundling-and-tree-shaking)
 - [OAuth Providers](#oauth-providers)
@@ -1393,6 +1394,7 @@ interface OpenAICompletionsCompat {
 }
 
 interface OpenAIResponsesCompat {
+  supportsResponseCheckpoints?: boolean; // Verified persistent Responses capability; see Response checkpoints (not generic store support)
   supportsDeveloperRole?: boolean;   // Whether provider supports `developer` role vs `system` (default: true)
   sessionAffinityFormat?: 'openai' | 'openai-nosession' | 'openrouter'; // Session-affinity header format: 'openai' sends `session_id` and `x-client-request-id`; 'openai-nosession' sends `x-client-request-id`; 'openrouter' sends `x-session-id`. Does not affect the `prompt_cache_key` body param (default: auto-detected)
   supportsLongCacheRetention?: boolean; // Whether provider supports `prompt_cache_retention: "24h"` (default: true)
@@ -1605,6 +1607,136 @@ const continuation = await models.complete(newModel, restored);
 Models are plain serializable data too — no functions or implementations attached — so persisting "which model was this conversation using" is a `JSON.stringify` away.
 
 > **Note**: If the context contains images (encoded as base64 as shown in the Image Input section), those will also be serialized.
+
+## Response checkpoints
+
+Response checkpoints reduce repeated input after a socket reconnect or a session
+restart. They do not replace conversation history. This feature belongs to the
+xz-dev downstream fork; endpoint storage guarantees remain service-specific.
+
+### Enable storage deliberately
+
+The optional `responseCheckpointExclude: string[]` is the only checkpoint setting.
+Pass it in `stream`/`streamSimple` options, or use the coding agent's
+[settings](../coding-agent/docs/settings.md#response-checkpoints):
+
+```json
+{
+  "transport": "auto",
+  "responseCheckpointExclude": []
+}
+```
+
+| Raw setting | Native request owner | Independent plugin request owner |
+| --- | --- | --- |
+| Absent | Treat as `["*"]`: disabled | Treat as `[]`: eligible targets enabled |
+| `[]` | Eligible targets enabled | Eligible targets enabled |
+| `["*"]` | All targets excluded | All targets excluded |
+
+Raw absence stays absent through settings persistence and Agent/SDK forwarding;
+only the actual request owner applies its default. A malformed value or a list
+containing a non-string disables checkpoints rather than enabling them.
+
+Both implementations use `minimatch` **10.2.6** with `{ nocase: true }` against
+provider ID, model ID, and combined `provider/model` ID, never display names.
+This is an unordered exclusion list: any match disables the feature, not an
+ordered gitignore exception list. Literal `"*"` excludes all targets, including
+slash-containing IDs. Other patterns retain minimatch segment, globstar, brace,
+and character-class semantics: `"openai/*"` does not match
+`openai/nested/model`, while `"openai/**"` does. For example,
+`["openai/**", "gpt-[45]*"]` excludes matching provider/model or model IDs.
+
+Only `auto` and `websocket-cached` can use durable checkpoints. Explicit SSE and
+uncached `websocket` keep their existing behavior; this adds no HTTP
+continuation. A supported official OpenAI API-key Responses mode is eligible;
+other endpoints need the exact model declaration
+`compat.supportsResponseCheckpoints: true` after persistence has been verified
+for that endpoint/account. A brand, model name, `resp_` ID, or acceptance of a
+`store` field is not proof. Unsupported Codex/ChatGPT modes stay unchanged.
+See [custom endpoint configuration](../coding-agent/docs/models.md#response-checkpoint-capability).
+
+**Privacy:** eligibility requests remote `store: true` before the payload hook.
+An explicit resulting `store: false` from `onPayload` prevents durable use and
+capture; a server's explicit `store: false` prevents capture too. Confirm the
+service's storage and retention policy before enabling this. No universal TTL,
+answer cache, KV-cache reuse, reduced billing, or retention guarantee is implied.
+The official protocol's [persisted continuation documentation](https://developers.openai.com/api/docs/guides/websocket-mode)
+is not a live-service test.
+
+### History, validation, and repair
+
+The full canonical conversation remains in session JSONL. Completed, stored,
+locally reconstructable assistant responses may add
+[`responseCheckpoint`](src/types.ts): version `1`, SHA-256 `scopeHash`,
+`requestHash`, `prefixHash`, `inputCount`, `createdAt`, and optional known
+`expiresAt`. The response ID stays in existing `AssistantMessage.responseId`.
+There are no stored input/output snapshots in this metadata and no side database.
+Hashes bind the actual destination, wire credential/account/header scope,
+request envelope, and exact SDK-encoded prefix, including tool and opaque
+reasoning data. Credentials themselves are not stored in checkpoint metadata.
+
+On restore or branch rollback, only the latest assistant on the effective active
+branch is considered. An exact match sends that response ID plus the remaining
+input. Invalid, expired, foreign-scope or unknown-version metadata, edited history,
+changed envelope, incomplete reconstruction, or an empty/unsafe suffix uses the
+full request. Checkpoints never make an otherwise valid local session unusable.
+Caller-supplied `previous_response_id` owns its lineage; a parent-only history is
+not treated as complete local history.
+
+A proven pre-execution missing-reference rejection may trigger at most one WS
+repair from genuine saved full history. The plugin's independently retained
+strict message-ID rejection repair (including its exact WS 1008 signature) has
+the same no-output/full-history boundary; arbitrary 1008 closes are not proof.
+No transparent replay follows output, authentication failure, unknown execution,
+or caller-dependent ancestry. A failed repair is terminal: no hidden provider
+retry or extra SSE attempt. Existing ordinary transport recovery is separate.
+
+### Implementation and ownership
+
+- [Native request owner](src/api/openai-responses.ts): policy, capability, storage
+  hook ordering, wire identity, and repair boundary.
+- [Native WS adapter](src/api/openai-responses-websocket.ts): capture and selection
+  around the [portable kernel](src/utils/response-checkpoints.ts).
+- [Public metadata](src/types.ts) and [capability schema](src/providers/compat-schema.ts).
+- [Raw settings](../coding-agent/src/core/settings-manager.ts) and
+  [Agent/SDK request wiring](../coding-agent/src/core/sdk.ts).
+- Paired [OpenAI API plugin repository](https://github.com/xz-dev/openai-api-pi-extension)
+  and [bridge source](https://github.com/xz-dev/openai-api-pi-extension/blob/main/responses-websocket-fetch.ts).
+  The plugin owns its checkpoint policy and transport independently.
+
+Native alone, plugin on stock Pi, and plugin on the fork each have one request
+owner. The plugin uses the host's SSE serializer/parser through custom fetch as
+an internal codec bridge, not HTTP continuation; native WS planning cannot run
+under it. Same portable kernel bytes do not imply interchangeable checkpoints:
+adapter identity remains part of scope.
+
+Bounded validation used loopback protocol fixtures: plugin suites passed 222/222
+on stock 0.84.2 and fork 1.3; independent targeted eight and frozen four cases
+passed on each host. Native-only CLI restart coverage used four processes;
+combined stock/fork plugin coverage used eight. CLI provenance was preserved,
+not relabelled as direct human terminal input.
+
+Additional network-namespace-isolated loopback checks passed all 10 processes:
+Bun single-executable Pi 1.3.0-xz.306 with the installed plugin (absent resumes,
+`["*"]` sends full input), native source under Bun 1.4.3 (`[]` resumes,
+absent sends full input), and stock 0.84.2 with the installed plugin (absent
+resumes). All exited 0 with zero HTTP inference.
+
+Real packed-plugin installs via `pi install npm:...@<tgz>` passed on the Bun
+single-executable and stock 0.84.2 hosts, with online registry access for
+dependencies: exactly six runtime packages and no Pi SDK. The earlier offline
+`ENOTCACHED` result was a cache miss, not an unresolved installer failure.
+
+With model data hydrated separately in each checkout (`npm run hydrate:model-data`),
+main `41be7dc` plus the checkpoint changes passed `tsc` and full `npm run check`,
+with AI tests 206/206 and settings tests 179/179. The earlier Kimi TS2322 was a
+foreign-catalog artifact; older owner-branch fixture diagnostics are fixed
+upstream, not caused by checkpoints. The downstream sync rebuild applies the
+owning patch to the current upstream baseline.
+
+Evidence remains limited to loopback fixtures, not real-gateway retention,
+account isolation, or every host layout. No live-service durability guarantee
+is implied.
 
 ## Browser Usage
 
