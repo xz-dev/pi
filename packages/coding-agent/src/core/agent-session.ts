@@ -139,6 +139,7 @@ import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type ContextEditEntry,
+	getEntriesAfterLatestCompaction,
 	getLatestCompactionEntry,
 	type SessionEntry,
 	SessionManager,
@@ -3318,8 +3319,7 @@ export class AgentSession {
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
 				// Check why we can't compact
-				const lastEntry = pathEntries[pathEntries.length - 1];
-				if (lastEntry?.type === "compaction") {
+				if (getEntriesAfterLatestCompaction(pathEntries)?.length === 0) {
 					throw new Error("Already compacted");
 				}
 				throw new Error("Nothing to compact (session too small)");
@@ -3542,10 +3542,15 @@ export class AgentSession {
 				(entry): entry is ContextEditEntry => entry.type === "context_edit" && entry.targetId === assistantEntryId,
 			)
 			.at(-1);
+		const assistantEntry = assistantIndex >= 0 ? branch[assistantIndex] : undefined;
+		const latestCompaction = getLatestCompactionEntry(branch);
+		// A compaction precedes its kept entries in the tree; compare recording times instead.
+		const compactedAfterAssistant =
+			latestCompaction !== null &&
+			assistantEntry !== undefined &&
+			Date.parse(latestCompaction.timestamp) > Date.parse(assistantEntry.timestamp);
 		const assistantRetainedForExplicitRecovery =
-			assistantEntryId === undefined ||
-			(!entriesAfterAssistant.some((entry) => entry.type === "compaction") &&
-				latestAssistantEdit?.replacement !== null);
+			assistantEntryId === undefined || (!compactedAfterAssistant && latestAssistantEdit?.replacement !== null);
 		const assistantUsageMatchesProjection = assistantIsProjected && !hasPostAssistantContextEdit;
 		const explicitOverflow = assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage);
 		const contextOverflow =
@@ -4838,10 +4843,9 @@ export class AgentSession {
 						: [],
 				),
 			);
-			const compactionIndex = branch.findIndex((entry) => entry.id === latestCompaction.id);
-			const hasPostCompactionUsage = branch
-				.slice(compactionIndex + 1)
-				.some((entry) => projectedAssistants.has(entry.id));
+			const hasPostCompactionUsage = getEntriesAfterLatestCompaction(branch)!.some((entry) =>
+				projectedAssistants.has(entry.id),
+			);
 			if (!hasPostCompactionUsage) return { tokens: null, contextWindow, percent: null };
 		}
 
