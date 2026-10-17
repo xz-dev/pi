@@ -20,7 +20,7 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 } from "../src/terminal-image.ts";
-import type { TuiMouseEvent } from "../src/tui.ts";
+import { renderFakeCursor, type TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -1362,6 +1362,26 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("keeps the selection highlight after a fake cursor cell", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(`> ${renderFakeCursor("a")}bcd`, 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;6;1M");
+		terminal.sendInput("\x1b[<3;6;1m");
+		await terminal.waitForRender();
+
+		assert.ok(
+			terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b[27m\x1b[7mbcd")),
+			"selection inverse must be reapplied after the fake cursor ends",
+		);
+
+		tui.stop();
+	});
+
 	it("uses an injected copySelection handler instead of OSC 52 and reports success", async () => {
 		const terminal = new RecordingTerminal(20, 4);
 		const copied: string[] = [];
@@ -1842,6 +1862,26 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	// #10769
+	it("scrolls the transcript on wheel input a focused overlay does not handle", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		const overlay = new InputOverlay();
+		tui.start();
+		await terminal.waitForRender();
+		const topBefore = tui.viewportTop;
+		tui.showOverlay(overlay, { anchor: "top-left", width: 10 });
+		await terminal.waitForRender();
+		assert.strictEqual(overlay.focused, true);
+
+		terminal.sendInput("\x1b[<64;3;1M");
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop < topBefore);
+		assert.deepStrictEqual(overlay.inputs, []);
+		tui.stop();
+	});
+
 	it("focuses and captures drag gestures for mouse-aware components", async () => {
 		const terminal = new VirtualTerminal(20, 2);
 		const tui = new TuiAltScreen(terminal);
@@ -1981,7 +2021,7 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
-	it("gives wheel and viewport keys to a focused overlay", async () => {
+	it("gives viewport keys to a focused overlay", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui = new TuiAltScreen(terminal);
 		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
@@ -1993,8 +2033,7 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.strictEqual(overlay.focused, true);
 
-		const wheel = "\x1b[<64;10;3M";
-		const keys = ["\x1b[5~", "\x1b[6~", "\x1bOH", "\x1bOF", wheel];
+		const keys = ["\x1b[5~", "\x1b[6~", "\x1bOH", "\x1bOF"];
 		for (const key of keys) terminal.sendInput(key);
 		await terminal.waitForRender();
 

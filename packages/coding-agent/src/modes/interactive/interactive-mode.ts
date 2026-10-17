@@ -184,6 +184,7 @@ import { UserMessageSelectorComponent } from "./components/user-message-selector
 import { editInExternalEditor } from "./external-editor.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
+import { type BlockedStatus, ProgramStatusReporter } from "./program-status-reporter.ts";
 import { shareSession } from "./session-share.ts";
 import {
 	getAvailableThemes,
@@ -218,7 +219,7 @@ interface WorkingStatusEditor extends EditorComponent {
 	setWorkingStatusIndicator(indicator: StatusIndicator | undefined): void;
 }
 
-function isWorkingStatusEditor(editor: EditorComponent): editor is WorkingStatusEditor {
+function isEmbeddedStatus(editor: EditorComponent): editor is WorkingStatusEditor {
 	return (
 		"embedWorkingStatus" in editor &&
 		editor.embedWorkingStatus === true &&
@@ -545,6 +546,12 @@ export class InteractiveMode {
 
 	// Shutdown state
 	private shutdownRequested = false;
+
+	/** Reports working, blocked, done, and error states to terminals that support OSC 7501. */
+	private readonly programStatus = new ProgramStatusReporter(
+		() => this.ui.terminal,
+		() => this.sessionManager.getSessionName(),
+	);
 
 	/** The `/bug` hint is shown at most once per session so error output stays readable. */
 	private bugReportHintShown = false;
@@ -990,6 +997,7 @@ export class InteractiveMode {
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
 		this.isInitialized = true;
+		this.programStatus.report();
 		this.ensurePngTranscoder();
 
 		this.themeController.applyFromSettings();
@@ -2084,6 +2092,7 @@ export class InteractiveMode {
 
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.programStatus.reset();
 		this.applyRuntimeSettings();
 
 		if (options.renderBeforeBind) {
@@ -2295,7 +2304,7 @@ export class InteractiveMode {
 
 	private setEditorWorkingStatusIndicator(indicator: StatusIndicator | undefined): boolean {
 		this.defaultEditor.setWorkingStatusIndicator(undefined);
-		if (!isWorkingStatusEditor(this.editor)) return false;
+		if (!isEmbeddedStatus(this.editor)) return false;
 		this.editor.setWorkingStatusIndicator(indicator);
 		return true;
 	}
@@ -2335,7 +2344,7 @@ export class InteractiveMode {
 	}
 
 	private showWorkingStatusIndicator(): void {
-		const colorFn = isWorkingStatusEditor(this.editor)
+		const colorFn = isEmbeddedStatus(this.editor)
 			? (text: string) =>
 					(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(text)
 			: undefined;
@@ -2682,6 +2691,7 @@ export class InteractiveMode {
 		title: string,
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
+		blocked: BlockedStatus = { kind: "question", message: title },
 	): Promise<string | undefined> {
 		return new Promise((resolve) => {
 			if (opts?.signal?.aborted) {
@@ -2715,6 +2725,8 @@ export class InteractiveMode {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionSelector);
 			this.ui.setFocus(this.extensionSelector);
+			// Extension dialogs share the editor slot: opening one replaces the status of a displaced one.
+			this.programStatus.setBlocked("extension-dialog", blocked);
 			this.ui.requestRender();
 		});
 	}
@@ -2727,6 +2739,7 @@ export class InteractiveMode {
 		this.editorContainer.clear();
 		this.editorContainer.addChild(this.editor);
 		this.extensionSelector = undefined;
+		this.programStatus.setBlocked("extension-dialog", undefined);
 		this.ui.setFocus(this.editor);
 		this.ui.requestRender();
 	}
@@ -2739,7 +2752,10 @@ export class InteractiveMode {
 		message: string,
 		opts?: ExtensionUIDialogOptions,
 	): Promise<boolean> {
-		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts);
+		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts, {
+			kind: "permission",
+			message: title,
+		});
 		return result === "Yes";
 	}
 
@@ -2791,6 +2807,7 @@ export class InteractiveMode {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionInput);
 			this.ui.setFocus(this.extensionInput);
+			this.programStatus.setBlocked("extension-dialog", { kind: "question", message: title });
 			this.ui.requestRender();
 		});
 	}
@@ -2803,6 +2820,7 @@ export class InteractiveMode {
 		this.editorContainer.clear();
 		this.editorContainer.addChild(this.editor);
 		this.extensionInput = undefined;
+		this.programStatus.setBlocked("extension-dialog", undefined);
 		this.ui.setFocus(this.editor);
 		this.ui.requestRender();
 	}
@@ -2833,6 +2851,7 @@ export class InteractiveMode {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionEditor);
 			this.ui.setFocus(this.extensionEditor);
+			this.programStatus.setBlocked("extension-dialog", { kind: "question", message: title });
 			this.ui.requestRender();
 		});
 	}
@@ -2844,6 +2863,7 @@ export class InteractiveMode {
 		this.editorContainer.clear();
 		this.editorContainer.addChild(this.editor);
 		this.extensionEditor = undefined;
+		this.programStatus.setBlocked("extension-dialog", undefined);
 		this.ui.setFocus(this.editor);
 		this.ui.requestRender();
 	}
@@ -2969,12 +2989,14 @@ export class InteractiveMode {
 
 		return new Promise((resolve, reject) => {
 			let component: Component & { dispose?(): void };
+			let overlayHandle: OverlayHandle | undefined;
 			let closed = false;
 
 			const close = (result: T) => {
 				if (closed) return;
 				closed = true;
-				if (isOverlay) this.ui.hideOverlay();
+				// Remove this overlay, not the topmost one: another overlay may have opened above it.
+				if (isOverlay) overlayHandle?.hide();
 				else restoreEditor();
 				// Note: both branches above already call requestRender
 				resolve(result);
@@ -3003,9 +3025,9 @@ export class InteractiveMode {
 							const w = (component as { width?: number }).width;
 							return w ? { width: w } : undefined;
 						};
-						const handle = this.ui.showOverlay(component, resolveOptions());
+						overlayHandle = this.ui.showOverlay(component, resolveOptions());
 						// Expose handle to caller for visibility control
-						options?.onHandle?.(handle);
+						options?.onHandle?.(overlayHandle);
 					} else {
 						this.disposeActiveSelector();
 						this.editorContainer.clear();
@@ -3389,6 +3411,7 @@ export class InteractiveMode {
 		}
 
 		this.footer.invalidate();
+		this.programStatus.handleEvent(event);
 
 		switch (event.type) {
 			case "agent_start":
@@ -3622,7 +3645,7 @@ export class InteractiveMode {
 				if (event.isError) this.maybeShowInstallChangeWarning();
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
-					component.updateResult({ ...event.result, isError: event.isError });
+					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
 					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
@@ -3657,7 +3680,13 @@ export class InteractiveMode {
 				this.defaultEditor.onEscape = () => {
 					this.session.abortCompaction();
 				};
-				this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason));
+				const colorFn = isEmbeddedStatus(this.editor)
+					? (text: string) =>
+							(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(
+								text,
+							)
+					: undefined;
+				this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason, colorFn));
 				this.ui.requestRender();
 				break;
 			}
@@ -3756,7 +3785,13 @@ export class InteractiveMode {
 				if (event.source === "branchSummary") {
 					this.showStatusIndicator(new BranchSummaryStatusIndicator(this.ui));
 				} else {
-					this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason));
+					const colorFn = isEmbeddedStatus(this.editor)
+						? (text: string) =>
+								(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(
+									text,
+								)
+						: undefined;
+					this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason, colorFn));
 				}
 				this.ui.requestRender();
 				break;
@@ -4905,6 +4940,7 @@ export class InteractiveMode {
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
 					transport: this.settingsManager.getTransport(),
+					sessionShareDestination: this.settingsManager.getSessionShareDestination(),
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					cacheWarmingMode: this.settingsManager.getCacheWarmingMode(),
 					thinkingLevel: this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL,
@@ -4975,6 +5011,9 @@ export class InteractiveMode {
 					onTransportChange: (transport) => {
 						this.settingsManager.setTransport(transport);
 						this.session.agent.transport = transport;
+					},
+					onSessionShareDestinationChange: (destination) => {
+						this.settingsManager.setSessionShareDestination(destination);
 					},
 					onHttpIdleTimeoutMsChange: (timeoutMs) => {
 						this.settingsManager.setHttpIdleTimeoutMs(timeoutMs);
@@ -6201,7 +6240,7 @@ export class InteractiveMode {
 		};
 
 		try {
-			await this.loginProvider(dialog, providerId, "api_key");
+			await this.loginProvider(dialog, providerId, providerName, "api_key");
 			restoreEditor();
 			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
 		} catch (error: unknown) {
@@ -6294,18 +6333,24 @@ export class InteractiveMode {
 	private async loginProvider(
 		dialog: LoginDialogComponent,
 		providerId: string,
+		providerName: string,
 		method: "api_key" | "oauth",
 	): Promise<void> {
-		await this.session.modelRuntime.login(
-			providerId,
-			method,
-			{
-				signal: dialog.signal,
-				prompt: (prompt) => this.showAuthPrompt(dialog, prompt, providerId),
-				notify: (event) => this.notifyAuthDialog(dialog, event),
-			},
-			{ getDeviceId: () => this.settingsManager.getOrCreateDeviceId() },
-		);
+		this.programStatus.setBlocked("login", { kind: "auth", message: `Log in to ${providerName}` });
+		try {
+			await this.session.modelRuntime.login(
+				providerId,
+				method,
+				{
+					signal: dialog.signal,
+					prompt: (prompt) => this.showAuthPrompt(dialog, prompt, providerId),
+					notify: (event) => this.notifyAuthDialog(dialog, event),
+				},
+				{ getDeviceId: () => this.settingsManager.getOrCreateDeviceId() },
+			);
+		} finally {
+			this.programStatus.setBlocked("login", undefined);
+		}
 	}
 
 	private async showLoginDialog(providerId: string, providerName: string, onBack?: () => void): Promise<void> {
@@ -6324,7 +6369,7 @@ export class InteractiveMode {
 		};
 
 		try {
-			await this.loginProvider(dialog, providerId, "oauth");
+			await this.loginProvider(dialog, providerId, providerName, "oauth");
 			restoreEditor();
 			await this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel);
 			if (providerId === RADIUS_PROVIDER_ID) this.offerRadiusMcpServer(providerId, providerName);

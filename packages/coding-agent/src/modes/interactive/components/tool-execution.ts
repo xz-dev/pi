@@ -58,6 +58,7 @@ export class ToolExecutionComponent extends Container {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError: boolean;
 		details?: any;
+		durationMs?: number;
 	};
 	private hideComponent = false;
 
@@ -133,6 +134,7 @@ export class ToolExecutionComponent extends Container {
 			expanded: this.expanded,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
+			durationMs: this.isPartial ? undefined : this.result?.durationMs,
 			outputPad: this.outputPad,
 		};
 	}
@@ -187,6 +189,8 @@ export class ToolExecutionComponent extends Container {
 			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 			details?: any;
 			isError: boolean;
+			/** Execution time of a final result. */
+			durationMs?: number;
 		},
 		isPartial = false,
 	): void {
