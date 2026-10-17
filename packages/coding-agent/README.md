@@ -20,6 +20,14 @@ Pi ships with powerful defaults but skips features like sub-agents and plan mode
 
 Use Pi [interactively](docs/usage.md), automate it in [print or JSON mode](docs/cli.md), control it over [RPC](docs/rpc.md), or build apps with the [Pi TypeScript SDK](docs/sdk.md). See [OpenClaw](https://github.com/OpenClaw/OpenClaw) for a real-world integration.
 
+**Response checkpoints (downstream fork).** Resume eligible persisted
+Responses state after reconnect or session restore without replacing canonical
+JSONL history. Native use is opt-in; the independent plugin has its own absent
+setting default. Read [settings and privacy](docs/settings.md#response-checkpoints),
+[endpoint capability](docs/models.md#response-checkpoint-capability), and
+[implementation/validation limits](../ai/README.md#response-checkpoints). This is
+not a released upstream or real-service durability claim.
+
 ## Getting started
 
 Install the command-line interface:
@@ -54,14 +62,6 @@ pi
 For a built-in AI provider, run `/login` inside Pi to connect a subscription or API key. Then give Pi a task.
 
 See the [documentation](docs/index.md) for full setup and usage instructions.
-
-**Response checkpoints (downstream fork).** Resume eligible persisted
-Responses state after reconnect or session restore without replacing canonical
-JSONL history. Native use is opt-in; the independent plugin has its own absent
-setting default. Read [settings and privacy](docs/settings.md#response-checkpoints),
-[endpoint capability](docs/models.md#response-checkpoint-capability), and
-[implementation/validation limits](../ai/README.md#response-checkpoints). This is
-not a released upstream or real-service durability claim.
 
 ## Share your OSS coding agent sessions
 
