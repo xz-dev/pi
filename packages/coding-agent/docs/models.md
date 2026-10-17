@@ -78,6 +78,45 @@ To route a built-in provider through a proxy, set only its `baseUrl`. Its models
 
 [Models Configuration](models-configuration.md) lists every field.
 
+### Response checkpoint capability
+
+Only declare persistent Responses support after verifying it for the endpoint
+and account. For a custom native Responses provider, a minimal `models.json`
+example is:
+
+```json
+{
+  "providers": {
+    "verified-responses": {
+      "baseUrl": "https://your-gateway.example.com/v1",
+      "api": "openai-responses",
+      "apiKey": "$GATEWAY_API_KEY",
+      "models": [
+        {
+          "id": "your-model-id",
+          "compat": { "supportsResponseCheckpoints": true }
+        }
+      ]
+    }
+  }
+}
+```
+
+Replace the example endpoint and model ID and configure the credential. This is
+a capability declaration, not a server test. Generic Responses compatibility,
+model branding, a `resp_` ID, and acceptance of `store` do not prove persistence.
+Supported official OpenAI API-key mode has a narrow default; unsupported
+Codex/ChatGPT modes are unchanged. For an existing extension model, use
+`providers.<provider>.modelOverrides.<model-id>.compat` instead of replacing its
+catalog. Never edit generated model catalogs to enable this.
+
+Capability alone does not override policy: native requests need an explicit
+exclusion list that does not match the target, such as
+`"responseCheckpointExclude": []` in [settings](settings.md#response-checkpoints),
+and `auto` or `websocket-cached`. This asks for remote `store: true`; payload-hook
+and server `store: false` are respected. See [checkpoint behavior and privacy](../../ai/README.md#response-checkpoints),
+[capability schema](../../ai/src/providers/compat-schema.ts), and
+[native request owner](../../ai/src/api/openai-responses.ts).
 ### Describe model input and caching
 
 Use `inputLimits.images.resize` to control how Pi encodes new image attachments, `read` results, and tool-result images before storing them in conversation history:
