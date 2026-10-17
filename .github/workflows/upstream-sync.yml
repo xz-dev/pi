@@ -58,6 +58,7 @@ jobs:
             +refs/heads/patch/defer-threshold-compaction:refs/remotes/origin/patch/defer-threshold-compaction \
             +refs/heads/patch/startup-submit-readiness:refs/remotes/origin/patch/startup-submit-readiness \
             +refs/heads/patch/cold-start-retry:refs/remotes/origin/patch/cold-start-retry \
+            +refs/heads/patch/compaction-boundary-insert:refs/remotes/origin/patch/compaction-boundary-insert \
             +refs/heads/patch/async-compaction:refs/remotes/origin/patch/async-compaction \
             +refs/heads/patch/compact-input-dock:refs/remotes/origin/patch/compact-input-dock \
             +refs/heads/patch/responsive-selectors:refs/remotes/origin/patch/responsive-selectors \
@@ -104,6 +105,7 @@ jobs:
             defer-threshold-compaction \
             startup-submit-readiness \
             cold-start-retry \
+            compaction-boundary-insert \
             async-compaction \
             compact-input-dock \
             responsive-selectors \
