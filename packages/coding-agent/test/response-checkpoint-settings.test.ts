@@ -225,9 +225,14 @@ describe("native session checkpoint requests over loopback WebSocket", () => {
 				expect(frames[1].store).toBe(enabled);
 				expect(frames[1].previous_response_id).toBe(enabled ? assistant.responseId : undefined);
 				if (enabled) {
-					expect(frames[1].input).toEqual([
-						{ role: "user", content: [{ type: "input_text", text: "second local question" }] },
-					]);
+					// Continuation sends exactly one user message containing the new text.
+					// patch/message-origin may prepend a source label input_text, so assert
+					// the real property: one user item that includes the new question and
+					// no full-history replay of the first question.
+					expect(frames[1].input).toHaveLength(1);
+					expect((frames[1].input[0] as { role?: string }).role).toBe("user");
+					expect(JSON.stringify(frames[1].input)).toContain("second local question");
+					expect(JSON.stringify(frames[1].input)).not.toContain("first local question");
 				} else {
 					expect(JSON.stringify(frames[1].input)).toContain("first local question");
 					expect(JSON.stringify(frames[1].input)).toContain("local answer");
