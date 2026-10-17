@@ -1046,6 +1046,11 @@
           "description": "Whether the provider accepts max_output_tokens. Some Codex-protocol gateways reject it.",
           "default": true
         },
+        "supportsResponseCheckpoints": {
+          "type": "boolean",
+          "description": "Whether the endpoint provides durable, persistent response state for previous_response_id continuation (store:true hydration across connections). Only declare this for verified services; the official OpenAI Responses WebSocket endpoint is enabled by default. Unknown compatible gateways must NOT set this — an accepted store field or resp_* id prefix is not proof of persistence.",
+          "default": false
+        },
         "supportsEagerToolInputStreaming": {
           "type": "boolean",
           "description": "Whether the provider accepts per-tool eager_input_streaming. When false, the Anthropic provider omits tools[].eager_input_streaming and sends the legacy fine-grained-tool-streaming-2025-05-14 beta header for tool-enabled requests.",

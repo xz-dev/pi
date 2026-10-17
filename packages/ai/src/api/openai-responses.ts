@@ -1,3 +1,4 @@
+import { minimatch } from "minimatch";
 import OpenAI from "openai";
 import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
@@ -45,6 +46,7 @@ import {
 	recordWebSocketFailure,
 	recordWebSocketSseFallback,
 	resetResponsesWebSocketDebugStats,
+	responsesCheckpointScopeHash,
 } from "./openai-responses-websocket.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
@@ -115,7 +117,53 @@ function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCo
 		supportsExplicitPromptCacheMode: model.compat?.supportsExplicitPromptCacheMode ?? false,
 		supportsMaxOutputTokens: model.compat?.supportsMaxOutputTokens ?? true,
 		supportsMidConvoEffort: model.compat?.supportsMidConvoEffort ?? false,
+		supportsResponseCheckpoints:
+			model.compat?.supportsResponseCheckpoints ?? isOfficialResponsesCheckpointService(model),
 	};
+}
+
+/**
+ * Narrowly documented official-service default: the documented OpenAI
+ * Responses WebSocket service persists response state with store:true and can
+ * hydrate older response IDs across connections. All other endpoints need an
+ * explicit `compat.supportsResponseCheckpoints: true` declaration — a generic
+ * compatible gateway or resp_* id prefix is not capability evidence.
+ */
+function isOfficialResponsesCheckpointService(model: Model<"openai-responses">): boolean {
+	return model.provider === "openai" && model.baseUrl === "https://api.openai.com/v1";
+}
+
+/**
+ * Whether durable response checkpoints are enabled for this request. Absent
+ * `responseCheckpointExclude` means the native default `["*"]` — disabled.
+ * An explicit `[]` enables eligible targets; malformed lists stay disabled.
+ * Policy: [Response checkpoints](../../README.md#response-checkpoints).
+ * Paired plugin: https://github.com/xz-dev/openai-api-pi-extension/blob/main/responses-websocket-fetch.ts
+ * The plugin owns its checkpoint policy and transport independently.
+ */
+function responseCheckpointsEnabled(
+	model: Model<"openai-responses">,
+	options: OpenAIResponsesOptions | undefined,
+	compat: Required<OpenAIResponsesCompat>,
+): boolean {
+	if (!compat.supportsResponseCheckpoints) return false;
+	const exclude = options?.responseCheckpointExclude;
+	if (exclude === undefined) return false; // missing => ["*"]
+	if (!Array.isArray(exclude) || !Array.from(exclude).every((pattern) => typeof pattern === "string")) return false;
+	const providerTarget = model.provider;
+	const modelTarget = model.id;
+	const combinedTarget = `${model.provider}/${model.id}`;
+	for (const pattern of exclude) {
+		if (
+			pattern === "*" ||
+			minimatch(combinedTarget, pattern, { nocase: true }) ||
+			minimatch(providerTarget, pattern, { nocase: true }) ||
+			minimatch(modelTarget, pattern, { nocase: true })
+		) {
+			return false;
+		}
+	}
+	return true;
 }
 
 /** Effort to send in configuration_update items, or undefined to send it as reasoning.effort. */
@@ -221,10 +269,31 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				grammarToolInputProperties,
 				configurationUpdateEffort,
 			);
+			// Durable checkpoints extend WS cached modes only. Request persistent
+			// state BEFORE the payload hook so an explicit caller store:false still
+			// disables capture below.
+			const requestTransport = options?.transport || "auto";
+			const { headers: websocketHeaders, scopeHeaders } =
+				requestTransport === "sse"
+					? { headers: new Headers(), scopeHeaders: {} }
+					: buildWebSocketHeaders(model, normalizedContext, apiKey, options?.headers, cacheSessionId);
+			// Header overrides, not the unused API-key option, determine the WS credential.
+			const authorization = websocketHeaders.get("authorization");
+			const checkpointsEnabled =
+				(requestTransport === "auto" || requestTransport === "websocket-cached") &&
+				model.provider !== "openai-codex" &&
+				!isChatGPTSignIn(model, authorization?.replace(/^Bearer\s+/i, "") ?? "") &&
+				responseCheckpointsEnabled(model, options, compat);
+			if (checkpointsEnabled) {
+				params.store = true;
+			}
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
+			// An explicit store:false from the payload hook is a privacy choice we
+			// never override; it also disables durable capture for this request.
+			const checkpointsActive = checkpointsEnabled && params.store === true;
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -233,18 +302,17 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 
 			const transport = options?.transport || "auto";
 			const sessionId = options?.sessionId;
-			let identityKey = "";
-			let websocketHeaders = new Headers();
-			if (transport !== "sse") {
-				websocketHeaders = buildWebSocketHeaders(
-					model,
-					normalizedContext,
-					apiKey,
-					options?.headers,
-					cacheSessionId,
-				);
-				identityKey = websocketIdentityKey(model, apiKey, websocketHeaders);
-			}
+			const identityKey = transport === "sse" ? "" : websocketIdentityKey(model, apiKey, websocketHeaders);
+			// Only generated transport values are absent from the durable identity.
+			const checkpointScope = checkpointsActive
+				? () =>
+						responsesCheckpointScopeHash({
+							url: model.baseUrl,
+							apiFamily: "openai-responses",
+							credential: authorization ?? websocketHeaders.get("cf-aig-authorization") ?? "",
+							headers: scopeHeaders,
+						})
+				: undefined;
 			const fallbackState = sessionId
 				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
 				: undefined;
@@ -264,8 +332,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
 				let retriedMissingWebSocketContinuation = false;
+				let suppressDurablePlanning = false;
 				while (true) {
 					websocketStarted = false;
+					let websocketSent = false;
+					let fullHistory = !(checkpointsActive && params.previous_response_id !== undefined);
 					try {
 						await processResponsesWebSocket({
 							scope: OPENAI_RESPONSES_WEBSOCKET_SCOPE,
@@ -275,6 +346,10 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							output,
 							stream,
 							model,
+							onSent: (completeHistory) => {
+								websocketSent = true;
+								fullHistory = completeHistory;
+							},
 							onStart: () => {
 								websocketStarted = true;
 								if (!startEmitted) {
@@ -317,7 +392,30 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 								),
 							isTerminalError: (out) =>
 								out.stopReason === "error" || out.stopReason === "aborted" || out.stopReason === "pending",
+							durableCheckpoints: checkpointScope
+								? {
+										getScopeHash: checkpointScope,
+										getCandidate: () => {
+											// Newest assistant on the active branch only — older
+											// checkpoints stay unread, so no all-history scan. The
+											// candidate must be the LAST assistant: any later
+											// assistant without a checkpoint makes the lineage
+											// ineligible.
+											for (let i = normalizedContext.messages.length - 1; i >= 0; i--) {
+												const msg = normalizedContext.messages[i];
+												if (msg.role !== "assistant") continue;
+												if (!msg.responseId || msg.responseCheckpoint === undefined) return undefined;
+												return { responseId: msg.responseId, responseCheckpoint: msg.responseCheckpoint };
+											}
+											return undefined;
+										},
+										assign: (checkpoint) => {
+											output.responseCheckpoint = checkpoint;
+										},
+									}
+								: undefined,
 							forceFresh: recoveryState !== undefined,
+							suppressDurablePlanning,
 							options,
 						});
 
@@ -352,13 +450,27 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 						// A replacement socket would append to this same message; only repair before start.
 						if (
 							!aborted &&
+							(!checkpointsActive || fullHistory) &&
 							previousResponseNotFound &&
 							!startEmitted &&
 							output.content.length === 0 &&
 							!retriedMissingWebSocketContinuation
 						) {
 							retriedMissingWebSocketContinuation = true;
+							// Repair once with the preserved full body; re-planning the
+							// same stale durable reference would repeat the failure.
+							suppressDurablePlanning = true;
 							continue;
+						}
+						// A consumed full-history repair is the final attempt. A sent
+						// request without an explicit rejection has unknown execution.
+						if (
+							checkpointsActive &&
+							(!fullHistory ||
+								retriedMissingWebSocketContinuation ||
+								(websocketSent && !connectionLimitBeforeStart))
+						) {
+							throw error;
 						}
 						if (!aborted && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
 							retriedWebSocketConnectionLimit = true;
@@ -528,7 +640,7 @@ function createClient(
 	fetch?: typeof globalThis.fetch,
 	sessionId?: string,
 ) {
-	const headers = buildMergedHeaders(model, context, sessionId, optionsHeaders);
+	const { headers } = buildMergedHeaders(model, context, sessionId, optionsHeaders);
 	return new OpenAI({
 		apiKey,
 		baseURL: model.baseUrl,
@@ -547,34 +659,47 @@ function buildMergedHeaders(
 	context: TranscriptContext,
 	sessionId: string | undefined,
 	optionsHeaders?: ProviderHeaders,
-): ProviderHeaders {
+): { headers: ProviderHeaders; generated: Set<string> } {
 	const compat = getCompat(model);
-	const headers: ProviderHeaders = { "User-Agent": getPiUserAgent(), ...model.headers };
+	const headers: ProviderHeaders = {};
+	const provenance = new Map<string, boolean>();
+	const merge = (source: ProviderHeaders | undefined, generated: boolean) => {
+		for (const [name, value] of Object.entries(source ?? {})) {
+			headers[name] = value;
+			provenance.set(name, generated);
+		}
+	};
+	merge({ "User-Agent": getPiUserAgent() }, true);
+	merge(model.headers, false);
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilotHeaders = buildCopilotDynamicHeaders({
 			messages: context.messages,
 			hasImages,
 		});
-		Object.assign(headers, copilotHeaders);
+		merge(copilotHeaders, false);
 	}
 
 	if (sessionId) {
 		if (compat.sessionAffinityFormat === "openrouter") {
-			headers["x-session-id"] = sessionId;
+			merge({ "x-session-id": sessionId }, true);
 		} else {
 			if (compat.sessionAffinityFormat === "openai") {
-				headers.session_id = sessionId;
+				merge({ session_id: sessionId }, true);
 			}
-			headers["x-client-request-id"] = sessionId;
+			merge({ "x-client-request-id": sessionId }, true);
 		}
 	}
 
 	// Merge options headers last so they can override defaults (null deletes).
-	if (optionsHeaders) {
-		Object.assign(headers, optionsHeaders);
+	merge(optionsHeaders, false);
+	// Match the final case-insensitive wire merge, including differently cased keys.
+	const generated = new Set<string>();
+	for (const name of Object.keys(headers)) {
+		if (provenance.get(name)) generated.add(name.toLowerCase());
+		else generated.delete(name.toLowerCase());
 	}
-	return headers;
+	return { headers, generated };
 }
 
 function buildWebSocketHeaders(
@@ -583,8 +708,8 @@ function buildWebSocketHeaders(
 	apiKey: string,
 	optionsHeaders: ProviderHeaders | undefined,
 	sessionId: string | undefined,
-): Headers {
-	const merged = buildMergedHeaders(model, context, sessionId, optionsHeaders);
+): { headers: Headers; scopeHeaders: Record<string, string> } {
+	const { headers: merged, generated } = buildMergedHeaders(model, context, sessionId, optionsHeaders);
 	const headers = new Headers();
 	for (const [key, value] of Object.entries(providerHeadersToRecord(merged) ?? {})) {
 		headers.set(key, value);
@@ -597,7 +722,10 @@ function buildWebSocketHeaders(
 		headers.set("Authorization", `Bearer ${apiKey}`);
 	}
 	headers.set("OpenAI-Beta", OPENAI_BETA_RESPONSES_WEBSOCKETS);
-	return headers;
+	generated.add("openai-beta");
+	const scopeHeaders = headersToRecord(headers);
+	for (const name of generated) delete scopeHeaders[name];
+	return { headers, scopeHeaders };
 }
 
 function isSseMediaType(contentType: string | null | undefined): boolean {
@@ -619,7 +747,7 @@ function resolveResponsesWebSocketUrl(baseUrl?: string): string {
 	return url.toString();
 }
 
-/** WS frame shape: no `stream` (the socket itself streams); keep store:false. */
+/** WS frame shape: no `stream` (the socket itself streams); preserve the resolved store policy. */
 function toWebSocketBody(params: ResponseCreateParamsStreaming): { [key: string]: unknown } {
 	const { stream: _stream, ...rest } = params as unknown as Record<string, unknown>;
 	return rest;
