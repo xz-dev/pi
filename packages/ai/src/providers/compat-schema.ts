@@ -429,6 +429,13 @@ const OpenAIResponsesCompatProperties = {
 			default: true,
 		}),
 	),
+	supportsResponseCheckpoints: opt(
+		bool({
+			description:
+				"Whether the endpoint provides durable, persistent response state for previous_response_id continuation (store:true hydration across connections). Only declare this for verified services; the official OpenAI Responses WebSocket endpoint is enabled by default. Unknown compatible gateways must NOT set this — an accepted store field or resp_* id prefix is not proof of persistence.",
+			default: false,
+		}),
+	),
 };
 
 export const OpenAIResponsesCompatSchema = openObject(OpenAIResponsesCompatProperties, {
