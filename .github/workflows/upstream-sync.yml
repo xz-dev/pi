@@ -222,6 +222,8 @@ jobs:
               test/openai-responses-compat.test.ts \
               test/openai-responses-websocket.test.ts \
               test/openai-responses-websocket-loopback.test.ts \
+              test/response-checkpoints.test.ts \
+              test/openai-responses-checkpoints-websocket.test.ts \
               test/provider-transport-status.test.ts \
               test/openai-codex-websocket-lazy.test.ts \
               test/openai-codex-websocket-recovery.test.ts \
@@ -245,6 +247,8 @@ jobs:
             cd packages/coding-agent
             node ../../node_modules/vitest/dist/cli.js --run \
               test/suite/codex-websocket-retry.test.ts \
+              test/response-checkpoint-settings.test.ts \
+              test/response-checkpoint-persistence.test.ts \
               test/interactive-transport-status.test.ts \
               test/interactive-retry-presentation.test.ts
           )

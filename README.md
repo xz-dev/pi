@@ -64,6 +64,46 @@ Fixes:
 - Model picker keeps your selection during refresh
 - Empty messages from extensions no longer break Gemini
 
+### Response checkpoints
+
+The [Responses transport patch](https://github.com/xz-dev/pi/tree/patch/responses-websocket-transport)
+resumes verified persistent Responses state after reconnect or session restore.
+Native checkpoints are disabled when the optional
+`responseCheckpointExclude` setting is absent; explicit `[]` enables eligible
+targets, while `["*"]` excludes all. The independent
+[OpenAI API plugin](https://github.com/xz-dev/openai-api-pi-extension) defaults
+absent to `[]` and remains the sole request owner when loaded on the fork.
+
+Use only `auto` or `websocket-cached` with a verified persistent endpoint.
+Enabling requests remote `store: true`; hook/server `store: false` is respected.
+Full JSONL remains canonical, with validated bounded assistant metadata rather
+than a side database or cache guarantee. Read [settings](packages/coding-agent/docs/settings.md#response-checkpoints),
+[capability configuration](packages/coding-agent/docs/models.md#response-checkpoint-capability),
+and [SDK policy, sources, and limits](packages/ai/README.md#response-checkpoints).
+
+Additional network-namespace-isolated loopback checks passed all 10 processes:
+Bun single-executable Pi 1.3.0-xz.306 with the installed plugin (absent resumes,
+`["*"]` sends full input), native source under Bun 1.4.3 (`[]` resumes,
+absent sends full input), and stock 0.84.2 with the installed plugin (absent
+resumes). All exited 0 with zero HTTP inference.
+
+Real packed-plugin installs via `pi install npm:...@<tgz>` passed on the Bun
+single-executable and stock 0.84.2 hosts, with online registry access for
+dependencies: exactly six runtime packages and no Pi SDK. The earlier offline
+`ENOTCACHED` result was a cache miss, not an unresolved installer failure.
+
+With model data hydrated separately in each checkout (`npm run hydrate:model-data`),
+main `41be7dc` plus the checkpoint changes passed `tsc` and full `npm run check`,
+with AI tests 206/206 and settings tests 179/179. The earlier Kimi TS2322 was a
+foreign-catalog artifact; older owner-branch fixture diagnostics are fixed
+upstream, not caused by checkpoints. The downstream sync rebuild applies the
+owning patch to the current upstream baseline.
+
+Evidence remains limited to loopback fixtures, not real-gateway retention,
+account isolation, or every host layout. No live-service durability guarantee
+is implied.
+See [maintenance ownership](MAINTAIN.md#response-checkpoint-documentation).
+
 ## Installation
 
 xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 14 ZIP archives: FreeBSD amd64 and arm64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64, named `pi-<target>.zip`. Each ZIP holds exactly one file, the single-file executable `pi` (`pi.exe` on Windows). The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. The extracted executable is the complete product; there is no wrapper and no companion `pi-native` binary. No Node.js, Bun, npm, package manager, or generated installer script is required.

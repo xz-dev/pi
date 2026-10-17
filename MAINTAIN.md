@@ -80,7 +80,7 @@ Run this checklist whenever a downstream feature, fix, default, command, install
 - Integrate `patch/async-compaction` immediately after and as a descendant of `patch/cold-start-retry`, before `patch/compact-input-dock`. Apply only its predecessor-relative range and rebase it when the cold-start tip changes; it edits the same threshold-compaction entry points as `patch/defer-threshold-compaction`. It owns opt-in background threshold summarization (`compaction.background`, default off, with its `/settings` On/Off row; `compaction.backgroundStartRatio` as the earliest-start guard of the hybrid `T - min(32768, (1 - r) * T)` start), reuse of a pending summary by threshold, overflow and manual compaction under one foreground lock, once-only adoption and post-settlement fallback, independent embedded/standalone background status and manual skip/reuse feedback, stale-snapshot discard, per-attempt background usage entries, the controlled `background_compaction_end` diagnostic, usage-tolerant manual-retry publication in `SessionManager`, the settings schema/docs, and `packages/coding-agent/test/suite/agent-session-background-compaction.test.ts` plus `background-compaction-boundaries.test.ts`. `ci` runs both files plus `background-compaction-status.test.ts`, `interactive-mode-compaction.test.ts`, `status-indicator.test.ts` and `interactive-tui.test.ts` in the upstream-sync focused gate. `patch/message-origin` is a sibling descendant of cold-start; their ranges must stay textually independent. `ci` owns registration and root README wording.
 - Integrate `patch/compact-input-dock` before `patch/model-thinking-sort` as an independent patch based on upstream. The input toggle and automatic collapse use the same follow-end state as Jump to latest, without a plugin-specific exemption. Each fullscreen scrollback visit starts collapsed: standard editors keep a single editable draft line, and completion menus, selectors, and custom panels are hidden with state preserved and input suppressed. The expand/collapse button allows manual changes within that visit; narrow layouts stack the toggle above Jump when at least two rows are available. Resizing and streaming preserve the choice, and returning to latest restores the full dock. The patch owns scroll-follow/layout handling, editor windowing, hidden-input protection, control hit targets, and focused regressions; `ci` owns registration, README wording, and the TUI regression gate.
 - Integrate `patch/codex-websocket-recovery` immediately after `patch/ws-cached-empty-delta`, as a descendant of `patch/retry-non-retryable-patterns`. Apply its predecessor-relative range and rebase when that predecessor changes: the shared retry planner requires the classifier's error-pattern policy argument. The patch owns Codex transport recovery, shared agent/summary retry budgeting, AgentSession integration, settings documentation, and public lazy state/reset accessors. `auto` has three fixed transport retries before SSE with a fresh global budget and a five-minute request-triggered recovery cooldown; explicit WS never downgrades. Logical attempts retain bounded before-output protocol repairs; sessionless SDK calls are outside the fixed allowance. `ci` owns root README wording, ancestry/range guards and the deterministic transport/settings gates, including the existing empty-delta regression. Keep runtime fixes on the patch, never in replay conflict handlers.
-- Integrate `patch/responses-websocket-transport` immediately after and as a descendant of `patch/codex-websocket-recovery`, then `patch/provider-transport-indicator` as its descendant. Apply predecessor-relative ranges and rebase descendants whenever their predecessor tip changes. The transport patch owns shared Responses WebSocket connection/continuation isolation, ordinary `openai-responses` auto-WS support, retained downstream retry/fallback safeguards, and optional actual-transport reporting by built-in chat adapters. All compatible Responses endpoints try WS in auto mode; explicit SSE stays SSE and explicit WS never silently downgrades. Reconnect sends full local context before resuming deltas; connection-local server cache is not persistent. The indicator patch owns request-scoped Agent/AgentSession forwarding and default Working labels, including stale callback, tool/backoff and session-change cleanup. Opaque custom streams stay unlabelled unless they report; extension custom messages remain verbatim and status never enters conversation history. `ci` owns registration, user documentation, replay ancestry tests and the offline transport/UI gates. Do not add runtime conflict resolvers or repurpose Codex authentication for new ChatGPT plan tokens.
+- Integrate `patch/responses-websocket-transport` immediately after and as a descendant of `patch/codex-websocket-recovery`, then `patch/provider-transport-indicator` as its descendant. Apply predecessor-relative ranges and rebase descendants whenever their predecessor tip changes. The transport patch owns shared Responses WebSocket connection/continuation isolation, ordinary `openai-responses` auto-WS support, retained downstream retry/fallback safeguards, and optional actual-transport reporting by built-in chat adapters. All compatible Responses endpoints try WS in auto mode; explicit SSE stays SSE and explicit WS never silently downgrades. Without an eligible durable checkpoint, reconnect sends full local context before resuming deltas; connection-local server cache is not persistent. Durable checkpoint ownership is documented below. The indicator patch owns request-scoped Agent/AgentSession forwarding and default Working labels, including stale callback, tool/backoff and session-change cleanup. Opaque custom streams stay unlabelled unless they report; extension custom messages remain verbatim and status never enters conversation history. `ci` owns registration, user documentation, replay ancestry tests and the offline transport/UI gates. Do not add runtime conflict resolvers or repurpose Codex authentication for new ChatGPT plan tokens.
 - Integrate `patch/responsive-selectors` immediately after and as a descendant of `patch/compact-input-dock`; apply only its predecessor-relative range and rebase it when the dock tip changes. It owns the opt-in `renderInBounds` interface, bounded editor/CLI hosts and selector presentation, including height forwarding through the dock wrapper. `/model`, `/models`, OAuth, extension selection, fork, settings/theme, session, tree and resource configuration use actual allocated rows; ordinary containers, custom components and transcript rendering retain their natural rendering. Preserve the compact dock's hidden-panel input suppression and saved state, and the independent `patch/model-selector-refresh-selection` refresh policy. Fullscreen PageUp/PageDown remain transcript shortcuts; selector page bindings are configurable. Never fix product conflicts in the replay script. `ci` owns registration, the bounded-selection/model/sibling/navigation/CLI/dock regression gates, and root README wording. `scripts/responsive-selector-refresh.integration.test.mts` runs only against the complete replay to cover delayed catalog refresh during bounded browsing; it requires the independent refresh-selection patch without duplicating that policy on the responsive branch.
 - Integrate `patch/thinking-preview` before `patch/message-origin` as an independent patch based on upstream. It has no runtime dependency on single-executable or the lifecycle chain. It adds a default Markdown-styled single-line rolling tail preview during and after thinking, with an omitted visible-character count, keeps full-text and static-folded styles in the `Ctrl+T` cycle, and includes thinking in `Ctrl+O` bulk expansion. Existing fullscreen mouse overrides survive thinking completion; display changes never alter stored reasoning or model effort. The patch owns rendering, settings, shortcut wiring, and focused behavior regressions; `ci` owns registration and downstream README wording.
 - Integrate `patch/retry-error-presentation` independently before `patch/message-origin`. It alone owns immediate, persistent interactive provider-error display, removal of unexecuted tool previews, count-only exhausted-retry outcomes and explicit backoff-cancellation outcomes. Retry classification, budgets, transport recovery and model-context omission remain with their existing owners. Its retry tests do not depend on the model-switch feature.
@@ -89,6 +89,58 @@ Run this checklist whenever a downstream feature, fix, default, command, install
 - Integrate `patch/model-selector-refresh-selection` after `patch/self-update-managed-by` as an independent selection-preservation patch. It only touches `packages/coding-agent/src/modes/interactive/components/model-selector.ts` and `packages/coding-agent/test/model-selector.test.ts` and complements the upstream 7209 filter-reset regression without changing the same behavior.
 - `patch/model-catalog-test-fixtures` is retired from active inputs. Upstream commit `99fe1489707f9f6accbef4377be79ef0544c42f2` supplies the same Xiaomi MiMo 2.6 model IDs and test behavior; the residual downstream differences are descriptive names only. Retain the source branch without integrating this duplicate overlay. No test or assertion is removed and no exclusion is added.
 - Patch branches must never carry `packages/*/CHANGELOG.md` hunks.
+
+## Response checkpoint documentation
+
+The checkpoint feature belongs on `patch/responses-websocket-transport`: package
+READMEs, settings/models docs, request adapter, public metadata, and portable
+kernel. Compatible generated-main copies are validation mirrors, never the only
+owner. Root README and this guide belong on `ci`. Rebase transport descendants and
+validate the full replay before publication; do not fix conflicts on generated
+`main` or add runtime replay resolvers.
+
+Keep reciprocal ordinary links between the [SDK checkpoint section](packages/ai/README.md#response-checkpoints),
+[settings](packages/coding-agent/docs/settings.md#response-checkpoints),
+[capability example](packages/coding-agent/docs/models.md#response-checkpoint-capability),
+[native adapter](packages/ai/src/api/openai-responses.ts),
+[public metadata](packages/ai/src/types.ts), and the independently owned
+[plugin repository](https://github.com/xz-dev/openai-api-pi-extension). Source
+comments belong at adapters/types, not in the byte-identical portable kernel.
+The plugin owns its checkpoint policy and transport independently.
+
+Preserve one optional exclusion setting and raw absence (native absent `["*"]`,
+plugin absent `[]`), verified endpoint capability, remote-storage privacy,
+canonical JSONL, exact active-branch validation, and bounded no-replay repair.
+Do not duplicate the full policy here: package docs and source are the detailed
+references. The plugin's inner SSE is a codec bridge, not HTTP continuation or a
+second planner. Optional local OMD range links can flag drift but cannot replace
+clickable links or prove semantic equivalence.
+
+Before claiming release delivery, verify root/package docs and implementation at
+the rebuilt remote main SHA and in the accepted artifact. Per-checkout model
+hydration clears the foreign-catalog Kimi artifact (source fixed by upstream
+`a3f265b`). Latest main `41be7dc` plus checkpoints passed `tsc`, full
+`npm run check`, AI 206/206, and settings 179/179. The `49e9650` owner branch
+needs upstream fixture fixes `568c2a8` (OpenRouter) and `99fe148` (MiMo);
+`ci` at `802d80e` also needs `195120a` (opencode-go). All are in upstream
+`4dd2b149`, used by `41be7dc`. These are owner-branch sync timing issues,
+not checkpoint regressions; the sync rebuild applies each owning patch to the
+current upstream baseline.
+
+Additional network-namespace-isolated loopback checks passed all 10 processes:
+Bun single-executable Pi 1.3.0-xz.306 with the installed plugin (absent resumes,
+`["*"]` sends full input), native source under Bun 1.4.3 (`[]` resumes,
+absent sends full input), and stock 0.84.2 with the installed plugin (absent
+resumes). All exited 0 with zero HTTP inference.
+
+Real packed-plugin installs via `pi install npm:...@<tgz>` passed on the Bun
+single-executable and stock 0.84.2 hosts, with online registry access for
+dependencies: exactly six runtime packages and no Pi SDK. The earlier offline
+`ENOTCACHED` result was a cache miss, not an unresolved installer failure.
+
+Evidence remains limited to loopback fixtures, not real-gateway retention,
+account isolation, or every host layout. No live-service durability guarantee
+is implied.
 
 ## Patch retirement
 
