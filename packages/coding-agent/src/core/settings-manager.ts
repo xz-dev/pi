@@ -803,6 +803,11 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/** Raw policy; request owners apply defaults and validation. See [settings](../../docs/settings.md#response-checkpoints). */
+	getResponseCheckpointExclude(): string[] | undefined {
+		return this.settings.responseCheckpointExclude;
+	}
+
 	getTransport(): TransportSetting {
 		return this.settings.transport ?? SETTINGS_DEFAULTS.transport;
 	}

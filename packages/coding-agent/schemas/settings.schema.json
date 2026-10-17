@@ -29,6 +29,13 @@
       },
       "description": "Per-model default thinking level overrides keyed by \"provider/modelId\"."
     },
+    "responseCheckpointExclude": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Raw Responses checkpoint exclusions. Missing uses the request owner's default; [] enables eligible targets."
+    },
     "transport": {
       "anyOf": [
         {
