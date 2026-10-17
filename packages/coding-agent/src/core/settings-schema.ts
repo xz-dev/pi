@@ -242,6 +242,12 @@ export const SettingsSchema = Type.Object(
 				description: 'Per-model default thinking level overrides keyed by "provider/modelId".',
 			}),
 		),
+		responseCheckpointExclude: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"Raw Responses checkpoint exclusions. Missing uses the request owner's default; [] enables eligible targets.",
+			}),
+		),
 		transport: Type.Optional(
 			Type.Union(
 				[Type.Literal("auto"), Type.Literal("sse"), Type.Literal("websocket"), Type.Literal("websocket-cached")],

@@ -259,6 +259,27 @@ describe("createAgentSession stream options", () => {
 		expect(options?.websocketConnectTimeoutMs).toBe(0);
 	});
 
+	it.each(
+		[undefined, [], ["*"], ["capture-provider/**", "gpt-[45]*"], null, ["unrelated", 7], "*"].map((raw) => ({ raw })),
+	)("forwards raw responseCheckpointExclude $raw without applying native defaults", async ({ raw }) => {
+		const settings: Settings = JSON.parse(JSON.stringify({ responseCheckpointExclude: raw }));
+		const options = await captureStreamOptions("openai-responses", settings);
+		expect(options?.responseCheckpointExclude).toEqual(raw);
+	});
+
+	it.each([[], ["*"], null].map((raw) => ({ raw })))(
+		"preserves request responseCheckpointExclude $raw over settings",
+		async ({ raw }) => {
+			const requestOptions: SimpleStreamOptions = JSON.parse(JSON.stringify({ responseCheckpointExclude: raw }));
+			const options = await captureStreamOptions(
+				"openai-responses",
+				JSON.parse('{"responseCheckpointExclude":["capture-provider/**"]}'),
+				requestOptions,
+			);
+			expect(options?.responseCheckpointExclude).toEqual(raw);
+		},
+	);
+
 	it("forwards provider retry settings", async () => {
 		const options = await captureStreamOptions("openai-completions", {
 			retry: { provider: { maxRetries: 2, maxRetryDelayMs: 3000 } },
