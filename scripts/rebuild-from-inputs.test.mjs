@@ -406,7 +406,14 @@ test("Responses transport and indicator preserve their predecessor deltas", () =
 
 test("recovery prerequisites replay as ordered ranges while presentation remains independent", () => {
 	const fixture = buildFixture();
-	const names = ["slow-hook-tui-only", "defer-threshold-compaction", "startup-submit-readiness", "cold-start-retry", "message-origin"];
+	const names = [
+		"slow-hook-tui-only",
+		"defer-threshold-compaction",
+		"startup-submit-readiness",
+		"cold-start-retry",
+		"compaction-boundary-insert",
+		"message-origin",
+	];
 	let predecessor = "upstream-main";
 	let content = "";
 	const args = ["--upstream", fixture.upstream, "--ci", fixture.ci];
@@ -493,8 +500,9 @@ for (const [ancestor, descendant] of [
 	["slow-hook-tui-only", "defer-threshold-compaction"],
 	["defer-threshold-compaction", "startup-submit-readiness"],
 	["startup-submit-readiness", "cold-start-retry"],
-	["cold-start-retry", "message-origin"],
-	["cold-start-retry", "async-compaction"],
+	["cold-start-retry", "compaction-boundary-insert"],
+	["compaction-boundary-insert", "message-origin"],
+	["compaction-boundary-insert", "async-compaction"],
 	["retry-non-retryable-patterns", "ws-cached-empty-delta"],
 	["codex-websocket-recovery", "responses-websocket-transport"],
 	["responses-websocket-transport", "provider-transport-indicator"],
@@ -587,7 +595,7 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 31);
+	assert.equal(order.length, 32);
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
 	assert.equal(order.at(-1), "env-native-test-fixtures");
