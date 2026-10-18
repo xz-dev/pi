@@ -1383,6 +1383,19 @@ describe("checkpoint failure cooldown", () => {
 		["server_error type", { type: "server_error", param: "store", message: "store is invalid upstream" }],
 		["untyped message", { message: "previous_response_id is not available for this user" }],
 		["429 not found", { code: "previous_response_not_found", status: 429, message: "slow down" }],
+		[
+			"500 server_error not found",
+			{ code: "previous_response_not_found", status: 500, type: "server_error", message: "gone" },
+		],
+		[
+			"400 internal_error store",
+			{ code: "internal_error", status: 400, type: "server_error", param: "store", message: "store invalid" },
+		],
+		[
+			"400 authentication_error store",
+			{ status: 400, type: "authentication_error", param: "store", message: "store invalid" },
+		],
+		["coded unrelated with store param", { code: "model_not_found", param: "store", message: "store invalid" }],
 	])("%s is not a checkpoint signal and is never replayed", async (_name, error) => {
 		const { sent, fetchMock } = checkpointServer({
 			onRequest: (socket) => {
@@ -1455,17 +1468,24 @@ describe("checkpoint failure cooldown", () => {
 		// Turn 1: store rejected, repaired without store, endpoint cools down.
 		await stream(model, ctx1, OPTS).result();
 		expect(sent).toHaveLength(2);
-		// During the cooldown the explicit hook false stays on the wire.
+		// During the cooldown the explicit hook false stays on the wire, and two
+		// successive vetoed turns still send full context (no cached delta).
 		const cooled = await stream(model, ctx1, { ...OPTS, onPayload }).result();
 		expect(cooled.stopReason).toBe("stop");
 		expect(sent[2].store).toBe(false);
+		const ctx2 = normalizeContext({ messages: [...ctx1.messages, cooled, userMsg("Next", 2)] });
+		const cooled2 = await stream(model, ctx2, { ...OPTS, onPayload }).result();
+		expect(cooled2.stopReason).toBe("stop");
+		expect(sent[3].store).toBe(false);
+		expect(sent[3].previous_response_id).toBeUndefined();
+		expect(sent[3].input).toHaveLength(3);
 		// After the deadline a vetoed request does not consume the probe claim...
 		now += 6 * 60 * 1000;
 		await stream(model, ctx1, { ...OPTS, onPayload }).result();
-		expect(sent[3].store).toBe(false);
+		expect(sent[4].store).toBe(false);
 		// ...so the next policy request is still the store:true probe.
 		await stream(model, ctx1, OPTS).result();
-		expect(sent[4].store).toBe(true);
+		expect(sent[5].store).toBe(true);
 		// SSE fallback keeps the explicit false too.
 		const bodies: Record<string, unknown>[] = [];
 		class FailSocket extends EventTarget {
