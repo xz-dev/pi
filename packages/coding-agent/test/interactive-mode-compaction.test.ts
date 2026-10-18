@@ -106,7 +106,7 @@ describe("InteractiveMode compaction events", () => {
 		);
 	});
 
-	test("renders retained entries and appends the latest summary cost at the bottom", async () => {
+	test("renders the latest summary before its retained entries, as on reload", async () => {
 		const usage: Usage = {
 			input: 10,
 			output: 20,
@@ -181,20 +181,9 @@ describe("InteractiveMode compaction events", () => {
 		});
 
 		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
-		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([previousCompaction]);
-		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
-		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
-			expect.objectContaining({
-				role: "compactionSummary",
-				tokensBefore: 123,
-				summary: "summary",
-			}),
-		);
-		expect(fakeThis.addCompactionCostNotice).toHaveBeenCalledWith({
-			type: "compaction_cost",
-			kind: "compaction",
-			usage,
-		});
+		// Same rendering as reload; the summary (and its cost) comes first.
+		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([latestCompaction, previousCompaction]);
+		expect(fakeThis.addMessageToChat).not.toHaveBeenCalled();
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
 	});
 
