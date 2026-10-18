@@ -43,6 +43,7 @@ Features:
 - Smaller input dock when reading fullscreen history
 - See where each message came from (you, extension, RPC, SDK)
 - Update mirrors and self-update (`pi update --self`, `--mirror`)
+- Retry failed update operations three times, with 3, 6, and 12 second waits
 - Verified downloads (Sigstore signatures)
 - Install extensions without npm or Node
 - English locale for tools, keeps your UI language
@@ -158,6 +159,8 @@ An installed executable updates itself from the matching `pi-<target>.zip`:
 ```bash
 pi update --self
 ```
+
+Failed update operations get three extra attempts, waiting **3, 6, and 12 seconds** between attempts. This applies to self-update, Git/npm extension updates, and `pi update --models`. Successful operations are not repeated. Exhausted retries retain the existing failure report; signatures, checksums, version pins, and rollback protections remain enforced. The behavior lives on [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable).
 
 To accelerate updates without changing settings:
 

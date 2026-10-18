@@ -10,6 +10,11 @@ The single-executable bundle, update verification, and packaging fixes.
   - Use case: Run Pi by downloading and extracting one ZIP, on a machine with no JavaScript tooling.
   - Builds: All 14 Release targets use `--minify --bytecode --format=esm`. Precompilation moves parsing and initial bytecode generation to build time; runtime JIT remains enabled. The current build helper still omits bytecode for cross-OS/architecture builds as a downstream restriction, although [Bun 1.4.1 fixed the historical cross-compilation defect](https://bun.com/blog/bun-v1.4.1#cross-compile-with-bytecode).
   - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
+- Retry failed `pi update` operations up to three additional times, waiting 3, 6, and 12 seconds. Covers self-update, Git/npm extension updates and explicit model-catalog refresh without repeating completed sibling updates.
+  - Use case: Recover from a transient TLS EOF or dropped connection without rerunning the command.
+  - Limits: Four attempts maximum per failed operation; retries cannot repair permanent failures. Signature/checksum verification, pinned versions, rollback and final failure reports remain enforced.
+  - Details: [Update](../README.md#update)
+  - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 - Run the native FreeBSD amd64 and arm64 executables with CLI, TUI, extension loading, self-update, and cleanup of obsolete backup copies.
   - Use case: Use Pi on FreeBSD without a Linux compatibility layer or a separately installed JavaScript runtime.
   - Limits: FreeBSD 14.3 or newer. The arm64 ZIP is accepted in an emulated (QEMU TCG) guest because GitHub has no arm64 KVM host. Install `fd-find` and `ripgrep` for find/grep tools. X11 clipboard reads require `libxcb`; Wayland uses `wl-clipboard`, and SSH/headless copy uses OSC 52.
