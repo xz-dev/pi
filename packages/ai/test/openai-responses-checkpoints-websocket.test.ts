@@ -1409,6 +1409,88 @@ describe("checkpoint failure cooldown", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		[
+			"unsupported_parameter",
+			{
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					code: "unsupported_parameter",
+					param: "store",
+					message: "Unsupported parameter: 'store'.",
+				},
+				status: 400,
+			},
+		],
+		[
+			"unknown_parameter",
+			{
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					code: "unknown_parameter",
+					param: "store",
+					message: "Unknown parameter: 'store'.",
+				},
+			},
+		],
+		[
+			"response.failed param-only",
+			{
+				type: "response.failed",
+				response: { error: { type: "invalid_request_error", param: "store", message: "Unsupported parameter" } },
+			},
+		],
+	])("OpenAI-shaped %s store rejection repairs once without store", async (_name, event) => {
+		const { sent } = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (frame.store !== true) return false;
+				socket.emit(event);
+				return true;
+			},
+		});
+		const out = await stream(makeModel(OFFICIAL_URL), ctx1, OPTS).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent).toHaveLength(2);
+		expect("store" in sent[1]).toBe(false);
+	});
+
+	it("non-signal probe failure renews the cooldown without replay", async () => {
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		let probeFails = false;
+		const { sent } = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (frame.store === true && sent.length === 1) {
+					socket.emit({
+						type: "error",
+						error: { type: "invalid_request_error", param: "store", message: "store is not allowed" },
+					});
+					return true;
+				}
+				if (frame.store === true && probeFails) {
+					socket.emit({ type: "error", error: { type: "server_error", message: "boom" }, status: 500 });
+					return true;
+				}
+				return false;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		await stream(model, ctx1, OPTS).result(); // [store:true rejected, repair without store]
+		expect(sent).toHaveLength(2);
+		now += 6 * 60 * 1000;
+		probeFails = true;
+		const probe = await stream(model, ctx1, OPTS).result();
+		expect(probe.stopReason).toBe("error");
+		expect(sent).toHaveLength(3); // probe sent once, never replayed
+		expect(sent[2].store).toBe(true);
+		probeFails = false;
+		const next = await stream(model, ctx1, OPTS).result();
+		expect(next.stopReason).toBe("stop");
+		expect("store" in sent[3]).toBe(false); // renewed cooldown
+	});
+
 	it("parameter-only unsupported wording on previous_response_id is a signal", async () => {
 		const { sent } = checkpointServer({
 			onRequest: (socket, frame) => {
