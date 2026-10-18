@@ -115,6 +115,70 @@ describe("SettingsSelectorComponent", () => {
 		expect(onSessionShareDestinationChange.mock.calls.flat()).toEqual(["gist", "radius", "auto"]);
 	});
 
+	it("exposes a separate Background compaction row that cycles On/Off", () => {
+		const onAutoCompactChange = vi.fn();
+		const onBackgroundCompactionChange = vi.fn();
+		const config = {
+			autoCompact: true,
+			backgroundCompaction: false,
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = { onAutoCompactChange, onBackgroundCompactionChange } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		// The row is configured with On/Off values, not raw booleans.
+		const item = (
+			list as unknown as { items: Array<{ id: string; currentValue: string; values?: string[] }> }
+		).items.find((i) => i.id === "background-compaction");
+		expect(item?.currentValue).toBe("Off");
+		expect(item?.values).toEqual(["Off", "On"]);
+
+		list.selectItem("background-compaction");
+		list.handleInput("\r");
+		expect(item?.currentValue).toBe("On");
+		list.handleInput("\r");
+		expect(item?.currentValue).toBe("Off");
+		expect(onBackgroundCompactionChange.mock.calls.flat()).toEqual([true, false]);
+		expect(onAutoCompactChange).not.toHaveBeenCalled();
+	});
+
+	it("keeps the Background compaction row adjacent to Auto-compact after all splices", () => {
+		// Reviewer finding: background compaction must land next to its master row,
+		// not at the bottom of a spliced list.
+		const config = {
+			autoCompact: true,
+			backgroundCompaction: false,
+			supportsImages: true,
+			autoResizeImages: true,
+			blockImages: true,
+			enableSkillCommands: true,
+			showHardwareCursor: true,
+			editorPaddingX: 1,
+			outputPad: 0,
+			autocompleteMaxVisible: 10,
+			clearOnShrink: true,
+			showTerminalProgress: true,
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = {} as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		const items = (list as unknown as { items: Array<{ id: string; label: string }> }).items;
+		const autoCompactIndex = items.findIndex((i) => i.id === "autocompact");
+		const backgroundIndex = items.findIndex((i) => i.id === "background-compaction");
+		expect(autoCompactIndex).toBeGreaterThanOrEqual(0);
+		expect(backgroundIndex).toBe(autoCompactIndex + 1);
+	});
+
 	it("keeps the configured fixed theme marked while browsing", () => {
 		const config = {
 			defaultModel: "not set",
