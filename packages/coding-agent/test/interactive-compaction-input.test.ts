@@ -91,7 +91,9 @@ describe("compaction input display", () => {
 					chat.length = 0;
 				},
 			},
-			renderSessionEntries: vi.fn(),
+			renderSessionEntries: (entries: { type: string }[]) => {
+				for (const entry of entries) if (entry.type === "compaction") chat.push("compactionSummary");
+			},
 			addMessageToChat: (message: { role: string }) => {
 				chat.push(message.role);
 			},
