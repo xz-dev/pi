@@ -139,6 +139,49 @@ Pi first clamps unsupported thinking levels, then merges model `samplingParams`,
 
 Compatibility settings should describe verified differences in the endpoint's request or response behavior. Do not enable them based only on an endpoint advertising OpenAI or Anthropic compatibility.
 
+### Response checkpoint capability
+
+Only declare persistent Responses support after verifying it for the endpoint
+and account. For a custom native Responses provider, a minimal `models.json`
+example is:
+
+```json
+{
+  "providers": {
+    "verified-responses": {
+      "baseUrl": "https://your-gateway.example.com/v1",
+      "api": "openai-responses",
+      "apiKey": "$GATEWAY_API_KEY",
+      "models": [
+        {
+          "id": "your-model-id",
+          "compat": { "supportsResponseCheckpoints": true }
+        }
+      ]
+    }
+  }
+}
+```
+
+Replace the example endpoint and model ID and configure the credential. This is
+a capability declaration, not a server test. Generic Responses compatibility,
+model branding, a `resp_` ID, and acceptance of `store` do not prove persistence.
+Supported official OpenAI API-key mode has a narrow default; unsupported
+Codex/ChatGPT modes are unchanged. For an existing extension model, use
+`providers.<provider>.modelOverrides.<model-id>.compat` instead of replacing its
+catalog. Never edit generated model catalogs to enable this.
+
+Capability declarations still matter under the default `always` checkpoint mode:
+they decide what `auto` and `declared` modes try, and an explicit
+`supportsResponseCheckpoints: false` is the model-level opt-out for `auto`.
+Policy stays in control: `auto` or `websocket-cached` transport, an exclusion
+list that does not match the target, and no cooldown in force — a verified
+store/continuation rejection suspends checkpoints for the session for five
+minutes before a single probe re-checks. This asks for remote `store: true`;
+payload-hook and server `store: false` are respected. See [checkpoint behavior and privacy](../../ai/README.md#response-checkpoints),
+[capability schema](../../ai/src/providers/compat-schema.ts), and
+[native request owner](../../ai/src/api/openai-responses.ts).
+
 ## Use classifier models
 
 Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef and Clef Flash models from Workers AI, and OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions):
