@@ -1187,11 +1187,31 @@ export async function processResponsesWebSocket<TApi extends Api>(
 	// we do not hold: forced full context must keep chaining it, never replace it,
 	// and a request that cannot chain it is never certified (or captured) as complete.
 	// Scoped to cooldown: elsewhere the base-branch provenance rules are unchanged.
-	const inheritsUnknownLineage = config.forceFullContext === true && entry?.continuation?.fullHistory === false;
-	let requestBody =
-		!callerOwned && (!config.forceFullContext || inheritsUnknownLineage) && useCachedContext && entry
-			? buildCachedWebSocketRequestBody(entry, fullBody)
-			: fullBody;
+	const inheritsUnknownLineage =
+		!callerOwned && config.forceFullContext === true && entry?.continuation?.fullHistory === false;
+	let requestBody: WebSocketRequestBody;
+	if (inheritsUnknownLineage && entry) {
+		// Cooldown omits store and a probe adds it: match the baseline without store,
+		// then keep this request's own store value on the chained delta.
+		const { store: _bodyStore, ...unstored } = fullBody as WebSocketRequestBody & { store?: boolean };
+		const continuation = entry.continuation!;
+		const { store: _lastStore, ...lastUnstored } = continuation.lastRequestBody as WebSocketRequestBody & {
+			store?: boolean;
+		};
+		const delta = getCachedWebSocketInputDelta(unstored, { ...continuation, lastRequestBody: lastUnstored });
+		if (!delta || delta.length === 0 || !continuation.lastResponseId) {
+			// shortcut: fail closed rather than replace caller-owned server history with partial local input.
+			throw new ResponsesApiError("Cannot continue a caller-rooted conversation during checkpoint cooldown", {
+				code: "checkpoint_lineage_unavailable",
+			});
+		}
+		requestBody = { ...fullBody, previous_response_id: continuation.lastResponseId, input: delta };
+	} else {
+		requestBody =
+			!callerOwned && !config.forceFullContext && useCachedContext && entry
+				? buildCachedWebSocketRequestBody(entry, fullBody)
+				: fullBody;
+	}
 	let fullHistory =
 		!callerOwned &&
 		!inheritsUnknownLineage &&
