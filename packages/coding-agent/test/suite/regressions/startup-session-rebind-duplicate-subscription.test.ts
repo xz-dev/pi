@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 
 type RebindContext = {
-	session: object;
+	session: { readonly isBackgroundCompacting: boolean };
 	unsubscribe?: () => void;
 	applyRuntimeSettings: () => void;
 	programStatus: { reset(): void };
@@ -22,8 +22,8 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown as Interac
 
 describe("overlapping startup and replacement session rebinds", () => {
 	it("does not subscribe from the stale startup rebind", async () => {
-		const startupSession = {};
-		const replacementSession = {};
+		const startupSession = { isBackgroundCompacting: false };
+		const replacementSession = { isBackgroundCompacting: false };
 		let resolveStartupBind!: () => void;
 		let resolveReplacementBind!: () => void;
 
