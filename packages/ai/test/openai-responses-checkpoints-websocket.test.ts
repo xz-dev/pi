@@ -1530,6 +1530,49 @@ describe("checkpoint failure cooldown", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
+	it("cooldown keeps chaining a caller-rooted descendant and never captures it", async () => {
+		const chained = new Set<string>();
+		const { sent } = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (frame.store === true && sent.length === 1) {
+					socket.emit({
+						type: "error",
+						error: { type: "invalid_request_error", param: "store", message: "store is not allowed" },
+					});
+					return true;
+				}
+				// Connection-local chain on the caller-rooted lineage (store omitted).
+				if (frame.previous_response_id === "external" || chained.has(frame.previous_response_id ?? "")) {
+					(socket as unknown as { respond: (f: SentFrame) => void }).respond({
+						...frame,
+						previous_response_id: undefined,
+					});
+					return true;
+				}
+				return false;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		await stream(model, ctx1, OPTS).result(); // store rejected -> repair -> cooldown
+		const onPayload = (payload: unknown) => ({
+			...(payload as Record<string, unknown>),
+			previous_response_id: "external",
+		});
+		const callerCtx = normalizeContext({ messages: [userMsg("delta", 2)] });
+		const caller = await stream(model, callerCtx, { ...OPTS, onPayload }).result();
+		expect(caller.stopReason).toBe("stop");
+		expect(sent[2].previous_response_id).toBe("external");
+		chained.add(caller.responseId!);
+		const descendantCtx = normalizeContext({ messages: [...callerCtx.messages, caller, userMsg("two", 3)] });
+		const descendant = await stream(model, descendantCtx, OPTS).result();
+		expect(descendant.stopReason).toBe("stop");
+		// The descendant chains the caller-rooted response instead of dropping external history.
+		expect(sent[3].previous_response_id).toBe(caller.responseId);
+		expect(sent[3].input).toHaveLength(1);
+		expect("store" in sent[3]).toBe(false);
+		expect(descendant.responseCheckpoint).toBeUndefined();
+	});
+
 	it("cooldown never strips a caller-owned previous_response_id", async () => {
 		const { sent } = serverFail("store");
 		const model = makeModel(OFFICIAL_URL);
