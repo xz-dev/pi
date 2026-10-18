@@ -261,6 +261,12 @@ jobs:
           docker run --rm --network none -e DISPLAY=:99 -e LD_LIBRARY_PATH=/musl-libraries/usr/lib -e PI_XZ_MUSL_LIBRARIES=/musl-libraries -e GITHUB_SHA -v "$RUNNER_TEMP/musl-libraries:/musl-libraries:ro" -e PI_XZ_EXECUTOR=pinned-musl-container -e PI_XZ_CONTAINER_DIGEST='${{ matrix.containerImage }}' -e PI_XZ_TUI_EVIDENCE=/evidence/tui.json -e RUNNER_NAME -e RUNNER_OS -e RUNNER_ARCH -e ImageOS -e ImageVersion -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/repo:ro" -v "$candidate:/release:ro" -v "$RUNNER_TEMP/smoke-record:/record" -v "$RUNNER_TEMP/musl-tui:/evidence:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-binary-release.mjs "/release/$archive" '${{ matrix.target }}' "$version" "/record/${{ matrix.target }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-smoke-${{ github.sha }}-${{ matrix.target }}", path: "${{ runner.temp }}/smoke-record/${{ matrix.target }}.json", if-no-files-found: error, overwrite: true, retention-days: 14 }
+      # Failure evidence only: written next to the smoke record by
+      # smoke-binary-release.mjs and kept out of acceptance aggregation, public
+      # assets, and attested subjects. Green runs upload an empty artifact.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with: { name: "smoke-diagnostics-${{ github.sha }}-${{ matrix.target }}", path: "${{ runner.temp }}/smoke-record/${{ matrix.target }}.json.diagnostics", if-no-files-found: ignore, overwrite: true, retention-days: 30 }
 
   acceptance-record:
     needs: [release-matrix, aggregate-release-candidate, accept-release-candidate]

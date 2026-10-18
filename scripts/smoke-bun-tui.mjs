@@ -1,11 +1,17 @@
 #!/usr/bin/env bun
 
+import { writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const [executable] = process.argv.slice(2);
 if (!executable) throw new Error("Usage: smoke-bun-tui.mjs <executable>");
 
 const started = performance.now();
+const elapsed = () => Math.round(performance.now() - started);
+// PI_XZ_TUI_DIAGNOSTICS names a file that receives the bounded failure evidence
+// JSON before this process exits; the smoke wrapper archives it outside the
+// deleted work directory. Success runs never write it.
+const diagnosticsPath = process.env.PI_XZ_TUI_DIAGNOSTICS;
 // Emulated targets pass a scaled budget; the interrupt/exit delays scale with it (1000/500 ms at 7000).
 const timeoutMs = Number(process.env.PI_XZ_TUI_TIMEOUT_MS ?? 7000);
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error(`Invalid PI_XZ_TUI_TIMEOUT_MS: ${process.env.PI_XZ_TUI_TIMEOUT_MS}`);
@@ -28,10 +34,17 @@ let benchmarkCompleted = startupBenchmark ? false : null;
 const terminalClosure = Promise.withResolvers();
 let observedOutput = false;
 let exitSent = false;
+// Send times relative to probe start; null until sent. Preserved in failure
+// evidence so a crashing child can be correlated with the input schedule.
+const inputEvents = { lastPasteMs: null, interruptMs: null, exitMs: null };
 let pasteTimer;
 let interruptTimer;
 let exitTimer;
 let timeoutTimer;
+
+function lastInputEvent(key) {
+	inputEvents[key] = elapsed();
+}
 
 const child = Bun.spawn([executable], {
 	cwd: dirname(executable),
@@ -54,13 +67,18 @@ const child = Bun.spawn([executable], {
 			// The first output byte can arrive before the editor handles input, so a
 			// single early ctrl+v may be dropped. Retry a few times, spaced so native
 			// clipboard reads never overlap (overlapping macOS reads crashed).
-			if (pasteProbe) pasteTimer = setInterval(() => terminal.write("\x16"), timeoutMs / 28);
+			if (pasteProbe) pasteTimer = setInterval(() => {
+				lastInputEvent("lastPasteMs");
+				terminal.write("\x16");
+			}, timeoutMs / 28);
 			if (!startupBenchmark) {
 				interruptTimer = setTimeout(() => {
 					clearInterval(pasteTimer);
+					lastInputEvent("interruptMs");
 					terminal.write("\x03");
 					exitTimer = setTimeout(() => {
 						exitSent = true;
+						lastInputEvent("exitMs");
 						terminal.write("\x04");
 					}, timeoutMs / 14);
 				}, timeoutMs / 7);
@@ -77,14 +95,14 @@ timeoutTimer = setTimeout(
 	() =>
 		timedOut.reject(
 			new Error(
-				`TUI PTY timeout: exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput} lastStage=${lastBenchmarkStage} tail=${JSON.stringify(diagnosticTail)}`,
+				`TUI PTY timeout: pid=${child.pid} exit=${child.exitCode} output=${outputBytes} observedOutput=${observedOutput} lastStage=${lastBenchmarkStage} tail=${JSON.stringify(diagnosticTail)}`,
 			),
 		),
 	timeoutMs,
 );
 try {
 	const [exitCode, terminalExitCode] = await Promise.race([Promise.all([child.exited, terminalClosure.promise]), timedOut.promise]);
-	if (!observedOutput || (startupBenchmark && !benchmarkCompleted) || exitSent === startupBenchmark || exitCode !== 0) throw new Error(`TUI PTY acceptance failed: exit=${exitCode} terminalExit=${terminalExitCode} output=${outputBytes} exitSent=${exitSent} benchmark=${startupBenchmark} benchmarkCompleted=${benchmarkCompleted}`);
+	if (!observedOutput || (startupBenchmark && !benchmarkCompleted) || exitSent === startupBenchmark || exitCode !== 0) throw new Error(`TUI PTY acceptance failed: pid=${child.pid} exit=${exitCode} terminalExit=${terminalExitCode} output=${outputBytes} exitSent=${exitSent} benchmark=${startupBenchmark} benchmarkCompleted=${benchmarkCompleted} input=${JSON.stringify(inputEvents)} tail=${JSON.stringify(diagnosticTail)}`);
 	console.log(JSON.stringify({
 		harness: process.platform === "win32" ? "Bun.Terminal ConPTY" : "Bun.Terminal PTY",
 		elapsedMs: Math.round(performance.now() - started),
@@ -101,7 +119,30 @@ try {
 	}));
 } catch (error) {
 	// Bun's GitHub annotations duplicate uncaught errors; print the bounded diagnostic once.
-	console.error(error instanceof Error ? error.message : String(error));
+	const message = error instanceof Error ? error.message : String(error);
+	if (diagnosticsPath) {
+		const evidence = {
+			error: message,
+			elapsedMs: elapsed(),
+			executable,
+			childPid: child.pid,
+			childExitCode: child.exitCode,
+			outputBytes,
+			observedOutput,
+			exitSent,
+			inputEvents,
+			benchmark: startupBenchmark,
+			benchmarkCompleted,
+			lastBenchmarkStage,
+			tail: diagnosticTail,
+		};
+		try {
+			writeFileSync(diagnosticsPath, `${JSON.stringify(evidence)}\n`);
+		} catch {
+			// Evidence persistence must never replace the acceptance error.
+		}
+	}
+	console.error(message);
 	process.exitCode = 1;
 } finally {
 	clearInterval(pasteTimer);

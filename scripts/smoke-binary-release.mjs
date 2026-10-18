@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { cpus, platform, tmpdir, userInfo } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { EMULATED_SMOKE_SLOWDOWN, bunTarget, smokeLimits } from "./lib/bun-targets.mjs";
 import { cpuFeatures } from "./lib/cpu-features.mjs";
+import { collectMacosCrashReports } from "./lib/macos-crash-reports.mjs";
 import { operatingSystemArchitecture } from "./lib/runtime-architecture.mjs";
 import { verifyMuslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 
@@ -18,7 +19,68 @@ const asset = resolve(assetArg);
 const recordPath = resolve(recordArg);
 const work = mkdtempSync(join(tmpdir(), "pi-binary-smoke-"));
 const commands = [];
+const probeStartedMs = Date.now();
+const diagnosticsPath = `${recordPath}.diagnostics`;
+const tuiEvidencePath = join(work, "tui-diagnostics.json");
+// Filled in once the staged executable exists so the outer catch can record the
+// exact launch context even for failures after staging.
+let stagedExecutable = null;
 const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+// Failure evidence lands beside (never inside) the smoke record so a green run
+// keeps its exact acceptance shape while a red run leaves a bounded diagnostics
+// file that survives deletion of the isolated work directory.
+function writeFailureDiagnostics(error, context) {
+	try {
+		let extra;
+		try {
+			extra = context();
+		} catch (contextError) {
+			extra = { contextError: contextError instanceof Error ? contextError.message : String(contextError) };
+		}
+		const diagnostics = {
+			schemaVersion: 1,
+			target: targetId,
+			version: expectedVersion,
+			error: error instanceof Error ? error.message : String(error),
+			asset: { file: basename(asset), sha256: sha256(asset), bytes: statSync(asset).size },
+			// Byte-identical staged copy under its public entrypoint name, hashed
+			// independently so a staging defect cannot hide behind the raw hash.
+			staged: stagedExecutable && existsSync(stagedExecutable) ? { path: stagedExecutable, sha256: sha256(stagedExecutable), bytes: statSync(stagedExecutable).size } : null,
+			runner: {
+				name: process.env.RUNNER_NAME ?? "local",
+				os: process.env.RUNNER_OS ?? platform(),
+				arch: process.env.RUNNER_ARCH ?? null,
+				osArchitecture: operatingSystemArchitecture(),
+				imageOs: process.env.ImageOS ?? null,
+				imageVersion: process.env.ImageVersion ?? null,
+				cpuModel: cpus()[0]?.model ?? "unknown",
+				cpuFeatures: cpuFeatures(),
+			},
+			bunRevision: spawnSync("bun", ["--revision"], { encoding: "utf8" }).stdout?.trim() ?? null,
+			commands,
+			...extra,
+		};
+		writeFileSync(diagnosticsPath, `${JSON.stringify(diagnostics, null, 2)}\n`);
+	} catch {
+		// Diagnostics are best-effort; the original acceptance error stands.
+	}
+}
+function tuiFailureContext(error, launch) {
+	let probe = null;
+	try {
+		if (existsSync(tuiEvidencePath)) probe = JSON.parse(readFileSync(tuiEvidencePath, "utf8"));
+	} catch {
+		probe = null;
+	}
+	let crashReports = [];
+	if (platform() === "darwin") {
+		const reportDirs = [join(work, "home", "Library", "Logs", "DiagnosticReports"), join(userInfo().homedir, "Library", "Logs", "DiagnosticReports"), "/Library/Logs/DiagnosticReports"];
+		if (Number.isSafeInteger(probe?.childPid)) {
+			crashReports = collectMacosCrashReports(reportDirs, { pid: probe.childPid, names: ["pi", "bun"], sinceMs: probeStartedMs, untilMs: Date.now() });
+		}
+	}
+	return { launch: { ...launch, cwd: dirname(launch.executable) }, probe, crashReports };
+}
 function run(name, command, args, options = {}) {
 	const started = performance.now();
 	// The kill timeout is only a hang guard. Budgets are enforced from the
@@ -42,12 +104,13 @@ try {
 	const executable = join(install, target.os === "windows" ? "pi.exe" : "pi");
 	copyFileSync(asset, executable);
 	if (target.os !== "windows") chmodSync(executable, 0o755);
+	stagedExecutable = executable;
 	const isolatedTmp = join(work, "tmpdir");
 	mkdirSync(isolatedTmp, { recursive: true });
 	const env = { ...process.env, NODE_ENV: "production", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: join(work, "isolated-agent"), HOME: join(work, "home"), USERPROFILE: join(work, "home"), TMPDIR: isolatedTmp, TEMP: isolatedTmp, TMP: isolatedTmp, TERM: "xterm-256color", PI_XZ_TUI_TIMEOUT_MS: String(SMOKE_LIMITS.interactiveMs) };
 	mkdirSync(env.PI_CODING_AGENT_DIR, { recursive: true });
 	mkdirSync(join(work, "home"), { recursive: true });
-	const tuiEnv = { ...env, PI_XZ_TUI_PASTE_PROBE: "1", ...(target.os === "windows" ? { PI_STARTUP_BENCHMARK: "1" } : {}) };
+	const tuiEnv = { ...env, PI_XZ_TUI_PASTE_PROBE: "1", PI_XZ_TUI_DIAGNOSTICS: tuiEvidencePath, ...(target.os === "windows" ? { PI_STARTUP_BENCHMARK: "1" } : {}) };
 	const coldVersion = run("cold-version", executable, ["--version"], { env, maxMs: SMOKE_LIMITS.coldVersionMs });
 	if (coldVersion.stdout.trim() !== expectedVersion) throw new Error(`cold version mismatch: ${coldVersion.stdout.trim()}`);
 	const bytecode = run("bytecode", executable, ["--version"], { env: { ...env, BUN_JSC_verboseDiskCache: "1" }, maxMs: SMOKE_LIMITS.versionMs });
@@ -126,4 +189,9 @@ try {
 	if (osArchitecture !== target.arch) throw new Error(`operating-system architecture ${osArchitecture} does not match ${target.arch}`);
 	writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
 	console.log(JSON.stringify(record));
+} catch (error) {
+	// Context construction runs inside the diagnostics' own try: an OS-account
+	// or collection fault must never replace the original acceptance error.
+	writeFailureDiagnostics(error, () => (stagedExecutable ? tuiFailureContext(error, { command: ["bun", "scripts/smoke-bun-tui.mjs"].join(" "), executable: stagedExecutable }) : {}));
+	throw error;
 } finally { rmSync(work, { recursive: true, force: true }); }

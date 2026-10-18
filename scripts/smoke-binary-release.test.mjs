@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -101,6 +101,127 @@ test("TUI benchmark timeout reports only a bounded escaped output tail", { skip:
 		assert.match(output, /lastStage=null tail="(?:\\u001b){100,}\\r\\ntail-line\\r\\n"/);
 		assert.doesNotMatch(output, /discard-me/);
 		assert.ok(Buffer.byteLength(output) < 5_000);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("TUI harness failure keeps pid, bounded tail, and the send schedule", { skip: !bunAvailable && "Bun is not installed" }, () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-tui-failure-evidence-"));
+	try {
+		const executable = join(root, "pi");
+		writeFileSync(executable, "#!/bin/sh\nprintf 'sentinel-dropme\\n'\ni=0; while [ $i -lt 900 ]; do printf 'X'; i=$((i + 1)); done\nprintf '\\nsentinel-crash-tail\\n'\nexit 139\n"); chmodSync(executable, 0o755);
+		const diagnostics = join(root, "tui-diag.json");
+		const result = spawnSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8", env: { ...process.env, PI_XZ_TUI_DIAGNOSTICS: diagnostics } });
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /TUI PTY acceptance failed: pid=\d+ exit=139/);
+		assert.match(result.stderr, /sentinel-crash-tail/);
+		assert.doesNotMatch(result.stderr, /sentinel-dropme/);
+		assert.match(result.stderr, /X{400,}\\r\\nsentinel-crash-tail/);
+		assert.ok(Buffer.byteLength(result.stderr) < 5_000);
+		const evidence = JSON.parse(readFileSync(diagnostics, "utf8"));
+		assert.ok(Number.isSafeInteger(evidence.childPid) && evidence.childPid > 0);
+		assert.equal(evidence.childExitCode, 139);
+		assert.equal(evidence.tail.includes("sentinel-crash-tail"), true);
+		assert.equal(evidence.tail.length <= 512, true);
+		assert.equal(evidence.exitSent, false);
+		assert.ok(Number.isSafeInteger(evidence.elapsedMs));
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("TUI harness records the Ctrl-C/Ctrl-D schedule for a child that exits nonzero after exit", { skip: !bunAvailable && "Bun is not installed" }, () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-tui-schedule-evidence-"));
+	try {
+		const executable = join(root, "pi");
+		writeFileSync(executable, `#!/usr/bin/env python3
+import os, select, sys, tty
+sys.stdout.write("ready\\n"); sys.stdout.flush()
+tty.setraw(sys.stdin.fileno())
+deadline = __import__("time").monotonic() + 5
+received = b""
+while __import__("time").monotonic() < deadline and b"\\x04" not in received:
+    readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+    if readable: received += os.read(sys.stdin.fileno(), 1024)
+raise SystemExit(139)
+`);
+		chmodSync(executable, 0o755);
+		const diagnostics = join(root, "tui-diag.json");
+		const result = spawnSync("bun", [join(import.meta.dirname, "smoke-bun-tui.mjs"), executable], { encoding: "utf8", env: { ...process.env, PI_XZ_TUI_DIAGNOSTICS: diagnostics, PI_XZ_TUI_PASTE_PROBE: "1", PI_XZ_TUI_TIMEOUT_MS: "7000" }, timeout: 15_000 });
+		assert.notEqual(result.status, 0);
+		const evidence = JSON.parse(readFileSync(diagnostics, "utf8"));
+		assert.equal(evidence.childExitCode, 139);
+		assert.equal(evidence.exitSent, true);
+		assert.ok(Number.isSafeInteger(evidence.inputEvents.interruptMs));
+		assert.ok(Number.isSafeInteger(evidence.inputEvents.exitMs));
+		assert.ok(Number.isSafeInteger(evidence.inputEvents.lastPasteMs));
+		assert.ok(evidence.inputEvents.lastPasteMs < evidence.inputEvents.interruptMs);
+		assert.ok(evidence.inputEvents.interruptMs < evidence.inputEvents.exitMs);
+		assert.ok(evidence.inputEvents.exitMs < evidence.elapsedMs);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("smoke failure writes .diagnostics outside the deleted work directory", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-smoke-diagnostics-"));
+	try {
+		const pi = join(root, `pi-${target}`);
+		writeFileSync(pi, "#!/bin/sh\necho 0.0.0\n"); chmodSync(pi, 0o755);
+		const recordPath = join(root, "record.json");
+		const result = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { encoding: "utf8" });
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /cold version mismatch|failed after/);
+		const diagnosticsPath = `${recordPath}.diagnostics`;
+		assert.equal(existsSync(diagnosticsPath), true);
+		const diagnostics = JSON.parse(readFileSync(diagnosticsPath, "utf8"));
+		assert.equal(diagnostics.schemaVersion, 1);
+		assert.equal(diagnostics.target, target);
+		assert.equal(diagnostics.version, "1.2.3");
+		assert.match(diagnostics.error, /cold version mismatch/);
+		assert.equal(diagnostics.asset.file, `pi-${target}`);
+		assert.match(diagnostics.asset.sha256, /^[0-9a-f]{64}$/);
+		assert.ok(diagnostics.asset.bytes > 0);
+		// Staged copy was hashed before cleanup and lives under the deleted work dir.
+		assert.match(diagnostics.staged.sha256, /^[0-9a-f]{64}$/);
+		assert.equal(diagnostics.staged.sha256, diagnostics.asset.sha256);
+		assert.match(diagnostics.staged.path, /pi-binary-smoke-.*\/install\/pi$/);
+		assert.equal(existsSync(diagnostics.staged.path), false);
+		assert.ok(Array.isArray(diagnostics.commands));
+		assert.ok(diagnostics.runner.os);
+		assert.ok(diagnostics.runner.cpuFeatures);
+		// A green-path record file must not exist: nothing to accept.
+		assert.equal(existsSync(recordPath), false);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("smoke diagnostics context failure cannot replace the original acceptance error", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-smoke-context-fault-"));
+	try {
+		// A module loader hook makes node:os report darwin and throw from
+		// userInfo(), faulting diagnostics context enrichment after staging.
+		writeFileSync(join(root, "os-hooks.mjs"), `let osSource = "";
+export function initialize(data) { osSource = data.osSource; }
+export async function load(url, context, next) {
+	if (url === "node:os") return { format: "module", shortCircuit: true, source: osSource };
+	return next(url, context);
+}
+`);
+		// createRequire bypasses ESM hooks, so the synthesized module re-exports
+		// real builtin bindings while platform/userInfo are faulted.
+		writeFileSync(join(root, "register.mjs"), `import { register } from "node:module";
+const real = process.getBuiltinModule("os");
+const names = Object.keys(real).filter((name) => name !== "platform" && name !== "userInfo" && name !== "default");
+const osSource = \`import { createRequire } from "node:module";\nconst real = createRequire(process.cwd() + "/x.cjs")("os");\n\` + names.map((name) => \`export const \${name} = real[\\\'\${name}\\\'];\n\`).join("") + \`export const platform = () => "darwin";\nexport const userInfo = () => { throw new Error("FAULT_USERINFO") };\nexport default real;\n\`;
+register("./os-hooks.mjs", { parentURL: import.meta.url, data: { osSource } });
+`);
+		const pi = join(root, `pi-${target}`);
+		writeFileSync(pi, "#!/bin/sh\necho 0.0.0\n"); chmodSync(pi, 0o755);
+		const recordPath = join(root, "record.json");
+		const result = spawnSync(process.execPath, ["--import", join(root, "register.mjs"), join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { encoding: "utf8" });
+		assert.notEqual(result.status, 0);
+		// The thrown acceptance failure, not FAULT_USERINFO, reaches the process.
+		assert.match(result.stderr, /cold version mismatch/);
+		assert.doesNotMatch(result.stderr, /Unhandled|FAULT_USERINFO\n/);
+		const diagnostics = JSON.parse(readFileSync(`${recordPath}.diagnostics`, "utf8"));
+		assert.match(diagnostics.error, /cold version mismatch/);
+		assert.match(diagnostics.contextError, /FAULT_USERINFO/);
+		assert.equal(existsSync(recordPath), false);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 

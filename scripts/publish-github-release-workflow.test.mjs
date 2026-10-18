@@ -579,6 +579,34 @@ test("Linux archive smoke provisions a headless display without bypassing clipbo
   assert.doesNotMatch(`${syncWorkflowText}\n${workflowText}\n${smoke}`, /skip[-_]clipboard|PI_XZ_SKIP_CLIPBOARD/i);
 });
 
+test("smoke failure diagnostics upload as a separate always-artifact outside acceptance", () => {
+  const acceptSteps = workflow.jobs["accept-release-candidate"].steps;
+  const diagnosticsUpload = acceptSteps.find(
+    (step) => typeof step.with?.name === "string" && step.with.name.startsWith("smoke-diagnostics-"),
+  );
+  assert.ok(diagnosticsUpload, "accept-release-candidate must upload a smoke-diagnostics artifact");
+  assert.equal(diagnosticsUpload.if, "always()");
+  assert.match(diagnosticsUpload.with.name, /^smoke-diagnostics-\$\{\{ github\.sha \}\}-\$\{\{ matrix\.target \}\}$/);
+  assert.doesNotMatch(diagnosticsUpload.with.name, /^github-release-/);
+  assert.match(diagnosticsUpload.with.path, /smoke-record\/\$\{\{ matrix\.target \}\}\.json\.diagnostics/);
+  assert.equal(diagnosticsUpload.with["if-no-files-found"], "ignore");
+  assert.equal(diagnosticsUpload.with.overwrite, true);
+  // Diagnostics never enter acceptance aggregation, the public release staging,
+  // or the attested subjects: the aggregation download pattern only matches
+  // github-release-smoke-*, and attest subjects are fixed.
+  const aggregationDownload = workflow.jobs["acceptance-record"].steps.find((step) => step.uses?.startsWith("actions/download-artifact@") && step.with?.pattern);
+  assert.match(aggregationDownload.with.pattern, /^github-release-smoke-/);
+  // No other job downloads or references the diagnostics artifact.
+  const downstream = ["acceptance-record", "attest-release-candidate", "update-release-candidate", "update-freebsd-release-candidate", "publish-release"];
+  for (const name of downstream) {
+    const text = JSON.stringify(workflow.jobs[name]);
+    assert.equal(text.includes("smoke-diagnostics"), false, `${name} must not reference smoke-diagnostics`);
+  }
+  const attestIndex = workflowText.indexOf("Attest exact Release subjects");
+  const verifyIndex = workflowText.indexOf("Stage and verify public attestation bundle");
+  assert.doesNotMatch(workflowText.slice(attestIndex, verifyIndex), /diagnostics/);
+});
+
 test("final native smoke proves every executable contains bytecode", () => {
   const smoke = readFileSync(join(ROOT, "scripts", "smoke-binary-release.mjs"), "utf8");
   assert.match(smoke, /run\("bytecode", executable/);
