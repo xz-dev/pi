@@ -39,6 +39,7 @@ import {
 	clearWebSocketSseFallbackIfOwned,
 	closeResponsesWebSocketSessions,
 	extractEventError,
+	getCheckpointCooldownState,
 	getResponsesWebSocketDebugStats,
 	getWebSocketSseFallbackState,
 	isCheckpointReferenceError,
@@ -353,17 +354,24 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			// Checkpoint failure cooldown (separate from WS→SSE recovery): while a
 			// verified store/continuation rejection is fresh, requests go without
 			// store or deltas; the first request after the deadline owns the probe.
-			// A hook store:false veto makes this request checkpoint-free without
-			// touching (or probing) the cooldown, and keeps the explicit false.
+			// A hook store:false veto keeps the explicit false and never claims the
+			// probe, but an existing cooldown still forces full context (allowed:false).
 			const policyStore = checkpointsEnabled && params.store === true;
 			const checkpointCooldown = policyStore
 				? resolveCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
-				: { allowed: checkpointsEnabled };
+				: {
+						allowed:
+							checkpointsEnabled &&
+							!(
+								sessionId &&
+								getCheckpointCooldownState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
+							),
+					};
 			checkpointProbe = checkpointCooldown.probe;
 			// A cooldown in force (or an already-claimed probe) keeps this request
 			// checkpoint-free by OMITTING the policy-owned store field (an endpoint
 			// may reject the parameter itself); a caller's own hook store stays.
-			if (checkpointsEnabled && !checkpointCooldown.allowed) {
+			if (policyStore && !checkpointCooldown.allowed) {
 				delete (params as { store?: boolean }).store;
 			}
 			const checkpointsActive = checkpointsEnabled && checkpointCooldown.allowed && params.store === true;
