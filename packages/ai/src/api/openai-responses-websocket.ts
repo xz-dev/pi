@@ -218,6 +218,14 @@ function errorStatus(error: ResponsesApiError): number | undefined {
 	return typeof status === "number" ? status : undefined;
 }
 
+function errorType(error: ResponsesApiError): string | undefined {
+	const payload = error.payload as
+		| { error?: { type?: unknown }; response?: { error?: { type?: unknown } } }
+		| undefined;
+	const type = payload?.error?.type ?? payload?.response?.error?.type;
+	return typeof type === "string" ? type : undefined;
+}
+
 /**
  * A rejection proving the requested durable checkpoint (`store:true` or
  * `previous_response_id`) failed before execution, warranting one repair and a
@@ -229,11 +237,14 @@ function errorStatus(error: ResponsesApiError): number | undefined {
  */
 export function isCheckpointReferenceError(error: unknown): boolean {
 	if (!(error instanceof ResponsesApiError)) return false;
-	if (error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE) return true;
 	// Authentication/permission/quota/rate-limit rejections first: never replay.
 	const status = errorStatus(error);
 	if (status !== undefined && CHECKPOINT_NON_RETRYABLE_STATUS.has(status)) return false;
 	if (error.code !== undefined && CHECKPOINT_NON_RETRYABLE_CODE_RE.test(error.code)) return false;
+	if (error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE) return true;
+	// The code-less shapes must prove an invalid-request rejection: a server
+	// error or other status leaves execution unknown and is never replayed.
+	if (status !== undefined ? status !== 400 : errorType(error) !== "invalid_request_error") return false;
 	const param = errorParam(error);
 	const message = error.message ?? "";
 	if (param === "store" || param === "previous_response_id") {
