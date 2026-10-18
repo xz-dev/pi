@@ -1594,6 +1594,53 @@ describe("checkpoint failure cooldown", () => {
 		expect(probe.responseCheckpoint).toBeUndefined();
 	});
 
+	it.each(["auto", "websocket-cached"] as const)(
+		"%s: unchainable caller-rooted request fails closed without sending; lineage survives",
+		async (transport) => {
+			const chained = new Set<string>();
+			const { sent, fetchMock } = checkpointServer({
+				onRequest: (socket, frame) => {
+					if (frame.store === true && sent.length === 1) {
+						socket.emit({
+							type: "error",
+							error: { type: "invalid_request_error", param: "store", message: "store is not allowed" },
+						});
+						return true;
+					}
+					if (frame.previous_response_id === "external" || chained.has(frame.previous_response_id ?? "")) {
+						(socket as unknown as { respond: (f: SentFrame) => void }).respond({
+							...frame,
+							previous_response_id: undefined,
+						});
+						return true;
+					}
+					return false;
+				},
+			});
+			const model = makeModel(OFFICIAL_URL);
+			const opts = { ...OPTS, transport };
+			await stream(model, ctx1, opts).result();
+			const callerCtx = normalizeContext({ messages: [userMsg("delta", 2)] });
+			const caller = await stream(model, callerCtx, {
+				...opts,
+				onPayload: (payload: unknown) => ({
+					...(payload as Record<string, unknown>),
+					previous_response_id: "external",
+				}),
+			}).result();
+			chained.add(caller.responseId!);
+			const before = sent.length;
+			const next = normalizeContext({ messages: [...callerCtx.messages, caller, userMsg("two", 3)] });
+			const changed = await stream({ ...model, maxTokens: 128 }, next, { ...opts, maxTokens: 128 }).result();
+			expect(changed.stopReason).toBe("error");
+			expect(sent).toHaveLength(before);
+			expect(fetchMock).not.toHaveBeenCalled();
+			const retried = await stream(model, next, opts).result();
+			expect(retried.stopReason).toBe("stop");
+			expect(sent.at(-1)!.previous_response_id).toBe(caller.responseId);
+		},
+	);
+
 	it("cooldown never strips a caller-owned previous_response_id", async () => {
 		const { sent } = serverFail("store");
 		const model = makeModel(OFFICIAL_URL);
