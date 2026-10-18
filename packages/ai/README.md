@@ -1715,9 +1715,9 @@ Two request options control eligibility, both passable via
 | `"auto"` | try | try | skip |
 | `"declared"` | skip (official OpenAI service defaults to capable) | try | skip |
 
-Absent or malformed `responseCheckpointMode` stays absent through settings and
-SDK forwarding; the request owner applies `"always"`, and a malformed value
-disables checkpoints rather than enabling them.
+Settings and SDK forwarding pass `responseCheckpointMode` through raw: absent
+stays absent and the request owner applies `"always"`; a malformed value is
+forwarded as-is and the request owner disables checkpoints for it.
 
 `responseCheckpointExclude` is the per-target opt-out. Absent means `[]`
 (enabled); any matching minimatch pattern disables the target. `["*"]`
