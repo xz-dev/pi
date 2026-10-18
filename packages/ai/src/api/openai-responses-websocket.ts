@@ -1183,13 +1183,19 @@ export async function processResponsesWebSocket<TApi extends Api>(
 	// Preserve legacy non-checkpoint behavior; the checkpoint owner must not
 	// discard a caller's parent or certify its unknown server-side lineage.
 	if (!callerOwned) delete fullBody.previous_response_id;
+	// A caller-rooted continuation (fullHistory:false) depends on server history
+	// we do not hold: forced full context must keep chaining it, never replace it,
+	// and a request that cannot chain it is never certified (or captured) as complete.
+	// Scoped to cooldown: elsewhere the base-branch provenance rules are unchanged.
+	const inheritsUnknownLineage = config.forceFullContext === true && entry?.continuation?.fullHistory === false;
 	let requestBody =
-		!callerOwned && !config.forceFullContext && useCachedContext && entry
+		!callerOwned && (!config.forceFullContext || inheritsUnknownLineage) && useCachedContext && entry
 			? buildCachedWebSocketRequestBody(entry, fullBody)
 			: fullBody;
 	let fullHistory =
 		!callerOwned &&
-		(config.forceFullContext === true || requestBody === fullBody || entry?.continuation?.fullHistory === true);
+		!inheritsUnknownLineage &&
+		(requestBody === fullBody || entry?.continuation?.fullHistory === true);
 
 	// Durable planning is independent of connection-local state, but never
 	// layers over a caller-owned parent.
