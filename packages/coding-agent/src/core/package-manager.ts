@@ -48,6 +48,7 @@ import {
 	resolvePath,
 } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
+import { retryUpdateOperation, UPDATE_RETRY_DELAYS_MS } from "../utils/update-retry.ts";
 import { withBunGitIntegrityCompatibility } from "./bun-git-integrity.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { type PiManifest, readPiManifest } from "./pi-manifest.ts";
@@ -907,6 +908,22 @@ export class DefaultPackageManager implements PackageManager {
 		this.progressCallback?.(event);
 	}
 
+	/**
+	 * Retry one network-bound update step after the fixed update delays.
+	 * Successful sibling steps never rerun; the last failure rethrows unchanged.
+	 */
+	private withUpdateRetry<T>(source: string, operation: () => Promise<T>): Promise<T> {
+		return retryUpdateOperation(operation, {
+			onRetry: (error, attempt, delayMs) =>
+				this.emitProgress({
+					type: "progress",
+					action: "update",
+					source,
+					message: `${error instanceof Error ? error.message : String(error)}; retrying in ${Math.round(delayMs / 1000)}s (${attempt}/${UPDATE_RETRY_DELAYS_MS.length})`,
+				}),
+		});
+	}
+
 	private async withProgress(
 		action: ProgressEvent["action"],
 		source: string,
@@ -1193,10 +1210,8 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		try {
-			const targetVersion = await this.getLatestNpmVersion(
-				source.version ? source.spec : source.name,
-				source.range,
-				scope,
+			const targetVersion = await this.withUpdateRetry(source.spec, () =>
+				this.getLatestNpmVersion(source.version ? source.spec : source.name, source.range, scope),
 			);
 			return gt(targetVersion, installedVersion);
 		} catch (cause) {
@@ -1238,16 +1253,20 @@ export class DefaultPackageManager implements PackageManager {
 						),
 				);
 				if (missing.length > 0) {
-					await this.runNpmCommand(
-						this.getNpmInstallArgs(
-							missing.map(({ parsed }) => (parsed.version ? parsed.spec : `${parsed.name}@latest`)),
-							installRoot,
+					await this.withUpdateRetry(sourceLabel, () =>
+						this.runNpmCommand(
+							this.getNpmInstallArgs(
+								missing.map(({ parsed }) => (parsed.version ? parsed.spec : `${parsed.name}@latest`)),
+								installRoot,
+							),
 						),
 					);
 				}
-				await this.runNpmCommand(["update", ...specs, "--cwd", installRoot, "--omit=peer"]);
+				await this.withUpdateRetry(sourceLabel, () =>
+					this.runNpmCommand(["update", ...specs, "--cwd", installRoot, "--omit=peer"]),
+				);
 			} else {
-				await this.installNpmBatch(specs, scope);
+				await this.withUpdateRetry(sourceLabel, () => this.installNpmBatch(specs, scope));
 			}
 		});
 	}
@@ -1889,14 +1908,19 @@ export class DefaultPackageManager implements PackageManager {
 		return wrappedPackageManagers[0] ?? directCommand;
 	}
 
-	private async runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void> {
+	private async runNpmCommand(args: string[], options?: { cwd?: string; update?: boolean }): Promise<void> {
 		const npmCommand = this.getNpmCommand();
+		const commandOptions = npmCommand.embeddedBun
+			? { cwd: options?.cwd, env: { BUN_BE_BUN: "1" } }
+			: options?.cwd === undefined
+				? undefined
+				: { cwd: options.cwd };
 		const run = () =>
-			this.runCommand(
-				npmCommand.command,
-				[...npmCommand.args, ...args],
-				npmCommand.embeddedBun ? { ...options, env: { BUN_BE_BUN: "1" } } : options,
-			);
+			options?.update
+				? this.withUpdateRetry(args.join(" "), () =>
+						this.runCommand(npmCommand.command, [...npmCommand.args, ...args], commandOptions),
+					)
+				: this.runCommand(npmCommand.command, [...npmCommand.args, ...args], commandOptions);
 		if (npmCommand.embeddedBun && (args[0] === "install" || args[0] === "update")) {
 			const cwdIndex = args.indexOf("--cwd");
 			const cwd = cwdIndex >= 0 ? args[cwdIndex + 1] : options?.cwd;
@@ -1980,15 +2004,20 @@ export class DefaultPackageManager implements PackageManager {
 		await this.runNpmCommand(args);
 	}
 
-	private async installGit(source: GitSource, scope: SourceScope): Promise<void> {
+	private async installGit(source: GitSource, scope: SourceScope, update = false): Promise<void> {
 		const targetDir = this.getGitInstallPath(source, scope);
 		if (existsSync(targetDir)) {
 			if (source.ref) {
-				await this.ensureGitRef(targetDir, ["fetch", "--depth=1", "--no-tags", "origin", source.ref], "FETCH_HEAD");
+				await this.ensureGitRef(
+					targetDir,
+					["fetch", "--depth=1", "--no-tags", "origin", source.ref],
+					"FETCH_HEAD",
+					update,
+				);
 				return;
 			}
 			const target = await this.getLocalGitUpdateTarget(targetDir);
-			await this.ensureGitRef(targetDir, target.fetchArgs, target.ref);
+			await this.ensureGitRef(targetDir, target.fetchArgs, target.ref, update);
 			return;
 		}
 		const gitRoot = this.getGitInstallRoot(scope);
@@ -1998,19 +2027,27 @@ export class DefaultPackageManager implements PackageManager {
 		mkdirSync(dirname(targetDir), { recursive: true });
 		rmSync(this.getGitUpdateMarkerPath(targetDir), { force: true });
 
+		// Network fetches and dependency installs get the update retry policy when
+		// this install is driven by `pi update`; local git steps do not.
+		const runGit = (args: string[], options?: { cwd?: string }): Promise<void> =>
+			update
+				? this.withUpdateRetry(source.repo, () => this.runCommand("git", args, options))
+				: options === undefined
+					? this.runCommand("git", args)
+					: this.runCommand("git", args, options);
 		try {
 			if (source.ref && /^[0-9a-f]{40}$/i.test(source.ref)) {
 				// --branch accepts branch/tag names, not commit IDs. Fetch the commit without cloning another branch.
 				await this.runCommand("git", ["init", targetDir]);
 				await this.runCommand("git", ["remote", "add", "origin", source.repo], { cwd: targetDir });
-				await this.runCommand("git", ["fetch", "--depth=1", "--no-tags", "origin", source.ref], { cwd: targetDir });
+				await runGit(["fetch", "--depth=1", "--no-tags", "origin", source.ref], { cwd: targetDir });
 				await this.runCommand("git", ["checkout", "--detach", "FETCH_HEAD"], { cwd: targetDir });
 			} else if (source.ref && /^[0-9a-f]{4,39}$/i.test(source.ref)) {
 				// Servers cannot resolve abbreviated commit IDs; retain history for local resolution.
-				await this.runCommand("git", ["clone", source.repo, targetDir]);
+				await runGit(["clone", source.repo, targetDir]);
 				await this.runCommand("git", ["checkout", source.ref], { cwd: targetDir });
 			} else {
-				await this.runCommand("git", [
+				await runGit([
 					"clone",
 					"--depth=1",
 					"--single-branch",
@@ -2022,7 +2059,7 @@ export class DefaultPackageManager implements PackageManager {
 			}
 			const packageJsonPath = join(targetDir, "package.json");
 			if (existsSync(packageJsonPath)) {
-				await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
+				await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir, update });
 			}
 		} catch (error) {
 			rmSync(targetDir, { recursive: true, force: true });
@@ -2033,18 +2070,26 @@ export class DefaultPackageManager implements PackageManager {
 
 	private async updateGit(source: GitSource, scope: SourceScope): Promise<void> {
 		const targetDir = this.getGitInstallPath(source, scope);
+		// Temporary startup refresh keeps the prior single-attempt policy; only
+		// explicit user/project updates opt into fixed-delay retries.
+		const updateRetries = scope !== "temporary";
 		if (!existsSync(targetDir)) {
-			await this.installGit(source, scope);
+			await this.installGit(source, scope, updateRetries);
 			return;
 		}
 
 		if (source.ref) {
-			await this.ensureGitRef(targetDir, ["fetch", "--depth=1", "--no-tags", "origin", source.ref], "FETCH_HEAD");
+			await this.ensureGitRef(
+				targetDir,
+				["fetch", "--depth=1", "--no-tags", "origin", source.ref],
+				"FETCH_HEAD",
+				updateRetries,
+			);
 			return;
 		}
 
 		const target = await this.getLocalGitUpdateTarget(targetDir);
-		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref);
+		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref, updateRetries);
 	}
 
 	private hasMissingGitDependencies(targetDir: string): boolean {
@@ -2072,35 +2117,39 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async repairMissingGitDependencies(targetDir: string): Promise<void> {
+	private async repairMissingGitDependencies(targetDir: string, update = false): Promise<void> {
 		if (!this.hasMissingGitDependencies(targetDir)) return;
-		await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
+		await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir, update });
 	}
 
 	private getGitUpdateMarkerPath(targetDir: string): string {
 		return join(dirname(targetDir), `.${basename(targetDir)}.pi-update-incomplete`);
 	}
 
-	private async cleanAndInstallGitDependencies(targetDir: string, markerPath: string): Promise<void> {
+	private async cleanAndInstallGitDependencies(targetDir: string, markerPath: string, update = false): Promise<void> {
 		// Clean untracked files (extensions should be pristine). If this fails after
 		// deleting dependencies, repair them so the existing extension still loads.
 		try {
 			await this.runCommand("git", ["clean", "-fdx"], { cwd: targetDir });
 		} catch (error) {
-			await this.repairMissingGitDependencies(targetDir).catch(() => {});
+			await this.repairMissingGitDependencies(targetDir, update).catch(() => {});
 			throw error;
 		}
 
 		const packageJsonPath = join(targetDir, "package.json");
 		if (existsSync(packageJsonPath)) {
-			await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
+			await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir, update });
 		}
 		rmSync(markerPath, { force: true });
 	}
 
-	private async ensureGitRef(targetDir: string, fetchArgs: string[], ref: string): Promise<void> {
+	private async ensureGitRef(targetDir: string, fetchArgs: string[], ref: string, update = false): Promise<void> {
 		// Fetch only the ref we will reset to, avoiding unrelated branch/tag noise.
-		await this.runCommand("git", fetchArgs, { cwd: targetDir });
+		if (update) {
+			await this.withUpdateRetry(targetDir, () => this.runCommand("git", fetchArgs, { cwd: targetDir }));
+		} else {
+			await this.runCommand("git", fetchArgs, { cwd: targetDir });
+		}
 		if (existsSync(join(targetDir, ".git", "shallow"))) {
 			// Shallow parents invalidate Git's derived commit-graph caches.
 			rmSync(join(targetDir, ".git", "objects", "info", "commit-graph"), { force: true });
@@ -2119,16 +2168,16 @@ export class DefaultPackageManager implements PackageManager {
 		const markerPath = this.getGitUpdateMarkerPath(targetDir);
 		if (localHead.trim() === targetHead.trim()) {
 			if (existsSync(markerPath)) {
-				await this.cleanAndInstallGitDependencies(targetDir, markerPath);
+				await this.cleanAndInstallGitDependencies(targetDir, markerPath, update);
 			} else {
-				await this.repairMissingGitDependencies(targetDir);
+				await this.repairMissingGitDependencies(targetDir, update);
 			}
 			return;
 		}
 
 		writeFileSync(markerPath, "", "utf-8");
 		await this.runCommand("git", ["reset", "--hard", commitRef], { cwd: targetDir });
-		await this.cleanAndInstallGitDependencies(targetDir, markerPath);
+		await this.cleanAndInstallGitDependencies(targetDir, markerPath, update);
 	}
 
 	private async refreshTemporaryGitSource(source: GitSource, sourceStr: string): Promise<void> {

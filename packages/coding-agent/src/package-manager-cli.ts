@@ -40,6 +40,7 @@ import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./utils/chi
 import { canonicalizePath, getCwdRelativePath } from "./utils/paths.ts";
 import { getPiUserAgent } from "./utils/pi-user-agent.ts";
 import { stripBom } from "./utils/text.ts";
+import { retryUpdateOperation, UPDATE_RETRY_DELAYS_MS } from "./utils/update-retry.ts";
 import { formatVersionCheckError, getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 import {
 	cleanupWindowsSelfUpdateQuarantine,
@@ -112,12 +113,23 @@ function getActiveManagedInstallRoot(): string | undefined {
 	return managedRoot;
 }
 
+function reportUpdateRetry(error: unknown, attempt: number, delayMs: number): void {
+	const message = error instanceof Error ? error.message : String(error);
+	console.log(
+		chalk.dim(`${message}; retrying in ${Math.round(delayMs / 1000)}s (${attempt}/${UPDATE_RETRY_DELAYS_MS.length})`),
+	);
+}
+
 async function fetchInstallerArtifact(url: string, label: string): Promise<string> {
 	const response = await fetch(url, { headers: { "User-Agent": getPiUserAgent(VERSION) } });
 	if (!response.ok) {
 		throw new Error(`Could not download managed installer ${label} from ${url}: HTTP ${response.status}`);
 	}
 	return await response.text();
+}
+
+function fetchInstallerArtifactWithRetry(url: string, label: string): Promise<string> {
+	return retryUpdateOperation(() => fetchInstallerArtifact(url, label), { onRetry: reportUpdateRetry });
 }
 
 async function runManagedNpmCi(stageDir: string): Promise<void> {
@@ -260,13 +272,13 @@ async function runManagedSelfUpdate(managedRoot: string, version: string): Promi
 		mkdirSync(stagingRoot, { recursive: true });
 		stageDir = mkdtempSync(join(stagingRoot, "update-"));
 		const [packageJsonContent, packageLockContent] = await Promise.all([
-			fetchInstallerArtifact(`${releaseUrl}/package.json`, "package.json"),
-			fetchInstallerArtifact(`${releaseUrl}/package-lock.json`, "package-lock.json"),
+			fetchInstallerArtifactWithRetry(`${releaseUrl}/package.json`, "package.json"),
+			fetchInstallerArtifactWithRetry(`${releaseUrl}/package-lock.json`, "package-lock.json"),
 		]);
 		writeFileSync(join(stageDir, "package.json"), packageJsonContent);
 		writeFileSync(join(stageDir, "package-lock.json"), packageLockContent);
 
-		await runManagedNpmCi(stageDir);
+		await retryUpdateOperation(() => runManagedNpmCi(stageDir!), { onRetry: reportUpdateRetry });
 		verifyManagedRelease(stageDir, version);
 		renameSync(stageDir, releaseDir);
 		activateManagedRelease(managedRoot, version);
@@ -702,29 +714,45 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 }
 
 async function refreshModelCatalogs(agentDir: string, refreshTimeoutMs: number | undefined): Promise<void> {
-	const controller = new AbortController();
-	const timeout = refreshTimeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), refreshTimeoutMs);
-	try {
-		const modelRuntime = await ModelRuntime.create({
-			authPath: join(agentDir, "auth.json"),
-			modelsPath: join(agentDir, "models.json"),
-			allowModelNetwork: false,
-			signal: controller.signal,
-		});
-		const result = await modelRuntime.refresh({
-			allowNetwork: true,
-			force: true,
-			signal: controller.signal,
-		});
-		if (result.aborted) {
-			throw new Error("Model catalog refresh timed out.");
+	const modelRuntime = await ModelRuntime.create({
+		authPath: join(agentDir, "auth.json"),
+		modelsPath: join(agentDir, "models.json"),
+		allowModelNetwork: false,
+	});
+	// One retry owner per provider: a fresh timeout per attempt and inner
+	// transport retries disabled, so the explicit update owns the 3/6/12s budget.
+	// A completed provider is never refetched; a failed or timed-out sibling
+	// retries only itself, and a failing provider does not skip the rest.
+	const errors: string[] = [];
+	for (const provider of modelRuntime.getProviders()) {
+		try {
+			await retryUpdateOperation(
+				async () => {
+					const result = await modelRuntime.refresh({
+						allowNetwork: true,
+						force: true,
+						providers: [provider.id],
+						// No timeout signal when the resolved value is undefined; 0 stays
+						// an immediate timeout (AbortSignal.timeout(0)).
+						...(refreshTimeoutMs === undefined ? {} : { signal: AbortSignal.timeout(refreshTimeoutMs) }),
+						disableImmediateRetries: true,
+					});
+					const error = result.errors.get(provider.id);
+					if (error) {
+						throw new Error(`${provider.id}: ${error.message}`);
+					}
+					if (result.aborted) {
+						throw new Error(`${provider.id}: Model catalog refresh timed out.`);
+					}
+				},
+				{ onRetry: reportUpdateRetry },
+			);
+		} catch (error) {
+			errors.push(error instanceof Error ? error.message : String(error));
 		}
-		if (result.errors.size > 0) {
-			const details = Array.from(result.errors, ([provider, error]) => `${provider}: ${error.message}`).join("; ");
-			throw new Error(`Could not refresh model catalogs: ${details}`);
-		}
-	} finally {
-		clearTimeout(timeout);
+	}
+	if (errors.length > 0) {
+		throw new Error(`Could not refresh model catalogs: ${errors.join("; ")}`);
 	}
 	console.log(chalk.green("Model catalogs refreshed"));
 }
@@ -781,16 +809,22 @@ interface SelfUpdatePlan {
 }
 
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
-	let latestRelease: Awaited<ReturnType<typeof getLatestPiRelease>>;
+	let latestRelease: NonNullable<Awaited<ReturnType<typeof getLatestPiRelease>>>;
 	try {
-		latestRelease = await getLatestPiRelease(VERSION, { retry: true });
+		latestRelease = await retryUpdateOperation(
+			async () => {
+				// Immediate transport retries stay inside the version check; the update
+				// backoff wraps a single attempt so attempts never multiply.
+				const release = await getLatestPiRelease(VERSION, { retry: false });
+				if (!release) throw new Error(`Could not determine latest ${APP_NAME} version.`);
+				return release;
+			},
+			{ onRetry: reportUpdateRetry },
+		);
 	} catch (error: unknown) {
 		throw new Error(`Could not determine latest ${APP_NAME} version: ${formatVersionCheckError(error)}`, {
 			cause: error,
 		});
-	}
-	if (!latestRelease) {
-		throw new Error(`Could not determine latest ${APP_NAME} version.`);
 	}
 
 	const packageName = latestRelease.packageName ?? PACKAGE_NAME;
@@ -812,23 +846,27 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 	console.log(chalk.dim(`Updating ${APP_NAME} with ${command.display}...`));
 	for (const step of command.steps ?? [command]) {
-		await new Promise<void>((resolve, reject) => {
-			const child = spawnProcess(step.command, step.args, {
-				stdio: "inherit",
-			});
-			child.on("error", (error) => {
-				reject(error);
-			});
-			child.on("close", (code, signal) => {
-				if (code === 0) {
-					resolve();
-				} else if (signal) {
-					reject(new Error(`${step.display} terminated by signal ${signal}`));
-				} else {
-					reject(new Error(`${step.display} exited with code ${code ?? "unknown"}`));
-				}
-			});
-		});
+		await retryUpdateOperation(
+			() =>
+				new Promise<void>((resolve, reject) => {
+					const child = spawnProcess(step.command, step.args, {
+						stdio: "inherit",
+					});
+					child.on("error", (error) => {
+						reject(error);
+					});
+					child.on("close", (code, signal) => {
+						if (code === 0) {
+							resolve();
+						} else if (signal) {
+							reject(new Error(`${step.display} terminated by signal ${signal}`));
+						} else {
+							reject(new Error(`${step.display} exited with code ${code ?? "unknown"}`));
+						}
+					});
+				}),
+			{ onRetry: reportUpdateRetry },
+		);
 	}
 }
 
@@ -1099,7 +1137,7 @@ export async function handlePackageCommand(
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
 
 	packageManager.setProgressCallback((event) => {
-		if (event.type === "start") {
+		if (event.type === "start" || event.type === "progress") {
 			process.stdout.write(chalk.dim(`${event.message}\n`));
 		}
 	});
@@ -1214,7 +1252,7 @@ export async function handlePackageCommand(
 								return true;
 							}
 							console.log(chalk.dim(`Updating ${APP_NAME} from the xz-dev Release...`));
-							await runXzSelfUpdate(latestRelease, VERSION, options.force, mirrorOptions);
+							await runXzSelfUpdate(latestRelease, VERSION, options.force, { ...mirrorOptions, retry: true });
 							console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${latestRelease.version}`));
 							console.log(
 								chalk.dim(

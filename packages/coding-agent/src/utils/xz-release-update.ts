@@ -5,6 +5,7 @@ import { RELEASE_TARGET } from "../config.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 import { readReleaseArchive } from "./release-archive.ts";
 import { verifyReleaseAttestation } from "./release-attestation.ts";
+import { retryUpdateOperation, UPDATE_RETRY_DELAYS_MS } from "./update-retry.ts";
 
 /** Rename one path, retrying transient Windows sharing violations. */
 function renameSyncRetryable(
@@ -125,6 +126,8 @@ interface XzSelfUpdateOptions extends XzMirrorOptions {
 	now?: () => number;
 	writeProgress?: (message: string) => void;
 	isTTY?: boolean;
+	/** Retry transient bundle download failures with the update delays (no mirrors configured). */
+	retry?: boolean;
 	/** Injectable raw rename for tests; retry behavior always applies. */
 	renameSync?: (source: string, destination: string) => void;
 }
@@ -425,18 +428,34 @@ export async function getLatestXzRelease(
 ): Promise<XzLatestRelease | undefined> {
 	if (process.env.PI_OFFLINE) return undefined;
 	parseDistributionVersion(currentVersion);
-	const attempts = options.retry && !options.mirrors?.length ? 3 : 1;
-	return withReleaseMirrors(options, async (base) => {
-		for (let attempt = 0; ; attempt++) {
-			try {
-				return await discoverLatestXzRelease(currentVersion, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, base);
-			} catch (error) {
-				if (!(error instanceof RetryableDiscoveryError) || attempt + 1 >= attempts) {
-					throw error instanceof RetryableDiscoveryError ? error.error : error;
-				}
-			}
-		}
+	// One fixed retry budget around the whole ordered mirror chain: configured
+	// mirrors are not exempt, and no mirror gets an independent budget.
+	const discover = () =>
+		withReleaseMirrors(options, (base) =>
+			discoverLatestXzRelease(currentVersion, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, base),
+		);
+	if (options.retry !== true) {
+		return discover().catch((error: unknown) => {
+			throw unwrapDiscoveryError(error);
+		});
+	}
+	return retryUpdateOperation(discover, {
+		shouldRetry: (error) => error instanceof RetryableDiscoveryError,
+		onRetry: (error, attempt, delayMs) =>
+			options.onMirrorError?.(xzRetryMessage("Release discovery", error, attempt, delayMs)),
+	}).catch((error: unknown) => {
+		throw unwrapDiscoveryError(error);
 	});
+}
+
+function unwrapDiscoveryError(error: unknown): unknown {
+	return error instanceof RetryableDiscoveryError ? error.error : error;
+}
+
+function xzRetryMessage(prefix: string, error: unknown, attempt: number, delayMs: number): string {
+	const cause = unwrapDiscoveryError(error);
+	const message = cause instanceof Error ? cause.message : String(cause);
+	return `${prefix} failed: ${message}. Retrying in ${Math.round(delayMs / 1000)}s (${attempt}/${UPDATE_RETRY_DELAYS_MS.length})`;
 }
 
 function formatBytes(bytes: number): string {
@@ -513,9 +532,10 @@ async function downloadExecutable(
 			currentVersion,
 			controller.signal,
 			"application/octet-stream",
+			true,
 		);
 		showProgress();
-		const bytes = await readBoundedResponse(response, release.bundle.size, release.bundle.name, false, (total) => {
+		const bytes = await readBoundedResponse(response, release.bundle.size, release.bundle.name, true, (total) => {
 			resetInactivityTimeout();
 			downloaded = total;
 			showProgress();
@@ -594,9 +614,24 @@ export async function runXzSelfUpdate(
 	}
 
 	try {
-		const executable = await withReleaseMirrors(options, (base) =>
-			downloadExecutable(release, currentVersion, options, base),
-		);
+		// One fixed retry budget around the whole ordered mirror chain, before
+		// filesystem staging/activation; integrity failures never retry.
+		const download = () =>
+			withReleaseMirrors(options, (base) => downloadExecutable(release, currentVersion, options, base));
+		let executable: Uint8Array;
+		if (options.retry !== true) {
+			executable = await download().catch((error: unknown) => {
+				throw unwrapDiscoveryError(error);
+			});
+		} else {
+			executable = await retryUpdateOperation(download, {
+				shouldRetry: (error) => error instanceof RetryableDiscoveryError,
+				onRetry: (error, attempt, delayMs) =>
+					options.onMirrorError?.(xzRetryMessage("Release download", error, attempt, delayMs)),
+			}).catch((error: unknown) => {
+				throw unwrapDiscoveryError(error);
+			});
+		}
 		// Write exclusively only after verification; local failures must not trigger mirror retries.
 		writeFileSync(stagingPath, executable, { flag: "wx", mode: 0o600 });
 		rename(stagingPath, candidatePath);
