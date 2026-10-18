@@ -126,6 +126,7 @@ export type {
 	McpServersChangeEvent,
 	MessageEndEvent,
 	MessageEndEventResult,
+	MessageOrigin,
 	MessageRenderer,
 	MessageRenderOptions,
 	MessageStartEvent,
