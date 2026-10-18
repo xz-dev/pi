@@ -513,7 +513,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 						if (output.stopReason === "aborted" || output.stopReason === "error") {
 							throw new ResponsesApiError(output.errorMessage || "An unknown error occurred");
 						}
-						if (transport === "auto" && sessionId && recoveryState) {
+						if (sessionId) {
 							clearWebSocketSseFallbackIfOwned(
 								OPENAI_RESPONSES_WEBSOCKET_SCOPE,
 								sessionId,
@@ -527,9 +527,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 						if (checkpointProbe && sessionId && output.responseCheckpoint === undefined) {
 							recordCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey);
 						}
-						// A completed probe clears the cooldown only when it captured a
-						// valid checkpoint: that alone proves store:true works again.
-						if (checkpointProbe && sessionId && output.responseCheckpoint !== undefined) {
+						// Only a valid checkpoint proves storage works and resets its progression.
+						if (sessionId && output.responseCheckpoint !== undefined) {
 							clearCheckpointCooldownIfOwned(
 								OPENAI_RESPONSES_WEBSOCKET_SCOPE,
 								sessionId,

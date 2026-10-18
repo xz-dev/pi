@@ -397,7 +397,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							throw new Error("Request was aborted");
 						}
 						assertSuccessfulOutput(output);
-						if (transport === "auto" && sessionId && recoveryState) {
+						if (sessionId) {
 							clearWebSocketSseFallbackIfOwned(CODEX_WEBSOCKET_SCOPE, sessionId, recoveryKey, recoveryState);
 						}
 						stream.push({
