@@ -290,6 +290,48 @@ describe("openai-responses WebSocket transport", () => {
 		expect(getOpenAIResponsesWebSocketDebugStats(sessionId)?.websocketFallbackActive).toBe(true);
 	});
 
+	it.each(["auto", "websocket", "websocket-cached"] as const)(
+		"progresses failed probes and resets only after a completed %s response",
+		async (transport) => {
+			const { run, recover, onSend, sent } = mockTransport();
+			let now = 1000;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const options = { responseCheckpointExclude: ["*"] };
+			onSend.mockImplementation((socket) => socket.fail());
+			await recover(options);
+			for (const cooldown of [120_000, 180_000, 240_000, 300_000, 300_000]) {
+				const attempts = sent.length;
+				now += cooldown - 1;
+				await run(options);
+				expect(sent).toHaveLength(attempts);
+				now++;
+				await run(options);
+				expect(sent).toHaveLength(attempts + 1);
+			}
+			onSend.mockImplementation((socket) => socket.complete());
+			if (transport === "auto") now += 300_000;
+			expect((await run({ ...options, transport })).stopReason).toBe("stop");
+			expect(getOpenAIResponsesWebSocketDebugStats(sessionId)?.websocketFallbackActive).toBe(transport !== "auto");
+			const attempts = sent.length;
+			if (transport !== "auto") {
+				now += 299_999;
+				await run(options);
+				expect(sent).toHaveLength(attempts);
+				now++;
+			}
+			onSend.mockImplementation((socket) => socket.fail());
+			await recover(options);
+			const failures = sent.length;
+			now += 119_999;
+			await run(options);
+			expect(sent).toHaveLength(failures);
+			now++;
+			onSend.mockImplementation((socket) => socket.complete());
+			await run(options);
+			expect(sent).toHaveLength(failures + 1);
+		},
+	);
+
 	it("does not replay a started response and recovers with full context", async () => {
 		const { run, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementationOnce((socket) => {

@@ -492,7 +492,7 @@ describe("checkpoint execution and capture safety", () => {
 		expect((await stream(model, ctx1, OPTS).result()).stopReason).toBe("stop");
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 		failConnect = false;
-		now += 6 * 60 * 1000;
+		now += 120_000;
 		expect((await stream(model, ctx1, OPTS).result()).stopReason).toBe("error");
 		expect(sent).toHaveLength(1);
 		expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -1300,7 +1300,7 @@ describe("checkpoint failure cooldown", () => {
 
 			// After the deadline the next request is the single store:true probe on
 			// full history; success clears the cooldown so the next turn deltas again.
-			now += 6 * 60 * 1000;
+			now += 120_000;
 			heal();
 			const fourth = await next("Probe");
 			expect(fourth.stopReason).toBe("stop");
@@ -1314,6 +1314,42 @@ describe("checkpoint failure cooldown", () => {
 			expect(sent).toHaveLength(expectedFrames + 3);
 			expect(sent[expectedFrames + 2].store).toBe(true);
 			expect(sent[expectedFrames + 2].previous_response_id).toBe(fourth.responseId);
+		},
+	);
+
+	it.each(["session", "endpoint", "credential"] as const)(
+		"keeps storage progression isolated by %s",
+		async (identity) => {
+			let now = 1000;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const { sent } = serverFail("store");
+			const model = makeModel(OFFICIAL_URL);
+			const otherModel = identity === "endpoint" ? makeModel(CUSTOM_URL) : model;
+			const otherOptions = {
+				...OPTS,
+				...(identity === "session" ? { sessionId: "other-session" } : {}),
+				...(identity === "credential" ? { apiKey: "sk-other-key" } : {}),
+			};
+			const run = () => stream(model, ctx1, OPTS).result();
+			const other = () => stream(otherModel, ctx1, otherOptions).result();
+			await run();
+			now += 120_000;
+			await run(); // Original identity advances to three minutes.
+			await other(); // New identity starts at two minutes.
+			now += 119_999;
+			await other();
+			expect(sent.at(-1)!.store).toBeUndefined();
+			now++;
+			await other();
+			expect(sent.at(-2)!.store).toBe(true);
+			await run();
+			expect(sent.at(-1)!.store).toBeUndefined();
+			now += 59_999;
+			await run();
+			expect(sent.at(-1)!.store).toBeUndefined();
+			now++;
+			await run();
+			expect(sent.at(-2)!.store).toBe(true);
 		},
 	);
 
@@ -1479,7 +1515,7 @@ describe("checkpoint failure cooldown", () => {
 		const model = makeModel(OFFICIAL_URL);
 		await stream(model, ctx1, OPTS).result(); // [store:true rejected, repair without store]
 		expect(sent).toHaveLength(2);
-		now += 6 * 60 * 1000;
+		now += 120_000;
 		probeFails = true;
 		const probe = await stream(model, ctx1, OPTS).result();
 		expect(probe.stopReason).toBe("error");
@@ -1585,7 +1621,7 @@ describe("checkpoint failure cooldown", () => {
 		expect(sent[4].store).toBe(false);
 		chained.add(vetoed.responseId!);
 		// After expiry the probe keeps chaining the caller-rooted lineage and captures nothing.
-		now += 6 * 60 * 1000;
+		now += 120_000;
 		const probeCtx = normalizeContext({ messages: [...vetoCtx.messages, vetoed, userMsg("probe", 5)] });
 		const probe = await stream(model, probeCtx, OPTS).result();
 		expect(probe.stopReason).toBe("stop");
@@ -1766,7 +1802,7 @@ describe("checkpoint failure cooldown", () => {
 		expect(sent[3].previous_response_id).toBeUndefined();
 		expect(sent[3].input).toHaveLength(3);
 		// After the deadline a vetoed request does not consume the probe claim...
-		now += 6 * 60 * 1000;
+		now += 120_000;
 		await stream(model, ctx1, { ...OPTS, onPayload }).result();
 		expect(sent[4].store).toBe(false);
 		// ...so the next policy request is still the store:true probe.
@@ -1849,34 +1885,129 @@ describe("checkpoint failure cooldown", () => {
 		expect("previous_response_id" in (bodies[0] as object)).toBe(false);
 	});
 
-	it("failed probe renews the cooldown instead of clearing it", async () => {
-		let now = Date.now();
+	it.each(["signal", "server-error", "uncaptured"] as const)(
+		"steps failed %s probes through two, three, four, five minutes; only a valid checkpoint resets",
+		async (failure) => {
+			let now = 1000;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let healthy = false;
+			let rejectNext = true;
+			const { sent, fetchMock } = checkpointServer({
+				onRequest: (socket, frame) => {
+					if (healthy || frame.store !== true) return false;
+					const initialRejection = rejectNext;
+					rejectNext = false;
+					if (!initialRejection && failure === "uncaptured") return false;
+					socket.emit({
+						type: "error",
+						error:
+							!initialRejection && failure === "server-error"
+								? { type: "server_error", message: "boom" }
+								: { type: "invalid_request_error", param: "store", message: "store is not allowed" },
+					});
+					return true;
+				},
+				events: (events) => {
+					if (!healthy && failure === "uncaptured") {
+						(events.at(-1)!.response as Record<string, unknown>).store = false;
+					}
+					return events;
+				},
+			});
+			const model = makeModel(OFFICIAL_URL);
+			const run = () => stream(model, ctx1, OPTS).result();
+			await run(); // Initial rejection, then successful store-disabled repair.
+			expect(sent).toHaveLength(2);
+			for (const [index, cooldown] of [120_000, 180_000, 240_000, 300_000, 300_000].entries()) {
+				now += cooldown - 1;
+				const fallback = await run();
+				expect(fallback.stopReason).toBe("stop");
+				expect(fallback.responseCheckpoint).toBeUndefined();
+				expect(sent.at(-1)!.store).toBeUndefined();
+				const attempts = sent.length;
+				now++;
+				healthy = index === 4;
+				const probe = await run();
+				expect(sent[attempts].store).toBe(true);
+				if (healthy) expect(probe.responseCheckpoint).toBeDefined();
+				else expect(probe.responseCheckpoint).toBeUndefined();
+			}
+			healthy = false;
+			rejectNext = true;
+			await run(); // A new rejection after checkpoint success must restart at two minutes.
+			now += 119_999;
+			await run();
+			expect(sent.at(-1)!.store).toBeUndefined();
+			now++;
+			healthy = true;
+			expect((await run()).responseCheckpoint).toBeDefined();
+			expect(sent.at(-1)!.store).toBe(true);
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it("WS success resets transport progression without resetting store failure progression", async () => {
+		let now = 1000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
-		const { sent, fetchMock } = serverFail("store");
-		const model = makeModel(OFFICIAL_URL);
-		const history = [...ctx1.messages];
-		const next = async (text: string) => {
-			history.push(userMsg(text, history.length));
-			const out = await stream(model, normalizeContext({ messages: history }), OPTS).result();
-			history.push(out);
-			return out;
-		};
-		await next("one");
-		// Turn 1 already hit the store rejection and cooled the endpoint.
-		now += 6 * 60 * 1000;
-		const probe = await next("probe");
-		expect(probe.stopReason).toBe("stop");
-		// The probe frame carries store:true...
-		const probeIndex = sent.findIndex((frame, i) => i >= 2 && frame.store === true);
-		expect(probeIndex).toBeGreaterThan(-1);
-		// ...is rejected with the store signal, then repaired without store.
+		let drop = false;
+		const { sent, fetchMock } = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (drop) {
+					socket.fail();
+					return true;
+				}
+				if (frame.store !== true) return false;
+				socket.emit({
+					type: "error",
+					error: { type: "invalid_request_error", param: "store", message: "store is not allowed" },
+				});
+				return true;
+			},
+		});
+		fetchMock.mockImplementation(
+			async () =>
+				new Response('data: {"type":"response.completed","response":{"id":"sse","status":"completed"}}\n\n', {
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		const run = () => stream(makeModel(OFFICIAL_URL), ctx1, OPTS).result();
+		await run(); // Store cooldown: two minutes.
+		now += 120_000;
+		await run(); // Store probe rejected, WS repair succeeds; store now cools for three minutes.
+		drop = true;
+		for (let index = 0; index < 4; index++) await run();
+		const attempts = sent.length;
+		now += 119_999;
+		await run();
+		expect(sent).toHaveLength(attempts);
+		now++;
+		drop = false;
+		await run(); // WS probe succeeds while store remains off.
+		expect(sent).toHaveLength(attempts + 1);
 		expect(sent.at(-1)!.store).toBeUndefined();
-		expect(sent.at(-1)!.previous_response_id).toBeUndefined();
-		// Still cooling right after the failed probe: no store on the next turn.
-		const cooled = await next("cooled");
-		expect(cooled.stopReason).toBe("stop");
+		now += 59_999;
+		await run();
 		expect(sent.at(-1)!.store).toBeUndefined();
-		expect(fetchMock).not.toHaveBeenCalled();
+		now++;
+		await run(); // Store probe still fires at its own deadline; successful WS did not reset it.
+		expect(sent.at(-2)!.store).toBe(true);
+		expect(sent.at(-1)!.store).toBeUndefined();
+		drop = true;
+		for (let index = 0; index < 4; index++) await run();
+		const afterSuccess = sent.length;
+		now += 119_999;
+		await run();
+		expect(sent).toHaveLength(afterSuccess);
+		now++;
+		drop = false;
+		await run(); // WS restarted at two minutes, not three.
+		expect(sent).toHaveLength(afterSuccess + 1);
+		now += 119_999;
+		await run();
+		expect(sent.at(-1)!.store).toBeUndefined();
+		now++;
+		await run(); // Store's next failed-probe window was four minutes, not two.
+		expect(sent.at(-2)!.store).toBe(true);
 	});
 
 	it("probe completion without a captured checkpoint keeps the cooldown", async () => {
@@ -1905,7 +2036,7 @@ describe("checkpoint failure cooldown", () => {
 		expect(second.stopReason).toBe("stop");
 		// Delta rejected -> repair without store; cooldown starts.
 		expect(sent[2].store).toBeUndefined();
-		now += 6 * 60 * 1000;
+		now += 120_000;
 		const ctx3 = normalizeContext({ messages: [...ctx2.messages, second, userMsg("Probe", 3)] });
 		const third = await stream(model, ctx3, OPTS).result();
 		expect(third.stopReason).toBe("stop");
@@ -1952,7 +2083,7 @@ describe("checkpoint failure cooldown", () => {
 			const ctx2 = normalizeContext({ messages: [...ctx1.messages, { ...userMsg("More", 2) }] });
 			await stream(model, ctx1, OPTS).result(); // store rejected -> repaired -> cooldown
 			cooledDown = true;
-			now += 6 * 60 * 1000;
+			now += 120_000;
 			const probe = stream(model, ctx2, OPTS).result();
 			await probeArrived;
 			const concurrent = await stream(model, ctx2, OPTS).result();
@@ -1975,13 +2106,23 @@ describe("checkpoint failure cooldown", () => {
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		// The concurrency gate is pure state; exercise it through the exported API.
 		recordCheckpointCooldown("openai-responses", sessionId, "probe-identity");
-		now += 6 * 60 * 1000;
+		now += 120_000;
 		const firstProbe = resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity");
 		expect(firstProbe.allowed).toBe(true);
 		expect(firstProbe.probe).toBeDefined();
 		const concurrent = resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity");
 		expect(concurrent.allowed).toBe(false);
 		expect(concurrent.probe).toBeUndefined();
+		// A failed probe opens the next step; a second in-flight failure only renews it.
+		now += 100;
+		recordCheckpointCooldown("openai-responses", sessionId, "probe-identity");
+		now += 100;
+		recordCheckpointCooldown("openai-responses", sessionId, "probe-identity");
+		now += 179_999;
+		expect(resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity").allowed).toBe(false);
+		now++;
+		// Even beyond the renewed deadline, the original probe still owns recovery.
+		expect(resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity").allowed).toBe(false);
 		// Releasing the claim lets a later request probe again.
 		firstProbe.probe!.probing = false;
 		const renewed = resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity");
