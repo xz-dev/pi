@@ -350,6 +350,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				options.responseCheckpointExclude !== undefined
 					? options.responseCheckpointExclude
 					: settingsManager.getResponseCheckpointExclude(),
+			responseCheckpointMode:
+				options.responseCheckpointMode !== undefined
+					? options.responseCheckpointMode
+					: settingsManager.getResponseCheckpointMode(),
 			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,
 			maxRetryDelayMs: options.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 			// Replaces the agent loop's default identity; read per request so telemetry changes apply at once.

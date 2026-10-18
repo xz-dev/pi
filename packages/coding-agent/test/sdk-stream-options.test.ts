@@ -280,6 +280,28 @@ describe("createAgentSession stream options", () => {
 		},
 	);
 
+	it.each([undefined, "always", "auto", "declared"].map((raw) => ({ raw })))(
+		"forwards raw responseCheckpointMode $raw without applying defaults",
+		async ({ raw }) => {
+			const settings: Settings = JSON.parse(JSON.stringify({ responseCheckpointMode: raw }));
+			const options = await captureStreamOptions("openai-responses", settings);
+			expect(options?.responseCheckpointMode).toEqual(raw);
+		},
+	);
+
+	it.each(["always", "declared"].map((raw) => ({ raw })))(
+		"preserves request responseCheckpointMode $raw over settings",
+		async ({ raw }) => {
+			const requestOptions: SimpleStreamOptions = JSON.parse(JSON.stringify({ responseCheckpointMode: raw }));
+			const options = await captureStreamOptions(
+				"openai-responses",
+				JSON.parse('{"responseCheckpointMode":"auto"}'),
+				requestOptions,
+			);
+			expect(options?.responseCheckpointMode).toEqual(raw);
+		},
+	);
+
 	it("forwards provider retry settings", async () => {
 		const options = await captureStreamOptions("openai-completions", {
 			retry: { provider: { maxRetries: 2, maxRetryDelayMs: 3000 } },
