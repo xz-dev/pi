@@ -33,6 +33,7 @@ test("produces a verified, content-addressed artifact set", (t) => {
 		{ "dist/index.js": 'export const target = true;\n' },
 	);
 	execFileSync("git", ["init", "--quiet"], { cwd: repoRoot });
+	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: repoRoot });
 	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot });
 	execFileSync("git", ["config", "user.name", "Test"], { cwd: repoRoot });
 	execFileSync("git", ["add", "."], { cwd: repoRoot });
