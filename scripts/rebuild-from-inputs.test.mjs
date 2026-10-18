@@ -337,6 +337,26 @@ test("--print-inputs and --print-marker resolve current refs from a source repo"
 	}
 });
 
+test("single-executable preserves its catalog settings predecessor range", () => {
+	const fixture = buildFixture();
+	const single = fixture.file("aaa.txt", "aaa\nupdate-retries\n", "retry", "patch/single-executable", "patch/model-refresh");
+	const { target } = replay(fixture, [
+		"--upstream", fixture.upstream,
+		"--ci", fixture.ci,
+		"--patch", `model-refresh=${fixture.aaa}`,
+		"--patch", `single-executable=${single}`,
+	]);
+	try {
+		assert.equal(readFileSync(join(target, "aaa.txt"), "utf8"), "aaa\nupdate-retries\n");
+		assert.deepEqual(log(target), [
+			"base", "merge ci branch", "merge patch/model-refresh branch",
+			"merge patch/single-executable branch", "record upstream sync inputs (diagnostic subset)",
+		]);
+	} finally {
+		cleanup(fixture, target);
+	}
+});
+
 test("Codex recovery applies only its delta after retry and cache prerequisites", () => {
 	const fixture = buildFixture();
 	const patterns = fixture.file("retry-policy.txt", "terminal-patterns\n", "patterns", "patch/retry-non-retryable-patterns");
@@ -497,6 +517,7 @@ for (const consumer of ["single-executable", "thinking-preview", "env-native-tes
 }
 
 for (const [ancestor, descendant] of [
+	["model-refresh", "single-executable"],
 	["slow-hook-tui-only", "defer-threshold-compaction"],
 	["defer-threshold-compaction", "startup-submit-readiness"],
 	["startup-submit-readiness", "cold-start-retry"],
