@@ -1946,6 +1946,90 @@ describe("checkpoint failure cooldown", () => {
 		},
 	);
 
+	it.each(["complete", "error"] as const)(
+		"counts a rejected store probe once when its store-off repair ends late with %s",
+		async (finish) => {
+			let now = 1000;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let storeAttempts = 0;
+			let slowRepair = true;
+			const { sent, fetchMock } = checkpointServer({
+				onRequest: (socket, frame) => {
+					if (frame.store === true) {
+						storeAttempts++;
+						socket.emit({
+							type: "error",
+							error: { type: "invalid_request_error", param: "store", message: "store is not allowed" },
+						});
+						return true;
+					}
+					if (storeAttempts === 2 && slowRepair) {
+						slowRepair = false;
+						now = 301_001; // Repair outlives the renewed three-minute cooldown.
+						if (finish === "error") {
+							socket.emit({ type: "error", error: { type: "server_error", message: "repair failed" } });
+							return true;
+						}
+					}
+					return false;
+				},
+			});
+			const run = () => stream(makeModel(OFFICIAL_URL), ctx1, { ...OPTS, timeoutMs: 0 }).result();
+			await run();
+			now = 121_000;
+			expect((await run()).stopReason).toBe(finish === "error" ? "error" : "stop");
+			expect(now).toBe(301_001);
+			now = 481_000;
+			await run();
+			expect(sent.at(-1)!.store).toBeUndefined();
+			const attempts = sent.length;
+			now = 481_001;
+			await run();
+			expect(sent[attempts].store).toBe(true);
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([false, true])("SSE-only fallback failure=%s never consumes an expired store probe", async (fails) => {
+		let now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		let drop = false;
+		const { sent, fetchMock } = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (drop) {
+					socket.fail();
+					return true;
+				}
+				if (frame.store !== true) return false;
+				socket.emit({
+					type: "error",
+					error: { type: "invalid_request_error", param: "store", message: "store is not allowed" },
+				});
+				return true;
+			},
+		});
+		const sse = () =>
+			new Response('data: {"type":"response.completed","response":{"id":"sse","status":"completed"}}\n\n', {
+				headers: { "content-type": "text/event-stream" },
+			});
+		fetchMock.mockImplementation(async () => sse());
+		const run = () => stream(makeModel(OFFICIAL_URL), ctx1, { ...OPTS, timeoutMs: 0, maxRetries: 0 }).result();
+		await run(); // Store deadline 121000.
+		now = 61_000;
+		drop = true;
+		for (let index = 0; index < 4; index++) await run(); // WS deadline 181000.
+		const attempts = sent.length;
+		now = 121_000;
+		fetchMock.mockImplementation(async () => (fails ? new Response("SSE outage", { status: 503 }) : sse()));
+		expect((await run()).stopReason).toBe(fails ? "error" : "stop");
+		expect(sent).toHaveLength(attempts);
+		now = 181_000;
+		drop = false;
+		fetchMock.mockImplementation(async () => sse());
+		await run();
+		expect(sent[attempts].store).toBe(true);
+	});
+
 	it("WS success resets transport progression without resetting store failure progression", async () => {
 		let now = 1000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -2113,9 +2197,10 @@ describe("checkpoint failure cooldown", () => {
 		const concurrent = resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity");
 		expect(concurrent.allowed).toBe(false);
 		expect(concurrent.probe).toBeUndefined();
-		// A failed probe opens the next step; a second in-flight failure only renews it.
+		// A sent probe opens the next step; a second in-flight failure only renews it.
+		firstProbe.probe!.attempted = true;
 		now += 100;
-		recordCheckpointCooldown("openai-responses", sessionId, "probe-identity");
+		recordCheckpointCooldown("openai-responses", sessionId, "probe-identity", firstProbe.probe);
 		now += 100;
 		recordCheckpointCooldown("openai-responses", sessionId, "probe-identity");
 		now += 179_999;
@@ -2124,7 +2209,7 @@ describe("checkpoint failure cooldown", () => {
 		// Even beyond the renewed deadline, the original probe still owns recovery.
 		expect(resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity").allowed).toBe(false);
 		// Releasing the claim lets a later request probe again.
-		firstProbe.probe!.probing = false;
+		firstProbe.probe!.state.probing = false;
 		const renewed = resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity");
 		expect(renewed.allowed).toBe(true);
 		expect(renewed.probe).toBeDefined();
