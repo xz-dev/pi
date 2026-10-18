@@ -199,8 +199,10 @@ const CHECKPOINT_PREVIOUS_UNSUPPORTED_RE =
 	/\bprevious_response_id\b[^\n]*(unsupported|not supported|unknown|invalid|unrecognized)/i;
 
 function errorParam(error: ResponsesApiError): string | undefined {
-	const payload = error.payload as { error?: { param?: unknown }; param?: unknown } | undefined;
-	const param = payload?.error?.param ?? payload?.param;
+	const payload = error.payload as
+		| { error?: { param?: unknown }; param?: unknown; response?: { error?: { param?: unknown } } }
+		| undefined;
+	const param = payload?.error?.param ?? payload?.param ?? payload?.response?.error?.param;
 	return typeof param === "string" ? param : undefined;
 }
 
@@ -238,6 +240,8 @@ export function isCheckpointReferenceError(error: unknown): boolean {
 	const type = errorType(error);
 	if (status !== undefined && status !== 400) return false;
 	if (type !== undefined && type !== "invalid_request_error") return false;
+	const checkpointParam = errorParam(error) === "store" || errorParam(error) === "previous_response_id";
+	if (error.code === "unsupported_parameter" || error.code === "unknown_parameter") return checkpointParam;
 	if (error.code !== undefined) return error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 	// Code-less shapes must positively prove an invalid-request rejection.
 	if (status === undefined && type === undefined) return false;
