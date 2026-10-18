@@ -353,10 +353,12 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			// Checkpoint failure cooldown (separate from WS→SSE recovery): while a
 			// verified store/continuation rejection is fresh, requests go without
 			// store or deltas; the first request after the deadline owns the probe.
-			const checkpointCooldown =
-				checkpointsEnabled && transport !== "sse"
-					? resolveCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
-					: { allowed: checkpointsEnabled };
+			// A hook store:false veto makes this request checkpoint-free without
+			// touching (or probing) the cooldown, and keeps the explicit false.
+			const policyStore = checkpointsEnabled && params.store === true;
+			const checkpointCooldown = policyStore
+				? resolveCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
+				: { allowed: checkpointsEnabled };
 			checkpointProbe = checkpointCooldown.probe;
 			// A cooldown in force (or an already-claimed probe) keeps this request
 			// checkpoint-free by OMITTING the policy-owned store field (an endpoint
@@ -537,11 +539,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const checkpointReferenceError =
 							websocketSent && !startEmitted && output.content.length === 0 && isCheckpointReferenceError(error);
-						// A verified checkpoint rejection proves a failed store/delta
-						// before execution: repair the turn once with the preserved full
-						// body minus store/previous_response_id, then cool this endpoint
-						// down for the session. A replacement socket would append to this
-						// same message; only repair before start.
 						// A verified checkpoint rejection proves a failed store/delta before
 						// execution: repair the turn once with the preserved full body minus
 						// store/previous_response_id, then cool this endpoint down for the
@@ -620,14 +617,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			}
 
 			// The SSE/HTTP path is a hard gate for checkpoints: it must never carry
-			// the policy-owned store or a checkpoint continuation.
-			const sseBody = params as ResponseCreateParamsStreaming & { previous_response_id?: string };
-			const {
-				store: _store,
-				previous_response_id: _previous,
-				...sseRest
-			} = checkpointsEnabled ? sseBody : ({} as typeof sseBody);
-			const sseParams = checkpointsEnabled ? (sseRest as ResponseCreateParamsStreaming) : params;
+			// a store:true request. An explicit hook store:false and a caller-owned
+			// previous_response_id pass through unchanged.
+			const { store: _store, ...sseRest } = params;
+			const sseParams =
+				checkpointsEnabled && params.store === true ? (sseRest as ResponseCreateParamsStreaming) : params;
 			const { data: openaiStream, response } = await retryProviderRequest(
 				() => client.responses.create(sseParams, requestOptions).withResponse(),
 				{
