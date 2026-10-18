@@ -307,6 +307,8 @@ export class Editor implements Component, Focusable {
 	protected tui: TUI;
 	private theme: EditorTheme;
 	private paddingX: number = 0;
+	/** Optional text-row limit for constrained layouts; borders and completion menus are separate. */
+	public maxVisibleLines: number | undefined;
 
 	// Store last render geometry for cursor navigation and mouse hit-testing.
 	private lastWidth: number = 80;
@@ -535,7 +537,10 @@ export class Editor implements Component, Focusable {
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
 		const terminalRows = this.tui.terminal.rows;
-		const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
+		const maxVisibleLines =
+			this.maxVisibleLines !== undefined && Number.isFinite(this.maxVisibleLines)
+				? Math.max(1, Math.floor(this.maxVisibleLines))
+				: Math.max(5, Math.floor(terminalRows * 0.3));
 
 		// Find the cursor line index in layoutLines
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
