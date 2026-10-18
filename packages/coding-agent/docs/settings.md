@@ -128,6 +128,8 @@ See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and p
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `transport` | `"auto" \| "sse" \| "websocket" \| "websocket-cached"` | `"auto"` | Preferred transport for AI providers that support multiple transports. |
+| `responseCheckpointMode` | `"always" \| "auto" \| "declared"` | `"always"` | How eagerly durable Responses checkpoints (`store: true`) are requested. `always` tries regardless of the declared capability; `auto` skips an explicit `compat.supportsResponseCheckpoints: false`; `declared` requires declared capability or the official OpenAI service. |
+| `responseCheckpointExclude` | `string[]` | `[]` | Exclusions for durable Responses checkpoints. Missing and `[]` both enable eligible targets; `minimatch` entries exclude matching provider/model targets. |
 | `httpProxy` | string | None | Proxy URL applied as `HTTP_PROXY` and `HTTPS_PROXY` for Pi-managed HTTP clients. **Can only be set in agent-directory settings.** |
 | `httpIdleTimeoutMs` | number | `300000` | HTTP header and body idle timeout in milliseconds. Set to `0` to disable. |
 | `websocketConnectTimeoutMs` | number | `15000` | WebSocket connection timeout in milliseconds. Set to `0` to disable. |
@@ -140,6 +142,28 @@ See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and p
 | `models.refreshTimeoutMs` | number | `60000` | Timeout in milliseconds for model-catalog refresh operations (startup, `--refresh`, `/model`, post-login, `pi update --models`). Negative values disable the timeout; `0` aborts immediately. |
 | `retry.provider.maxRetries` | number | `0` | Provider-level retry attempts. |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Maximum server-requested delay in milliseconds. Set to `0` to disable the limit. |
+
+### Response checkpoints
+
+Durable Responses checkpoints are requested by default (`responseCheckpointMode: "always"`): eligible `auto`/`websocket-cached` requests ask the service to store state (`store: true`) so the next turn sends only `previous_response_id` plus the delta. Set `"responseCheckpointMode": "declared"` to require `compat.supportsResponseCheckpoints: true` (or the official OpenAI service), or `"auto"` to skip endpoints that explicitly declare `supportsResponseCheckpoints: false`. SSE, uncached `websocket`, Codex/ChatGPT modes, any `chatgpt.com` base URL,
+`cacheRetention: "none"`, and payload-hook `store: false` stay unchanged in
+every mode. A verified `previous_response_id`/store rejection repairs the turn once with full history, then cools the endpoint for the session for five minutes — checkpoints stay off until one probe request re-verifies storage. See [checkpoint policy and privacy](../../ai/README.md#response-checkpoints).
+
+```json
+{
+  "transport": "auto",
+  "responseCheckpointMode": "always",
+  "responseCheckpointExclude": []
+}
+```
+
+`["*"]` excludes every target, including slash-containing IDs. Other entries use minimatch 10.2.6 with `{ nocase: true }` against provider ID, model ID, and `provider/model`, not display names; any match excludes that target. This is an unordered exclusion list, not an ordered exception list. For example, `["openai/**", "gpt-[45]*"]` excludes the OpenAI provider's models and matching model IDs. Lists replace rather than concatenate: trusted project settings override agent-directory settings, including an explicit empty list. Untrusted project settings are ignored.
+
+Missing stays unconfigured in saved settings and forwarded stream options; the request owner applies the `always`/`[]` defaults (the independent [OpenAI API plugin](https://github.com/xz-dev/openai-api-pi-extension) reads the same keys). Malformed values are forwarded unchanged so the request owner can disable checkpoints rather than accidentally enable them. Saving another setting does not create these keys. Declaring `supportsResponseCheckpoints` is still useful in `auto`/`declared` modes; see [verified endpoint capability](models.md#response-checkpoint-capability).
+
+Full conversation history remains canonical in session JSONL; checkpoints are optional bounded v1 metadata on assistant messages, alongside the existing response ID. Restore and branch rollback require an exact active-branch prefix, envelope, and scope match; invalid metadata sends full history. There is no side database, universal TTL, answer cache, or KV-cache guarantee. [SettingsManager](../src/core/settings-manager.ts) reads the raw effective values; [session request wiring](../src/core/sdk.ts) reads them on each request, including after settings reload or a project-trust change.
+
+### Transport recovery
 
 For Codex Responses, explicit `websocket` and `websocket-cached` never fall back to SSE. Their transient failures follow the global `retry` settings, including `enabled`, `maxRetries`, delay limits, and non-retryable error patterns.
 

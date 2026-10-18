@@ -164,7 +164,9 @@ describe("provider error body passthrough (per-tier regression)", () => {
 	});
 
 	it("openai-responses (status-only) keeps the prefix and surfaces the body", async () => {
-		const output = await drainResult(streamOpenAIResponses(responsesModel, context, { apiKey: "test" }));
+		const output = await drainResult(
+			streamOpenAIResponses(responsesModel, context, { apiKey: "test", transport: "sse" }),
+		);
 
 		expect(output.stopReason).toBe("error");
 		expect(output.errorMessage).toContain("OpenAI API error (403)");
