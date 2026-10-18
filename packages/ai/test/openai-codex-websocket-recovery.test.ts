@@ -218,7 +218,7 @@ describe("Codex transport recovery", () => {
 			const recoveryContext = normalizeContext({
 				messages: [...secondContext.messages, fallback, { role: "user", content: "Third", timestamp: 3 }],
 			});
-			now += 300_000;
+			now += 120_000;
 			onSend.mockImplementation((socket) => socket.complete());
 			const recovered = await run({ transport }, recoveryContext);
 			expect(recovered.stopReason).toBe("stop");
@@ -264,32 +264,68 @@ describe("Codex transport recovery", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it("waits five minutes before a single probe, renews cooldown on failure, and resets after success", async () => {
-		const { run, recover, onSend, sent, fetchMock } = mockTransport();
+	it("steps failed probes through two, three, four, five minutes and resets only after WS success", async () => {
+		const { run, recover, onSend, sent } = mockTransport();
 		let now = 1000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		onSend.mockImplementation((socket) => socket.fail());
 		await recover();
+		for (const [index, cooldown] of [120_000, 180_000, 240_000, 300_000, 300_000].entries()) {
+			const attempts = sent.length;
+			// Successful SSE fallbacks neither reset progression nor slide its deadline.
+			now += cooldown - 1;
+			expect((await run()).stopReason).toBe("stop");
+			expect(sent).toHaveLength(attempts);
+			now++;
+			if (index === 4) onSend.mockImplementation((socket) => socket.complete());
+			expect((await run()).stopReason).toBe("stop");
+			expect(sent).toHaveLength(attempts + 1);
+		}
+		onSend.mockImplementation((socket) => socket.fail());
+		await recover();
+		const attempts = sent.length;
+		now += 119_999;
 		await run();
-		expect(sent).toHaveLength(4);
-		now += 299_999;
-		await run();
-		expect(sent).toHaveLength(4);
-		now++;
-		await run();
-		expect(sent).toHaveLength(5);
-		now += 299_999;
-		await run();
-		expect(sent).toHaveLength(5);
+		expect(sent).toHaveLength(attempts);
 		now++;
 		onSend.mockImplementation((socket) => socket.complete());
 		await run();
-		expect(sent).toHaveLength(6);
-		expect(fetchMock).toHaveBeenCalledTimes(5);
+		expect(sent).toHaveLength(attempts + 1);
+	});
+
+	it("renews concurrent in-flight failures at the same step until the deadline reopens", async () => {
+		const { run, onSend, sockets, sent } = mockTransport();
+		let now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		let arrived!: () => void;
+		const started = new Promise<void>((resolve) => {
+			arrived = resolve;
+		});
+		onSend.mockImplementation(() => {
+			if (sent.length === 6) arrived();
+		});
+		const requests = Array.from({ length: 6 }, () => run({ timeoutMs: 0 }));
+		await started;
+		for (let index = 0; index < 6; index++) {
+			if (index >= 4) now += 100;
+			sockets[index].fail();
+			await requests[index];
+		}
+		const attempts = sent.length;
+		now += 119_999;
+		await run();
+		expect(sent).toHaveLength(attempts);
+		now++;
 		onSend.mockImplementation((socket) => socket.fail());
-		await recover();
-		expect(sent).toHaveLength(10);
-		expect(fetchMock).toHaveBeenCalledTimes(6);
+		await run();
+		expect(sent).toHaveLength(attempts + 1);
+		now += 179_999;
+		await run();
+		expect(sent).toHaveLength(attempts + 1);
+		now++;
+		onSend.mockImplementation((socket) => socket.complete());
+		await run();
+		expect(sent).toHaveLength(attempts + 2);
 	});
 
 	it("allows only one recovery probe and keeps explicit SSE on HTTP", async () => {
@@ -298,7 +334,7 @@ describe("Codex transport recovery", () => {
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		onSend.mockImplementation((socket) => socket.fail());
 		await recover();
-		now += 300_000;
+		now += 120_000;
 		let finish: (() => void) | undefined;
 		const started = new Promise<void>((resolve) => {
 			onSend.mockImplementationOnce((socket) => {
@@ -344,7 +380,7 @@ describe("Codex transport recovery", () => {
 				// A late failure must mutate the existing state, not replace the active owner.
 				sockets[1].fail();
 				expect((await older).stopReason).toBe("error");
-				now += 300_000;
+				now += 120_000;
 				onSend.mockImplementation((socket) => socket.complete());
 				expect((await run({ timeoutMs: 0 })).stopReason).toBe("stop");
 				expect(sent).toHaveLength(3);
@@ -399,7 +435,7 @@ describe("Codex transport recovery", () => {
 			vi.spyOn(Date, "now").mockImplementation(() => now);
 			onSend.mockImplementation((socket) => socket.fail());
 			await recover();
-			now += 300_000;
+			now += 120_000;
 			fetchMock.mockClear();
 			onSend.mockImplementationOnce((socket) => {
 				socket.emit({ type: "response.created", response: { id: "partial" } });
@@ -449,7 +485,7 @@ describe("Codex transport recovery", () => {
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		onSend.mockImplementation((socket) => socket.fail());
 		await recover();
-		now += 300_000;
+		now += 120_000;
 		onSend.mockImplementation((socket) => (success ? socket.complete() : socket.fail()));
 		onSend.mockImplementationOnce((socket) =>
 			socket.emit({ type: "error", code: "websocket_connection_limit_reached" }),
@@ -534,7 +570,7 @@ describe("Codex transport recovery", () => {
 		expect((await request).stopReason).toBe("stop");
 		expect(sent).toHaveLength(4);
 		expect(fetchMock).toHaveBeenCalledTimes(2);
-		await vi.advanceTimersByTimeAsync(300_000);
+		await vi.advanceTimersByTimeAsync(120_000);
 		onSend.mockImplementation((socket) => socket.complete());
 		expect((await run()).stopReason).toBe("stop");
 		expect(sent).toHaveLength(5);
@@ -543,9 +579,13 @@ describe("Codex transport recovery", () => {
 	it.each(["websocket", "websocket-cached"] as const)(
 		"never downgrades explicit %s or clears auto cooldown",
 		async (transport) => {
+			let now = 1000;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
 			const { run, recover, onSend, fetchMock, sent } = mockTransport();
 			onSend.mockImplementation((socket) => socket.fail());
 			await recover();
+			now += 120_000;
+			await run(); // A failed auto probe opens the three-minute step.
 			fetchMock.mockClear();
 			const attempts = sent.length;
 			for (let i = 0; i < 2; i++) {
@@ -562,6 +602,21 @@ describe("Codex transport recovery", () => {
 			await run();
 			expect(sent).toHaveLength(attempts + 3);
 			expect(fetchMock).toHaveBeenCalledTimes(1);
+			// Explicit WS success resets progression, not the active auto deadline.
+			now += 179_999;
+			await run();
+			expect(sent).toHaveLength(attempts + 3);
+			now++;
+			onSend.mockImplementation((socket) => socket.fail());
+			await run();
+			expect(sent).toHaveLength(attempts + 4);
+			now += 119_999;
+			await run();
+			expect(sent).toHaveLength(attempts + 4);
+			now++;
+			onSend.mockImplementation((socket) => socket.complete());
+			await run();
+			expect(sent).toHaveLength(attempts + 5);
 		},
 	);
 });
