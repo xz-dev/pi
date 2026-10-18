@@ -94,6 +94,8 @@ export interface RefreshModelsContext {
 	allowNetwork: boolean;
 	/** Bypass provider freshness checks and fetch immediately when network access is allowed. */
 	force?: boolean;
+	/** Disable transport-level immediate retries so the caller owns the retry policy. */
+	disableImmediateRetries?: boolean;
 	/** Always present, including when the public refresh caller omits its optional signal. */
 	signal: AbortSignal;
 	/**
@@ -109,6 +111,8 @@ export interface ModelsRefreshOptions {
 	providers?: readonly string[];
 	/** Bypass provider freshness checks and fetch immediately when network access is allowed. */
 	force?: boolean;
+	/** Disable transport-level immediate retries so the caller owns the retry policy. */
+	disableImmediateRetries?: boolean;
 	signal?: AbortSignal;
 }
 
@@ -555,6 +559,7 @@ class ModelsImpl implements MutableModels {
 		credential: Credential | undefined,
 		allowNetwork: boolean,
 		force: boolean | undefined,
+		disableImmediateRetries: boolean | undefined,
 		generation: number,
 		signal: AbortSignal,
 	): Promise<void> {
@@ -565,6 +570,7 @@ class ModelsImpl implements MutableModels {
 			publish: (publication) => this.publishProviderModels(provider.id, generation, signal, publication),
 			allowNetwork,
 			force: allowNetwork ? force : undefined,
+			disableImmediateRetries,
 			signal,
 			baseUrl: provider.baseUrl,
 		});
@@ -595,7 +601,15 @@ class ModelsImpl implements MutableModels {
 					}
 
 					// Restore cached provider state before auth resolution or network access.
-					await this.runProviderRefreshPhase(provider, storedCredential, false, undefined, generation, signal);
+					await this.runProviderRefreshPhase(
+						provider,
+						storedCredential,
+						false,
+						undefined,
+						undefined,
+						generation,
+						signal,
+					);
 					if (credentialError !== undefined) throw credentialError;
 					if (!allowNetwork || signal.aborted) return;
 
@@ -606,6 +620,7 @@ class ModelsImpl implements MutableModels {
 						network.credential,
 						true,
 						options.force,
+						options.disableImmediateRetries,
 						generation,
 						signal,
 					);
