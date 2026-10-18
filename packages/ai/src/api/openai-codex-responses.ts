@@ -357,6 +357,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							throw new Error("Request was aborted");
 						}
 						assertSuccessfulOutput(output);
+						const currentState = sessionId ? websocketSseFallbackSessions.get(sessionId) : undefined;
+						// Explicit WS success resets progression without ending auto's current cooldown.
+						if (currentState) currentState.nextCooldownMs = AUTO_SSE_COOLDOWN_MS;
 						if (
 							transport === "auto" &&
 							sessionId &&
@@ -913,7 +916,8 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
 const SESSION_WEBSOCKET_MAX_AGE_MS = 55 * 60 * 1000;
-const AUTO_SSE_COOLDOWN_MS = 5 * 60 * 1000;
+const AUTO_SSE_COOLDOWN_MS = 2 * 60 * 1000;
+const AUTO_SSE_MAX_COOLDOWN_MS = 5 * 60 * 1000;
 
 type WebSocketEventType = "open" | "message" | "error" | "close";
 type WebSocketListener = (event: unknown) => void;
@@ -961,6 +965,8 @@ const websocketDebugStats = new Map<string, OpenAICodexWebSocketDebugStats>();
 interface WebSocketRecoveryState {
 	failures: number;
 	retryAt: number;
+	cooldownMs: number;
+	nextCooldownMs: number;
 	recovering: boolean;
 }
 
@@ -1043,13 +1049,25 @@ function recordWebSocketFailure(
 	if (autoFallback) {
 		state = websocketSseFallbackSessions.get(sessionId);
 		if (!state) {
-			state = { failures: 0, retryAt: 0, recovering: false };
+			state = {
+				failures: 0,
+				retryAt: 0,
+				cooldownMs: AUTO_SSE_COOLDOWN_MS,
+				nextCooldownMs: AUTO_SSE_COOLDOWN_MS,
+				recovering: false,
+			};
 			websocketSseFallbackSessions.set(sessionId, state);
 		}
 		state.failures++;
 		if (state.retryAt > 0 || state.failures > CODEX_AUTO_WEBSOCKET_RETRIES) {
+			const now = Date.now();
+			// Late concurrent failures renew the current step, not the progression.
+			if (now >= state.retryAt) {
+				state.cooldownMs = state.nextCooldownMs;
+				state.nextCooldownMs = Math.min(state.cooldownMs + 60_000, AUTO_SSE_MAX_COOLDOWN_MS);
+			}
 			// Preserve ownership when an older request fails during a recovery probe.
-			state.retryAt = Date.now() + AUTO_SSE_COOLDOWN_MS;
+			state.retryAt = now + state.cooldownMs;
 		}
 	}
 
