@@ -14,6 +14,7 @@ import {
 	streamSimple,
 } from "../src/api/openai-responses.ts";
 import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
+import { recordCheckpointCooldown, resolveCheckpointCooldown } from "../src/api/openai-responses-websocket.ts";
 import { buildBaseOptions } from "../src/api/simple-options.ts";
 import type { AssistantMessage, Model, ProviderHeaders } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
@@ -192,6 +193,16 @@ describe("durable response checkpoint entry policy", () => {
 		expect(sent[0].store).toBe(store);
 	});
 
+	it.each([undefined, []])("absent/empty exclusion enables storage: %j", async (exclude) => {
+		const { sent } = checkpointServer();
+		const out = await stream(makeModel(OFFICIAL_URL), ctx1, {
+			...OPTS,
+			responseCheckpointExclude: exclude,
+		}).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent[0].store).toBe(true);
+	});
+
 	it.each([null, "*", [null], ["unrelated", 1], [undefined], new Array(1), {}])(
 		"malformed exclusion %j never enables storage",
 		async (exclude) => {
@@ -264,6 +275,10 @@ describe("durable response checkpoint entry policy", () => {
 			},
 		).result();
 		expect(second.stopReason).toBe("stop");
+		console.log(
+			"F",
+			sent.map((f) => [f.connection, f.previous_response_id ?? "-", f.store, (f.input ?? []).length]),
+		);
 		expect(sent[1].previous_response_id).toBe(first.responseId);
 	});
 
@@ -381,11 +396,12 @@ describe("durable response checkpoint entry policy", () => {
 		).result();
 		expect(sent[1].previous_response_id).toBe(first.responseId);
 		expect(sent[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Next" }] }]);
-		for (const responseCheckpointExclude of [undefined, ["*"]]) {
-			const out = await streamSimple(model, ctx1, { ...OPTS, responseCheckpointExclude }).result();
-			expect(out.responseCheckpoint).toBeUndefined();
-		}
-		expect(sent.slice(2).map((frame) => frame.store)).toEqual([false, false]);
+		// Absent exclusion now enables checkpoints (default []); only ["*"] disables.
+		const absentOut = await streamSimple(model, ctx1, OPTS).result();
+		expect(absentOut.responseCheckpoint).toBeDefined();
+		const excluded = await streamSimple(model, ctx1, { ...OPTS, responseCheckpointExclude: ["*"] }).result();
+		expect(excluded.responseCheckpoint).toBeUndefined();
+		expect(sent.slice(2).map((frame) => frame.store)).toEqual([true, false]);
 	});
 });
 
@@ -516,6 +532,8 @@ describe("checkpoint execution and capture safety", () => {
 			OPTS,
 		).result();
 		expect(failed.stopReason).toBe("error");
+		// The caller-descendant lineage depends on history not held locally, so
+		// the missing reference is never repaired (complete-history guard).
 		expect(sent).toHaveLength(4);
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
@@ -574,33 +592,50 @@ describe("checkpoint execution and capture safety", () => {
 		},
 	);
 
-	it.each(["missing policy", "excluded policy", "hook store:false", "complete local"])(
+	it.each(["declared-off", "excluded policy", "hook store:false", "complete local"])(
 		"policy transition preserves reconstruction provenance: %s",
 		async (mode) => {
 			let turns = 0;
 			const { sent, generations } = checkpointServer({
-				events: (events) => (++turns === 1 && mode !== "complete local" ? [events[0], events[3]] : events),
+				events: (events) => {
+					// A first turn with no terminal output items (or a
+					// checkpoint-disabled request) must not become a resumable
+					// prefix for later provenance.
+					if (++turns === 1 && (mode === "excluded policy" || mode === "hook store:false")) {
+						return [events[0], events[3]];
+					}
+					return events;
+				},
 			});
-			const model = makeModel(OFFICIAL_URL);
+			// "declared-off" uses an undeclared custom endpoint + declared mode to
+			// keep turn 1 checkpoint-free while still storing turn-1 state.
+			const model = mode === "declared-off" ? makeModel(CUSTOM_URL) : makeModel(OFFICIAL_URL);
+			const disabledPolicy =
+				mode === "declared-off"
+					? { responseCheckpointMode: "declared" as const }
+					: mode === "excluded policy"
+						? { responseCheckpointExclude: ["*"] }
+						: {};
 			const first = await stream(model, ctx1, {
 				apiKey,
 				sessionId,
-				...(mode === "excluded policy" ? { responseCheckpointExclude: ["*"] } : {}),
-				...(mode === "hook store:false" ? { responseCheckpointExclude: [] } : {}),
+				...disabledPolicy,
 				onPayload: (payload) => ({
 					...(payload as Record<string, unknown>),
-					store: mode !== "hook store:false",
+					...(mode === "hook store:false" ? { store: false } : { store: true }),
 				}),
 			}).result();
 			expect(first.stopReason).toBe("stop");
-			expect(first.responseCheckpoint).toBeUndefined();
-			if (mode !== "complete local") expect(first.content).toEqual([]);
+			// Only "complete local" captures on turn 1; the other modes never do.
+			if (mode === "complete local") expect(first.responseCheckpoint).toBeDefined();
+			else expect(first.responseCheckpoint).toBeUndefined();
+			if (mode === "excluded policy" || mode === "hook store:false") expect(first.content).toEqual([]);
 			const nextContext = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
 			const second = await stream(model, nextContext, OPTS).result();
 			expect(second.stopReason).toBe("stop");
 			// Provenance tracking must not change legacy connection-local wire behavior.
 			expect(sent[1].previous_response_id).toBe(mode === "hook store:false" ? undefined : first.responseId);
-			const proven = mode === "complete local" || mode === "hook store:false";
+			const proven = mode !== "excluded policy";
 			if (proven) expect(second.responseCheckpoint).toBeDefined();
 			else expect(second.responseCheckpoint).toBeUndefined();
 			closeOpenAIResponsesWebSocketSessions();
@@ -684,33 +719,110 @@ describe("checkpoint execution and capture safety", () => {
 });
 
 describe("durable response checkpoints over WS", () => {
-	it("default off: no store:true, no checkpoint, no cross-connection delta", async () => {
+	it("checkpoint-eligible by default: store:true, capture, cross-connection delta", async () => {
 		const { sent, sockets } = checkpointServer();
 		const model = makeModel(OFFICIAL_URL);
 		const first = await stream(model, ctx1, { apiKey, sessionId }).result();
 		expect(first.stopReason).toBe("stop");
-		expect(sent[0].store).toBe(false);
-		expect(first.responseCheckpoint).toBeUndefined();
+		expect(sent[0].store).toBe(true);
+		expect(first.responseCheckpoint).toBeDefined();
 		closeOpenAIResponsesWebSocketSessions();
 		const ctx2 = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
 		const second = await stream(model, ctx2, { apiKey, sessionId }).result();
 		expect(second.stopReason).toBe("stop");
 		expect(sockets.length).toBe(2);
-		expect(sent[1].previous_response_id).toBeUndefined();
-		expect((sent[1].input as unknown[]).length).toBeGreaterThan(1);
+		expect(sent[1].previous_response_id).toBe(first.responseId);
+		expect(sent[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Next" }] }]);
 	});
 
-	it("custom endpoint needs explicit capability declaration", async () => {
+	it("custom endpoint also tries checkpoints under the default always mode", async () => {
 		const { sent } = checkpointServer();
-		const model = makeModel(CUSTOM_URL); // no compat flag => not capable
-		const first = await stream(model, ctx1, { apiKey, sessionId, responseCheckpointExclude: [] }).result();
+		const model = makeModel(CUSTOM_URL); // undeclared capability
+		const first = await stream(model, ctx1, { apiKey, sessionId }).result();
+		expect(sent[0].store).toBe(true);
+		expect(first.responseCheckpoint).toBeDefined();
+		// declared mode keeps the old capability gate.
+		const declared = await stream(model, ctx1, {
+			apiKey,
+			sessionId,
+			responseCheckpointMode: "declared",
+		}).result();
+		expect(sent[1].store).toBe(false);
+		expect(declared.responseCheckpoint).toBeUndefined();
+	});
+
+	it.each([
+		// mode x compat x official/non-official => store
+		["always", undefined, false, true],
+		["always", false, false, true],
+		["always", true, false, true],
+		["always", undefined, true, true],
+		["always", false, true, true],
+		["auto", undefined, false, true],
+		["auto", true, false, true],
+		["auto", false, false, false],
+		["auto", undefined, true, true],
+		["auto", false, true, false],
+		["declared", undefined, false, false],
+		["declared", false, false, false],
+		["declared", true, false, true],
+		["declared", undefined, true, true],
+		["declared", false, true, false],
+	] as const)("mode %s compat %s official %s => store %s", async (mode, capability, official, expected) => {
+		const { sent } = checkpointServer();
+		const model = official
+			? makeModel(OFFICIAL_URL, capability === undefined ? {} : { supportsResponseCheckpoints: capability })
+			: makeModel(CUSTOM_URL, capability === undefined ? {} : { supportsResponseCheckpoints: capability });
+		const out = await stream(model, ctx1, { ...OPTS, responseCheckpointMode: mode }).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent[0].store).toBe(expected);
+	});
+
+	it.each(["no-such-mode", 3, null, {}])("malformed mode %j disables checkpoints", async (mode) => {
+		const { sent } = checkpointServer();
+		const out = await stream(makeModel(OFFICIAL_URL), ctx1, {
+			...OPTS,
+			responseCheckpointMode: mode as never,
+		}).result();
+		expect(out.stopReason).toBe("stop");
 		expect(sent[0].store).toBe(false);
-		expect(first.responseCheckpoint).toBeUndefined();
-		// Declared capable endpoint: store:true and checkpoint.
-		const declared = makeModel(CUSTOM_URL, { supportsResponseCheckpoints: true });
-		const second = await stream(declared, ctx1, { apiKey, sessionId, responseCheckpointExclude: [] }).result();
-		expect(sent[1].store).toBe(true);
-		expect(second.responseCheckpoint).toBeDefined();
+		expect(out.responseCheckpoint).toBeUndefined();
+	});
+
+	it.each(["sse", "websocket"] as const)(
+		"hard gate transport %s blocks checkpoints in always mode",
+		async (transport) => {
+			const { sent, fetchMock } = checkpointServer();
+			fetchMock.mockImplementation(
+				async () =>
+					new Response(
+						'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}\n\n',
+						{
+							headers: { "content-type": "text/event-stream" },
+						},
+					),
+			);
+			const out = await stream(makeModel(OFFICIAL_URL), ctx1, { ...OPTS, transport }).result();
+			expect(out.stopReason).toBe("stop");
+			if (transport === "sse") expect(sent).toHaveLength(0);
+			else expect(sent[0].store).toBe(false);
+		},
+	);
+
+	it.each([
+		["codex provider", { provider: "openai-codex" as const }, {}],
+		["chatgpt sign-in", { provider: "openai" as const }, { apiKey: "chatgpt-access-token" }],
+		["cache retention none", {}, { cacheRetention: "none" as const, sessionId: undefined }],
+		["hook store:false", {}, { onPayload: (p: unknown) => ({ ...(p as Record<string, unknown>), store: false }) }],
+	])("hard gate %s blocks checkpoints in always mode", async (_label, modelPatch, optionsPatch) => {
+		const { sent } = checkpointServer();
+		const out = await stream({ ...makeModel(OFFICIAL_URL), ...modelPatch }, ctx1, {
+			...OPTS,
+			responseCheckpointMode: "always",
+			...optionsPatch,
+		}).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent[0]?.store).not.toBe(true);
 	});
 
 	it("exclusion patterns disable; '**' and provider globs match (example: globs)", async () => {
@@ -1085,5 +1197,319 @@ describe("durable response checkpoints over WS", () => {
 		);
 		await stream(model, ctx1, { ...OPTS, transport: "sse" }).result();
 		expect(sent).toHaveLength(1); // still only the WS request; no extra WS store:true
+	});
+});
+
+describe("checkpoint failure cooldown", () => {
+	const serverFail = (mode: "coded" | "uncoded" | "store" | "unsupported") => {
+		const health = { failing: true };
+		const server = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (!health.failing) return false;
+				if (!frame.previous_response_id && frame.store !== true) return false;
+				if (frame.previous_response_id) {
+					if (mode === "coded") {
+						socket.emit({
+							type: "error",
+							error: { code: "previous_response_not_found", message: "No such response" },
+						});
+					} else if (mode === "uncoded") {
+						socket.emit({
+							type: "error",
+							error: {
+								type: "invalid_request_error",
+								message: "previous_response_id is not available for this user",
+							},
+						});
+					} else if (mode === "unsupported") {
+						socket.emit({
+							type: "error",
+							error: {
+								type: "invalid_request_error",
+								param: "previous_response_id",
+								message: "previous_response_id is unsupported by this endpoint",
+							},
+						});
+					}
+				} else if (mode === "store") {
+					socket.emit({
+						type: "error",
+						error: { type: "invalid_request_error", param: "store", message: "store is not allowed" },
+					});
+				}
+				return false;
+			},
+		});
+		return {
+			...server,
+			heal: () => {
+				health.failing = false;
+			},
+		};
+	};
+
+	it.each(["coded", "uncoded", "store", "unsupported"] as const)(
+		"signal %s repairs once without store/previous_response_id and cools the endpoint",
+		async (mode) => {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const { sent, fetchMock, heal } = serverFail(mode);
+			const model = makeModel(OFFICIAL_URL);
+			const history = [...ctx1.messages];
+			const next = async (text: string) => {
+				history.push(userMsg(text, history.length));
+				const out = await stream(model, normalizeContext({ messages: history }), OPTS).result();
+				history.push(out);
+				return out;
+			};
+			const first = await stream(model, ctx1, OPTS).result();
+			history.push(first);
+			expect(first.stopReason).toBe("stop");
+			// A store-param rejection hits turn 1 itself (store:true, full body);
+			// the other signals only fire on the turn-2 delta.
+			const turnsBeforeDelta = mode === "store" ? 2 : 1;
+			expect(sent).toHaveLength(turnsBeforeDelta);
+			if (mode === "store") {
+				expect(sent[0].store).toBe(true);
+				expect(sent[1].store).toBeUndefined();
+				expect(first.responseCheckpoint).toBeUndefined();
+			}
+
+			// Delta rejected by the signal, repair resends full body without
+			// store/previous_response_id, and the endpoint enters cooldown.
+			const second = await next("Next");
+			expect(second.stopReason).toBe("stop");
+			const expectedFrames = mode === "store" ? 3 : 3;
+			expect(sent).toHaveLength(expectedFrames);
+			if (mode === "store") {
+				// Turn 1 already cooled the endpoint; turn 2 stays checkpoint-free.
+				expect(sent[2].store).toBeUndefined();
+				expect(sent[2].previous_response_id).toBeUndefined();
+			} else {
+				expect(sent[expectedFrames - 2].previous_response_id).toBe(first.responseId);
+			}
+			expect(sent[expectedFrames - 1].store).toBeUndefined();
+			expect(sent[expectedFrames - 1].previous_response_id).toBeUndefined();
+			expect((sent[expectedFrames - 1].input as unknown[]).length).toBe(history.length - 1);
+			expect(fetchMock).not.toHaveBeenCalled();
+
+			// Cooldown: no store, no delta, no checkpoint capture.
+			const third = await next("Cooled");
+			expect(third.errorMessage).toBeUndefined();
+			expect(third.stopReason).toBe("stop");
+			expect(sent).toHaveLength(expectedFrames + 1);
+			expect(sent[expectedFrames].store).toBeUndefined();
+			expect(sent[expectedFrames].previous_response_id).toBeUndefined();
+			expect(third.responseCheckpoint).toBeUndefined();
+
+			// After the deadline the next request is the single store:true probe on
+			// full history; success clears the cooldown so the next turn deltas again.
+			now += 6 * 60 * 1000;
+			heal();
+			const fourth = await next("Probe");
+			expect(fourth.stopReason).toBe("stop");
+			expect(sent).toHaveLength(expectedFrames + 2);
+			expect(sent[expectedFrames + 1].store).toBe(true);
+			expect(sent[expectedFrames + 1].previous_response_id).toBeUndefined();
+			expect((sent[expectedFrames + 1].input as unknown[]).length).toBe(history.length - 1);
+			expect(fourth.responseCheckpoint).toBeDefined();
+			const fifth = await next("Resumed");
+			expect(fifth.stopReason).toBe("stop");
+			expect(sent).toHaveLength(expectedFrames + 3);
+			expect(sent[expectedFrames + 2].store).toBe(true);
+			expect(sent[expectedFrames + 2].previous_response_id).toBe(fourth.responseId);
+		},
+	);
+
+	it("sessionless failure repairs once but keeps no cooldown state", async () => {
+		const { sent } = serverFail("coded");
+		const model = makeModel(OFFICIAL_URL);
+		const options = { ...OPTS, sessionId: undefined };
+		const first = await stream(model, ctx1, options).result();
+		const ctx2 = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
+		const second = await stream(model, ctx2, options).result();
+		expect(second.stopReason).toBe("stop");
+		expect(sent).toHaveLength(3);
+		expect(sent[2].store).toBeUndefined();
+		// A fresh sessionless request still tries store:true — no state survived.
+		const third = await stream(model, ctx1, options).result();
+		expect(third.stopReason).toBe("stop");
+		expect(sent).toHaveLength(4);
+		expect(sent[3].store).toBe(true);
+	});
+
+	it("checkpoint rejection unrelated to checkpoints does not cool the endpoint", async () => {
+		// A coded non-checkpoint error (e.g. invalid model) is not a checkpoint
+		// signal: it errors out and never starts a cooldown.
+		const { sent } = checkpointServer({
+			onRequest: (socket) => {
+				socket.emit({ type: "error", error: { code: "model_not_found", message: "bad model" } });
+				return true;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const out = await stream(model, ctx1, OPTS).result();
+		expect(out.stopReason).toBe("error");
+		const next = await stream(model, ctx1, OPTS).result();
+		expect(next.stopReason).toBe("error");
+		expect(sent).toHaveLength(2);
+		expect(sent[1].store).toBe(true);
+	});
+
+	it("authentication rejection with param store is never replayed", async () => {
+		// A 401 invalid_api_key that happens to carry param:"store" must not be
+		// classified as a checkpoint signal: replaying a sent request after an
+		// auth failure is unsafe.
+		let rejections = 0;
+		const { sent, fetchMock } = checkpointServer({
+			onRequest: (socket) => {
+				rejections++;
+				socket.emit({
+					type: "error",
+					error: { code: "invalid_api_key", message: "Incorrect API key", param: "store", status: 401 },
+				});
+				return true;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const out = await stream(model, ctx1, OPTS).result();
+		expect(out.stopReason).toBe("error");
+		expect(rejections).toBe(1);
+		expect(sent).toHaveLength(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("chatgpt.com baseUrl is hard-gated in always mode", async () => {
+		const { sent } = checkpointServer();
+		const model = makeModel("https://chatgpt.com/backend-api/codex/v1");
+		const out = await stream(model, ctx1, OPTS).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent[0].store).toBe(false);
+		expect(out.responseCheckpoint).toBeUndefined();
+		// A chatgpt.com subdomain is gated too.
+		const sub = await stream(makeModel("https://api.chatgpt.com/v1"), ctx1, OPTS).result();
+		expect(sent[1].store).toBe(false);
+		expect(sub.responseCheckpoint).toBeUndefined();
+	});
+
+	it("SSE fallback requests never carry the policy store", async () => {
+		const bodies: unknown[] = [];
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			bodies.push(init?.body ? JSON.parse(String(init.body)) : undefined);
+			return new Response(
+				'data: {"type":"response.completed","response":{"id":"resp_sse","status":"completed"}}\n\n',
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		});
+		class FailSocket extends EventTarget {
+			readyState = 1;
+			constructor() {
+				super();
+				// Connection-level failure before the request is sent: auto falls back to SSE.
+				queueMicrotask(() => this.dispatchEvent(new Event("error")));
+			}
+			send(): void {
+				throw new Error("unreachable");
+			}
+			close(): void {
+				this.readyState = 3;
+			}
+		}
+		vi.stubGlobal("WebSocket", FailSocket);
+		vi.stubGlobal("fetch", fetchMock);
+		// Sessionless: no WS retry budget bookkeeping, immediate auto fallback.
+		const out = await stream(makeModel(OFFICIAL_URL), ctx1, { ...OPTS, sessionId: undefined }).result();
+		expect(out.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalledOnce();
+		expect("store" in (bodies[0] as object)).toBe(false);
+		expect("previous_response_id" in (bodies[0] as object)).toBe(false);
+	});
+
+	it("failed probe renews the cooldown instead of clearing it", async () => {
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { sent, fetchMock } = serverFail("store");
+		const model = makeModel(OFFICIAL_URL);
+		const history = [...ctx1.messages];
+		const next = async (text: string) => {
+			history.push(userMsg(text, history.length));
+			const out = await stream(model, normalizeContext({ messages: history }), OPTS).result();
+			history.push(out);
+			return out;
+		};
+		await next("one");
+		// Turn 1 already hit the store rejection and cooled the endpoint.
+		now += 6 * 60 * 1000;
+		const probe = await next("probe");
+		expect(probe.stopReason).toBe("stop");
+		// The probe frame carries store:true...
+		const probeIndex = sent.findIndex((frame, i) => i >= 2 && frame.store === true);
+		expect(probeIndex).toBeGreaterThan(-1);
+		// ...is rejected with the store signal, then repaired without store.
+		expect(sent.at(-1)!.store).toBeUndefined();
+		expect(sent.at(-1)!.previous_response_id).toBeUndefined();
+		// Still cooling right after the failed probe: no store on the next turn.
+		const cooled = await next("cooled");
+		expect(cooled.stopReason).toBe("stop");
+		expect(sent.at(-1)!.store).toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("probe completion without a captured checkpoint keeps the cooldown", async () => {
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		// Store is accepted but the terminal event declares store:false, so no
+		// checkpoint is captured: the cooldown must survive the probe.
+		const { sent } = checkpointServer({
+			failStore: true,
+			onRequest: (socket, frame) => {
+				if (frame.previous_response_id) {
+					socket.emit({
+						type: "error",
+						error: { code: "previous_response_not_found", message: "No such response" },
+					});
+					return true;
+				}
+				return false;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, OPTS).result();
+		expect(first.responseCheckpoint).toBeUndefined();
+		const ctx2 = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
+		const second = await stream(model, ctx2, OPTS).result();
+		expect(second.stopReason).toBe("stop");
+		// Delta rejected -> repair without store; cooldown starts.
+		expect(sent[2].store).toBeUndefined();
+		now += 6 * 60 * 1000;
+		const ctx3 = normalizeContext({ messages: [...ctx2.messages, second, userMsg("Probe", 3)] });
+		const third = await stream(model, ctx3, OPTS).result();
+		expect(third.stopReason).toBe("stop");
+		// The probe sent store:true but captured nothing (failStore).
+		expect(sent[3].store).toBe(true);
+		expect(third.responseCheckpoint).toBeUndefined();
+		const ctx4 = normalizeContext({ messages: [...ctx3.messages, third, userMsg("After", 4)] });
+		await stream(model, ctx4, OPTS).result();
+		// No checkpoint captured -> cooldown persists -> next request has no store.
+		expect(sent[4].store).toBeUndefined();
+	});
+
+	it("one probe per session: a concurrent request stays checkpoint-free", async () => {
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		// The concurrency gate is pure state; exercise it through the exported API.
+		recordCheckpointCooldown("openai-responses", sessionId, "probe-identity");
+		now += 6 * 60 * 1000;
+		const firstProbe = resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity");
+		expect(firstProbe.allowed).toBe(true);
+		expect(firstProbe.probe).toBeDefined();
+		const concurrent = resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity");
+		expect(concurrent.allowed).toBe(false);
+		expect(concurrent.probe).toBeUndefined();
+		// Releasing the claim lets a later request probe again.
+		firstProbe.probe!.probing = false;
+		const renewed = resolveCheckpointCooldown("openai-responses", sessionId, "probe-identity");
+		expect(renewed.allowed).toBe(true);
+		expect(renewed.probe).toBeDefined();
 	});
 });
