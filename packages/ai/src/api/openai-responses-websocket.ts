@@ -204,12 +204,6 @@ function errorParam(error: ResponsesApiError): string | undefined {
 	return typeof param === "string" ? param : undefined;
 }
 
-// Auth/permission/quota/usage-limit codes and statuses never warrant a replay:
-// a rejected-then-replayed key repeats a credential failure, and no-output alone
-// does not prove the request was rejected before execution.
-const CHECKPOINT_NON_RETRYABLE_STATUS = new Set([401, 402, 403, 429]);
-const CHECKPOINT_NON_RETRYABLE_CODE_RE =
-	/invalid_api_key|incorrect_api_key|api_key_not_valid|unauthorized|forbidden|permission_denied|insufficient_quota|quota_exceeded|usage_limit|rate_limit|billing|payment_required|account_deactivated|token_expired|authentication/i;
 const CHECKPOINT_UNSUPPORTED_WORDING_RE = /(unsupported|not supported|unknown|invalid|not allowed|unrecognized)/i;
 
 function errorStatus(error: ResponsesApiError): number | undefined {
@@ -237,21 +231,22 @@ function errorType(error: ResponsesApiError): string | undefined {
  */
 export function isCheckpointReferenceError(error: unknown): boolean {
 	if (!(error instanceof ResponsesApiError)) return false;
-	// Authentication/permission/quota/rate-limit rejections first: never replay.
+	// Every fence runs before any positive match: conflicting evidence (auth,
+	// quota, server error, a non-400 status, an unrelated code) leaves execution
+	// state unknown or unsafe to replay.
 	const status = errorStatus(error);
-	if (status !== undefined && CHECKPOINT_NON_RETRYABLE_STATUS.has(status)) return false;
-	if (error.code !== undefined && CHECKPOINT_NON_RETRYABLE_CODE_RE.test(error.code)) return false;
-	if (error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE) return true;
-	// The code-less shapes must prove an invalid-request rejection: a server
-	// error or other status leaves execution unknown and is never replayed.
-	if (status !== undefined ? status !== 400 : errorType(error) !== "invalid_request_error") return false;
+	const type = errorType(error);
+	if (status !== undefined && status !== 400) return false;
+	if (type !== undefined && type !== "invalid_request_error") return false;
+	if (error.code !== undefined) return error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
+	// Code-less shapes must positively prove an invalid-request rejection.
+	if (status === undefined && type === undefined) return false;
 	const param = errorParam(error);
 	const message = error.message ?? "";
 	if (param === "store" || param === "previous_response_id") {
 		// The parameter names the field; match the rejection wording itself.
 		return CHECKPOINT_UNSUPPORTED_WORDING_RE.test(message) || CHECKPOINT_REFERENCE_UNAVAILABLE_RE.test(message);
 	}
-	if (error.code !== undefined) return false; // coded non-checkpoint errors are unrelated
 	return (
 		CHECKPOINT_REFERENCE_UNAVAILABLE_RE.test(message) ||
 		CHECKPOINT_STORE_PARAM_RE.test(message) ||
