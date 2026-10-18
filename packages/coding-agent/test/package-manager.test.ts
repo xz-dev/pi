@@ -8,6 +8,7 @@ import * as config from "../src/config.ts";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import * as childProcess from "../src/utils/child-process.ts";
+import * as sleepModule from "../src/utils/sleep.ts";
 
 function normalizeForMatch(value: string): string {
 	return value.replace(/\\/g, "/");
@@ -86,6 +87,8 @@ describe("DefaultPackageManager", () => {
 	beforeEach(() => {
 		previousOfflineEnv = process.env.PI_OFFLINE;
 		delete process.env.PI_OFFLINE;
+		// Update retries wait on a fixed schedule; tests exercise attempts, not real delays.
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
 		tempDir = join(tmpdir(), `pm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		agentDir = join(tempDir, "agent");
@@ -3328,7 +3331,9 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 
 			await packageManager.update();
 
-			expect(runCommandCaptureSpy).toHaveBeenCalledTimes(5);
+			// user-unknown's registry failure is retried (3 extra attempts) before the
+			// pre-check falls back to updating: 4 other lookups + 4 attempts = 8.
+			expect(runCommandCaptureSpy).toHaveBeenCalledTimes(8);
 			expect(runCommandSpy).toHaveBeenCalledTimes(2);
 			expect(runCommandSpy).toHaveBeenNthCalledWith(
 				1,
