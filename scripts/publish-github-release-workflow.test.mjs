@@ -140,6 +140,16 @@ test("sync includes Responses transport dependencies and offline gates before pu
   assert.ok(workflow.on.push.branches.includes("main"));
 });
 
+test("upstream sync runs the full CI test suite before publication", () => {
+  const steps = syncWorkflow.jobs["sync-main-with-squash-branches"].steps;
+  const full = steps.findIndex((step) => step.name === "Run full test suite");
+  const daemon = steps.findIndex((step) => step.name === "Build the pi-env daemon");
+  const push = steps.findIndex((step) => step.name === "Push rebuilt main");
+  assert.ok(daemon >= 0 && full > daemon && push > full);
+  assert.equal(steps[full].run.trim(), "./test.sh");
+  assert.match(workflowText, /run: \.\/test\.sh/);
+});
+
 test("upstream sync requires formatter-stable rebuilt sources", () => {
   assert.match(syncWorkflowText, /status="\$\(git status --porcelain=v1 --untracked-files=all\)"/);
   assert.match(syncWorkflowText, /::error::Check mutated rebuilt main/);

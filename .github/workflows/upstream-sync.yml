@@ -198,7 +198,7 @@ jobs:
         # Upstream ci.yml installs these before npm test; grep/find tool tests need them.
         run: |
           sudo apt-get update
-          sudo apt-get install -y fd-find ripgrep
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -sf $(which fdfind) /usr/local/bin/fd
 
       - name: Run focused integration tests
@@ -306,6 +306,15 @@ jobs:
             packages/tui/test/settings-list.test.ts \
             packages/tui/test/mouse-components.test.ts \
             packages/tui/test/editor.test.ts
+
+      # The same workspace suite ci.yml runs on the published main. The focused
+      # gates above cannot catch a new upstream workspace script (e.g. durable
+      # test:workers) breaking under test.sh, so publish only after ./test.sh.
+      - name: Build the pi-env daemon
+        run: npm run build:daemon --workspace packages/env
+
+      - name: Run full test suite
+        run: ./test.sh
 
       - name: Smoke test packed npm release
         run: |
