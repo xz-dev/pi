@@ -33,14 +33,13 @@ const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
 // The server closes a socket after 60 minutes, even mid-response, and the in-flight response is lost.
 // New requests open a fresh socket after 45 minutes, leaving 15 minutes for long responses.
 const SESSION_WEBSOCKET_MAX_AGE_MS = 45 * 60 * 1000;
-const AUTO_SSE_COOLDOWN_MS = 5 * 60 * 1000;
+const AUTO_SSE_COOLDOWN_MS = 2 * 60 * 1000;
+const AUTO_SSE_MAX_COOLDOWN_MS = 5 * 60 * 1000;
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
-// Checkpoint-cooldown window after a verified store/continuation failure. The
-// same 5-minute window as the auto SSE cooldown: both exist to re-probe a
-// transiently failing capability without retrying every request.
+// Checkpoint and transport cooldowns independently step from two to five minutes.
 const CHECKPOINT_COOLDOWN_MS = AUTO_SSE_COOLDOWN_MS;
 
 // ============================================================================
@@ -100,6 +99,8 @@ export interface ResponsesWebSocketDebugStats {
 export interface WebSocketRecoveryState {
 	failures: number;
 	retryAt: number;
+	cooldownMs: number;
+	nextCooldownMs: number;
 	recovering: boolean;
 }
 
@@ -110,6 +111,8 @@ export interface WebSocketRecoveryState {
  */
 export interface CheckpointCooldownState {
 	retryAt: number;
+	cooldownMs: number;
+	nextCooldownMs: number;
 	probing: boolean;
 }
 
@@ -440,13 +443,25 @@ export function recordWebSocketFailure(
 		const map = getIdentityRecoveryMap(entry, sessionId, true)!;
 		state = map.get(recoveryKey);
 		if (!state) {
-			state = { failures: 0, retryAt: 0, recovering: false };
+			state = {
+				failures: 0,
+				retryAt: 0,
+				cooldownMs: AUTO_SSE_COOLDOWN_MS,
+				nextCooldownMs: AUTO_SSE_COOLDOWN_MS,
+				recovering: false,
+			};
 			map.set(recoveryKey, state);
 		}
 		state.failures++;
 		if (state.retryAt > 0 || state.failures > CODEX_AUTO_WEBSOCKET_RETRIES) {
+			const now = Date.now();
+			// Late concurrent failures renew the current step, not the progression.
+			if (now >= state.retryAt) {
+				state.cooldownMs = state.nextCooldownMs;
+				state.nextCooldownMs = Math.min(state.cooldownMs + 60_000, AUTO_SSE_MAX_COOLDOWN_MS);
+			}
 			// Preserve ownership when an older request fails during a recovery probe.
-			state.retryAt = Date.now() + AUTO_SSE_COOLDOWN_MS;
+			state.retryAt = now + state.cooldownMs;
 		}
 	}
 
@@ -461,10 +476,13 @@ export function clearWebSocketSseFallbackIfOwned(
 	scope: string,
 	sessionId: string,
 	recoveryKey: string,
-	state: WebSocketRecoveryState,
+	state: WebSocketRecoveryState | undefined,
 ): void {
 	const map = poolScopes.get(scope)?.sseFallbackSessions.get(sessionId);
-	if (map?.get(recoveryKey) === state) {
+	const current = map?.get(recoveryKey);
+	// Any completed WS success resets progression; only the auto owner clears its deadline.
+	if (current) current.nextCooldownMs = AUTO_SSE_COOLDOWN_MS;
+	if (map && current && current === state) {
 		map.delete(recoveryKey);
 		if (map.size === 0) poolScopes.get(scope)?.sseFallbackSessions.delete(sessionId);
 	}
@@ -474,7 +492,8 @@ export function clearWebSocketSseFallbackIfOwned(
 // Durable-checkpoint failure cooldown
 //
 // A verified store:true / previous_response_id rejection on one (session,
-// endpoint identity) suspends checkpoint requests for CHECKPOINT_COOLDOWN_MS,
+// endpoint identity) suspends checkpoint requests for two minutes initially,
+// stepping to three, four and at most five minutes on failed recovery probes,
 // like the SSE fallback cooldown but scoped to the checkpoint feature rather
 // than the transport. The first request after the deadline is the single
 // recovery probe: it sends store:true with full history while concurrent
@@ -499,7 +518,23 @@ export function recordCheckpointCooldown(scope: string, sessionId: string | unde
 		map = new Map();
 		entry.checkpointCooldownSessions.set(sessionId, map);
 	}
-	map.set(recoveryKey, { retryAt: Date.now() + CHECKPOINT_COOLDOWN_MS, probing: false });
+	let state = map.get(recoveryKey);
+	if (!state) {
+		state = {
+			retryAt: 0,
+			cooldownMs: CHECKPOINT_COOLDOWN_MS,
+			nextCooldownMs: CHECKPOINT_COOLDOWN_MS,
+			probing: false,
+		};
+		map.set(recoveryKey, state);
+	}
+	const now = Date.now();
+	if (now >= state.retryAt) {
+		state.cooldownMs = state.nextCooldownMs;
+		state.nextCooldownMs = Math.min(state.cooldownMs + 60_000, AUTO_SSE_MAX_COOLDOWN_MS);
+	}
+	// Renew in place so late failures cannot release an in-flight probe's ownership.
+	state.retryAt = now + state.cooldownMs;
 }
 
 /**
@@ -523,15 +558,17 @@ export function resolveCheckpointCooldown(
 	return { allowed: true, probe: state };
 }
 
-/** Release an owned probe: success clears the state, rejection un-claims it. */
+/** Checkpoint success resets progression; only its owned probe clears the deadline. */
 export function clearCheckpointCooldownIfOwned(
 	scope: string,
 	sessionId: string,
 	recoveryKey: string,
-	state: CheckpointCooldownState,
+	state: CheckpointCooldownState | undefined,
 ): void {
 	const map = poolScopes.get(scope)?.checkpointCooldownSessions.get(sessionId);
-	if (map?.get(recoveryKey) === state) {
+	const current = map?.get(recoveryKey);
+	if (current) current.nextCooldownMs = CHECKPOINT_COOLDOWN_MS;
+	if (map && current && current === state) {
 		map.delete(recoveryKey);
 		if (map.size === 0) poolScopes.get(scope)?.checkpointCooldownSessions.delete(sessionId);
 	}
