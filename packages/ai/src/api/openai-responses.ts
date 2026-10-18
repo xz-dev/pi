@@ -34,7 +34,7 @@ import {
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
 import {
-	type CheckpointCooldownState,
+	type CheckpointCooldownProbe,
 	clearCheckpointCooldownIfOwned,
 	clearWebSocketSseFallbackIfOwned,
 	closeResponsesWebSocketSessions,
@@ -281,7 +281,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		};
 
 		let recoveryState = undefined as ReturnType<typeof getWebSocketSseFallbackState> | undefined;
-		let checkpointProbe = undefined as CheckpointCooldownState | undefined;
+		let checkpointProbe = undefined as CheckpointCooldownProbe | undefined;
 		let checkpointIdentityKey = "";
 		try {
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
@@ -352,22 +352,34 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const transport = options?.transport || "auto";
 			const sessionId = options?.sessionId;
 			const identityKey = transport === "sse" ? "" : websocketIdentityKey(model, apiKey, websocketHeaders);
+			const fallbackState = sessionId
+				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
+				: undefined;
+			const recoveryProbe = (fallbackState?.retryAt ?? 0) > 0;
+			let startEmitted = false;
+			const websocketDisabledForSession =
+				transport === "auto" && fallbackState && (fallbackState.recovering || Date.now() < fallbackState.retryAt);
+			if (websocketDisabledForSession) {
+				recordWebSocketSseFallback(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId);
+			}
 			// Checkpoint failure cooldown (separate from WS→SSE recovery): while a
 			// verified store/continuation rejection is fresh, requests go without
 			// store or deltas; the first request after the deadline owns the probe.
 			// A hook store:false veto keeps the explicit false and never claims the
 			// probe, but an existing cooldown still forces full context (allowed:false).
 			const policyStore = checkpointsEnabled && params.store === true;
-			const checkpointCooldown = policyStore
-				? resolveCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
-				: {
-						allowed:
-							checkpointsEnabled &&
-							!(
-								sessionId &&
-								getCheckpointCooldownState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
-							),
-					};
+			// SSE-only fallback must not claim or settle a storage probe.
+			const checkpointCooldown =
+				policyStore && !websocketDisabledForSession
+					? resolveCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
+					: {
+							allowed:
+								checkpointsEnabled &&
+								!(
+									sessionId &&
+									getCheckpointCooldownState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
+								),
+						};
 			checkpointProbe = checkpointCooldown.probe;
 			checkpointIdentityKey = identityKey;
 			// A cooldown in force (or an already-claimed probe) keeps this request
@@ -391,17 +403,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							headers: scopeHeaders,
 						})
 				: undefined;
-			const fallbackState = sessionId
-				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
-				: undefined;
-			const recoveryProbe = (fallbackState?.retryAt ?? 0) > 0;
-			let startEmitted = false;
-			const websocketDisabledForSession =
-				transport === "auto" && fallbackState && (fallbackState.recovering || Date.now() < fallbackState.retryAt);
-			if (websocketDisabledForSession) {
-				recordWebSocketSseFallback(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId);
-			}
-
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				if (transport === "auto" && fallbackState) {
 					recoveryState = fallbackState;
@@ -429,6 +430,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							model,
 							onSent: (completeHistory) => {
 								websocketSent = true;
+								if (checkpointProbe && params.store === true) checkpointProbe.attempted = true;
 								fullHistory = completeHistory;
 							},
 							onStart: () => {
@@ -524,8 +526,13 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 						// A completed probe that captured nothing renews the cooldown
 						// instead of clearing it: store:true is still unproven, and
 						// releasing the claim alone would make every next request probe.
-						if (checkpointProbe && sessionId && output.responseCheckpoint === undefined) {
-							recordCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey);
+						if (checkpointProbe?.attempted && sessionId && output.responseCheckpoint === undefined) {
+							recordCheckpointCooldown(
+								OPENAI_RESPONSES_WEBSOCKET_SCOPE,
+								sessionId,
+								identityKey,
+								checkpointProbe,
+							);
 						}
 						// Only a valid checkpoint proves storage works and resets its progression.
 						if (sessionId && output.responseCheckpoint !== undefined) {
@@ -533,7 +540,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 								OPENAI_RESPONSES_WEBSOCKET_SCOPE,
 								sessionId,
 								identityKey,
-								checkpointProbe,
+								checkpointProbe?.state,
 							);
 						}
 						stream.push({
@@ -561,7 +568,12 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							// Never repair a caller-owned parent or a lineage whose complete
 							// history is not locally held: fullHistory is the provenance guard.
 							if (checkpointOwned && !callerOwnedParent && fullHistory) {
-								recordCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey);
+								recordCheckpointCooldown(
+									OPENAI_RESPONSES_WEBSOCKET_SCOPE,
+									sessionId,
+									identityKey,
+									checkpointProbe,
+								);
 								// Repair drops the checkpoint request: re-planning the same
 								// stale reference or resending store would repeat the failure.
 								delete (params as { store?: boolean; previous_response_id?: string }).store;
@@ -599,6 +611,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							identityKey,
 							error,
 							transport === "auto",
+							recoveryProbe ? recoveryState : undefined,
 						);
 						const fallbackToSse = transport === "auto" && (!failureState || failureState.retryAt > 0);
 						appendAssistantMessageDiagnostic(
@@ -692,10 +705,15 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				delete (block as { customInput?: unknown }).customInput;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			// Any non-aborted probe failure renews the cooldown: only a captured
+			// A sent, non-aborted probe failure renews the cooldown: only a captured
 			// checkpoint proves store:true works again.
-			if (checkpointProbe && output.stopReason === "error") {
-				recordCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, options?.sessionId, checkpointIdentityKey);
+			if (checkpointProbe?.attempted && output.stopReason === "error") {
+				recordCheckpointCooldown(
+					OPENAI_RESPONSES_WEBSOCKET_SCOPE,
+					options?.sessionId,
+					checkpointIdentityKey,
+					checkpointProbe,
+				);
 			}
 			const errorMessage = formatProviderError(
 				normalizeProviderError(error),
@@ -716,7 +734,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			if (recoveryState) recoveryState.recovering = false;
 			// An owned probe that ended without a clear releases the claim (an
 			// aborted probe only releases; failures were renewed above).
-			if (checkpointProbe) checkpointProbe.probing = false;
+			if (checkpointProbe) checkpointProbe.state.probing = false;
 		}
 	})();
 

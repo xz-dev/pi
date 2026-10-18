@@ -435,6 +435,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							recoveryKey,
 							error,
 							transport === "auto",
+							recoveryProbe ? recoveryState : undefined,
 						);
 						const fallbackToSse = transport === "auto" && (!failureState || failureState.retryAt > 0);
 						appendAssistantMessageDiagnostic(
