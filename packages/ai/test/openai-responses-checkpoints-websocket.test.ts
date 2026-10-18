@@ -1531,6 +1531,8 @@ describe("checkpoint failure cooldown", () => {
 	});
 
 	it("cooldown keeps chaining a caller-rooted descendant and never captures it", async () => {
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
 		const chained = new Set<string>();
 		const { sent } = checkpointServer({
 			onRequest: (socket, frame) => {
@@ -1571,6 +1573,25 @@ describe("checkpoint failure cooldown", () => {
 		expect(sent[3].input).toHaveLength(1);
 		expect("store" in sent[3]).toBe(false);
 		expect(descendant.responseCheckpoint).toBeUndefined();
+		chained.add(descendant.responseId!);
+		// A hook store:false descendant during cooldown still chains the lineage.
+		const vetoCtx = normalizeContext({ messages: [...descendantCtx.messages, descendant, userMsg("veto", 4)] });
+		const vetoed = await stream(model, vetoCtx, {
+			...OPTS,
+			onPayload: (payload: unknown) => ({ ...(payload as Record<string, unknown>), store: false }),
+		}).result();
+		expect(vetoed.stopReason).toBe("stop");
+		expect(sent[4].previous_response_id).toBe(descendant.responseId);
+		expect(sent[4].store).toBe(false);
+		chained.add(vetoed.responseId!);
+		// After expiry the probe keeps chaining the caller-rooted lineage and captures nothing.
+		now += 6 * 60 * 1000;
+		const probeCtx = normalizeContext({ messages: [...vetoCtx.messages, vetoed, userMsg("probe", 5)] });
+		const probe = await stream(model, probeCtx, OPTS).result();
+		expect(probe.stopReason).toBe("stop");
+		expect(sent[5].previous_response_id).toBe(vetoed.responseId);
+		expect(sent[5].input).toHaveLength(1);
+		expect(probe.responseCheckpoint).toBeUndefined();
 	});
 
 	it("cooldown never strips a caller-owned previous_response_id", async () => {
