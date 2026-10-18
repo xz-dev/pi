@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as config from "../src/config.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import * as sleepModule from "../src/utils/sleep.ts";
 
 interface Commands {
 	runCommand(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string> }): Promise<void>;
@@ -77,11 +78,32 @@ describe("embedded Bun updates registered npm packages", () => {
 		expect(run.mock.calls[0][1][0]).toBe("update");
 	});
 
-	it("does not retry or continue after dependency installation fails", async () => {
+	it("retries a failed dependency install four times, then stops without updating", async () => {
+		const delays: number[] = [];
+		vi.spyOn(sleepModule, "sleep").mockImplementation(async (ms) => {
+			delays.push(ms);
+		});
 		const run = vi.spyOn(commands, "runCommand").mockRejectedValue(new Error("integrity failure"));
 		await expect(manager.update()).rejects.toThrow("integrity failure");
-		expect(run).toHaveBeenCalledTimes(1);
-		expect(run.mock.calls[0][1][0]).toBe("install");
+		expect(run).toHaveBeenCalledTimes(4);
+		expect(run.mock.calls.every((call) => call[1][0] === "install")).toBe(true);
+		expect(delays).toEqual([3000, 6000, 12000]);
+	});
+
+	it("recovers a transient npm update failure after a 3s wait", async () => {
+		writeFileSync(
+			join(npmDir, "package.json"),
+			JSON.stringify({ dependencies: { "third-party-plugin": "latest", "@example/plugin": "^2.0.0" } }),
+		);
+		const delays: number[] = [];
+		vi.spyOn(sleepModule, "sleep").mockImplementation(async (ms) => {
+			delays.push(ms);
+		});
+		const run = vi.spyOn(commands, "runCommand").mockRejectedValueOnce(new Error("fetch failed")).mockResolvedValue();
+		await manager.update();
+		expect(run).toHaveBeenCalledTimes(2);
+		expect(run.mock.calls.map((call) => call[1][0])).toEqual(["update", "update"]);
+		expect(delays).toEqual([3000]);
 	});
 
 	it("does not rewrite invalid manifests", async () => {
