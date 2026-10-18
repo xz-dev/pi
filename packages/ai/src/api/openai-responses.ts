@@ -282,6 +282,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 
 		let recoveryState = undefined as ReturnType<typeof getWebSocketSseFallbackState> | undefined;
 		let checkpointProbe = undefined as CheckpointCooldownState | undefined;
+		let checkpointIdentityKey = "";
 		try {
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
@@ -368,6 +369,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							),
 					};
 			checkpointProbe = checkpointCooldown.probe;
+			checkpointIdentityKey = identityKey;
 			// A cooldown in force (or an already-claimed probe) keeps this request
 			// checkpoint-free by OMITTING the policy-owned store field (an endpoint
 			// may reject the parameter itself); a caller's own hook store stays.
@@ -685,6 +687,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			stream.end();
 		} catch (error) {
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+			// Any non-aborted probe failure renews the cooldown: only a captured
+			// checkpoint proves store:true works again.
+			if (checkpointProbe && output.stopReason === "error") {
+				recordCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, options?.sessionId, checkpointIdentityKey);
+			}
 			const errorMessage = formatProviderError(
 				normalizeProviderError(error),
 				`${model.provider === "openai" ? "OpenAI" : model.provider} API error`,
@@ -702,8 +709,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			stream.end();
 		} finally {
 			if (recoveryState) recoveryState.recovering = false;
-			// An owned probe that ended without a clear (non-signal failure or
-			// abort) releases the claim; the recorded retryAt still bounds retries.
+			// An owned probe that ended without a clear releases the claim (an
+			// aborted probe only releases; failures were renewed above).
 			if (checkpointProbe) checkpointProbe.probing = false;
 		}
 	})();
