@@ -425,6 +425,13 @@ describe("output capture eligibility", () => {
 	])("rejects %s", (_name, output) => {
 		expect(responseOutputItemsCapturable(output as unknown[], output)).toBe(false);
 	});
+	it("ignores output_text logprobs metadata (prod gateways emit logprobs: []) but still compares text", () => {
+		const encoded = assistantItem("ok") as { content: Record<string, unknown>[] };
+		const withLogprobs = { ...encoded, content: encoded.content.map((part) => ({ ...part, logprobs: [] })) };
+		expect(responseOutputItemsCapturable([withLogprobs], [encoded])).toBe(true);
+		const changed = { ...withLogprobs, content: withLogprobs.content.map((part) => ({ ...part, text: "no" })) };
+		expect(responseOutputItemsCapturable([changed], [encoded])).toBe(false);
+	});
 	it("compares exact tool argument bytes and opaque reasoning, allowing only omitted tool status", () => {
 		const call = functionCallItem();
 		expect(responseOutputItemsCapturable([{ ...call, status: "completed" }], [call])).toBe(true);

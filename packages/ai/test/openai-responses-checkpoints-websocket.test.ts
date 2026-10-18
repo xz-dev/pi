@@ -1641,6 +1641,46 @@ describe("checkpoint failure cooldown", () => {
 		},
 	);
 
+	it("prod gateway output (logprobs: []) still repairs a keeper miss after a successful continuation", async () => {
+		let continuations = 0;
+		const withLogprobs = (events: Record<string, unknown>[]) =>
+			JSON.parse(JSON.stringify(events).replaceAll('"annotations":[]', '"annotations":[],"logprobs":[]'));
+		const { sent, fetchMock } = checkpointServer({
+			events: withLogprobs,
+			onRequest: (socket, frame) => {
+				// Keeper restart: the second chained reference is gone.
+				if (frame.previous_response_id && ++continuations === 2) {
+					socket.emit({
+						type: "error",
+						status: 400,
+						error: {
+							code: "previous_response_not_found",
+							message: `Previous response with id '${frame.previous_response_id}' not found.`,
+							param: "previous_response_id",
+							type: "invalid_request_error",
+						},
+					});
+					return true;
+				}
+				return false;
+			},
+		});
+		const model = makeModel(CUSTOM_URL);
+		let context = ctx1;
+		const outs: AssistantMessage[] = [];
+		for (let turn = 0; turn < 3; turn++) {
+			const out = await stream(model, context, OPTS).result();
+			outs.push(out);
+			context = normalizeContext({ messages: [...context.messages, out, userMsg(`next ${turn}`, turn + 2)] });
+		}
+		expect(outs.map((out) => out.stopReason)).toEqual(["stop", "stop", "stop"]);
+		expect(fetchMock).not.toHaveBeenCalled();
+		const repair = sent.at(-1)!;
+		expect(repair.previous_response_id).toBeUndefined();
+		expect(repair.store).toBeUndefined();
+		expect(repair.input).toHaveLength(5);
+	});
+
 	it("cooldown never strips a caller-owned previous_response_id", async () => {
 		const { sent } = serverFail("store");
 		const model = makeModel(OFFICIAL_URL);
