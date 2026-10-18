@@ -1750,11 +1750,23 @@ carried checkpoint artifacts triggers it:
 
 The first signal repairs the current turn once with full history and no
 `store`/`previous_response_id`, then marks the endpoint for the session: for
-five minutes requests go without store or deltas, still safe (full history is
-canonical). The first request after the deadline is a single probe that sends
-`store: true` with full history — concurrent requests stay checkpoint-free —
-and success clears the cooldown; a repeated signal renews it. Sessionless
-calls repair the turn but keep no cooldown state. No background probes run.
+two minutes native requests go without store or deltas, still safe (full history
+is canonical). The first request after the deadline is a single probe that sends
+`store: true` with full history — concurrent requests stay checkpoint-free.
+Failed probes increase the next cooldown to three, four, then five minutes,
+capped at five; a completed probe that captures no usable checkpoint is still
+a failure. Only a valid captured checkpoint resets storage progression to two
+minutes and clears its owned cooldown. Successful store-disabled requests do
+neither. Ordinary cooled requests never move the deadline; late failures from
+already in-flight attempts renew the current step without increasing it.
+
+Native WS-to-SSE recovery has independent progression with the same two-to-five
+minute steps. A completed successful WS response resets only transport
+progression; successful SSE fallbacks do not. Explicit WS success preserves an
+active auto deadline while resetting the next window to two minutes. Session
+cleanup clears both states. Sessionless calls repair the turn but keep no
+cooldown state. No background probes run. The independent OpenAI API plugin
+owns its own recovery policy; these native cooldown changes do not alter it.
 
 **Privacy:** eligibility requests remote `store: true` before the payload hook.
 By default that ask now reaches every eligible third-party Responses endpoint,
