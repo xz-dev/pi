@@ -395,7 +395,12 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						if (aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
 							throw error;
 						}
-						const failureState = recordWebSocketFailure(sessionId, error, transport === "auto");
+						const failureState = recordWebSocketFailure(
+							sessionId,
+							error,
+							transport === "auto",
+							recoveryProbe ? recoveryState : undefined,
+						);
 						const fallbackToSse = transport === "auto" && (!failureState || failureState.retryAt > 0);
 						appendAssistantMessageDiagnostic(
 							output,
@@ -1043,6 +1048,7 @@ function recordWebSocketFailure(
 	sessionId: string | undefined,
 	error: unknown,
 	autoFallback: boolean,
+	probe?: WebSocketRecoveryState,
 ): WebSocketRecoveryState | undefined {
 	if (!sessionId) return undefined;
 	let state: WebSocketRecoveryState | undefined;
@@ -1061,8 +1067,8 @@ function recordWebSocketFailure(
 		state.failures++;
 		if (state.retryAt > 0 || state.failures > CODEX_AUTO_WEBSOCKET_RETRIES) {
 			const now = Date.now();
-			// Late concurrent failures renew the current step, not the progression.
-			if (now >= state.retryAt) {
+			// Only a newly admitted recovery attempt advances; late original failures only renew.
+			if (state.retryAt === 0 || probe === state) {
 				state.cooldownMs = state.nextCooldownMs;
 				state.nextCooldownMs = Math.min(state.cooldownMs + 60_000, AUTO_SSE_MAX_COOLDOWN_MS);
 			}
