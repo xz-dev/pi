@@ -6,14 +6,28 @@ name: "Probe Windows launcher rename semantics"
 #   2. Deleting a running exe fails, so cleanup of locked files must be skipped.
 #   3. A new exe can be renamed into the vacated launcher path while the old
 #      process is still running.
+# The registered manual probe also supports a diagnostic-only macOS replay.
+# It downloads the exact original candidate; it never builds or publishes one.
 on:
   workflow_dispatch:
+    inputs:
+      macos_candidate_run:
+        description: "Failed main publication run to diagnose (blank keeps the Windows probe)"
+        required: false
+        default: ""
+        type: string
+      macos_candidate_sha256:
+        description: "Verified original darwin-x64-modern executable SHA-256"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   probe-windows-rename:
+    if: inputs.macos_candidate_run == ''
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,3 +110,34 @@ jobs:
             Write-Output "RESULT: rename-with-inherited-handle FAILED: $($_.Exception.Message)"
           }
           if ($node -and -not $node.HasExited) { Stop-Process -Id $node.Id -Force -ErrorAction SilentlyContinue }
+
+  diagnose-macos-candidate:
+    if: inputs.macos_candidate_run != ''
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22.23.2" }
+      # Match the failed candidate's external PTY harness, not Release compiler policy.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with: { bun-version: "1.4.3" }
+      - name: Diagnose the original candidate with bounded controls
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.macos_candidate_run }}
+          EXPECTED_BINARY_SHA256: ${{ inputs.macos_candidate_sha256 }}
+          TMPDIR: ${{ runner.temp }}
+        run: node scripts/probe-macos-candidate.mjs "$SOURCE_RUN_ID" "$EXPECTED_BINARY_SHA256" "$RUNNER_TEMP/native-candidate-diagnostics"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: "native-candidate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/native-candidate-diagnostics"
+          if-no-files-found: warn
+          retention-days: 14
