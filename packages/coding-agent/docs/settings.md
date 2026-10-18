@@ -140,7 +140,7 @@ See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and p
 
 Durable Responses checkpoints are requested by default (`responseCheckpointMode: "always"`): eligible `auto`/`websocket-cached` requests ask the service to store state (`store: true`) so the next turn sends only `previous_response_id` plus the delta. Set `"responseCheckpointMode": "declared"` to require `compat.supportsResponseCheckpoints: true` (or the official OpenAI service), or `"auto"` to skip endpoints that explicitly declare `supportsResponseCheckpoints: false`. SSE, uncached `websocket`, Codex/ChatGPT modes, any `chatgpt.com` base URL,
 `cacheRetention: "none"`, and payload-hook `store: false` stay unchanged in
-every mode. A verified `previous_response_id`/store rejection repairs the turn once with full history, then cools the endpoint for the session for five minutes — checkpoints stay off until one probe request re-verifies storage. See [checkpoint policy and privacy](../../ai/README.md#response-checkpoints).
+every mode. A verified `previous_response_id`/store rejection repairs the turn once with full history, then cools the endpoint for the session for two minutes. Each failed recovery probe increases that storage cooldown to three, four, then five minutes (capped at five); only a valid usable checkpoint resets it to two minutes. Successful store-disabled requests and successful WebSocket transport alone do not reset storage progression. Checkpoints stay off until one probe request re-verifies storage. See [checkpoint policy and privacy](../../ai/README.md#response-checkpoints).
 
 ```json
 {
