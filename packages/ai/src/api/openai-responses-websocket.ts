@@ -114,6 +114,12 @@ export interface CheckpointCooldownState {
 	probing: boolean;
 }
 
+export interface CheckpointCooldownProbe {
+	state: CheckpointCooldownState;
+	attempted: boolean;
+	failed: boolean;
+}
+
 export class ResponsesApiError extends Error {
 	readonly code?: string;
 	readonly payload?: Record<string, unknown>;
@@ -433,6 +439,7 @@ export function recordWebSocketFailure(
 	recoveryKey: string,
 	error: unknown,
 	autoFallback: boolean,
+	probe?: WebSocketRecoveryState,
 ): WebSocketRecoveryState | undefined {
 	if (!sessionId) return undefined;
 	const entry = getScope(scope);
@@ -453,8 +460,8 @@ export function recordWebSocketFailure(
 		state.failures++;
 		if (state.retryAt > 0 || state.failures > CODEX_AUTO_WEBSOCKET_RETRIES) {
 			const now = Date.now();
-			// Late concurrent failures renew the current step, not the progression.
-			if (now >= state.retryAt) {
+			// Only a newly admitted recovery attempt advances; late original failures only renew.
+			if (state.retryAt === 0 || probe === state) {
 				state.cooldownMs = state.nextCooldownMs;
 				state.nextCooldownMs = Math.min(state.cooldownMs + 60_000, AUTO_SSE_MAX_COOLDOWN_MS);
 			}
@@ -508,7 +515,12 @@ export function getCheckpointCooldownState(
 }
 
 /** Begin (or renew) a cooldown after a verified checkpoint failure signal. */
-export function recordCheckpointCooldown(scope: string, sessionId: string | undefined, recoveryKey: string): void {
+export function recordCheckpointCooldown(
+	scope: string,
+	sessionId: string | undefined,
+	recoveryKey: string,
+	probe?: CheckpointCooldownProbe,
+): void {
 	if (!sessionId) return;
 	const entry = getScope(scope);
 	let map = entry.checkpointCooldownSessions.get(sessionId);
@@ -527,7 +539,10 @@ export function recordCheckpointCooldown(scope: string, sessionId: string | unde
 		map.set(recoveryKey, state);
 	}
 	const now = Date.now();
-	if (now >= state.retryAt) {
+	const advance = probe?.state === state && probe.attempted && !probe.failed;
+	if (probe?.attempted) probe.failed = true;
+	// Rejection and a long-running store-off repair belong to the same logical probe.
+	if (state.retryAt === 0 || advance) {
 		state.cooldownMs = state.nextCooldownMs;
 		state.nextCooldownMs = Math.min(state.cooldownMs + 60_000, AUTO_SSE_MAX_COOLDOWN_MS);
 	}
@@ -538,7 +553,7 @@ export function recordCheckpointCooldown(scope: string, sessionId: string | unde
 /**
  * Decide checkpoint use for this request. Returns `{ allowed: true }` when
  * checkpoints may be requested; after a cooldown deadline the first caller
- * also owns the probe (`probe: true`) and must settle it via
+ * also owns per-attempt probe metadata and must settle it via
  * `clearCheckpointCooldownIfOwned` on success or `recordCheckpointCooldown` on
  * a renewed failure signal. Concurrent requests during a probe stay off.
  */
@@ -546,14 +561,14 @@ export function resolveCheckpointCooldown(
 	scope: string,
 	sessionId: string | undefined,
 	recoveryKey: string,
-): { allowed: boolean; probe?: CheckpointCooldownState } {
+): { allowed: boolean; probe?: CheckpointCooldownProbe } {
 	if (!sessionId) return { allowed: true };
 	const state = getCheckpointCooldownState(scope, sessionId, recoveryKey);
 	if (!state || state.retryAt <= 0) return { allowed: true };
 	if (Date.now() < state.retryAt) return { allowed: false };
 	if (state.probing) return { allowed: false };
 	state.probing = true;
-	return { allowed: true, probe: state };
+	return { allowed: true, probe: { state, attempted: false, failed: false } };
 }
 
 /** Checkpoint success resets progression; only its owned probe clears the deadline. */
