@@ -1491,6 +1491,59 @@ describe("checkpoint failure cooldown", () => {
 		expect("store" in sent[3]).toBe(false); // renewed cooldown
 	});
 
+	it.each([
+		[
+			"response.failed nested status 500",
+			{
+				type: "response.failed",
+				response: {
+					error: { status: 500, type: "invalid_request_error", param: "store", message: "store invalid" },
+				},
+			},
+		],
+		[
+			"top-level 400 with nested 500",
+			{
+				type: "error",
+				status: 400,
+				error: { status: 500, type: "invalid_request_error", param: "store", message: "store invalid" },
+			},
+		],
+		[
+			"coded not-found hiding nested invalid_api_key",
+			{
+				type: "error",
+				code: "previous_response_not_found",
+				error: { code: "invalid_api_key", type: "invalid_request_error", message: "bad key" },
+			},
+		],
+	])("conflicting envelope %s is never replayed", async (_name, event) => {
+		const { sent, fetchMock } = checkpointServer({
+			onRequest: (socket) => {
+				socket.emit(event);
+				return true;
+			},
+		});
+		const out = await stream(makeModel(OFFICIAL_URL), ctx1, OPTS).result();
+		expect(out.stopReason).toBe("error");
+		expect(sent).toHaveLength(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("cooldown never strips a caller-owned previous_response_id", async () => {
+		const { sent } = serverFail("store");
+		const model = makeModel(OFFICIAL_URL);
+		await stream(model, ctx1, OPTS).result(); // store rejected -> repaired -> cooldown
+		expect(sent).toHaveLength(2);
+		const onPayload = (payload: unknown) => ({
+			...(payload as Record<string, unknown>),
+			previous_response_id: "external-parent",
+		});
+		await stream(model, ctx1, { ...OPTS, onPayload }).result();
+		expect(sent[2].previous_response_id).toBe("external-parent");
+		expect("store" in sent[2]).toBe(false);
+	});
+
 	it("parameter-only unsupported wording on previous_response_id is a signal", async () => {
 		const { sent } = checkpointServer({
 			onRequest: (socket, frame) => {
