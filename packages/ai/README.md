@@ -1693,28 +1693,43 @@ Response checkpoints reduce repeated input after a socket reconnect or a session
 restart. They do not replace conversation history. This feature belongs to the
 xz-dev downstream fork; endpoint storage guarantees remain service-specific.
 
-### Enable storage deliberately
+### Checkpoint mode and exclusions
 
-The optional `responseCheckpointExclude: string[]` is the only checkpoint setting.
-Pass it in `stream`/`streamSimple` options, or use the coding agent's
+Two request options control eligibility, both passable via
+`stream`/`streamSimple` options or the coding agent's
 [settings](../coding-agent/docs/settings.md#response-checkpoints):
 
 ```json
 {
   "transport": "auto",
+  "responseCheckpointMode": "always",
   "responseCheckpointExclude": []
 }
 ```
 
-| Raw setting | Native request owner | Independent plugin request owner |
-| --- | --- | --- |
-| Absent | Treat as `["*"]`: disabled | Treat as `[]`: eligible targets enabled |
-| `[]` | Eligible targets enabled | Eligible targets enabled |
-| `["*"]` | All targets excluded | All targets excluded |
+`responseCheckpointMode` decides whether a request even tries `store: true`:
 
-Raw absence stays absent through settings persistence and Agent/SDK forwarding;
-only the actual request owner applies its default. A malformed value or a list
-containing a non-string disables checkpoints rather than enabling them.
+| Mode | `compat.supportsResponseCheckpoints` undefined | `true` | `false` |
+| --- | --- | --- | --- |
+| `"always"` (default) | try | try | try |
+| `"auto"` | try | try | skip |
+| `"declared"` | skip (official OpenAI service defaults to capable) | try | skip |
+
+Absent or malformed `responseCheckpointMode` stays absent through settings and
+SDK forwarding; the request owner applies `"always"`, and a malformed value
+disables checkpoints rather than enabling them.
+
+`responseCheckpointExclude` is the per-target opt-out. Absent means `[]`
+(enabled); any matching minimatch pattern disables the target. `["*"]`
+excludes everything.
+
+Hard gates apply in every mode: only `auto` and `websocket-cached` transports
+can use durable checkpoints; explicit SSE and uncached `websocket` keep their
+existing behavior; `openai-codex`, Sign-in-with-ChatGPT credentials, any
+`chatgpt.com` base URL (including subdomains),
+`cacheRetention: "none"`, and a payload-hook `store: false` are never
+overridden. Unsupported Codex/ChatGPT modes stay unchanged.
+See [custom endpoint configuration](../coding-agent/docs/models.md#response-checkpoint-capability).
 
 Both implementations use `minimatch` **10.2.6** with `{ nocase: true }` against
 provider ID, model ID, and combined `provider/model` ID, never display names.
@@ -1725,21 +1740,35 @@ and character-class semantics: `"openai/*"` does not match
 `openai/nested/model`, while `"openai/**"` does. For example,
 `["openai/**", "gpt-[45]*"]` excludes matching provider/model or model IDs.
 
-Only `auto` and `websocket-cached` can use durable checkpoints. Explicit SSE and
-uncached `websocket` keep their existing behavior; this adds no HTTP
-continuation. A supported official OpenAI API-key Responses mode is eligible;
-other endpoints need the exact model declaration
-`compat.supportsResponseCheckpoints: true` after persistence has been verified
-for that endpoint/account. A brand, model name, `resp_` ID, or acceptance of a
-`store` field is not proof. Unsupported Codex/ChatGPT modes stay unchanged.
-See [custom endpoint configuration](../coding-agent/docs/models.md#response-checkpoint-capability).
+### Failure cooldown
+
+Mode and exclusions only decide whether to *try* checkpoints. A separate
+failure cooldown verifies that `store: true` continuation actually works on
+the endpoint. Any of these verified pre-execution rejections on a request that
+carried checkpoint artifacts triggers it:
+
+- a `previous_response_not_found` error code;
+- a code-less `previous_response_id is not available` / not-found message;
+- a rejection of the `store` parameter;
+- a `previous_response_id`-is-unsupported rejection.
+
+The first signal repairs the current turn once with full history and no
+`store`/`previous_response_id`, then marks the endpoint for the session: for
+five minutes requests go without store or deltas, still safe (full history is
+canonical). The first request after the deadline is a single probe that sends
+`store: true` with full history — concurrent requests stay checkpoint-free —
+and success clears the cooldown; a repeated signal renews it. Sessionless
+calls repair the turn but keep no cooldown state. No background probes run.
 
 **Privacy:** eligibility requests remote `store: true` before the payload hook.
-An explicit resulting `store: false` from `onPayload` prevents durable use and
-capture; a server's explicit `store: false` prevents capture too. Confirm the
-service's storage and retention policy before enabling this. No universal TTL,
-answer cache, KV-cache reuse, reduced billing, or retention guarantee is implied.
-The official protocol's [persisted continuation documentation](https://developers.openai.com/api/docs/guides/websocket-mode)
+By default that ask now reaches every eligible third-party Responses endpoint,
+not just declared-capable ones. An explicit resulting `store: false` from
+`onPayload` prevents durable use and capture; a server's explicit `store: false`
+prevents capture too. Opt out per target via `responseCheckpointExclude`, or
+set `responseCheckpointMode: "declared"` to only ask verified endpoints. No
+universal TTL, answer cache, KV-cache reuse, reduced billing, or retention
+guarantee is implied. The official protocol's
+[persisted continuation documentation](https://developers.openai.com/api/docs/guides/websocket-mode)
 is not a live-service test.
 
 ### History, validation, and repair

@@ -146,6 +146,12 @@ export interface ThinkingBudgets {
 // Base options all providers share
 export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
+/**
+ * Eligibility policy for requesting durable Responses checkpoints.
+ * `"always"` is the default when the option is absent.
+ */
+export type ResponseCheckpointMode = "always" | "auto" | "declared";
+
 /** Provider-scoped environment overrides. Values take precedence over process.env. */
 export type ProviderEnv = Record<string, string>;
 export type ProviderHeaders = Record<string, string | null>;
@@ -280,13 +286,23 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	/**
 	 * Optional glob exclusion patterns for durable Responses checkpoints,
 	 * matched against provider ID, model ID and `provider/model`, never display names.
-	 * Raw absence stays absent; the native owner defaults to `["*"]`, the plugin to `[]`.
-	 * An explicit `[]` enables
-	 * checkpoints on confirmed-capable endpoints. Matching any pattern disables
-	 * checkpoint capture/resume for that request. Providers that do not support
+	 * Raw absence stays absent; the request owner applies its default (`[]` since
+	 * the checkpoint-mode change). Matching any pattern disables checkpoint
+	 * capture/resume for that request. Providers that do not support
 	 * durable checkpoints ignore this option. See [policy](../README.md#response-checkpoints).
 	 */
 	responseCheckpointExclude?: string[];
+	/**
+	 * How eagerly durable Responses checkpoints (`store: true`) are requested.
+	 * - `"always"` (default): try regardless of `compat.supportsResponseCheckpoints`.
+	 * - `"auto"`: try when the capability is undeclared or `true`; skip an explicit `false`.
+	 * - `"declared"`: only explicit `true`, or the official OpenAI service default.
+	 * Raw absence stays absent; the request owner applies the default. Malformed
+	 * values disable checkpoints rather than enabling them. Hard gates (transport,
+	 * Codex/ChatGPT, cache retention none, payload-hook `store:false`) apply in
+	 * every mode. See [policy](../README.md#response-checkpoints).
+	 */
+	responseCheckpointMode?: ResponseCheckpointMode;
 }
 
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;

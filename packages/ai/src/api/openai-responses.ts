@@ -34,12 +34,14 @@ import {
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
 import {
+	type CheckpointCooldownState,
+	clearCheckpointCooldownIfOwned,
 	clearWebSocketSseFallbackIfOwned,
 	closeResponsesWebSocketSessions,
 	extractEventError,
 	getResponsesWebSocketDebugStats,
 	getWebSocketSseFallbackState,
-	isPreviousResponseNotFoundError,
+	isCheckpointReferenceError,
 	isResponsesNonTransportError,
 	isWebSocketConnectionLimitReachedError,
 	normalizeWebSocketTimeoutMs,
@@ -48,9 +50,11 @@ import {
 	processResponsesWebSocket,
 	ResponsesApiError,
 	type ResponsesWebSocketDebugStats,
+	recordCheckpointCooldown,
 	recordWebSocketFailure,
 	recordWebSocketSseFallback,
 	resetResponsesWebSocketDebugStats,
+	resolveCheckpointCooldown,
 	responsesCheckpointScopeHash,
 } from "./openai-responses-websocket.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
@@ -76,6 +80,20 @@ function isChatGPTSignIn(model: Model<"openai-responses">, apiKey: string | unde
 		apiKey !== undefined &&
 		!apiKey.startsWith("sk-")
 	);
+}
+
+/**
+ * ChatGPT backend endpoints (chatgpt.com and subdomains) never receive
+ * durable-checkpoint requests: they are hard-gated in every mode, like the
+ * Codex provider and ChatGPT sign-in credentials.
+ */
+function isChatGPTBackendUrl(baseUrl: string): boolean {
+	try {
+		const hostname = new URL(baseUrl).hostname.toLowerCase();
+		return hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com");
+	} catch {
+		return false;
+	}
 }
 
 function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean {
@@ -130,21 +148,23 @@ function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCo
 }
 
 /**
- * Narrowly documented official-service default: the documented OpenAI
- * Responses WebSocket service persists response state with store:true and can
- * hydrate older response IDs across connections. All other endpoints need an
- * explicit `compat.supportsResponseCheckpoints: true` declaration — a generic
- * compatible gateway or resp_* id prefix is not capability evidence.
+ * Narrowly documented official-service default for `declared` mode: the
+ * documented OpenAI Responses WebSocket service persists response state with
+ * store:true and can hydrate older response IDs across connections.
  */
 function isOfficialResponsesCheckpointService(model: Model<"openai-responses">): boolean {
 	return model.provider === "openai" && model.baseUrl === "https://api.openai.com/v1";
 }
 
 /**
- * Whether durable response checkpoints are enabled for this request. Absent
- * `responseCheckpointExclude` means the native default `["*"]` — disabled.
- * An explicit `[]` enables eligible targets; malformed lists stay disabled.
- * Policy: [Response checkpoints](../../README.md#response-checkpoints).
+ * Whether durable response checkpoints are enabled for this request.
+ * `responseCheckpointMode` selects capability policy: absent means `"always"`
+ * (try `store: true` regardless of the declared capability), `"auto"` tries
+ * unless `compat.supportsResponseCheckpoints === false`, and `"declared"`
+ * requires explicit capability or the official service. Malformed values
+ * disable checkpoints. `responseCheckpointExclude` stays the per-target
+ * opt-out: absent means `[]`; any match or a malformed list disables the
+ * feature. Policy: [Response checkpoints](../../README.md#response-checkpoints).
  * Paired plugin: https://github.com/xz-dev/openai-api-pi-extension/blob/main/responses-websocket-fetch.ts
  * The plugin owns its checkpoint policy and transport independently.
  */
@@ -153,14 +173,22 @@ function responseCheckpointsEnabled(
 	options: OpenAIResponsesOptions | undefined,
 	compat: Required<OpenAIResponsesCompat>,
 ): boolean {
-	if (!compat.supportsResponseCheckpoints) return false;
+	const mode = options?.responseCheckpointMode;
+	if (mode === "declared") {
+		if (!compat.supportsResponseCheckpoints) return false;
+	} else if (mode === "auto") {
+		if (model.compat?.supportsResponseCheckpoints === false) return false;
+	} else if (mode !== undefined && mode !== "always") {
+		return false; // malformed mode: disabled, never enabled
+	}
 	const exclude = options?.responseCheckpointExclude;
-	if (exclude === undefined) return false; // missing => ["*"]
-	if (!Array.isArray(exclude) || !Array.from(exclude).every((pattern) => typeof pattern === "string")) return false;
+	if (exclude !== undefined && (!Array.isArray(exclude) || !Array.from(exclude).every((p) => typeof p === "string"))) {
+		return false;
+	}
 	const providerTarget = model.provider;
 	const modelTarget = model.id;
 	const combinedTarget = `${model.provider}/${model.id}`;
-	for (const pattern of exclude) {
+	for (const pattern of exclude ?? []) {
 		if (
 			pattern === "*" ||
 			minimatch(combinedTarget, pattern, { nocase: true }) ||
@@ -252,6 +280,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		};
 
 		let recoveryState = undefined as ReturnType<typeof getWebSocketSseFallbackState> | undefined;
+		let checkpointProbe = undefined as CheckpointCooldownState | undefined;
 		try {
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
@@ -297,6 +326,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const checkpointsEnabled =
 				(requestTransport === "auto" || requestTransport === "websocket-cached") &&
 				model.provider !== "openai-codex" &&
+				!isChatGPTBackendUrl(model.baseUrl) &&
+				cacheRetention !== "none" &&
 				!isChatGPTSignIn(model, authorization?.replace(/^Bearer\s+/i, "") ?? "") &&
 				responseCheckpointsEnabled(model, options, compat);
 			if (checkpointsEnabled) {
@@ -308,7 +339,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			}
 			// An explicit store:false from the payload hook is a privacy choice we
 			// never override; it also disables durable capture for this request.
-			const checkpointsActive = checkpointsEnabled && params.store === true;
+			// The checkpoint-cooldown check below may still strip a policy-requested
+			// store:true; the effective flag is computed there.
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -318,6 +350,25 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const transport = options?.transport || "auto";
 			const sessionId = options?.sessionId;
 			const identityKey = transport === "sse" ? "" : websocketIdentityKey(model, apiKey, websocketHeaders);
+			// Checkpoint failure cooldown (separate from WS→SSE recovery): while a
+			// verified store/continuation rejection is fresh, requests go without
+			// store or deltas; the first request after the deadline owns the probe.
+			const checkpointCooldown =
+				checkpointsEnabled && transport !== "sse"
+					? resolveCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
+					: { allowed: checkpointsEnabled };
+			checkpointProbe = checkpointCooldown.probe;
+			// A cooldown in force (or an already-claimed probe) keeps this request
+			// checkpoint-free by OMITTING the policy-owned store field (an endpoint
+			// may reject the parameter itself); a caller's own hook store stays.
+			if (checkpointsEnabled && !checkpointCooldown.allowed) {
+				delete (params as { store?: boolean }).store;
+			}
+			const checkpointsActive = checkpointsEnabled && checkpointCooldown.allowed && params.store === true;
+			// A caller-injected previous_response_id owns its lineage; the
+			// checkpoint repair must never discard it.
+			const callerOwnedParent =
+				typeof params.previous_response_id === "string" && params.previous_response_id.length > 0;
 			// Only generated transport values are absent from the durable identity.
 			const checkpointScope = checkpointsActive
 				? () =>
@@ -347,7 +398,10 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
 				let retriedMissingWebSocketContinuation = false;
-				let suppressDurablePlanning = false;
+				// The checkpoint probe re-verifies with store:true on a full body; a
+				// stale delta would not prove the store path works.
+				let suppressDurablePlanning = checkpointProbe !== undefined;
+				let forceFullContext = checkpointsEnabled && (!checkpointCooldown.allowed || checkpointProbe !== undefined);
 				while (true) {
 					websocketStarted = false;
 					let websocketSent = false;
@@ -430,6 +484,10 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 									}
 								: undefined,
 							forceFresh: recoveryState !== undefined,
+							// Cooled-down requests and the recovery probe send full context:
+							// neither a connection-local continuation nor a durable delta
+							// may exercise the suspect checkpoint path.
+							forceFullContext,
 							suppressDurablePlanning,
 							options,
 						});
@@ -451,6 +509,22 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 								recoveryState,
 							);
 						}
+						// A completed probe that captured nothing renews the cooldown
+						// instead of clearing it: store:true is still unproven, and
+						// releasing the claim alone would make every next request probe.
+						if (checkpointProbe && sessionId && output.responseCheckpoint === undefined) {
+							recordCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey);
+						}
+						// A completed probe clears the cooldown only when it captured a
+						// valid checkpoint: that alone proves store:true works again.
+						if (checkpointProbe && sessionId && output.responseCheckpoint !== undefined) {
+							clearCheckpointCooldownIfOwned(
+								OPENAI_RESPONSES_WEBSOCKET_SCOPE,
+								sessionId,
+								identityKey,
+								checkpointProbe,
+							);
+						}
 						stream.push({
 							type: "done",
 							reason: output.stopReason,
@@ -461,21 +535,40 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 					} catch (error) {
 						const aborted = options?.signal?.aborted;
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
-						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
-						// A replacement socket would append to this same message; only repair before start.
-						if (
-							!aborted &&
-							(!checkpointsActive || fullHistory) &&
-							previousResponseNotFound &&
-							!startEmitted &&
-							output.content.length === 0 &&
-							!retriedMissingWebSocketContinuation
-						) {
+						const checkpointReferenceError =
+							websocketSent && !startEmitted && output.content.length === 0 && isCheckpointReferenceError(error);
+						// A verified checkpoint rejection proves a failed store/delta
+						// before execution: repair the turn once with the preserved full
+						// body minus store/previous_response_id, then cool this endpoint
+						// down for the session. A replacement socket would append to this
+						// same message; only repair before start.
+						// A verified checkpoint rejection proves a failed store/delta before
+						// execution: repair the turn once with the preserved full body minus
+						// store/previous_response_id, then cool this endpoint down for the
+						// session. With durable checkpoints opted out, the same coded error
+						// keeps the base-branch connection-local repair: the WS cache
+						// continuation still depends on that reference. A replacement socket
+						// would append to this same message; only repair before start.
+						const checkpointOwned = checkpointsActive || checkpointProbe !== undefined;
+						if (!aborted && checkpointReferenceError && !retriedMissingWebSocketContinuation) {
 							retriedMissingWebSocketContinuation = true;
-							// Repair once with the preserved full body; re-planning the
-							// same stale durable reference would repeat the failure.
-							suppressDurablePlanning = true;
-							continue;
+							// Never repair a caller-owned parent or a lineage whose complete
+							// history is not locally held: fullHistory is the provenance guard.
+							if (checkpointOwned && !callerOwnedParent && fullHistory) {
+								recordCheckpointCooldown(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey);
+								// Repair drops the checkpoint request: re-planning the same
+								// stale reference or resending store would repeat the failure.
+								delete (params as { store?: boolean; previous_response_id?: string }).store;
+								delete (params as { previous_response_id?: string }).previous_response_id;
+								suppressDurablePlanning = true;
+								forceFullContext = true;
+								continue;
+							}
+							if (!checkpointOwned && !callerOwnedParent && fullHistory) {
+								// Base-branch connection-local recovery, unchanged.
+								suppressDurablePlanning = true;
+								continue;
+							}
 						}
 						// A consumed full-history repair is the final attempt. A sent
 						// request without an explicit rejection has unknown execution.
@@ -526,8 +619,17 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				}
 			}
 
+			// The SSE/HTTP path is a hard gate for checkpoints: it must never carry
+			// the policy-owned store or a checkpoint continuation.
+			const sseBody = params as ResponseCreateParamsStreaming & { previous_response_id?: string };
+			const {
+				store: _store,
+				previous_response_id: _previous,
+				...sseRest
+			} = checkpointsEnabled ? sseBody : ({} as typeof sseBody);
+			const sseParams = checkpointsEnabled ? (sseRest as ResponseCreateParamsStreaming) : params;
 			const { data: openaiStream, response } = await retryProviderRequest(
-				() => client.responses.create(params, requestOptions).withResponse(),
+				() => client.responses.create(sseParams, requestOptions).withResponse(),
 				{
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
@@ -598,6 +700,9 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			stream.end();
 		} finally {
 			if (recoveryState) recoveryState.recovering = false;
+			// An owned probe that ended without a clear (non-signal failure or
+			// abort) releases the claim; the recorded retryAt still bounds retries.
+			if (checkpointProbe) checkpointProbe.probing = false;
 		}
 	})();
 

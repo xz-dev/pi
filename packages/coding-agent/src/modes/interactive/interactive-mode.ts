@@ -5030,6 +5030,7 @@ export class InteractiveMode {
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
 					transport: this.settingsManager.getTransport(),
+					responseCheckpointMode: this.settingsManager.getResponseCheckpointMode() ?? "always",
 					sessionShareDestination: this.settingsManager.getSessionShareDestination(),
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					cacheWarmingMode: this.settingsManager.getCacheWarmingMode(),
@@ -5101,6 +5102,9 @@ export class InteractiveMode {
 					onTransportChange: (transport) => {
 						this.settingsManager.setTransport(transport);
 						this.session.agent.transport = transport;
+					},
+					onResponseCheckpointModeChange: (mode) => {
+						this.settingsManager.setResponseCheckpointMode(mode);
 					},
 					onSessionShareDestinationChange: (destination) => {
 						this.settingsManager.setSessionShareDestination(destination);
