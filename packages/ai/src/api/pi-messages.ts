@@ -25,7 +25,7 @@ import type {
 	TranscriptContext,
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic, createAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
 import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
@@ -410,8 +410,19 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 			if (!response.body) {
 				throw new Error(`${model.provider} response has no body`);
 			}
+			let sseReported = false;
+			const reportSseOnce = async () => {
+				if (sseReported) return;
+				sseReported = true;
+				await emitTransport(options?.onTransport, "SSE", model);
+			};
+			// Media type proves SSE now; otherwise the first decoded event does.
+			if ((response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream")) {
+				await reportSseOnce();
+			}
 
 			for await (const piEvent of readPiMessagesEvents(response.body)) {
+				await reportSseOnce();
 				await options?.onProviderStreamEvent?.(piEvent, model);
 				const event = convertEvent(piEvent);
 				eventStream.push(event);
