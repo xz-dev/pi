@@ -332,6 +332,41 @@ describe("openai-responses WebSocket transport", () => {
 		},
 	);
 
+	it("keeps original in-flight WS failures at the same stage across expired deadlines", async () => {
+		const { run, onSend, sockets, sent } = mockTransport();
+		let now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const options = { responseCheckpointExclude: ["*"], timeoutMs: 0 };
+		let arrived!: () => void;
+		const started = new Promise<void>((resolve) => {
+			arrived = resolve;
+		});
+		onSend.mockImplementation(() => {
+			if (sent.length === 6) arrived();
+		});
+		const requests = Array.from({ length: 6 }, () => run(options));
+		await started;
+		for (let index = 0; index < 6; index++) {
+			if (index >= 4) now += index === 4 ? 120_001 : 180_001;
+			sockets[index].fail();
+			await requests[index];
+		}
+		now += 119_999;
+		await run(options);
+		expect(sent).toHaveLength(6);
+		now++;
+		onSend.mockImplementation((socket) => socket.fail());
+		await run(options);
+		expect(sent).toHaveLength(7);
+		now += 179_999;
+		await run(options);
+		expect(sent).toHaveLength(7);
+		now++;
+		onSend.mockImplementation((socket) => socket.complete());
+		await run(options);
+		expect(sent).toHaveLength(8);
+	});
+
 	it("does not replay a started response and recovers with full context", async () => {
 		const { run, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementationOnce((socket) => {
