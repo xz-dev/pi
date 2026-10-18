@@ -1201,6 +1201,8 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		const delta = getCachedWebSocketInputDelta(unstored, { ...continuation, lastRequestBody: lastUnstored });
 		if (!delta || delta.length === 0 || !continuation.lastResponseId) {
 			// shortcut: fail closed rather than replace caller-owned server history with partial local input.
+			// Nothing was sent: return the lease and keep the entry so its caller-rooted provenance survives.
+			release({ keep: true });
 			throw new ResponsesApiError("Cannot continue a caller-rooted conversation during checkpoint cooldown", {
 				code: "checkpoint_lineage_unavailable",
 			});
