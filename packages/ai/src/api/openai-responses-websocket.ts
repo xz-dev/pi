@@ -198,28 +198,26 @@ const CHECKPOINT_STORE_PARAM_RE =
 const CHECKPOINT_PREVIOUS_UNSUPPORTED_RE =
 	/\bprevious_response_id\b[^\n]*(unsupported|not supported|unknown|invalid|unrecognized)/i;
 
-function errorParam(error: ResponsesApiError): string | undefined {
-	const payload = error.payload as
-		| { error?: { param?: unknown }; param?: unknown; response?: { error?: { param?: unknown } } }
-		| undefined;
-	const param = payload?.error?.param ?? payload?.param ?? payload?.response?.error?.param;
-	return typeof param === "string" ? param : undefined;
-}
-
 const CHECKPOINT_UNSUPPORTED_WORDING_RE = /(unsupported|not supported|unknown|invalid|not allowed|unrecognized)/i;
 
-function errorStatus(error: ResponsesApiError): number | undefined {
-	const payload = error.payload as { status?: unknown; error?: { status?: unknown } } | undefined;
-	const status = payload?.status ?? payload?.error?.status;
-	return typeof status === "number" ? status : undefined;
+// Every supported error envelope location: the frame itself, `error`, and
+// `response.error` (response.failed). Conflicting values anywhere are evidence.
+function errorEnvelopes(error: ResponsesApiError): Record<string, unknown>[] {
+	const payload = error.payload as Record<string, unknown> | undefined;
+	const nested = (value: unknown) =>
+		value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+	const response = nested(payload?.response);
+	return [payload, nested(payload?.error), nested(response?.error)].filter(
+		(entry): entry is Record<string, unknown> => entry !== undefined,
+	);
 }
 
-function errorType(error: ResponsesApiError): string | undefined {
-	const payload = error.payload as
-		| { error?: { type?: unknown }; response?: { error?: { type?: unknown } } }
-		| undefined;
-	const type = payload?.error?.type ?? payload?.response?.error?.type;
-	return typeof type === "string" ? type : undefined;
+function errorValues(error: ResponsesApiError, field: string, type: "string" | "number"): (string | number)[] {
+	const values = errorEnvelopes(error)
+		.map((entry) => entry[field])
+		.filter((value): value is string | number => typeof value === type);
+	// The frame-level `type` is the event kind ("error"/"response.failed"), not an error type.
+	return field === "type" ? values.filter((value) => value !== "error" && value !== "response.failed") : values;
 }
 
 /**
@@ -233,21 +231,25 @@ function errorType(error: ResponsesApiError): string | undefined {
  */
 export function isCheckpointReferenceError(error: unknown): boolean {
 	if (!(error instanceof ResponsesApiError)) return false;
-	// Every fence runs before any positive match: conflicting evidence (auth,
-	// quota, server error, a non-400 status, an unrelated code) leaves execution
-	// state unknown or unsafe to replay.
-	const status = errorStatus(error);
-	const type = errorType(error);
-	if (status !== undefined && status !== 400) return false;
-	if (type !== undefined && type !== "invalid_request_error") return false;
-	const checkpointParam = errorParam(error) === "store" || errorParam(error) === "previous_response_id";
-	if (error.code === "unsupported_parameter" || error.code === "unknown_parameter") return checkpointParam;
-	if (error.code !== undefined) return error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
+	// Every fence runs before any positive match, over every envelope location:
+	// any non-400 status, non-invalid_request_error type or disagreeing code
+	// (auth, quota, server error) leaves execution unknown or unsafe to replay.
+	const statuses = errorValues(error, "status", "number");
+	const types = errorValues(error, "type", "string");
+	const codes = new Set([...errorValues(error, "code", "string"), ...(error.code ? [error.code] : [])]);
+	const params = new Set(errorValues(error, "param", "string"));
+	if (statuses.some((status) => status !== 400)) return false;
+	if (types.some((type) => type !== "invalid_request_error")) return false;
+	if (codes.size > 1 || params.size > 1) return false;
+	const [code] = codes;
+	const [param] = params;
+	const checkpointParam = param === "store" || param === "previous_response_id";
+	if (code === "unsupported_parameter" || code === "unknown_parameter") return checkpointParam;
+	if (code !== undefined) return code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 	// Code-less shapes must positively prove an invalid-request rejection.
-	if (status === undefined && type === undefined) return false;
-	const param = errorParam(error);
+	if (statuses.length === 0 && types.length === 0) return false;
 	const message = error.message ?? "";
-	if (param === "store" || param === "previous_response_id") {
+	if (checkpointParam) {
 		// The parameter names the field; match the rejection wording itself.
 		return CHECKPOINT_UNSUPPORTED_WORDING_RE.test(message) || CHECKPOINT_REFERENCE_UNAVAILABLE_RE.test(message);
 	}
@@ -1174,7 +1176,9 @@ export async function processResponsesWebSocket<TApi extends Api>(
 	const transport = options?.transport ?? "auto";
 	const useCachedContext = transport === "websocket-cached" || transport === "auto";
 	const durable = config.durableCheckpoints;
-	const callerOwned = durable !== undefined && body.previous_response_id !== undefined;
+	// Under a checkpoint cooldown (forceFullContext) the caller's parent still owns its lineage.
+	const callerOwned =
+		(durable !== undefined || config.forceFullContext === true) && body.previous_response_id !== undefined;
 	const fullBody = { ...body };
 	// Preserve legacy non-checkpoint behavior; the checkpoint owner must not
 	// discard a caller's parent or certify its unknown server-side lineage.
