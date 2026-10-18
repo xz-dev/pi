@@ -108,7 +108,7 @@ describe("lazy Codex WebSocket state accessors", () => {
 			});
 		}
 
-		// A reset can bypass the cooldown even before its five-minute deadline.
+		// A reset can bypass the cooldown even before its two-minute initial deadline.
 		failSends = false;
 		expect((await run()).stopReason).toBe("stop");
 		expect(websocketRequests).toBe(8);
