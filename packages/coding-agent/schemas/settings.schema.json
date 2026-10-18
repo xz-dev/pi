@@ -36,6 +36,23 @@
       },
       "description": "Raw Responses checkpoint exclusions. Missing uses the request owner's default; [] enables eligible targets."
     },
+    "responseCheckpointMode": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "always"
+        },
+        {
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "type": "string",
+          "const": "declared"
+        }
+      ],
+      "description": "How eagerly durable Responses checkpoints (store:true) are requested: 'always' tries regardless of the declared capability, 'auto' skips an explicit compat.supportsResponseCheckpoints:false, 'declared' requires declared capability or the official OpenAI service. Missing uses the request owner's default (always)."
+    },
     "transport": {
       "anyOf": [
         {

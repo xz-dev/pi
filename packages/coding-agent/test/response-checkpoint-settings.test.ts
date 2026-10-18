@@ -93,9 +93,31 @@ interface Frame {
 	previous_response_id?: string;
 }
 
+describe("raw response checkpoint mode setting", () => {
+	it.each([undefined, "always", "auto", "declared"].map((raw) => ({ raw })))(
+		"preserves $raw through save and reload; selector save writes it",
+		async ({ raw }) => {
+			writeFileSync(globalPath, JSON.stringify({ responseCheckpointMode: raw }));
+			const settings = SettingsManager.create(cwd, agentDir);
+			expect(settings.getResponseCheckpointMode()).toBe(raw);
+			settings.setTheme("dark");
+			await settings.flush();
+			await settings.reload();
+			expect(settings.getResponseCheckpointMode()).toBe(raw);
+			const saved = JSON.parse(readFileSync(globalPath, "utf8"));
+			expect(saved).toEqual(raw === undefined ? { theme: "dark" } : { theme: "dark", responseCheckpointMode: raw });
+			if (raw === undefined) {
+				settings.setResponseCheckpointMode("auto");
+				await settings.flush();
+				expect(JSON.parse(readFileSync(globalPath, "utf8")).responseCheckpointMode).toBe("auto");
+			}
+		},
+	);
+});
+
 describe("native session checkpoint requests over loopback WebSocket", () => {
 	it.each([
-		{ raw: undefined, enabled: false },
+		{ raw: undefined, enabled: true },
 		{ raw: [], enabled: true },
 		{ raw: ["*"], enabled: false },
 		{ raw: ["CHECKPOINT-LOCAL"], enabled: false },
@@ -224,6 +246,7 @@ describe("native session checkpoint requests over loopback WebSocket", () => {
 				expect(frames).toHaveLength(2);
 				expect(frames[1].store).toBe(enabled);
 				expect(frames[1].previous_response_id).toBe(enabled ? assistant.responseId : undefined);
+				expect(requests.mock.calls[1][2]?.responseCheckpointMode).toBeUndefined();
 				if (enabled) {
 					// Continuation sends exactly one user message containing the new text.
 					// patch/message-origin may prepend a source label input_text, so assert

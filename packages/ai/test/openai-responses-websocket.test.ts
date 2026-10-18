@@ -136,8 +136,10 @@ describe("openai-responses WebSocket transport", () => {
 	});
 
 	it("opens the public /responses WS URL with bearer auth and no stream field", async () => {
+		// Legacy transport fixture: default checkpoint mode is now always, so opt
+		// out to keep asserting the pre-checkpoint wire shape.
 		const { run, sent, connectHeaders, connectUrls, fetchMock } = mockTransport();
-		const result = await run();
+		const result = await run({ responseCheckpointExclude: ["*"] });
 		expect(result.stopReason).toBe("stop");
 		expect(connectUrls).toEqual(["wss://api.openai.com/v1/responses"]);
 		expect(sent).toHaveLength(1);
@@ -209,12 +211,14 @@ describe("openai-responses WebSocket transport", () => {
 	});
 
 	it("isolates SSE fallback cooldown per endpoint+identity for the same session", async () => {
+		// Legacy transport fixture: checkpoints default to always, so opt out to
+		// keep asserting the WS→SSE recovery budget in isolation.
 		const { run, recover, onSend, sent, fetchMock } = mockTransport();
 		const now = 1000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		onSend.mockImplementation((socket) => socket.fail());
-		await recover();
-		await run();
+		await recover({ responseCheckpointExclude: ["*"] });
+		await run({ responseCheckpointExclude: ["*"] });
 		expect(sent).toHaveLength(4); // initial + 3 WS retries, all failed
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 		// A different endpoint on the same session still gets its own WS probe.
@@ -276,9 +280,10 @@ describe("openai-responses WebSocket transport", () => {
 	});
 
 	it("falls back to SSE after the fixed auto retry budget is exhausted", async () => {
+		// Legacy transport fixture: opt out of checkpoints (now default always).
 		const { recover, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementation((socket) => socket.fail());
-		const result = await recover();
+		const result = await recover({ responseCheckpointExclude: ["*"] });
 		expect(result.stopReason).toBe("stop");
 		expect(sent).toHaveLength(4); // initial + 3 outer WS retries
 		expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -373,11 +378,12 @@ describe("openai-responses WebSocket transport", () => {
 	});
 
 	it("does not share SSE cooldown across caller session routing identities", async () => {
+		// Legacy transport fixture: opt out of checkpoints (now default always).
 		const { run, recover, onSend, sent, fetchMock } = mockTransport();
 		const now = 1000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		onSend.mockImplementation((socket) => socket.fail());
-		await recover({ headers: { session_id: "route-a" } });
+		await recover({ responseCheckpointExclude: ["*"], headers: { session_id: "route-a" } });
 		await run({ headers: { session_id: "route-a" } });
 		expect(sent).toHaveLength(4); // initial + 3 WS retries, all failed
 		expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -479,18 +485,20 @@ describe("openai-responses WebSocket transport", () => {
 	});
 
 	it("never forwards a caller-injected previous_response_id on a new connection", async () => {
+		// Legacy transport fixture: with checkpoints off, the caller parent must
+		// still be stripped from the WS body on a fresh connection.
 		const { run, sent, sockets } = mockTransport();
 		const inject = (params: unknown) => ({
 			...(params as Record<string, unknown>),
 			previous_response_id: "resp_foreign",
 		});
-		await run({ onPayload: inject });
+		await run({ responseCheckpointExclude: ["*"], onPayload: inject });
 		expect(sent).toHaveLength(1);
 		expect(sent[0].previous_response_id).toBeUndefined();
 		const secondContext = normalizeContext({
 			messages: [...context.messages, { role: "user", content: "Second", timestamp: 2 }],
 		});
-		await run({ apiKey: "sk-rotated-key", onPayload: inject }, secondContext);
+		await run({ apiKey: "sk-rotated-key", responseCheckpointExclude: ["*"], onPayload: inject }, secondContext);
 		expect(sockets).toHaveLength(2);
 		expect(sent[1].previous_response_id).toBeUndefined();
 		expect(sent[1].input?.length).toBe(secondContext.messages.length);
@@ -500,10 +508,11 @@ describe("openai-responses WebSocket transport", () => {
 describe("openai-responses retry plan", () => {
 	it("uses the transport recovery budget for auto failures", async () => {
 		vi.useFakeTimers();
+		// Legacy transport fixture: opt out of checkpoints (now default always).
 		const { run, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementation((socket) => socket.fail());
 		const policy: RetryPolicy = { enabled: true, maxRetries: 1, baseDelayMs: 10, maxAgentDelayMs: 15 };
-		const request = retryAssistantCall(() => run(), policy, undefined);
+		const request = retryAssistantCall(() => run({ responseCheckpointExclude: ["*"] }), policy, undefined);
 		await vi.advanceTimersByTimeAsync(0);
 		expect(sent).toHaveLength(1);
 		await vi.advanceTimersByTimeAsync(10);
@@ -616,10 +625,11 @@ describe("onTransport reporting", () => {
 	});
 
 	it("clears the label then reports SSE when auto falls back", async () => {
+		// Legacy transport fixture: opt out of checkpoints (now default always).
 		const { recover, onSend } = mockTransport();
 		onSend.mockImplementation((socket) => socket.fail());
 		const transports: Array<string | undefined> = [];
-		await recover({ onTransport: (t) => void transports.push(t) });
+		await recover({ responseCheckpointExclude: ["*"], onTransport: (t) => void transports.push(t) });
 		expect(transports.at(-2)).toBe(undefined);
 		expect(transports.at(-1)).toBe("SSE");
 	});
