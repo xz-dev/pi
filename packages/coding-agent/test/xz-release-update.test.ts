@@ -171,6 +171,7 @@ function fullFetch(assetBody: Uint8Array | string = ASSET_BYTES) {
 
 afterEach(() => {
 	vi.doUnmock("../src/utils/release-attestation.ts");
+	vi.doUnmock("../src/utils/sleep.ts");
 	vi.doUnmock("../src/config.ts");
 	vi.doUnmock("node:process");
 	vi.resetModules();
@@ -213,6 +214,7 @@ describe("xz-dev Release discovery", () => {
 
 	it("restarts discovery from SHA256SUMS after a manifest body transport failure", async () => {
 		allowNetwork();
+		vi.doMock("../src/utils/sleep.ts", () => ({ sleep: vi.fn(async () => {}) }));
 		const { manifestBytes, sums } = discoveryFiles();
 		let manifestAttempts = 0;
 		const fetchMock = vi.fn(async (input: string | URL) => {
@@ -242,6 +244,7 @@ describe("xz-dev Release discovery", () => {
 			MANIFEST_URL,
 			ATTESTATION_URL,
 		]);
+		vi.doUnmock("../src/utils/sleep.ts");
 	});
 
 	it("does not retry transient discovery failures by default", async () => {
@@ -256,6 +259,7 @@ describe("xz-dev Release discovery", () => {
 
 	it("does not retry integrity failures", async () => {
 		allowNetwork();
+		vi.doMock("../src/utils/sleep.ts", () => ({ sleep: vi.fn(async () => {}) }));
 		const { manifestBytes, sums } = discoveryFiles();
 		const corrupt = manifestBytes.slice();
 		corrupt[corrupt.byteLength - 1] = " ".charCodeAt(0);
@@ -267,8 +271,9 @@ describe("xz-dev Release discovery", () => {
 		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([SUMS_URL, MANIFEST_URL]);
 	});
 
-	it("stops retrying discovery after three whole attempts", async () => {
+	it("stops retrying discovery after four attempts", async () => {
 		allowNetwork();
+		vi.doMock("../src/utils/sleep.ts", () => ({ sleep: vi.fn(async () => {}) }));
 		const { sums } = discoveryFiles();
 		const fetchMock = vi.fn(
 			async (input: string | URL) =>
@@ -289,6 +294,64 @@ describe("xz-dev Release discovery", () => {
 			MANIFEST_URL,
 			SUMS_URL,
 			MANIFEST_URL,
+			SUMS_URL,
+			MANIFEST_URL,
+		]);
+		vi.doUnmock("../src/utils/sleep.ts");
+	});
+
+	it("retries a configured single mirror with the fixed update delays", async () => {
+		allowNetwork();
+		const sleepMock = vi.fn(async (_ms: number, _signal?: AbortSignal) => {});
+		vi.doMock("../src/utils/sleep.ts", () => ({ sleep: sleepMock }));
+		const fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease } = await loadUpdater();
+
+		await expect(
+			getLatestXzRelease(CURRENT_VERSION, { retry: true, mirrors: ["https://mirror.invalid/https://github.com"] }),
+		).rejects.toThrow("HTTP 503");
+		expect(fetchMock).toHaveBeenCalledTimes(4);
+		expect(sleepMock.mock.calls.map(([ms]) => ms)).toEqual([3000, 6000, 12000]);
+	});
+
+	it("retries the whole mirror chain as one retry budget", async () => {
+		allowNetwork();
+		const sleepMock = vi.fn(async (_ms: number, _signal?: AbortSignal) => {});
+		vi.doMock("../src/utils/sleep.ts", () => ({ sleep: sleepMock }));
+		const { manifestBytes, sums } = discoveryFiles();
+		const first = "https://first-mirror.invalid";
+		const second = "https://second-mirror.invalid";
+		let secondSumsRequests = 0;
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = String(input);
+			if (url.startsWith(first)) return new Response("unavailable", { status: 503 });
+			if (url === `${second}/xz-dev/pi/releases/latest/download/SHA256SUMS`) {
+				secondSumsRequests++;
+				if (secondSumsRequests === 1) return new Response("unavailable", { status: 503 });
+				return new Response(sums);
+			}
+			if (url === `${second}/xz-dev/pi/releases/latest/download/release-manifest.json`) {
+				return new Response(manifestBytes);
+			}
+			if (url.endsWith("attestation-subjects.jsonl")) return new Response("{}");
+			return new Response("not found", { status: 404 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease } = await loadUpdater();
+
+		await expect(
+			getLatestXzRelease(CURRENT_VERSION, { retry: true, mirrors: [first, second] }),
+		).resolves.toMatchObject({ version: NEXT_VERSION });
+		// Chain 1 exhausts both mirrors on 503; chain 2 reaches the second mirror and succeeds.
+		expect(sleepMock.mock.calls.map(([ms]) => ms)).toEqual([3000]);
+		expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+			`${first}/xz-dev/pi/releases/latest/download/SHA256SUMS`,
+			`${second}/xz-dev/pi/releases/latest/download/SHA256SUMS`,
+			`${first}/xz-dev/pi/releases/latest/download/SHA256SUMS`,
+			`${second}/xz-dev/pi/releases/latest/download/SHA256SUMS`,
+			`${second}/xz-dev/pi/releases/latest/download/release-manifest.json`,
+			`${second}/xz-dev/pi/releases/download/${TAG}/attestation-subjects.jsonl`,
 		]);
 	});
 
@@ -680,6 +743,47 @@ describe("xz-dev single-file self-update", () => {
 		}
 	});
 
+	it("retries a transient bundle download failure with the update delays", async () => {
+		allowNetwork();
+		const sleeps: number[] = [];
+		vi.doMock("../src/utils/sleep.ts", () => ({
+			sleep: vi.fn(async (ms: number) => {
+				sleeps.push(ms);
+			}),
+		}));
+		const root = writeSingleInstall();
+		const executablePath = join(root, "pi");
+		const { manifestBytes, sums } = discoveryFiles();
+		let assetRequests = 0;
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = String(input);
+			if (url === SUMS_URL) return new Response(sums);
+			if (url === MANIFEST_URL) return new Response(manifestBytes);
+			if (url === ATTESTATION_URL) return new Response("{}");
+			if (url === `${EXACT_BASE}${ASSET}`) {
+				assetRequests++;
+				if (assetRequests < 4) return new Response("unavailable", { status: 503 });
+				return new Response(ASSET_BYTES);
+			}
+			return new Response("not found", { status: 404 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const { getLatestXzRelease, runXzSelfUpdate } = await loadUpdater(executablePath);
+		try {
+			const latest = await getLatestXzRelease(CURRENT_VERSION);
+			await runXzSelfUpdate(latest!, CURRENT_VERSION, false, {
+				executablePath,
+				writeProgress: () => {},
+				retry: true,
+			});
+			expect(assetRequests).toBe(4);
+			expect(sleeps).toEqual([3000, 6000, 12000]);
+			expect(readFileSync(executablePath, "utf8")).toBe(EXECUTABLE_TEXT);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("aborts a download after thirty seconds without data", async () => {
 		allowNetwork();
 		vi.useFakeTimers();
@@ -955,6 +1059,7 @@ describe("xz-dev Release mirrors", () => {
 			return direct(url.replace(second, RELEASE_ORIGIN));
 		});
 		vi.stubGlobal("fetch", fetchMock);
+		if (allFail) vi.doMock("../src/utils/sleep.ts", () => ({ sleep: vi.fn(async () => {}) }));
 		try {
 			await loadUpdater(executablePath);
 			const { handlePackageCommand } = await import("../src/package-manager-cli.ts");
@@ -964,10 +1069,12 @@ describe("xz-dev Release mirrors", () => {
 			expect(readFileSync(executablePath, "utf8")).toBe(allFail ? "old-pi-binary\n" : EXECUTABLE_TEXT);
 			const messages = errors.mock.calls.map(([message]) => String(message));
 			expect(messages.slice(0, 2).every((message) => message.startsWith("\u001b[90m"))).toBe(true);
-			expect(messages).toHaveLength(allFail ? 3 : 2);
+			// With retry enabled each outer attempt replays the ordered chain: 2 mirror
+			// failures x 4 attempts plus 3 retry notices and the final error.
+			expect(messages).toHaveLength(allFail ? 12 : 2);
 			if (allFail) {
-				expect(messages[2]).toContain("Error:");
-				expect(fetchMock).toHaveBeenCalledTimes(2);
+				expect(messages[11]).toContain("Error:");
+				expect(fetchMock).toHaveBeenCalledTimes(8);
 			} else {
 				expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
 					SUMS_URL.replace(RELEASE_ORIGIN, first),
