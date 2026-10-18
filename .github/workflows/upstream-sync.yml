@@ -201,6 +201,19 @@ jobs:
           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -sf $(which fdfind) /usr/local/bin/fd
 
+      - name: Test update retries and safety
+        run: |
+          cd packages/coding-agent
+          node ../../node_modules/vitest/dist/cli.js --run \
+            test/git-update.test.ts \
+            test/package-manager.test.ts \
+            test/package-manager-git-shallow.test.ts \
+            test/bun-npm-update.test.ts \
+            test/package-command-paths.test.ts \
+            test/management-http.test.ts \
+            test/version-check.test.ts \
+            test/xz-release-update.test.ts
+
       - name: Run focused integration tests
         run: |
           (
