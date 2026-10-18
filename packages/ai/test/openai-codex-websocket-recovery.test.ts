@@ -293,7 +293,7 @@ describe("Codex transport recovery", () => {
 		expect(sent).toHaveLength(attempts + 1);
 	});
 
-	it("renews concurrent in-flight failures at the same step until the deadline reopens", async () => {
+	it("keeps original in-flight WS failures at the same stage across expired deadlines", async () => {
 		const { run, onSend, sockets, sent } = mockTransport();
 		let now = 1000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -307,7 +307,7 @@ describe("Codex transport recovery", () => {
 		const requests = Array.from({ length: 6 }, () => run({ timeoutMs: 0 }));
 		await started;
 		for (let index = 0; index < 6; index++) {
-			if (index >= 4) now += 100;
+			if (index >= 4) now += index === 4 ? 120_001 : 180_001;
 			sockets[index].fail();
 			await requests[index];
 		}
