@@ -6,8 +6,9 @@ Complete reference for every patch branch integrated into this fork, grouped by 
 
 The single-executable bundle, update verification, and packaging fixes.
 
-- Single-file executable with embedded Bun runtime (JIT); the extracted `pi` is the complete product, no Node.js, npm, or companion binary required.
+- Single-file executable with embedded Bun runtime (JIT) and precompiled JavaScript bytecode; the extracted `pi` is the complete product, no Node.js, npm, or companion binary required.
   - Use case: Run Pi by downloading and extracting one ZIP, on a machine with no JavaScript tooling.
+  - Builds: All 14 Release targets use `--minify --bytecode --format=esm`. Precompilation moves parsing and initial bytecode generation to build time; runtime JIT remains enabled. The current build helper still omits bytecode for cross-OS/architecture builds as a downstream restriction, although [Bun 1.4.1 fixed the historical cross-compilation defect](https://bun.com/blog/bun-v1.4.1#cross-compile-with-bytecode).
   - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 - Run the native FreeBSD amd64 and arm64 executables with CLI, TUI, extension loading, self-update, and cleanup of obsolete backup copies.
   - Use case: Use Pi on FreeBSD without a Linux compatibility layer or a separately installed JavaScript runtime.
@@ -25,7 +26,7 @@ The single-executable bundle, update verification, and packaging fixes.
 - Fix standalone extension installation and updates failing when an external package manager is unavailable by using the Bun embedded in the xz-dev bundle. Explicit `npmCommand` settings take precedence; otherwise package operations spawn the running Pi executable itself, so they work when Pi is launched by absolute path without `pi` on `PATH`, and without separately installing Node.js, npm, or Bun.
   - Use case: Install a Git extension with runtime dependencies on a machine that only has Pi and Git. Managed npm updates retain version selectors and exact pins. If metadata lookup fails, Pi warns about possible downgrade and continues; successful queries still skip equal or older targets.
   - Limits: Official Bun 1.4.2 requires a project manifest for metadata queries. Registry configuration, lockfiles, dependency scripts, and native modules are not guaranteed to behave like npm; Pi does not broaden script trust or install native build tools automatically.
-  - Details: [Package-manager selection](../packages/coding-agent/docs/packages.md#package-manager-selection)
+  - Details: [Package-manager selection](../packages/coding-agent/docs/packages.md#choose-a-source)
   - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 
 ## Retry and recovery
@@ -54,7 +55,7 @@ Manual and automatic retry of interrupted work, plus transport-level recovery.
   - Patch branch: [`patch/codex-websocket-recovery`](https://github.com/xz-dev/pi/tree/patch/codex-websocket-recovery)
 - Use cached WebSocket continuations for ordinary OpenAI Responses, including API-key authentication, Sign in with ChatGPT, and custom compatible endpoints.
   - `auto` tries WebSocket first for all `openai-responses` endpoints and uses the same bounded recovery and SSE cooldown policy as Codex. Unsupported proxies may incur connection attempts before fallback; choose `sse` to avoid them. Explicit WebSocket modes never silently downgrade.
-  - Connections and continuation state are isolated by endpoint and authentication. A dropped connection is rebuilt with full local context, then subsequent successful requests can send only new input. This does not preserve the old connection's server-side cache or guarantee prompt-cache hits.
+  - Connections and continuation state are isolated by endpoint and authentication. Without an eligible [Response checkpoint](#response-checkpoints), a dropped connection is rebuilt with full local context, then subsequent successful requests can send only new input. Connection-local state alone does not preserve the old connection's server-side cache or guarantee prompt-cache hits.
   - Use case: Reduce repeated context uploads in tool loops while recovering from transient socket failures without restarting Pi.
   - Limits: New ChatGPT sign-in tokens use the public Responses endpoint, not the legacy Codex backend. Custom gateways must support the Responses WebSocket protocol; a Chat Completions-compatible endpoint alone is not sufficient.
   - Patch branch: [`patch/responses-websocket-transport`](https://github.com/xz-dev/pi/tree/patch/responses-websocket-transport)
@@ -71,6 +72,19 @@ Manual and automatic retry of interrupted work, plus transport-level recovery.
 - [earendil-works/pi#6234](https://github.com/earendil-works/pi/issues/6234): make Esc abort recover from lifecycle hooks, extension hooks, provider setup, provider streams, or listener dispatch that never settle.
   - Use case: Recover control when Esc is pressed during a hook, provider setup, stream, or listener that does not settle.
   - Patch branch: [`patch/esc-abort`](https://github.com/xz-dev/pi/tree/patch/esc-abort)
+
+## Response checkpoints
+
+Resume stored Responses state after a socket reconnect or session restart without replacing local conversation history.
+
+- Use case: Send only new input after reconnecting or reopening a session when the endpoint still retains the verified response.
+- Enable: Native requests require an explicit `responseCheckpointExclude` list. Absent means disabled, `[]` enables eligible targets, and `["*"]` excludes all. The independent [OpenAI API plugin](https://github.com/xz-dev/openai-api-pi-extension) instead treats absence as `[]` and remains the sole request owner when loaded on the fork.
+- Compatibility: Use `auto` or `websocket-cached`. Custom endpoints need verified persistent Responses support and `compat.supportsResponseCheckpoints: true`; generic OpenAI compatibility or a response ID is not proof. SSE, uncached `websocket`, and unsupported Codex/ChatGPT modes retain their existing behavior.
+- Privacy: Enabling checkpoints requests remote `store: true`. An explicit payload-hook `store: false` disables durable use and capture; a server's `store: false` prevents capture. Check the service's retention policy before enabling this.
+- History: Full session JSONL remains canonical. Bounded assistant metadata is reused only after exact active-branch, request and credential/endpoint scope validation; invalid metadata falls back to full history. There is no side database.
+- Limits: No universal retention time, prompt/KV-cache hit, reduced billing, or live-service durability guarantee. Existing validation uses loopback fixtures, not every real gateway or account-isolation policy.
+- Details: [Settings](../packages/coding-agent/docs/settings.md#response-checkpoints), [endpoint capability](../packages/coding-agent/docs/models.md#response-checkpoint-capability), [SDK policy and repair boundaries](../packages/ai/README.md#response-checkpoints), and [maintenance ownership and validation record](../MAINTAIN.md#response-checkpoint-documentation).
+- Patch branch: [`patch/responses-websocket-transport`](https://github.com/xz-dev/pi/tree/patch/responses-websocket-transport)
 
 ## TUI and display
 

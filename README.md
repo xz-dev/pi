@@ -30,83 +30,48 @@ Highlights only; full details with use cases, limits, and patch branches: [docs/
 
 Features:
 
-- Single executable, no Node.js needed (JIT)
+- Single executable, no Node.js needed (Bun JIT + precompiled bytecode)
 - FreeBSD support
-- Auto-retry interrupted sessions (`/retry`, also automatic on startup)
+- Resume interrupted work (`/retry`, eligible sessions also recover on startup)
 - WebSocket recovery and incremental context for OpenAI Responses and Codex
+- Optional [Response checkpoints](docs/downstream-changes.md#response-checkpoints) across reconnects and session restarts
+- Custom fail-fast patterns for terminal gateway errors
 - Actual connection and request mode beside Working (`SSE`, `WS/full`, `WS/continuation`, or another reported protocol)
 - Detach long tool calls, keep chatting (`tool_task`)
-- Optional background compaction (`/settings`, off by default): keep working while summarizing; threshold, overflow and manual compaction wait/reuse one summary, with an independent TUI status
+- Optional background compaction: keep working while summarizing (`/settings`, off by default)
 - Thinking shown as one preview line (`Ctrl+T` to expand)
-- Smaller input dock when reading history
+- Smaller input dock when reading fullscreen history
 - See where each message came from (you, extension, RPC, SDK)
 - Update mirrors and self-update (`pi update --self`, `--mirror`)
 - Verified downloads (Sigstore signatures)
 - Install extensions without npm or Node
 - English locale for tools, keeps your UI language
 - Quieter startup screen
+- Refresh provider catalogs from CLI (`pi --list-models --refresh`)
 - Per-model thinking level picker, sorted and preselected
 - `Model: old → new` hint after switching models
-- Per-skill on/off switches
+- Per-skill automatic invocation controls; manual `/skill:<name>` stays available
 - Detect slow extensions (opt-in)
-- Clean old backups (`pi update --clean`)
+- Clean old binary backups in the install directory (`pi update --clean`)
 - Scoop/ebuild installs blocked from self-update fights
 
 Fixes:
 
 - Esc now aborts stuck hooks and streams ([#6234](https://github.com/earendil-works/pi/issues/6234))
 - Provider errors stay visible during retries without fake tool failures
-- Model picker fits small screens and phone keyboards
+- Selection panels fit small screens and phone keyboards
 - No wasted summary after a finished answer
+- Compaction summaries survive `/tree` navigation to retained messages
 - Models from extensions load before startup
 - Context % stays right after model list refresh
-- `pi --list-models --refresh`
 - Model picker keeps your selection during refresh
 - Empty messages from extensions no longer break Gemini
-
-### Response checkpoints
-
-The [Responses transport patch](https://github.com/xz-dev/pi/tree/patch/responses-websocket-transport)
-resumes verified persistent Responses state after reconnect or session restore.
-Native checkpoints are disabled when the optional
-`responseCheckpointExclude` setting is absent; explicit `[]` enables eligible
-targets, while `["*"]` excludes all. The independent
-[OpenAI API plugin](https://github.com/xz-dev/openai-api-pi-extension) defaults
-absent to `[]` and remains the sole request owner when loaded on the fork.
-
-Use only `auto` or `websocket-cached` with a verified persistent endpoint.
-Enabling requests remote `store: true`; hook/server `store: false` is respected.
-Full JSONL remains canonical, with validated bounded assistant metadata rather
-than a side database or cache guarantee. Read [settings](packages/coding-agent/docs/settings.md#response-checkpoints),
-[capability configuration](packages/coding-agent/docs/models.md#response-checkpoint-capability),
-and [SDK policy, sources, and limits](packages/ai/README.md#response-checkpoints).
-
-Additional network-namespace-isolated loopback checks passed all 10 processes:
-Bun single-executable Pi 1.3.0-xz.306 with the installed plugin (absent resumes,
-`["*"]` sends full input), native source under Bun 1.4.3 (`[]` resumes,
-absent sends full input), and stock 0.84.2 with the installed plugin (absent
-resumes). All exited 0 with zero HTTP inference.
-
-Real packed-plugin installs via `pi install npm:...@<tgz>` passed on the Bun
-single-executable and stock 0.84.2 hosts, with online registry access for
-dependencies: exactly six runtime packages and no Pi SDK. The earlier offline
-`ENOTCACHED` result was a cache miss, not an unresolved installer failure.
-
-With model data hydrated separately in each checkout (`npm run hydrate:model-data`),
-main `41be7dc` plus the checkpoint changes passed `tsc` and full `npm run check`,
-with AI tests 206/206 and settings tests 179/179. The earlier Kimi TS2322 was a
-foreign-catalog artifact; older owner-branch fixture diagnostics are fixed
-upstream, not caused by checkpoints. The downstream sync rebuild applies the
-owning patch to the current upstream baseline.
-
-Evidence remains limited to loopback fixtures, not real-gateway retention,
-account isolation, or every host layout. No live-service durability guarantee
-is implied.
-See [maintenance ownership](MAINTAIN.md#response-checkpoint-documentation).
 
 ## Installation
 
 xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/xz-dev/pi/releases). Each Release ships 14 ZIP archives: FreeBSD amd64 and arm64; Darwin x64 baseline/modern and arm64; Linux GNU and musl x64 baseline/modern and arm64; and Windows x64 baseline/modern and arm64, named `pi-<target>.zip`. Each ZIP holds exactly one file, the single-file executable `pi` (`pi.exe` on Windows). The x64 `baseline` and `modern` names are compatibility aliases for the same runtime-dispatched Bun target; they no longer select separate AVX2 and baseline implementations. On Linux, choose `gnu` for glibc systems and `musl` for musl systems. The extracted executable is the complete product; there is no wrapper and no companion `pi-native` binary. No Node.js, Bun, npm, package manager, or generated installer script is required.
+
+The executable embeds Bun's JIT runtime and precompiled JavaScript bytecode. All 14 Release targets use `--minify --bytecode --format=esm`, moving parsing and initial bytecode generation to build time without disabling runtime JIT.
 
 The executable materializes its embedded runtime assets (docs, themes, native clipboard helper) into a per-user tmpdir cache at `os.tmpdir()/pi-resources-<uid>/<target>/<version>` on first use; a nonempty cache directory is reused as-is. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
 
@@ -240,11 +205,11 @@ Extension updates are separate:
 pi update --extensions
 ```
 
-Standalone extension operations spawn the running executable itself, so public `pi` on `PATH` is not required. Git sources also require Git. See [package-manager selection](packages/coding-agent/docs/packages.md#package-manager-selection) for overrides and compatibility limits.
+Standalone extension operations spawn the running executable itself, so public `pi` on `PATH` is not required. Git sources also require Git. See [package-manager selection](packages/coding-agent/docs/packages.md#choose-a-source) for overrides and compatibility limits.
 
 Pi authenticates the manifest using Sigstore trust roots bundled in the trusted client, requiring the `xz-dev/pi` main-branch `publish-github-release.yml` workflow, GitHub-hosted signing runner, and the manifest's source commit. It then checks the ZIP and extracted executable against that authenticated manifest before writing or replacing files. This verification is mandatory for every mirror **and direct GitHub**, including `--force`. Missing, forged, or wrong-identity attestations reject that source; only another fully verified source can succeed. No mirror-supplied trust root or verification-disable flag is accepted. Root rotations require a trusted Pi update; if the installed roots no longer cover a new signer, update through a separately trusted installation path.
 
-On successful update, the old executable is retained as `pi-<old-version>` (`pi-<old-version>.exe` on Windows) and the verified candidate replaces the public path. `pi update --clean` removes only regular backups matching the strict distribution-version pattern; the running executable, symlinks, directories, and unrelated files are left untouched.
+On successful update, the old executable is retained as `pi-<old-version>` (`pi-<old-version>.exe` on Windows) and the verified candidate replaces the public path. `pi update --clean` removes only regular backups next to the executable that match the strict distribution-version pattern; the running executable, symlinks, directories, and unrelated files are left untouched.
 
 Installations from releases up to `xz-v1.0.0-xz.253` (raw `pi-<target>` downloads) cannot self-update onto ZIP releases: their updater only knows the raw asset and reports an invalid manifest. Reinstall once by downloading and extracting the current `pi-<target>.zip` over the old `pi`; later updates work with `pi update --self` again. Older ZIP bundle installations (`pi` + `pi-native` + loose assets) need the same one-time reinstall and should delete the old extracted directory.
 
@@ -277,7 +242,7 @@ Release CI signs accepted candidates before self-update acceptance on native, of
 
 See [`MAINTAIN.md`](MAINTAIN.md) for the authoritative downstream branch ownership, rebuild, publication, recovery, and patch-retirement rules. Upstream now supplies the websocket test dependencies; the never-published test-only repair input is retired, while real Chord websocket and thinking-preview gates remain enabled. Upstream now supplies the Xiaomi model-fixture updates, so the duplicate [`patch/model-catalog-test-fixtures`](https://github.com/xz-dev/pi/tree/patch/model-catalog-test-fixtures) input is retired. Its source ref is retained; the tests and their assertions remain upstream.
 
-Twice daily, [Upstream Sync](https://github.com/xz-dev/pi/actions/workflows/upstream-sync.yml) rebuilds `main` from the latest `https://github.com/earendil-works/pi.git` `main`, then integrates the maintenance overlay, feature and fix branches, and temporary compatibility branches in a fixed order:
+Twice daily, [Upstream Sync](https://github.com/xz-dev/pi/actions/workflows/upstream-sync.yml) rebuilds `main` from the latest `https://github.com/earendil-works/pi.git` `main`, then integrates the maintenance overlay and feature/fix branches in a fixed order:
 
 - 01:28 Asia/Shanghai
 - 13:28 Asia/Shanghai
