@@ -647,10 +647,14 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 	it("does not refetch a successful catalog when a sibling times out", async () => {
 		// Regression: per-provider retry ownership means a timed-out sibling only
 		// retries itself; the already-fetched provider is not part of any retry.
+		// The configured models.refreshTimeoutMs drives the per-attempt signal.
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ models: { refreshTimeoutMs: 50_000 } }));
 		vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
 		vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
 		const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
-		vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => originalTimeout(ms === 15_000 ? 50 : ms));
+		const timeoutSpy = vi
+			.spyOn(AbortSignal, "timeout")
+			.mockImplementation((ms) => originalTimeout(ms === 50_000 ? 50 : ms));
 		const requests: string[] = [];
 		vi.stubGlobal(
 			"fetch",
@@ -678,7 +682,74 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 
 		expect(requests.filter((url) => url.includes("/providers/openai?"))).toHaveLength(1);
 		expect(requests.filter((url) => url.includes("/providers/anthropic?"))).toHaveLength(4);
+		// The configured 50_000ms value is what drives the per-attempt signal
+		// (other internal timeouts may also call AbortSignal.timeout).
+		expect(timeoutSpy.mock.calls.filter(([ms]) => ms === 50_000).length).toBeGreaterThanOrEqual(4);
 		expect(process.exitCode).toBe(1);
+	});
+
+	it("uses the configured model refresh timeout fresh for each retry attempt", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ models: { refreshTimeoutMs: 42_000 } }));
+		const refresh = vi
+			.fn(async (_options?: Record<string, unknown>) => ({ aborted: false, errors: new Map<string, Error>() }))
+			.mockResolvedValueOnce({
+				aborted: false,
+				errors: new Map<string, Error>([["openai", new Error("boom")]]),
+			});
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(refresh).toHaveBeenCalledTimes(2);
+		// Fresh timeout per attempt: AbortSignal.timeout called once per refresh call.
+		expect(timeoutSpy.mock.calls.filter(([ms]) => ms === 42_000)).toHaveLength(2);
+	});
+
+	it("a zero models.refreshTimeoutMs aborts each attempt immediately", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ models: { refreshTimeoutMs: 0 } }));
+		const refresh = vi.fn(async (_options?: Record<string, unknown>) => ({
+			aborted: true,
+			errors: new Map<string, Error>(),
+		}));
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(timeoutSpy).toHaveBeenCalledWith(0);
+		expect(refresh).toHaveBeenCalledTimes(4);
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Could not refresh model catalogs: openai: Model catalog refresh timed out.",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("a negative models.refreshTimeoutMs disables the per-attempt timeout signal", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ models: { refreshTimeoutMs: -1 } }));
+		const refresh = vi.fn(async (_options?: Record<string, unknown>) => ({
+			aborted: false,
+			errors: new Map<string, Error>(),
+		}));
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(refresh).toHaveBeenCalledTimes(1);
+		expect(refresh.mock.calls[0]?.[0]).not.toHaveProperty("signal");
+		expect(timeoutSpy).not.toHaveBeenCalled();
 	});
 
 	it("rejects update --models combined with another update target", async () => {
