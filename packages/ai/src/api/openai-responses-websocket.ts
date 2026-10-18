@@ -36,6 +36,10 @@ const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
+// Checkpoint-cooldown window after a verified store/continuation failure. The
+// same 5-minute window as the auto SSE cooldown: both exist to re-probe a
+// transiently failing capability without retrying every request.
+const CHECKPOINT_COOLDOWN_MS = AUTO_SSE_COOLDOWN_MS;
 
 // ============================================================================
 // Types
@@ -95,6 +99,16 @@ export interface WebSocketRecoveryState {
 	failures: number;
 	retryAt: number;
 	recovering: boolean;
+}
+
+/**
+ * Durable-checkpoint failure cooldown for one (session, endpoint identity).
+ * `retryAt` holds the cooldown deadline; `probing` marks the single in-flight
+ * recovery probe permitted after the deadline passed.
+ */
+export interface CheckpointCooldownState {
+	retryAt: number;
+	probing: boolean;
 }
 
 export class ResponsesApiError extends Error {
@@ -177,6 +191,63 @@ export function isPreviousResponseNotFoundError(error: unknown): boolean {
 	return error instanceof ResponsesApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 }
 
+const CHECKPOINT_REFERENCE_UNAVAILABLE_RE =
+	/previous_response_id[^\n]*not available|previous[ _]response[^\n]*not found/i;
+const CHECKPOINT_STORE_PARAM_RE =
+	/\bstore\b[^\n]*(unsupported|not supported|unknown|invalid|not allowed|unrecognized)/i;
+const CHECKPOINT_PREVIOUS_UNSUPPORTED_RE =
+	/\bprevious_response_id\b[^\n]*(unsupported|not supported|unknown|invalid|unrecognized)/i;
+
+function errorParam(error: ResponsesApiError): string | undefined {
+	const payload = error.payload as { error?: { param?: unknown }; param?: unknown } | undefined;
+	const param = payload?.error?.param ?? payload?.param;
+	return typeof param === "string" ? param : undefined;
+}
+
+// Auth/permission/quota/usage-limit codes and statuses never warrant a replay:
+// a rejected-then-replayed key repeats a credential failure, and no-output alone
+// does not prove the request was rejected before execution.
+const CHECKPOINT_NON_RETRYABLE_STATUS = new Set([401, 402, 403, 429]);
+const CHECKPOINT_NON_RETRYABLE_CODE_RE =
+	/invalid_api_key|incorrect_api_key|api_key_not_valid|unauthorized|forbidden|permission_denied|insufficient_quota|quota_exceeded|usage_limit|rate_limit|billing|payment_required|account_deactivated|token_expired|authentication/i;
+const CHECKPOINT_UNSUPPORTED_WORDING_RE = /(unsupported|not supported|unknown|invalid|not allowed|unrecognized)/i;
+
+function errorStatus(error: ResponsesApiError): number | undefined {
+	const payload = error.payload as { status?: unknown; error?: { status?: unknown } } | undefined;
+	const status = payload?.status ?? payload?.error?.status;
+	return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * A rejection proving the requested durable checkpoint (`store:true` or
+ * `previous_response_id`) failed before execution, warranting one repair and a
+ * checkpoint cooldown. Four shapes: the coded missing-reference error, a
+ * code-less "previous_response_id is not available" message, a `store` param
+ * rejection, and a `previous_response_id`-is-unsupported rejection. Auth,
+ * permission, quota, rate-limit, coded non-checkpoint and mid-stream failures
+ * stay unclassified.
+ */
+export function isCheckpointReferenceError(error: unknown): boolean {
+	if (!(error instanceof ResponsesApiError)) return false;
+	if (error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE) return true;
+	// Authentication/permission/quota/rate-limit rejections first: never replay.
+	const status = errorStatus(error);
+	if (status !== undefined && CHECKPOINT_NON_RETRYABLE_STATUS.has(status)) return false;
+	if (error.code !== undefined && CHECKPOINT_NON_RETRYABLE_CODE_RE.test(error.code)) return false;
+	const param = errorParam(error);
+	const message = error.message ?? "";
+	if (param === "store" || param === "previous_response_id") {
+		// The parameter names the field; match the rejection wording itself.
+		return CHECKPOINT_UNSUPPORTED_WORDING_RE.test(message) || CHECKPOINT_REFERENCE_UNAVAILABLE_RE.test(message);
+	}
+	if (error.code !== undefined) return false; // coded non-checkpoint errors are unrelated
+	return (
+		CHECKPOINT_REFERENCE_UNAVAILABLE_RE.test(message) ||
+		CHECKPOINT_STORE_PARAM_RE.test(message) ||
+		CHECKPOINT_PREVIOUS_UNSUPPORTED_RE.test(message)
+	);
+}
+
 export function extractEventError(event: Record<string, unknown>): { code?: string; message?: string } {
 	const nested = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>) : undefined;
 	return {
@@ -201,6 +272,8 @@ interface WebSocketPoolScope {
 	// Pi's outer retry owner retries three times before an endpoint+credential
 	// identity enters SSE cooldown, partitioned per session.
 	sseFallbackSessions: Map<string, Map<string, WebSocketRecoveryState>>;
+	// Durable-checkpoint failure cooldown, same partitioning as sseFallbackSessions.
+	checkpointCooldownSessions: Map<string, Map<string, CheckpointCooldownState>>;
 }
 
 const poolScopes = new Map<string, WebSocketPoolScope>();
@@ -208,7 +281,12 @@ const poolScopes = new Map<string, WebSocketPoolScope>();
 function getScope(scope: string): WebSocketPoolScope {
 	let entry = poolScopes.get(scope);
 	if (!entry) {
-		entry = { connections: new Map(), debugStats: new Map(), sseFallbackSessions: new Map() };
+		entry = {
+			connections: new Map(),
+			debugStats: new Map(),
+			sseFallbackSessions: new Map(),
+			checkpointCooldownSessions: new Map(),
+		};
 		poolScopes.set(scope, entry);
 	}
 	return entry;
@@ -251,10 +329,12 @@ export function resetResponsesWebSocketDebugStats(scope: string, sessionId?: str
 	if (sessionId) {
 		entry.debugStats.delete(sessionId);
 		entry.sseFallbackSessions.delete(sessionId);
+		entry.checkpointCooldownSessions.delete(sessionId);
 		return;
 	}
 	entry.debugStats.clear();
 	entry.sseFallbackSessions.clear();
+	entry.checkpointCooldownSessions.clear();
 }
 
 function getIdentityRecoveryMap(
@@ -293,6 +373,7 @@ function closeScopeSessions(scope: string, sessionId?: string): void {
 		for (const conn of entry.connections.get(sessionId)?.values() ?? []) closeEntry(conn);
 		entry.connections.delete(sessionId);
 		entry.sseFallbackSessions.delete(sessionId);
+		entry.checkpointCooldownSessions.delete(sessionId);
 		return;
 	}
 	for (const sessionEntries of entry.connections.values()) {
@@ -300,6 +381,7 @@ function closeScopeSessions(scope: string, sessionId?: string): void {
 	}
 	entry.connections.clear();
 	entry.sseFallbackSessions.clear();
+	entry.checkpointCooldownSessions.clear();
 }
 
 registerSessionResourceCleanup((sessionId?: string) => {
@@ -371,6 +453,73 @@ export function clearWebSocketSseFallbackIfOwned(
 	if (map?.get(recoveryKey) === state) {
 		map.delete(recoveryKey);
 		if (map.size === 0) poolScopes.get(scope)?.sseFallbackSessions.delete(sessionId);
+	}
+}
+
+// ============================================================================
+// Durable-checkpoint failure cooldown
+//
+// A verified store:true / previous_response_id rejection on one (session,
+// endpoint identity) suspends checkpoint requests for CHECKPOINT_COOLDOWN_MS,
+// like the SSE fallback cooldown but scoped to the checkpoint feature rather
+// than the transport. The first request after the deadline is the single
+// recovery probe: it sends store:true with full history while concurrent
+// requests of the same session stay checkpoint-free. Sessionless callers keep
+// no cooldown state; they still get the same single repair on a signal.
+// ============================================================================
+
+export function getCheckpointCooldownState(
+	scope: string,
+	sessionId: string,
+	recoveryKey: string,
+): CheckpointCooldownState | undefined {
+	return poolScopes.get(scope)?.checkpointCooldownSessions.get(sessionId)?.get(recoveryKey);
+}
+
+/** Begin (or renew) a cooldown after a verified checkpoint failure signal. */
+export function recordCheckpointCooldown(scope: string, sessionId: string | undefined, recoveryKey: string): void {
+	if (!sessionId) return;
+	const entry = getScope(scope);
+	let map = entry.checkpointCooldownSessions.get(sessionId);
+	if (!map) {
+		map = new Map();
+		entry.checkpointCooldownSessions.set(sessionId, map);
+	}
+	map.set(recoveryKey, { retryAt: Date.now() + CHECKPOINT_COOLDOWN_MS, probing: false });
+}
+
+/**
+ * Decide checkpoint use for this request. Returns `{ allowed: true }` when
+ * checkpoints may be requested; after a cooldown deadline the first caller
+ * also owns the probe (`probe: true`) and must settle it via
+ * `clearCheckpointCooldownIfOwned` on success or `recordCheckpointCooldown` on
+ * a renewed failure signal. Concurrent requests during a probe stay off.
+ */
+export function resolveCheckpointCooldown(
+	scope: string,
+	sessionId: string | undefined,
+	recoveryKey: string,
+): { allowed: boolean; probe?: CheckpointCooldownState } {
+	if (!sessionId) return { allowed: true };
+	const state = getCheckpointCooldownState(scope, sessionId, recoveryKey);
+	if (!state || state.retryAt <= 0) return { allowed: true };
+	if (Date.now() < state.retryAt) return { allowed: false };
+	if (state.probing) return { allowed: false };
+	state.probing = true;
+	return { allowed: true, probe: state };
+}
+
+/** Release an owned probe: success clears the state, rejection un-claims it. */
+export function clearCheckpointCooldownIfOwned(
+	scope: string,
+	sessionId: string,
+	recoveryKey: string,
+	state: CheckpointCooldownState,
+): void {
+	const map = poolScopes.get(scope)?.checkpointCooldownSessions.get(sessionId);
+	if (map?.get(recoveryKey) === state) {
+		map.delete(recoveryKey);
+		if (map.size === 0) poolScopes.get(scope)?.checkpointCooldownSessions.delete(sessionId);
 	}
 }
 
@@ -956,6 +1105,12 @@ export interface ProcessResponsesWebSocketOptions<TApi extends Api> {
 	 */
 	suppressDurablePlanning?: boolean;
 	/**
+	 * Send the request's full input as-is: skip connection-local continuation
+	 * AND durable planning. Used while the endpoint is in checkpoint cooldown
+	 * and by the cooldown probe, which must re-verify the store path itself.
+	 */
+	forceFullContext?: boolean;
+	/**
 	 * Terminal non-success outcomes (error/aborted stop reasons, content-filter
 	 * incompletes, provider-asserted failures). Responses that end this way never
 	 * become the cached continuation baseline; the next request sends full input.
@@ -1015,12 +1170,22 @@ export async function processResponsesWebSocket<TApi extends Api>(
 	// discard a caller's parent or certify its unknown server-side lineage.
 	if (!callerOwned) delete fullBody.previous_response_id;
 	let requestBody =
-		!callerOwned && useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
-	let fullHistory = !callerOwned && (requestBody === fullBody || entry?.continuation?.fullHistory === true);
+		!callerOwned && !config.forceFullContext && useCachedContext && entry
+			? buildCachedWebSocketRequestBody(entry, fullBody)
+			: fullBody;
+	let fullHistory =
+		!callerOwned &&
+		(config.forceFullContext === true || requestBody === fullBody || entry?.continuation?.fullHistory === true);
 
 	// Durable planning is independent of connection-local state, but never
 	// layers over a caller-owned parent.
-	if (durable && !callerOwned && !config.suppressDurablePlanning && requestBody === fullBody) {
+	if (
+		durable &&
+		!callerOwned &&
+		!config.forceFullContext &&
+		!config.suppressDurablePlanning &&
+		requestBody === fullBody
+	) {
 		const candidate = durable.getCandidate();
 		if (candidate && isResponseCheckpoint(candidate.responseCheckpoint)) {
 			const scopeHash = await durable.getScopeHash();
