@@ -193,7 +193,13 @@ function parseOwnerLine(line: string): OwnerRecord {
 		}
 		const code = "code" in parsed ? parsed.code : undefined;
 		const signal = "signal" in parsed ? parsed.signal : undefined;
-		if (typeof code === "number" && Number.isInteger(code) && code >= 0 && code <= 255 && signal === null)
+		if (
+			typeof code === "number" &&
+			Number.isInteger(code) &&
+			code >= 0 &&
+			code <= (process.platform === "win32" ? 0xffff_ffff : 255) &&
+			signal === null
+		)
 			return { kind: "exit", report: { code, signal } };
 		if (code === null && typeof signal === "number" && Number.isInteger(signal) && signal > 0 && signal <= 127)
 			return { kind: "exit", report: { code, signal } };
@@ -211,6 +217,7 @@ class OwnedProcess {
 	private primaryExit: OwnerExit | undefined;
 	private spawnErrno: number | undefined;
 	private cleanupConfirmed = false;
+	private cancelled = false;
 	private protocolError: Error | undefined;
 	private launchError: Error | undefined;
 	private stderrListener: ((chunk: Buffer) => void) | undefined;
@@ -253,7 +260,9 @@ class OwnedProcess {
 			if (this.launchError) throw this.launchError;
 			if (this.protocolError) throw this.protocolError;
 			const expectedCode = this.primaryExit ? (this.primaryExit.code ?? 128 + (this.primaryExit.signal ?? 0)) : 125;
-			if (helper.signal !== null || helper.code !== expectedCode) {
+			const expectedHelper =
+				process.platform === "win32" && process.versions.bun ? expectedCode % 256 : expectedCode;
+			if (helper.signal !== null || helper.code !== expectedHelper) {
 				const failure = new Error(
 					`Process owner failed: expected exit ${expectedCode}, received ${helper.signal ?? helper.code}`,
 				);
@@ -337,7 +346,14 @@ class OwnedProcess {
 
 	/** K or lease EOF requests subtree cleanup; never signal the helper's process group. */
 	kill(): void {
-		if (this.lease?.writable && !this.lease.destroyed && !this.lease.writableEnded) this.lease.end("K");
+		if (this.lease?.writable && !this.lease.destroyed && !this.lease.writableEnded) {
+			if (process.platform === "win32") {
+				if (!this.cancelled) {
+					this.cancelled = true;
+					this.lease.write("K");
+				}
+			} else this.lease.end("K");
+		}
 	}
 }
 

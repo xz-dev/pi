@@ -1,5 +1,5 @@
 // Host manager (Node only): runs a child host process and keeps at most one instance of it alive.
-import { type ChildProcess, fork } from "node:child_process";
+import { type ChildProcess, fork, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { lstat, mkdir, rm } from "node:fs/promises";
@@ -56,7 +56,10 @@ export interface Driver {
 }
 
 export interface ForkDriverOptions {
-	/** The child's entry module. */
+	/**
+	 * Child entry module. With Windows native ownership, containment starts at attach acknowledgment.
+	 * Module startup must not spawn descendants before receiving the first manager message.
+	 */
 	readonly entry: string;
 	readonly args?: readonly string[];
 	readonly env?: Readonly<Record<string, string>>;
@@ -175,11 +178,13 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 			if (options.lock !== undefined) env[LOCK_ENV] = options.lock;
 			if (owner === undefined) delete env.PI_PROCESS_OWNER_BINARY;
 			else env.PI_PROCESS_OWNER_BINARY = owner;
+			const windowsAttach = owner !== undefined && process.platform === "win32";
+			const beforeFork = windowsAttach ? performance.timeOrigin + performance.now() : 0;
 			const child: ChildProcess = fork(options.entry, [...(options.args ?? [])], {
 				env,
-				execPath: owner ?? process.execPath,
+				execPath: windowsAttach ? process.execPath : (owner ?? process.execPath),
 				execArgv: [
-					...(owner !== undefined
+					...(owner !== undefined && !windowsAttach
 						? ["supervise", "--control-fd", "4", "--ipc-fd", "3", "--", process.execPath]
 						: []),
 					...(options.execArgv ?? []),
@@ -190,9 +195,10 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 					options.onOutput ? "pipe" : "inherit",
 					options.onOutput ? "pipe" : "inherit",
 					"ipc",
-					...(owner !== undefined ? ["pipe" as const] : []),
+					...(owner !== undefined && !windowsAttach ? ["pipe" as const] : []),
 				],
 			});
+			const afterFork = windowsAttach ? performance.timeOrigin + performance.now() : 0;
 			if (options.onOutput) {
 				for (const stream of ["stdout", "stderr"] as const) {
 					child[stream]?.on("data", (chunk: Buffer) => {
@@ -201,8 +207,42 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 					});
 				}
 			}
-			const lease = owner !== undefined ? (child.stdio[4] as Duplex | null) : undefined;
+			// Keep fork IPC directly bound to P: libuv duplicates socket handles for its PID.
+			// shortcut: Windows contains only post-S work; worker top-level spawns are outside attach ownership.
+			let guardian = child;
+			if (windowsAttach && child.pid !== undefined) {
+				try {
+					guardian = spawn(owner!, ["supervise", "--control-fd", "3", "--attach-pid", String(child.pid)], {
+						stdio: ["ignore", "ignore", "inherit", "pipe"],
+						windowsHide: true,
+					});
+				} catch (error) {
+					child.kill("SIGKILL");
+					throw error;
+				}
+			}
+			const lease = owner !== undefined ? (guardian.stdio[windowsAttach ? 3 : 4] as Duplex | null) : undefined;
+			const outgoing: (() => void)[] = [];
 			let pid = owner !== undefined ? -1 : (child.pid ?? -1);
+			const rawChannel = child as unknown as IpcChannel;
+			const channel: IpcChannel = windowsAttach
+				? {
+						get connected() {
+							return child.connected;
+						},
+						send(message, callback) {
+							if (pid < 0) {
+								outgoing.push(() => rawChannel.send(message, callback));
+								return true;
+							}
+							return rawChannel.send(message, callback);
+						},
+						on: child.on.bind(child),
+						off: child.off.bind(child),
+					}
+				: rawChannel;
+			let attachPermitted = false;
+			let cancelled = false;
 			let primaryExit: Exit | undefined;
 			let primaryCode: number | undefined;
 			let spawnErrno: number | undefined;
@@ -223,7 +263,11 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 			const failOwner = (message: string): void => {
 				if (protocolError) return;
 				protocolError = Object.assign(new Error(message), { code: "ERR_PROCESS_OWNER_CLEANUP" });
-				lease?.destroy();
+				// A denial must reach G before it closes its held handle; never assign on lease loss.
+				if (windowsAttach) {
+					if (!attachPermitted && lease?.writable && !lease.destroyed) lease.write("deny\n");
+					child.kill("SIGKILL");
+				} else lease?.destroy();
 				deliver({ chord2control: { type: "fatal", message } });
 			};
 			let buffer = "";
@@ -253,13 +297,44 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 							spawnErrno = errno;
 							continue;
 						}
+						if (windowsAttach && line.startsWith("O") && !attachPermitted && pid < 0) {
+							const opened: unknown = JSON.parse(line.slice(1));
+							if (
+								!opened ||
+								typeof opened !== "object" ||
+								Object.keys(opened).length !== 3 ||
+								!("pid" in opened) ||
+								opened.pid !== child.pid ||
+								!("parentPid" in opened) ||
+								opened.parentPid !== process.pid ||
+								!("creationTime" in opened) ||
+								typeof opened.creationTime !== "number" ||
+								!Number.isFinite(opened.creationTime) ||
+								opened.creationTime < beforeFork - 16 ||
+								opened.creationTime > afterFork ||
+								child.exitCode !== null ||
+								child.signalCode !== null ||
+								cancelled
+							)
+								throw new Error("Process owner attach identity denied");
+							// Node sets exitCode/signalCode before closing its original OS handle on this JS thread.
+							// Bun's delayed JS exit notification lacks that proof; timestamps remain mandatory.
+							attachPermitted = true;
+							lease!.write("permit\n");
+							continue;
+						}
 						const record: unknown = JSON.parse(line.slice(1));
 						if (!record || typeof record !== "object") throw new Error("Invalid process owner record");
 						if (line.startsWith("S") && "pid" in record && pid < 0) {
 							if (typeof record.pid !== "number" || !Number.isSafeInteger(record.pid) || record.pid <= 0) {
 								throw new Error("Invalid process owner primary PID");
 							}
+							if (windowsAttach && (!attachPermitted || record.pid !== child.pid))
+								throw new Error("Process owner attach PID mismatch or missing permit");
 							pid = record.pid;
+							if (windowsAttach) {
+								for (const send of outgoing.splice(0)) send();
+							}
 							for (const message of queued.splice(0)) deliver(message);
 						} else if (
 							line.startsWith("X") &&
@@ -272,7 +347,7 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 								typeof record.code === "number" &&
 								Number.isInteger(record.code) &&
 								record.code >= 0 &&
-								record.code <= 255 &&
+								record.code <= (process.platform === "win32" ? 0xffff_ffff : 255) &&
 								record.signal === null
 							) {
 								primaryExit = { code: record.code, signal: null };
@@ -320,17 +395,22 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 						lease.once("close", () => finish(false));
 					})
 				: Promise.resolve();
+			const payloadClosed = windowsAttach
+				? new Promise<void>((resolve) => child.once("close", () => resolve()))
+				: Promise.resolve();
 			const closed = new Promise<Exit>((resolve) => {
-				child.once("error", (error: Error) => {
+				guardian.once("error", (error: Error) => {
 					if (owner !== undefined) {
-						if (child.pid === undefined && pid < 0) {
+						if (guardian.pid === undefined && pid < 0) {
 							launchError = error;
 							lease?.destroy();
+							if (windowsAttach) child.kill("SIGKILL");
 							deliver({ chord2control: { type: "fatal", message: error.message } });
 						} else failOwner(error.message);
 					} else if (child.pid === undefined) resolve({ code: 125, signal: null });
 				});
-				child.once(owner !== undefined ? "close" : "exit", (code, signal) => {
+				guardian.once(owner !== undefined ? "close" : "exit", (code, signal) => {
+					if (windowsAttach && pid < 0) child.kill("SIGKILL");
 					if (owner === undefined) killGroup();
 					resolve({ code, signal });
 				});
@@ -338,12 +418,17 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 			const exited =
 				owner === undefined
 					? closed
-					: Promise.all([closed, drained]).then(([helper]) => {
+					: Promise.all([closed, drained, payloadClosed]).then(([helper]) => {
 							lease?.destroy();
 							if (launchError) throw launchError;
 							if (!cleanupConfirmed || (!primaryExit && spawnErrno === undefined))
 								failOwner("Process owner cleanup unconfirmed: incomplete report");
-							if (helper.signal !== null || helper.code !== (spawnErrno === undefined ? primaryCode : 125))
+							const expected = spawnErrno === undefined ? primaryCode : 125;
+							const expectedHelper =
+								process.platform === "win32" && process.versions.bun && expected !== undefined
+									? expected % 256
+									: expected;
+							if (helper.signal !== null || helper.code !== expectedHelper)
 								failOwner(
 									`Process owner cleanup unconfirmed: unexpected helper exit ${helper.signal ?? helper.code}`,
 								);
@@ -362,23 +447,32 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 							}
 							return primaryExit!;
 						});
+			if (windowsAttach && guardian !== child) child.once("error", (error: Error) => failOwner(error.message));
 			// Direct driver users may attach their exit observer after readiness.
 			void exited.catch(() => {});
 			const send = (message: ControlMessage): void => {
 				// A child that exited before the channel reported it fails the write (EPIPE): its exit is what counts.
-				if (child.connected) child.send({ chord2control: message }, ignoreSendError);
+				if (channel.connected) channel.send({ chord2control: message }, ignoreSendError);
 			};
 			if (options.init !== undefined) send({ type: "init", value: options.init });
 			return {
 				get pid() {
 					return pid;
 				},
-				link: ipcLink(child as unknown as IpcChannel),
+				link: ipcLink(channel),
 				exited,
 				send,
 				killTree: () => {
 					if (owner !== undefined) {
-						if (lease?.writable && !lease.destroyed && !lease.writableEnded) lease.end("K");
+						if (windowsAttach && pid < 0) child.kill("SIGKILL");
+						if (lease?.writable && !lease.destroyed && !lease.writableEnded) {
+							if (process.platform === "win32") {
+								if (!cancelled) {
+									cancelled = true;
+									lease.write("K");
+								}
+							} else lease.end("K");
+						}
 						return;
 					}
 					try {

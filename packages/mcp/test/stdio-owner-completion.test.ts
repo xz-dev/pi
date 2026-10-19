@@ -10,7 +10,9 @@ import { StdioTransport } from "../src/transports/stdio.ts";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const cleanupCode = { code: "ERR_PROCESS_OWNER_CLEANUP" };
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
 afterEach(() => {
+	Object.defineProperty(process, "platform", originalPlatform);
 	spawn.mockReset();
 	vi.unstubAllEnvs();
 });
@@ -74,6 +76,29 @@ function setup(launched = true) {
 }
 
 describe("process owner completion", () => {
+	it("Windows close writes K without ending response pipe; accepts cleanup after 50 ms", async () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const s = setup();
+		s.report('S{"pid":123}\n');
+		await s.startup;
+		let settled = false;
+		const closing = s.transport.close().then(() => {
+			settled = true;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(s.cancellation()).toBe("K");
+		expect(s.control.writableEnded).toBe(false);
+		expect(s.control.destroyed).toBe(false);
+		expect(settled).toBe(false);
+		s.report('X{"code":137,"signal":null}\nC\n');
+		s.control.push(null);
+		await tick();
+		expect(settled).toBe(false);
+		s.finish(137);
+		await closing;
+		expect(s.control.destroyed).toBe(true);
+		expect(s.errors).toEqual([]);
+	});
 	it.each([0, 125])("rejects matching %i status without C after both fences", async (code) => {
 		const s = setup();
 		s.report('S{"pid":123}\n');

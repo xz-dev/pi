@@ -10,8 +10,10 @@ const { spawnMock, accessMock } = vi.hoisted(() => ({ spawnMock: vi.fn(), access
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 vi.mock("node:fs/promises", async (original) => ({ ...(await original<typeof FsPromises>()), access: accessMock }));
 const previousOwner = process.env.PI_PROCESS_OWNER_BINARY;
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
 
 afterEach(() => {
+	Object.defineProperty(process, "platform", originalPlatform);
 	spawnMock.mockReset();
 	accessMock.mockReset();
 	if (previousOwner === undefined) delete process.env.PI_PROCESS_OWNER_BINARY;
@@ -55,6 +57,34 @@ async function turn() {
 
 // Deterministic stream/event ordering only. These mocks prove no OS containment.
 describe("UNIT native completion fences", () => {
+	it("Windows abort keeps response pipe open for cleanup beyond 50 ms", async () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		process.env.PI_PROCESS_OWNER_BINARY = "/test/owner";
+		accessMock.mockResolvedValue(undefined);
+		const fake = fakeChild();
+		const abort = new AbortController();
+		let settled = false;
+		const pending = new NodeExecutionEnv({ cwd: "/test" })
+			.exec(["/test/program"], undefined, withAbortSignal(abort.signal, BACKGROUND_CONTEXT))
+			.then((result) => {
+				settled = true;
+				return result;
+			});
+		await fake.ready;
+		fake.control.write('S{"pid":123}\n');
+		abort.abort();
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(fake.input()).toBe("K");
+		expect(fake.lease.writableEnded).toBe(false);
+		expect(fake.lease.destroyed).toBe(false);
+		expect(settled).toBe(false);
+		fake.control.end('X{"code":137,"signal":null}\nC\n');
+		await turn();
+		expect(settled).toBe(false);
+		fake.child.emit("close", 137, null);
+		await pending;
+		expect(fake.lease.destroyed).toBe(true);
+	});
 	it("joins helper close AND delayed control EOF; E after helper exit keeps program errno", async () => {
 		process.env.PI_PROCESS_OWNER_BINARY = "/test/owner";
 		accessMock.mockResolvedValue(undefined);

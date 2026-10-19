@@ -1,13 +1,23 @@
+import type * as ChildProcessModule from "node:child_process";
+import { ChildProcess } from "node:child_process";
+import { Duplex } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ownCliProcesses, ownedCommand } from "../src/utils/process-owner.ts";
+import { observeOwnedProcess, ownCliProcesses, ownedCommand } from "../src/utils/process-owner.ts";
 
 const state = vi.hoisted(() => ({
 	bundled: false,
 	access: vi.fn(),
 	materialize: false,
 	resource: vi.fn<(options: { sourceDir: string; relativePath: string; fileMode: number }) => unknown>(),
+	spawn: vi.fn(),
 }));
 const originalArgv = process.argv;
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+const originalBunVersion = Object.getOwnPropertyDescriptor(process.versions, "bun");
+vi.mock("node:child_process", async (original) => ({
+	...(await original<typeof ChildProcessModule>()),
+	spawn: state.spawn,
+}));
 vi.mock("node:fs", () => ({ accessSync: state.access, constants: { X_OK: 1 } }));
 vi.mock("../src/config.ts", () => ({
 	getPackageDir: () => "/private/pi",
@@ -37,6 +47,9 @@ beforeEach(() => {
 
 afterEach(() => {
 	process.argv = originalArgv;
+	Object.defineProperty(process, "platform", originalPlatform);
+	if (originalBunVersion) Object.defineProperty(process.versions, "bun", originalBunVersion);
+	else Reflect.deleteProperty(process.versions, "bun");
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
 });
@@ -164,3 +177,140 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 		});
 	},
 );
+
+describe("Windows CLI trusted respawn (unit, not runtime proof)", () => {
+	for (const lost of [false, true]) {
+		it(`Windows cancellation retains X/C beyond 50 ms; lease loss ${lost}`, async () => {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			let writes = "";
+			const lease = new Duplex({
+				read() {},
+				write(chunk, _encoding, done) {
+					writes += chunk.toString();
+					done();
+				},
+			});
+			const child = Object.assign(new ChildProcess(), { stdio: [null, null, null, lease] });
+			const owner = observeOwnedProcess(child);
+			let settled = false;
+			const outcome = owner.completion.then(
+				(value) => {
+					settled = true;
+					return value;
+				},
+				(error: unknown) => {
+					settled = true;
+					return error;
+				},
+			);
+			child.emit("spawn");
+			lease.push('S{"pid":42}\n');
+			owner.cancel();
+			owner.cancel();
+			expect(writes).toBe("K");
+			expect(lease.writableEnded).toBe(false);
+			await new Promise((resolve) => setTimeout(resolve, 80));
+			expect(settled).toBe(false);
+			expect(lease.destroyed).toBe(false);
+			if (lost) lease.destroy();
+			else {
+				lease.push('X{"code":137,"signal":null}\nC\n');
+				lease.push(null);
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(settled).toBe(false);
+			child.emit("close", 137, null);
+			if (lost) expect(await outcome).toMatchObject({ code: "ERR_PROCESS_OWNER_CLEANUP" });
+			else expect(await outcome).toEqual({ code: 137, errno: undefined });
+			expect(lease.destroyed).toBe(true);
+		});
+	}
+	for (const valid of [true, false])
+		it(`Bun u8 helper close ${valid ? "preserves full X" : "must still match X"}`, async () => {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			Object.defineProperty(process.versions, "bun", { value: "1.3.14", configurable: true });
+			const lease = new Duplex({
+				read() {},
+				write(_chunk, _encoding, done) {
+					done();
+				},
+			});
+			const child = Object.assign(new ChildProcess(), { stdio: [null, null, null, lease] });
+			const owner = observeOwnedProcess(child);
+			const checked = valid
+				? expect(owner.completion).resolves.toEqual({ code: 3221225477, errno: undefined })
+				: expect(owner.completion).rejects.toMatchObject({ code: "ERR_PROCESS_OWNER_CLEANUP" });
+			child.emit("spawn");
+			lease.push('S{"pid":42}\nX{"code":3221225477,"signal":null}\nC\n');
+			lease.push(null);
+			child.emit("close", valid ? 5 : 6, null);
+			await checked;
+		});
+
+	it("preserves Windows/Bun CreateProcess errors even when no control handle exists", async () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const child = Object.assign(new ChildProcess(), { stdio: [null, null, null, null] });
+		const owner = observeOwnedProcess(child);
+		const error = new Error("CreateProcess failed");
+		const rejected = expect(owner.completion).rejects.toBe(error);
+		child.emit("error", error);
+		child.emit("close", 125, null);
+		await rejected;
+	});
+
+	it("keeps wrapper out of main; passes source argv, inherited console and named-pipe lease", async () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const lease = new Duplex({
+			read() {},
+			write(_chunk, _encoding, done) {
+				done();
+			},
+		});
+		const child = Object.assign(new ChildProcess(), { stdio: [null, null, null, lease] });
+		state.spawn.mockReturnValue(child);
+		const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+		vi.spyOn(process, "on").mockReturnValue(process);
+		expect(ownCliProcesses()).toBe(false);
+		expect(execute).not.toHaveBeenCalled();
+		const [binary, args, options] = state.spawn.mock.calls.at(-1)!;
+		expect(binary.endsWith("pi-env.exe")).toBe(true);
+		expect(args).toEqual([
+			"supervise",
+			"--control-fd",
+			"3",
+			"--",
+			process.execPath,
+			...process.execArgv,
+			...process.argv.slice(1),
+		]);
+		expect(options.stdio).toEqual(["inherit", "inherit", "inherit", "pipe"]);
+		expect(options.env.PI_PROCESS_OWNER_PENDING).toBe("1");
+		child.emit("spawn");
+		lease.push('S{"pid":42}\nX{"code":3221225477,"signal":null}\nC\n');
+		lease.push(null);
+		child.emit("close", process.versions.bun ? 5 : 3221225477, null);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(exit).toHaveBeenCalledWith(3221225477);
+	});
+
+	it("retains Bun argument distinction and executable suffix after materialization", () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		state.bundled = true;
+		state.materialize = true;
+		state.resource.mockReturnValue("/cache/process-owner");
+		const lease = new Duplex({
+			read() {},
+			write(_chunk, _encoding, done) {
+				done();
+			},
+		});
+		state.spawn.mockReturnValue(Object.assign(new ChildProcess(), { stdio: [null, null, null, lease] }));
+		vi.spyOn(process, "on").mockReturnValue(process);
+		expect(ownCliProcesses()).toBe(false);
+		expect(state.spawn.mock.calls.at(-1)?.slice(0, 2)).toEqual([
+			"/cache/process-owner/pi-env.exe",
+			["supervise", "--control-fd", "3", "--", process.execPath, ...process.argv.slice(2)],
+		]);
+		lease.destroy();
+	});
+});

@@ -1,4 +1,4 @@
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { join } from "node:path";
 import type { Duplex } from "node:stream";
@@ -23,7 +23,7 @@ function processOwnerBinary(): string {
 			directory = physical;
 		}
 	}
-	const binary = join(directory, "pi-env");
+	const binary = join(directory, process.platform === "win32" ? "pi-env.exe" : "pi-env");
 	try {
 		accessSync(binary, constants.X_OK);
 	} catch (error) {
@@ -57,6 +57,27 @@ export function ownedCommand(
 
 /** Observe only the private native protocol; success also requires actual helper close and control drain. */
 export function observeOwnedProcess(child: ChildProcess, onStartup?: () => void) {
+	// Bun can omit extra stdio when CreateProcess itself fails. Preserve that error,
+	// without allowing missing control transport to count as owned completion.
+	if (process.platform === "win32" && !child.stdio[3]) {
+		const completion = new Promise<{ code: number | null; errno: number | undefined }>((_resolve, reject) => {
+			child.once("error", reject);
+			child.once("close", () =>
+				reject(
+					Object.assign(new Error("Process owner cleanup unconfirmed: missing control pipe"), {
+						code: "ERR_PROCESS_OWNER_CLEANUP",
+					}),
+				),
+			);
+		});
+		return {
+			completion,
+			cancel: () => {},
+			get started() {
+				return false;
+			},
+		};
+	}
 	const lease = child.stdio[3] as Duplex;
 	let state: "initial" | "started" | "exited" | "error" | "complete" = "initial";
 	let started = false;
@@ -70,8 +91,16 @@ export function observeOwnedProcess(child: ChildProcess, onStartup?: () => void)
 	let drained = false;
 	let helperCode: number | null = null;
 	let finish: () => void = () => {};
+	let cancelled = false;
 	const cancel = () => {
-		if (lease.writable && !lease.destroyed && !lease.writableEnded) lease.end("K");
+		if (lease.writable && !lease.destroyed && !lease.writableEnded) {
+			if (process.platform === "win32") {
+				if (!cancelled) {
+					cancelled = true;
+					lease.write("K");
+				}
+			} else lease.end("K");
+		}
 	};
 	const fail = (detail: string) => {
 		failure ??= Object.assign(new Error(`Process owner cleanup unconfirmed: ${detail}`), {
@@ -118,7 +147,12 @@ export function observeOwnedProcess(child: ChildProcess, onStartup?: () => void)
 					)
 						throw new Error("invalid exit record");
 					const { code, signal } = record;
-					if (signal === null && Number.isSafeInteger(code) && Number(code) >= 0 && Number(code) <= 255) {
+					if (
+						signal === null &&
+						Number.isSafeInteger(code) &&
+						Number(code) >= 0 &&
+						Number(code) <= (process.platform === "win32" ? 0xffff_ffff : 255)
+					) {
 						primaryCode = Number(code);
 					} else if (code === null && Number.isSafeInteger(signal) && Number(signal) > 0 && Number(signal) < 128) {
 						primaryCode = 128 + Number(signal);
@@ -164,16 +198,20 @@ export function observeOwnedProcess(child: ChildProcess, onStartup?: () => void)
 	const completion = new Promise<{ code: number | null; errno: number | undefined }>((resolve, reject) => {
 		finish = () => {
 			if (!closed || !drained) return;
+			if (process.platform === "win32") lease.destroy();
 			if (helperError && !helperSpawned && !started) {
 				reject(helperError);
 				return;
 			}
 			if (pending || state !== "complete") fail("missing or truncated completion record");
 			if (helperError) fail(helperError.message);
-			if (helperCode !== (errno === undefined ? primaryCode : 125))
-				fail("helper status does not match primary status");
+			const expected = errno === undefined ? primaryCode : 125;
+			// Pinned Bun truncates Windows child status to u8; X retains native u32.
+			const expectedHelper =
+				process.platform === "win32" && process.versions.bun && expected !== undefined ? expected % 256 : expected;
+			if (helperCode !== expectedHelper) fail("helper status does not match primary status");
 			if (failure) reject(failure);
-			else resolve({ code: helperCode, errno });
+			else resolve({ code: errno === undefined ? (primaryCode ?? null) : helperCode, errno });
 		};
 	});
 	return {
@@ -186,7 +224,7 @@ export function observeOwnedProcess(child: ChildProcess, onStartup?: () => void)
 }
 
 /** Enter the shipped native owner before any CLI task or extension runs. */
-export function ownCliProcesses(): void {
+export function ownCliProcesses(): undefined | false {
 	const owner = process.env[OWNER_PID];
 	const pending = process.env[OWNER_PENDING];
 	delete process.env[OWNER_PID];
@@ -201,10 +239,17 @@ export function ownCliProcesses(): void {
 		process.env[OWNER_BINARY] = processOwnerBinary();
 		return;
 	}
-	if (process.platform !== "linux" && process.platform !== "freebsd" && process.platform !== "darwin") return;
+	if (
+		process.platform !== "linux" &&
+		process.platform !== "freebsd" &&
+		process.platform !== "darwin" &&
+		process.platform !== "win32"
+	)
+		return;
 
 	const binary = processOwnerBinary();
-	if (!process.execve) throw new Error("Process ownership requires execve support in this runtime");
+	if (process.platform !== "win32" && !process.execve)
+		throw new Error("Process ownership requires execve support in this runtime");
 
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) {
@@ -212,5 +257,25 @@ export function ownCliProcesses(): void {
 	}
 	env[OWNER_PENDING] = "1";
 	const args = packageConfig.isBunBinary ? process.argv.slice(2) : [...process.execArgv, ...process.argv.slice(1)];
-	process.execve(binary, [binary, "supervise", "--", process.execPath, ...args], env);
+	if (process.platform === "win32") {
+		// Windows has no execve. This wrapper never enters main or loads extensions.
+		const child = spawn(binary, ["supervise", "--control-fd", "3", "--", process.execPath, ...args], {
+			env,
+			stdio: ["inherit", "inherit", "inherit", "pipe"],
+		});
+		const owner = observeOwnedProcess(child);
+		// Console already delivers Ctrl-C to payload. Keep wrapper/lease alive for cleanup.
+		process.on("SIGINT", () => {});
+		process.on("SIGBREAK", () => {});
+		process.on("SIGTERM", owner.cancel);
+		void owner.completion.then(
+			({ code, errno }) => process.exit(errno === undefined ? (code ?? 125) : 125),
+			(error: unknown) => {
+				console.error(error instanceof Error ? error.message : String(error));
+				process.exit(125);
+			},
+		);
+		return false;
+	}
+	process.execve!(binary, [binary, "supervise", "--", process.execPath, ...args], env);
 }

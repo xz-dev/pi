@@ -75,7 +75,8 @@ export async function execCommand(
 		const killProcess = () => {
 			if (!killed && !exited && !settled) {
 				killed = true;
-				proc.kill("SIGTERM");
+				if (process.platform === "win32" && owner) owner.cancel();
+				else proc.kill("SIGTERM");
 				// Native owners escalate and acknowledge exit only after descendant cleanup.
 				if (!invocation.nativeOwner) {
 					forceKillId = setTimeout(() => {

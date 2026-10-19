@@ -118,6 +118,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		this.child = child;
 		const lease = owned ? (child.stdio[3] as Duplex) : undefined;
 		let exited = false;
+		let cancelled = false;
 		let ready = false;
 		let failure: Error | undefined;
 		let helperError: Error | undefined;
@@ -149,8 +150,15 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 			});
 		};
 		const stop = (force: boolean) => {
-			if (owned && force) {
-				if (lease?.writable && !lease.destroyed) lease.end("K");
+			if (owned && (force || process.platform === "win32")) {
+				if (lease?.writable && !lease.destroyed) {
+					if (process.platform === "win32") {
+						if (!cancelled) {
+							cancelled = true;
+							lease.write("K");
+						}
+					} else lease.end("K");
+				}
 				return;
 			}
 			if (exited) return;
@@ -178,6 +186,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 			child.once("close", (code: number | null, signal: NodeJS.Signals | null) => resolve({ code, signal })),
 		);
 		this.cleanup = Promise.all([childClosed, ownerDrained]).then(([helperStatus]) => {
+			if (process.platform === "win32") lease?.destroy();
 			retire();
 			// Legacy standalone group cleanup; native owners must only use their lease.
 			if (!owned && this.closed) killProcessTree(child, "SIGTERM");
@@ -187,13 +196,15 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 			this.closed = true;
 			if (helperError) cleanupError = undefined;
 			const expectedCode = primaryStatus ? (primaryStatus.code ?? 128 + (primaryStatus.signal ?? 0)) : 125;
+			const expectedHelper =
+				process.platform === "win32" && process.versions.bun ? expectedCode % 256 : expectedCode;
 			if (
 				owned &&
 				!helperError &&
 				(phase !== "complete" ||
 					report ||
 					!lease?.readableEnded ||
-					helperStatus.code !== expectedCode ||
+					helperStatus.code !== expectedHelper ||
 					helperStatus.signal !== null)
 			) {
 				cleanupError ??= Object.assign(new Error("MCP process owner cleanup unconfirmed"), {
@@ -270,7 +281,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 							typeof code === "number" &&
 							Number.isInteger(code) &&
 							code >= 0 &&
-							code <= 255 &&
+							code <= (process.platform === "win32" ? 0xffff_ffff : 255) &&
 							signal === null
 						) {
 							primaryStatus = { code, signal };

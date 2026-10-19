@@ -5,5 +5,4 @@ import { main } from "./main.ts";
 import { ownCliProcesses } from "./utils/process-owner.ts";
 
 setupCli();
-ownCliProcesses();
-void runMain(() => main(process.argv.slice(2)));
+if (ownCliProcesses() !== false) void runMain(() => main(process.argv.slice(2)));

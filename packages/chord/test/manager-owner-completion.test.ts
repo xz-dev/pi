@@ -5,8 +5,9 @@ import { Duplex } from "node:stream";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { createHostManager, forkDriver } from "../src/manager.ts";
 
-const fork = vi.hoisted(() => vi.fn());
-vi.mock("node:child_process", () => ({ fork }));
+const { fork, spawn } = vi.hoisted(() => ({ fork: vi.fn(), spawn: vi.fn() }));
+vi.mock("node:child_process", () => ({ fork, spawn }));
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
 
 const entry = "/unit/host.ts";
 const owner = "/unit/process-owner";
@@ -27,6 +28,8 @@ function helper() {
 	});
 	const child = Object.assign(new EventEmitter(), {
 		pid: 123 as number | undefined,
+		exitCode: null as number | null,
+		signalCode: null as string | null,
 		connected: true,
 		stdio: [null, null, null, null, lease],
 		send: vi.fn(() => true),
@@ -49,6 +52,7 @@ beforeEach(() => {
 	vi.stubEnv("PI_PROCESS_OWNER_BINARY", owner);
 });
 afterEach(() => {
+	Object.defineProperty(process, "platform", originalPlatform);
 	vi.unstubAllEnvs();
 	vi.restoreAllMocks();
 });
@@ -455,5 +459,110 @@ describe("host manager cleanup failure propagation", () => {
 			await manager.stop();
 			assert.equal(manager.status, "stopped");
 		}
+	});
+});
+
+describe("Windows direct-fork attach adapter (unit, not runtime proof)", () => {
+	function attachFixture() {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		vi.spyOn(performance, "now").mockReturnValue(1000);
+		const native = helper();
+		native.child.stdio = [null, null, null, native.lease];
+		spawn.mockReturnValue(native.child);
+		const payload = helper();
+		payload.child.pid = 456;
+		return { native, payload };
+	}
+
+	const opened = (creationTime = performance.timeOrigin + 1000, parentPid = process.pid) =>
+		`O${JSON.stringify({ pid: 456, parentPid, creationTime })}\n`;
+
+	it("forks real runtime, queues both init and frames until confirmed attach, fences both processes", async () => {
+		const { native, payload } = attachFixture();
+		const instance = forkDriver({ entry, init: "first" }).spawn();
+		instance.link.send({ t: "bye", reason: "test" });
+		assert.equal(payload.child.send.mock.calls.length, 0);
+		assert.equal(fork.mock.calls[0][2].execPath, process.execPath);
+		assert.deepEqual(fork.mock.calls[0][2].execArgv, []);
+		assert.deepEqual(fork.mock.calls[0][2].stdio, ["ignore", "inherit", "inherit", "ipc"]);
+		assert.deepEqual(spawn.mock.calls.at(-1)?.slice(0, 2), [
+			owner,
+			["supervise", "--control-fd", "3", "--attach-pid", "456"],
+		]);
+		native.record(opened());
+		assert.deepEqual(native.writes, ["permit\n"]);
+		assert.equal(payload.child.send.mock.calls.length, 0, "opened is not assignment acknowledgment");
+		native.record(startup);
+		assert.equal(payload.child.send.mock.calls.length, 2);
+		instance.killTree();
+		instance.killTree();
+		assert.deepEqual(native.writes, ["permit\n", "K"]);
+		assert.equal(native.lease.writableEnded, false, "Windows cancellation must retain response pipe");
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		assert.equal(native.lease.destroyed, false);
+		assert.equal(payload.child.kill.mock.calls.length, 0);
+		native.record(`${exit(137)}C\n`);
+		native.drain();
+		native.close(137);
+		let settled = false;
+		void instance.exited.then(() => {
+			settled = true;
+		});
+		await tick();
+		assert.equal(settled, false);
+		payload.close(137);
+		assert.deepEqual(await instance.exited, { code: 137, signal: null });
+	});
+
+	for (const fault of ["exited", "signal", "parent", "old", "future", "no-open"] as const) {
+		it(`denies ${fault} identity before assignment; never releases init`, async () => {
+			const { native, payload } = attachFixture();
+			const instance = forkDriver({ entry, init: "must not run" }).spawn();
+			const rejected = assert.rejects(instance.exited, cleanupError);
+			if (fault === "exited") payload.child.exitCode = 7;
+			if (fault === "signal") payload.child.signalCode = "SIGKILL";
+			native.record(
+				fault === "no-open"
+					? startup
+					: opened(
+							performance.timeOrigin + 1000 + (fault === "old" ? -17 : fault === "future" ? 0.001 : 0),
+							fault === "parent" ? process.pid + 1 : process.pid,
+						),
+			);
+			assert.deepEqual(native.writes, ["deny\n"]);
+			assert.equal(instance.pid, -1);
+			instance.send({ type: "shutdown" });
+			assert.equal(payload.child.send.mock.calls.length, 0);
+			assert.ok(payload.child.kill.mock.calls.length > 0);
+			native.drain();
+			native.close(125);
+			payload.close(7);
+			await rejected;
+		});
+	}
+
+	it("allows 16 ms lower clock granularity margin without permitting future creation", async () => {
+		const { native, payload } = attachFixture();
+		const instance = forkDriver({ entry }).spawn();
+		native.record(opened(performance.timeOrigin + 1000 - 16));
+		assert.deepEqual(native.writes, ["permit\n"]);
+		native.record(`${startup}${exit(0)}C\n`);
+		native.drain();
+		native.close();
+		payload.close();
+		await instance.exited;
+	});
+
+	it("failed assignment sends no messages, kills P through Node handle and surfaces cleanup failure", async () => {
+		const { native, payload } = attachFixture();
+		const instance = forkDriver({ entry, init: "must not run" }).spawn();
+		const rejected = assert.rejects(instance.exited, cleanupError);
+		native.record("C\n");
+		native.drain();
+		native.close(125);
+		assert.ok(payload.child.kill.mock.calls.length > 0);
+		assert.equal(payload.child.send.mock.calls.length, 0);
+		payload.close(1);
+		await rejected;
 	});
 });
