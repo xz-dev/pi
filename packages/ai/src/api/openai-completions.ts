@@ -43,6 +43,7 @@ import { parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
+import { createRequestCompressionFetch } from "../utils/request-compression.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
@@ -351,7 +352,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				normalizedContext,
 				apiKey,
 				options?.headers,
-				options?.fetch,
+				options?.fetch ?? createRequestCompressionFetch(),
 				cacheSessionId,
 				compat,
 			);
