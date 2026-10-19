@@ -4,6 +4,7 @@ import {
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	fauxToolCall,
+	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	type Model,
@@ -186,7 +187,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.messages[1]?.role).toBe("compactionSummary");
 	});
 
-	it("checkpoints the replayed system state and folds summarized and retained system patches into it", async () => {
+	it("checkpoints the system state at the compaction boundary and replays retained system patches after it", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("declared")]);
@@ -221,16 +222,28 @@ describe("AgentSession compaction characterization", () => {
 		harness.sessionManager.appendCompaction("compacted", firstKeptEntryId, 100);
 
 		const messages = harness.sessionManager.buildSessionContext().messages;
-		expect(messages.map((message) => message.role)).toEqual(["system", "compactionSummary", "user", "user"]);
+		expect(messages.map((message) => message.role)).toEqual([
+			"system",
+			"compactionSummary",
+			"user",
+			"system",
+			"user",
+		]);
+		// The checkpoint reflects only the summarized prefix; /tree back to a kept entry
+		// therefore never sees system state recorded after it.
 		const checkpoint = messages[0];
 		if (checkpoint?.role !== "system") throw new Error("expected checkpoint system message");
-		expect(checkpoint.content).toBe("summarized instruction\n\nretained instruction");
-		expect(checkpoint.sections).toEqual({
+		expect(checkpoint.content).toBe("summarized instruction");
+		expect(checkpoint.sections).toEqual({ ...declared.sections, early: "<early>1</early>" });
+		// Replaying the retained patch yields the same final state the old folded checkpoint carried.
+		const current = getCurrentSystemMessage(messages);
+		expect(current?.content).toBe("summarized instruction\n\nretained instruction");
+		expect(current?.sections).toEqual({
 			...declared.sections,
 			early: "<early>1</early>",
 			extra: "<extra>late</extra>",
 		});
-		expect(checkpoint.toolsAdded?.map((tool) => tool.name)).toEqual(
+		expect(getCurrentTools(messages).map((tool) => tool.name)).toEqual(
 			harness.session.getActiveToolNames().filter((name) => name !== "read" && name !== "bash"),
 		);
 	});
