@@ -97,6 +97,7 @@ Resume stored Responses state after a socket reconnect or session restart withou
 
 Losslessly reduce model-upload bytes without changing JSON or image data. HTTP senders use a conservative encoding fallback policy; Responses WebSockets negotiate compression separately.
 
+- Visibility: The default Working indicator appends the actual algorithm, for example `SSE Zstd` or `WS/continuation DEFLATE`. Names use their standard casing: `Zstd`, `gzip`, `DEFLATE`, `Brotli`. Uncompressed or unobservable compression keeps the protocol label unchanged.
 - Details: [Request compression](request-compression.md) — supported paths, codec levels, refusal rules and compatibility limits.
 - Companion plugin: [Host requirements and bridge integration](https://github.com/xz-dev/openai-api-pi-extension/blob/main/docs/request-compression.md).
 - Patch branch: [`patch/request-compression`](https://github.com/xz-dev/pi/tree/patch/request-compression)

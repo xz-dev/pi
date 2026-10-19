@@ -22,6 +22,21 @@ non-JSON, streaming and recognized signed requests bypass the HTTP encoder.
 Unprofitable compression sends the original body and does not mark the endpoint
 as incompatible.
 
+## See the active algorithm
+
+The default Working indicator appends the actual compression algorithm after the
+protocol, separated by one space: `Working(SSE Zstd)`,
+`Working(SSE gzip)`, or `Working(WS/continuation DEFLATE)`.
+Display names are `Zstd`, `gzip`, `DEFLATE` and `Brotli`; HTTP encoding values
+remain `zstd`, `gzip`, `deflate` and `br`.
+
+HTTP reports the final upload encoding after any explicit-refusal fallback, not
+the response's encoding or advertised capabilities. WebSockets show `DEFLATE`
+only when `permessage-deflate` was negotiated, including reused connections.
+Uncompressed requests and transports whose compression cannot be observed keep
+the original protocol label. Custom extension working messages remain unchanged.
+This describes Pi's connection to its endpoint, not a proxy's upstream hop.
+
 ## HTTP: try first, remember refusals
 
 An unknown endpoint starts with `zstd`. The official `api.anthropic.com` host
