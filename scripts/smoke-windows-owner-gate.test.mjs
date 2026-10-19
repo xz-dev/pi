@@ -170,6 +170,16 @@ test("Bun exit failure cannot pass even with a complete successful JUnit invento
 	assert.equal(evidence.runtimes[1].counts.passed, WINDOWS_OWNER_TEST_NAMES.length);
 });
 
+test("Bun JUnit accepts the cwd-relative test file Bun writes, and nothing else", () => {
+	const work = "C:\\pi-owner-nonadmin-x", file = `${work}\\packages\\coding-agent\\test\\windows-owner-runtime.mjs`;
+	const xml = (path) => `<testsuites tests="${WINDOWS_OWNER_TEST_NAMES.length}" failures="0" skipped="0"><testsuite file="${path}" tests="${WINDOWS_OWNER_TEST_NAMES.length}" failures="0" skipped="0">${WINDOWS_OWNER_TEST_NAMES.map((name) => `<testcase name="${name.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;")}" file="${path}"></testcase>`).join("")}</testsuite></testsuites>`;
+	for (const path of ["packages\\coding-agent\\test\\windows-owner-runtime.mjs", "packages/coding-agent/test/windows-owner-runtime.mjs", file]) assert.equal(parseBunOwnerGate(xml(path), "", file, work).counts.passed, WINDOWS_OWNER_TEST_NAMES.length);
+	for (const path of ["windows-owner-runtime.mjs", "other\\windows-owner-runtime.mjs", "C:\\elsewhere\\packages\\coding-agent\\test\\windows-owner-runtime.mjs"]) assert.throws(() => parseBunOwnerGate(xml(path), "", file, work), /unexpected test file|testcase identity/);
+});
+test("Node gate reporter is passed as a file URL (Windows drive paths are rejected by the ESM loader)", () => {
+	const command = windowsOwnerGateCommand("/work", "/node");
+	assert.match(command.find((arg) => arg.startsWith("--test-reporter=")), /^--test-reporter=file:\/\//);
+});
 for (const report of ["missing", "<invalid>", '<testsuites tests="0" failures="0" skipped="0"><testsuite file="unexpected" tests="0" failures="0" skipped="0"></testsuite></testsuites>']) test(`Bun missing or malformed JUnit cannot pass: ${report}`, () => {
 	const { evidence } = runMockedBun({ report });
 	assert.equal(evidence.status, "failed");

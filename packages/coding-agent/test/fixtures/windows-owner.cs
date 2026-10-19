@@ -63,6 +63,7 @@ public class OwnerFixture {
         writer.Dispose();
         CloseHandle(child.process); ClosePseudoConsole(console); reading.Join(5000); reader.Dispose();
         Console.WriteLine(output);
+        Console.WriteLine("conpty-result ready="+ready+" survivedCtrlC="+survivedCtrlC+" exited="+exited+" code="+code);
         return ready && survivedCtrlC && exited && code==(tui ? 0u : 7u) && (tui || output.Contains("ctrl-c")) && !output.Contains("cleanup unconfirmed") ? 0 : 98;
     }
     static IntPtr nested;

@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const WINDOWS_OWNER_GATE_TIMEOUT_MS = 900_000;
 export const WINDOWS_OWNER_TEST_NAMES = [
@@ -97,7 +97,7 @@ export function stageWindowsOwnerGate(work, { env, run, source = fileURLToPath(n
 export function windowsOwnerGateCommand(work, runtime = process.execPath, name = "node") {
 	const file = join(work, "packages", "coding-agent", "test", "windows-owner-runtime.mjs");
 	if (name === "bun") return [runtime, "test", "--reporter=junit", `--reporter-outfile=${join(work, "bun-junit.xml")}`, "--timeout", "60000", file];
-	return [runtime, "--experimental-strip-types", "--test", "--test-concurrency=1", `--test-reporter=${join(work, "scripts", "smoke-windows-owner-gate.mjs")}`, file];
+	return [runtime, "--experimental-strip-types", "--test", "--test-concurrency=1", `--test-reporter=${pathToFileURL(join(work, "scripts", "smoke-windows-owner-gate.mjs")).href}`, file];
 }
 
 function gateObservations(tests, logs) {
@@ -121,7 +121,10 @@ export function parseWindowsOwnerGate(stdout) {
 }
 
 // Accept only Bun's single-file JUnit schema; unknown/malformed XML fails closed.
-export function parseBunOwnerGate(xml, logs, file) {
+// Bun may write file attributes relative to its cwd (`base`); accept exactly the absolute path or that cwd-relative form.
+export function parseBunOwnerGate(xml, logs, file, base = dirname(file)) {
+	const norm = (path) => path.replaceAll("\\", "/").toLowerCase();
+	const same = (path) => typeof path === "string" && (norm(path) === norm(file) || `${norm(base)}/${norm(path)}` === norm(file));
 	function attributes(text) {
 		const result = {};
 		const rest = text.replace(/\s+([\w-]+)="([^"<>]*)"/g, (_match, key, value) => {
@@ -136,11 +139,11 @@ export function parseBunOwnerGate(xml, logs, file) {
 	const suite = document?.[2].trim().match(/^<testsuite\b([^>]*)>([\s\S]*)<\/testsuite>$/);
 	if (!suite) throw new Error("missing or invalid single-file Bun JUnit report");
 	const root = attributes(document[1]), details = attributes(suite[1]);
-	if (details.file?.replaceAll("\\", "/") !== file.replaceAll("\\", "/")) throw new Error("Bun JUnit report has unexpected test file");
+	if (!same(details.file)) throw new Error(`Bun JUnit report has unexpected test file: ${JSON.stringify(details.file)}`);
 	const tests = [];
 	const rest = suite[2].replace(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g, (_match, attrs, body = "") => {
 		const entry = attributes(attrs);
-		if (!entry.name || entry.file?.replaceAll("\\", "/") !== file.replaceAll("\\", "/")) throw new Error("invalid Bun JUnit testcase identity");
+		if (!entry.name || !same(entry.file)) throw new Error("invalid Bun JUnit testcase identity");
 		let status = "passed";
 		if (body.trim()) {
 			const outcome = body.trim().match(/^<(failure|error|skipped)\b([^>]*?)(?:\/>|>([^<]*)<\/\1>)$/);
@@ -206,7 +209,7 @@ export function smokeWindowsOwnerGate(executable, target, owner, identity, { wor
 				runtime.stderr = result.stderr ?? "";
 				try {
 					Object.assign(runtime, runtime.name === "bun"
-						? parseBunOwnerGate(readFileSync(join(work, "bun-junit.xml"), "utf8"), `${result.stdout ?? ""}\n${result.stderr ?? ""}`, runtime.command.at(-1))
+						? parseBunOwnerGate(readFileSync(join(work, "bun-junit.xml"), "utf8"), `${result.stdout ?? ""}\n${result.stderr ?? ""}`, runtime.command.at(-1), work)
 						: parseWindowsOwnerGate(result.stdout ?? ""));
 				} catch (error) { runtime.error = `invalid reporter output: ${error.message}`; }
 				if (result.error) runtime.error = result.error.message;
