@@ -234,7 +234,7 @@ describe("Codex transport recovery", () => {
 			});
 			const fallback = await recover(options, secondContext);
 			expect(fallback.stopReason).toBe("stop");
-			expect(transports.at(-1)).toBe("SSE");
+			expect(transports.at(-1)).toBe("SSE Zstd");
 			expect(sent).toHaveLength(5);
 			expect(fetchMock).toHaveBeenCalledTimes(1);
 			const recoveryContext = normalizeContext({

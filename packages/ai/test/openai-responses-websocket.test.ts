@@ -740,7 +740,7 @@ describe("onTransport reporting", () => {
 		const transports: Array<string | undefined> = [];
 		await recover({ responseCheckpointExclude: ["*"], onTransport: (t) => void transports.push(t) });
 		expect(transports.at(-2)).toBe(undefined);
-		expect(transports.at(-1)).toBe("SSE");
+		expect(transports.at(-1)).toBe("SSE Zstd");
 	});
 
 	it("a throwing hook does not become a transport failure", async () => {
