@@ -3594,6 +3594,7 @@ export class InteractiveMode {
 
 			case "turn_start":
 				if (this.pendingModelSwitch) this.settlePendingModelSwitch();
+				if (this.pendingThinkingLevelSwitch) this.settlePendingThinkingLevelSwitch();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -4010,6 +4011,10 @@ export class InteractiveMode {
 	private pendingModelSwitch: { newModel: Model<any>; text: ThemedText; label: { value: string } } | undefined;
 
 	private setPendingModelSwitch(oldModel: Model<any>, newModel: Model<any>): void {
+		// Model selection can reset effort even when the model itself is reselected.
+		if (this.pendingThinkingLevelSwitch) {
+			this.setPendingThinkingLevelSwitch(this.pendingThinkingLevelSwitch.newLevel, this.session.thinkingLevel);
+		}
 		// A no-op reselection (A → A) is not a switch.
 		if (modelsAreEqual(oldModel, newModel)) return;
 		// A switch that never got a request is still a completed switch; settle it before tracking the next one.
@@ -4029,6 +4034,34 @@ export class InteractiveMode {
 		if (!pending) return;
 		this.pendingModelSwitch = undefined;
 		pending.label.value = `Model: ${pending.newModel.id}`;
+		pending.text.invalidate();
+		this.ui.requestRender();
+	}
+
+	private pendingThinkingLevelSwitch:
+		| { newLevel: ThinkingLevel; text: ThemedText; label: { value: string } }
+		| undefined;
+
+	private setPendingThinkingLevelSwitch(oldLevel: ThinkingLevel, newLevel: ThinkingLevel): void {
+		// A no-op reselection (A → A) is not a switch.
+		if (oldLevel === newLevel) return;
+		// A switch that never got a request is still a completed switch; settle it before tracking the next one.
+		this.settlePendingThinkingLevelSwitch();
+		const label = { value: `Thinking level: ${oldLevel} → ${newLevel}` };
+		const spacer = new Spacer(1);
+		const text = new ThemedText(() => theme.fg("dim", label.value), 1, 0);
+		this.chatContainer.addChild(spacer);
+		this.chatContainer.addChild(text);
+		this.pendingThinkingLevelSwitch = { newLevel, text, label };
+		this.ui.requestRender();
+	}
+
+	/** Confirm the pending switch in place (`old → new` becomes `Thinking level: new`) once a request actually starts. */
+	private settlePendingThinkingLevelSwitch(): void {
+		const pending = this.pendingThinkingLevelSwitch;
+		if (!pending) return;
+		this.pendingThinkingLevelSwitch = undefined;
+		pending.label.value = `Thinking level: ${pending.newLevel}`;
 		pending.text.invalidate();
 		this.ui.requestRender();
 	}
@@ -4775,13 +4808,14 @@ export class InteractiveMode {
 	}
 
 	private cycleThinkingLevel(): void {
+		const previousLevel = this.session.thinkingLevel;
 		const newLevel = this.session.cycleThinkingLevel();
 		if (newLevel === undefined) {
 			this.showStatus("Current model does not support thinking");
 		} else {
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
-			this.showStatus(`Thinking level: ${newLevel}`);
+			this.setPendingThinkingLevelSwitch(previousLevel, newLevel);
 		}
 	}
 
@@ -5425,10 +5459,12 @@ export class InteractiveMode {
 
 	private selectThinkingLevel(level: ThinkingLevel, persist: boolean): void {
 		try {
+			const previousLevel = this.session.thinkingLevel;
 			this.session.setThinkingLevel(level, { persist });
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
-			this.showStatus(persist ? `Default thinking level: ${level}` : `Thinking level: ${level}`);
+			this.setPendingThinkingLevelSwitch(previousLevel, this.session.thinkingLevel);
+			if (persist) this.showStatus(`Default thinking level: ${level}`);
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
