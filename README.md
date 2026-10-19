@@ -51,7 +51,7 @@ Features:
 - Quieter startup screen
 - Refresh provider catalogs from CLI (`pi --list-models --refresh`)
 - Per-model thinking level picker, sorted and preselected
-- `Model: old → new` hint after switching models
+- [Model and thinking switch hints](docs/downstream-changes.md#model-and-thinking-switches) (`old → new` until the next request starts)
 - Per-skill automatic invocation controls; manual `/skill:<name>` stays available
 - Detect slow extensions (opt-in)
 - Clean old binary backups in the install directory (`pi update --clean`)

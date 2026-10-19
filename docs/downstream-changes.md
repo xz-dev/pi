@@ -126,9 +126,14 @@ Presentation-only changes: layout, selectors, thinking display, startup screen.
 - Hide `[Skill conflicts]` / `[Prompt conflicts]` / `[Extension issues]` / `[Theme conflicts]` startup diagnostic blocks by default; enable them with `showStartupDiagnostics: true` in `settings.json`.
   - Use case: Keep the startup screen clean unless actively debugging resource conflicts or extension loading issues.
   - Patch branch: [`patch/slow-hook-tui-only`](https://github.com/xz-dev/pi/tree/patch/slow-hook-tui-only)
-- Show a `Model: old → new` indicator in the message list after switching models, settling it in place to `Model: new` when the next request starts. Reselecting the same model adds no indicator.
-  - Use case: See that a model switch is deferred to the next request instead of wondering why the footer already shows the new model while the old one is still answering.
-  - Patch branch: [`patch/message-origin`](https://github.com/xz-dev/pi/tree/patch/message-origin)
+### Model and thinking switches
+
+Show pending changes in the message list: `Model: old → new` and `Thinking level: high → xhigh`. Each line settles in place to its new value when the next request starts.
+
+- Use case: Change thinking effort while a response streams and see that the new choice applies to the next request, not the request already in flight. Model and thinking hints remain independent of each other and ordinary status messages.
+- Controls: Keyboard cycling, `/thinking`, and the thinking selector use the same feedback. Saving a default keeps its separate confirmation. Reselecting the current model or effective thinking level adds no switch indicator.
+- Limits: Hints report the effective session choice after model-capability clamping. They are interactive display feedback, not provider acknowledgements or persisted conversation entries; changing a choice does not restart or modify an issued request.
+- Patch branch: [`patch/message-origin`](https://github.com/xz-dev/pi/tree/patch/message-origin)
 
 ## Models and providers
 
