@@ -5,8 +5,14 @@ const CODECS = ["zstd", "gzip", "deflate", "br"] as const;
 type Codec = (typeof CODECS)[number];
 // Process lifetime only: wrapper recreation and session cleanup must not retry rejected codecs.
 const floors = new Map<string, number>();
+const uploadEncodings = new WeakMap<Response, Codec>();
 const AUTH_HEADERS = ["authorization", "proxy-authorization", "x-api-key", "api-key", "auth-token"];
 const ERROR_BYTES = 4096;
+
+/** Upload encoding applied by this helper, not the response's Content-Encoding. */
+export function getRequestCompressionEncoding(response: Response): Codec | undefined {
+	return uploadEncodings.get(response);
+}
 
 type BuiltinProcess = typeof process & { getBuiltinModule?: (id: "node:zlib") => typeof NodeZlib };
 
@@ -142,7 +148,10 @@ export function createRequestCompressionFetch(
 			const response = request
 				? await fetchImpl(new Request(request, { ...init, method, headers: wireHeaders, body: encoded }))
 				: await fetchImpl(input, { ...init, method, headers: wireHeaders, body: encoded });
-			if (!(await encodingRefused(response))) return response;
+			if (!(await encodingRefused(response))) {
+				uploadEncodings.set(response, codec);
+				return response;
+			}
 			signal?.throwIfAborted();
 			floors.set(key, Math.max(floor(), rung + 1));
 			void response.body?.cancel().catch(() => {});

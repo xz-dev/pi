@@ -2,7 +2,7 @@ import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } fro
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stream as streamOpenAICompletions } from "../src/api/openai-completions.ts";
 import type { Model } from "../src/types.ts";
-import { createRequestCompressionFetch } from "../src/utils/request-compression.ts";
+import { createRequestCompressionFetch, getRequestCompressionEncoding } from "../src/utils/request-compression.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const ORIGIN_A = "https://gateway-a.test";
@@ -64,6 +64,36 @@ describe("request-compression fetch wrapper", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0].encoding).toBe("zstd");
 		expect(decompress("zstd", calls[0].body as Uint8Array)).toBe(BIG_JSON);
+		expect(getRequestCompressionEncoding(res)).toBe("zstd");
+	});
+
+	it("reports the final actual upload codec after a refusal downgrade", async () => {
+		const origin = "https://label-refusal.test";
+		const { fn } = makeFetch((c) =>
+			c.encoding === "zstd" ? new Response("unsupported content-encoding", { status: 415 }) : new Response("{}"),
+		);
+		const wrapped = createRequestCompressionFetch(fn);
+		const response = await wrapped(`${origin}/x`, jsonInit(BIG_JSON));
+		expect(getRequestCompressionEncoding(response)).toBe("gzip");
+	});
+
+	it("does not infer upload compression from response headers or a previous upload", async () => {
+		const origin = "https://label-identity.test";
+		const { fn } = makeFetch(() => new Response("{}", { headers: { "content-encoding": "br" } }));
+		const wrapped = createRequestCompressionFetch(fn);
+		const compressed = await wrapped(`${origin}/x`, jsonInit(BIG_JSON));
+		const tiny = await wrapped(`${origin}/x`, jsonInit('{"a":1}'));
+		const get = await wrapped(`${origin}/get`);
+		expect(getRequestCompressionEncoding(compressed)).toBe("zstd");
+		expect(getRequestCompressionEncoding(tiny)).toBeUndefined();
+		expect(getRequestCompressionEncoding(get)).toBeUndefined();
+	});
+
+	it("keeps the caller's own content-encoding opaque", async () => {
+		const { fn } = makeFetch(() => new Response("{}"));
+		const wrapped = createRequestCompressionFetch(fn);
+		const response = await wrapped(`${ORIGIN_A}/enc`, jsonInit(BIG_JSON, { "content-encoding": "custom" }));
+		expect(getRequestCompressionEncoding(response)).toBeUndefined();
 	});
 
 	it("roundtrips exact bytes including base64-like content", async () => {
@@ -120,7 +150,8 @@ describe("request-compression fetch wrapper", () => {
 				? new Response("{}", { status: 200 })
 				: new Response("unsupported content-encoding", { status: 415 }),
 		);
-		await createRequestCompressionFetch(fn)(`${origin}/x`, jsonInit(BIG_JSON));
+		const identity = await createRequestCompressionFetch(fn)(`${origin}/x`, jsonInit(BIG_JSON));
+		expect(getRequestCompressionEncoding(identity)).toBeUndefined();
 		expect(calls.map((c) => c.encoding)).toEqual(["zstd", "gzip", "deflate", "br", null]);
 		expect(calls[calls.length - 1].body).toBe(BIG_JSON);
 
@@ -262,9 +293,11 @@ describe("request-compression fetch wrapper", () => {
 		const second = wrapped(`${origin}/x`, jsonInit(BIG_JSON));
 		await secondAdmitted;
 		finishFirst(new Response("unsupported content-encoding", { status: 415 }));
-		await first;
+		const downgraded = await first;
 		finishSecond(new Response("{}"));
-		await second;
+		const staleSuccess = await second;
+		expect(getRequestCompressionEncoding(downgraded)).toBe("gzip");
+		expect(getRequestCompressionEncoding(staleSuccess)).toBe("zstd");
 		const next = makeFetch(() => new Response("{}"));
 		await createRequestCompressionFetch(next.fn)(`${origin}/x`, jsonInit(BIG_JSON));
 		expect(next.calls[0].encoding).toBe("gzip");
@@ -422,6 +455,135 @@ describe("native adapter default transport", () => {
 		expect(captured?.encoding).toBe("zstd");
 		const decoded = decompress("zstd", captured?.body as Uint8Array);
 		expect(JSON.parse(decoded).model).toBe("test-model");
+	});
+
+	it("appends the canonical codec name to the SSE transport label", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () => new Response(completionsSse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+			),
+		);
+		const model: Model<"openai-completions"> = {
+			id: "test-model",
+			name: "Test",
+			api: "openai-completions",
+			provider: "test-provider",
+			baseUrl: "https://adapter-label.test/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10_000,
+			maxTokens: 1_000,
+		};
+		const context = normalizeContext({
+			messages: [{ role: "user", content: `say ${"hello ".repeat(400)}`, timestamp: 1 }],
+		});
+		const transports: Array<string | undefined> = [];
+		await streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			maxRetries: 0,
+			onTransport: (t) => void transports.push(t),
+		}).result();
+		expect(transports).toEqual(["SSE Zstd"]);
+	});
+
+	it("keeps the bare SSE label when a custom fetch owns the upload", async () => {
+		const custom = vi.fn(
+			async (_input: Parameters<typeof globalThis.fetch>[0], _init?: RequestInit) =>
+				new Response(completionsSse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		);
+		const model: Model<"openai-completions"> = {
+			id: "test-model",
+			name: "Test",
+			api: "openai-completions",
+			provider: "test-provider",
+			baseUrl: "https://adapter-custom.test/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10_000,
+			maxTokens: 1_000,
+		};
+		const context = normalizeContext({
+			messages: [{ role: "user", content: `say ${"hello ".repeat(400)}`, timestamp: 1 }],
+		});
+		const transports: Array<string | undefined> = [];
+		await streamOpenAICompletions(model, context, {
+			apiKey: "k",
+			fetch: custom,
+			maxRetries: 0,
+			onTransport: (t) => void transports.push(t),
+		}).result();
+		expect(transports).toEqual(["SSE"]);
+	});
+
+	it("labels the SSE transport with the final codec after an endpoint refusal", async () => {
+		let refused = false;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+				const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+				if (headers.get("content-encoding") === "zstd") {
+					refused = true;
+					return new Response("unsupported content-encoding", { status: 415 });
+				}
+				return new Response(completionsSse, { status: 200, headers: { "content-type": "text/event-stream" } });
+			}),
+		);
+		const model: Model<"openai-completions"> = {
+			id: "test-model",
+			name: "Test",
+			api: "openai-completions",
+			provider: "test-provider",
+			baseUrl: "https://label-downgrade.test/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10_000,
+			maxTokens: 1_000,
+		};
+		const context = normalizeContext({
+			messages: [{ role: "user", content: `say ${"hello ".repeat(400)}`, timestamp: 1 }],
+		});
+		const transports: Array<string | undefined> = [];
+		await streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			maxRetries: 0,
+			onTransport: (t) => void transports.push(t),
+		}).result();
+		expect(refused).toBe(true);
+		expect(transports).toEqual(["SSE gzip"]);
+	});
+
+	it("keeps the bare SSE label for an uncompressed upload", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () => new Response(completionsSse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+			),
+		);
+		const model: Model<"openai-completions"> = {
+			id: "test-model",
+			name: "Test",
+			api: "openai-completions",
+			provider: "test-provider",
+			baseUrl: "https://label-plain.test/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10_000,
+			maxTokens: 1_000,
+		};
+		const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] });
+		const transports: Array<string | undefined> = [];
+		await streamOpenAICompletions(model, context, {
+			apiKey: "k",
+			headers: { "content-encoding": "identity" },
+			maxRetries: 0,
+			onTransport: (t) => void transports.push(t),
+		}).result();
+		expect(transports).toEqual(["SSE"]);
 	});
 
 	it("leaves a custom options.fetch completely untouched", async () => {
