@@ -1,4 +1,7 @@
+import { HttpProxyAgent } from "http-proxy-agent";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import type { ResponseInput, ResponseStreamEvent } from "openai/resources/responses/responses.js";
+import NodeWebSocket from "ws";
 
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type { Api, AssistantMessage, Model, ProviderEnv, ResponseCheckpoint, StreamOptions } from "../types.ts";
@@ -15,6 +18,7 @@ import {
 	sha256Hex,
 } from "../utils/response-checkpoints.ts";
 import { CODEX_AUTO_WEBSOCKET_RETRIES } from "../utils/retry.ts";
+import { getWebSocketCompressionPolicy } from "../utils/websocket-compression.ts";
 
 // ============================================================================
 // Shared Responses WebSocket transport
@@ -48,6 +52,7 @@ export type WebSocketEventType = "open" | "message" | "error" | "close";
 export type WebSocketListener = (event: unknown) => void;
 
 export interface WebSocketLike {
+	readonly extensions?: string;
 	close(code?: number, reason?: string): void;
 	send(data: string): void;
 	addEventListener(type: WebSocketEventType, listener: WebSocketListener): void;
@@ -593,41 +598,35 @@ export function clearCheckpointCooldownIfOwned(
 
 type WebSocketConstructor = new (
 	url: string,
-	protocols?: string | string[] | { headers?: Record<string, string> },
+	protocols?: string | string[] | NodeWebSocket.ClientOptions,
 ) => WebSocketLike;
 
+const originalWebSocket = globalThis.WebSocket;
 let _cachedWebsocket: WebSocketConstructor | null = null;
 async function getWebSocketConstructor(env?: ProviderEnv): Promise<WebSocketConstructor | null> {
-	if (!env && _cachedWebsocket) return _cachedWebsocket;
-
-	// bun doesn't respect http proxy envs, ref: https://github.com/oven-sh/bun/issues/15489
-	// TODO: remove this when bun supports proxy envs in websocket.
-	if (typeof process !== "undefined" && process.versions?.bun) {
-		const WebSocketWithProxy = class extends WebSocket {
-			constructor(url: string | URL, options?: string | string[] | Record<string, unknown>) {
-				let _opts: Record<string, unknown> = {};
-				if (Array.isArray(options) || typeof options === "string") {
-					_opts = { protocols: options };
-				} else {
-					_opts = { ...options };
-				}
-
-				const proxyUrl = resolveHttpProxyUrlForTarget(
-					url.toString().replace(/^wss:/, "https:").replace(/^ws:/, "http:"),
-					env,
-				);
-				super(url, { ..._opts, ...(proxyUrl ? { proxy: proxyUrl.toString() } : {}) } as never);
-			}
-		};
-		if (!env) {
-			_cachedWebsocket = WebSocketWithProxy;
-		}
-		return WebSocketWithProxy;
-	}
-
 	const ctor = (globalThis as { WebSocket?: unknown }).WebSocket;
 	if (typeof ctor !== "function") return null;
-	return ctor as unknown as WebSocketConstructor;
+	// Deliberate custom globals and browser runtimes keep ownership of their transport.
+	if (ctor !== originalWebSocket || typeof process === "undefined" || !process.versions?.node) {
+		return ctor as WebSocketConstructor;
+	}
+	if (!env && _cachedWebsocket) return _cachedWebsocket;
+	const WebSocketWithProxy = class extends NodeWebSocket {
+		constructor(url: string, options?: string | string[] | NodeWebSocket.ClientOptions) {
+			const protocols = typeof options === "string" || Array.isArray(options) ? options : [];
+			const clientOptions = options && typeof options === "object" && !Array.isArray(options) ? options : {};
+			const proxyUrl = resolveHttpProxyUrlForTarget(url.replace(/^wss:/, "https:").replace(/^ws:/, "http:"), env);
+			const agent = proxyUrl
+				? url.startsWith("wss:")
+					? new HttpsProxyAgent(proxyUrl)
+					: new HttpProxyAgent(proxyUrl)
+				: undefined;
+			// Match the prior native transport's unbounded frame receiver.
+			super(url, protocols, { ...clientOptions, ...(agent ? { agent } : {}), maxPayload: 0 });
+		}
+	};
+	if (!env) _cachedWebsocket = WebSocketWithProxy;
+	return WebSocketWithProxy;
 }
 
 function getWebSocketReadyState(socket: WebSocketLike): number | undefined {
@@ -704,6 +703,10 @@ async function connectWebSocket(
 
 	const wsHeaders = headersToRecord(headers);
 	delete wsHeaders["OpenAI-Beta"];
+	const compression =
+		WebSocketCtor.prototype instanceof NodeWebSocket
+			? await getWebSocketCompressionPolicy(url, wsHeaders)
+			: undefined;
 
 	return new Promise<WebSocketLike>((resolve, reject) => {
 		let settled = false;
@@ -711,7 +714,10 @@ async function connectWebSocket(
 		let socket: WebSocketLike;
 
 		try {
-			socket = new WebSocketCtor(url, { headers: wsHeaders });
+			socket = new WebSocketCtor(url, {
+				headers: wsHeaders,
+				...(compression ? { perMessageDeflate: compression.perMessageDeflate } : {}),
+			});
 		} catch (error) {
 			// A synchronous ctor throw is usually a config/programming error
 			// (bad URL, unsupported protocols arg), not a network failure — leave
@@ -743,6 +749,7 @@ async function connectWebSocket(
 			if (settled) return;
 			settled = true;
 			cleanup();
+			if (compression && typeof socket.extensions === "string") compression.recordNegotiated(socket.extensions);
 			resolve(socket);
 		};
 		const onError: WebSocketListener = (event) => {
