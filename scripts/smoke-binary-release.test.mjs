@@ -321,7 +321,7 @@ test("owner lifecycle fails leaked descendants without polling or expiry credit"
 });
 
 test("owner lifecycle acceptance rejects elevated identity, missing rows, peer loss, and Windows leaks", () => {
-	const evidence = { status: "passed", identity: { elevated: false, mediumIntegrity: true }, rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })) };
+	const evidence = { status: "passed", artifactBunVersion: "1.3.14", identity: { elevated: false, mediumIntegrity: true }, rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, pi: { bun: "1.3.14" }, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })) };
 	assertOwnerLifecycle(evidence, "windows");
 	for (const mutate of [
 		(value) => { value.identity.elevated = true; },

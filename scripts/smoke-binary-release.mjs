@@ -127,7 +127,7 @@ try {
 	if (!listModels.stdout.trim()) throw new Error("list-models produced no output");
 	// The owner probe provisions a standard CI user when this host token is privileged.
 	const ownerStarted = performance.now();
-	const ownerResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), executable, targetId, ownerEvidencePath], { encoding: "utf8", env, timeout: (target.emulated ? 1_100_000 : 460_000) });
+	const ownerResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), executable, targetId, ownerEvidencePath], { encoding: "utf8", env, timeout: target.os === "windows" ? 1_250_000 : (target.emulated ? 1_100_000 : 460_000) });
 	try { ownerLifecycle = JSON.parse(ownerResult.stdout.trim().split(/\r?\n/).at(-1)); } catch {}
 	commands.push({ name: "owner-lifecycle", command: `${process.execPath} smoke-owner-lifecycle.mjs ${executable}`, status: ownerResult.status, elapsedMs: Math.round(performance.now() - ownerStarted) });
 	if (ownerResult.status !== 0 || ownerLifecycle?.status !== "passed") throw new Error(`owner lifecycle failed: ${ownerResult.stderr || ownerLifecycle?.error || ownerResult.error?.message || "missing evidence"}`);

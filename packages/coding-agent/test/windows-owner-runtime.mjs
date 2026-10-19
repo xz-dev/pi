@@ -91,6 +91,10 @@ before(async () => {
 	const groups = await run("whoami.exe", ["/all"]);
 	assert.equal(groups.code, 0);
 	console.log(groups.stdout.toString());
+	const account = await run("whoami.exe", []);
+	assert.equal(account.code, 0);
+	console.log(JSON.stringify({ gateIdentity: { ...JSON.parse(token.stdout.toString()), name: account.stdout.toString().trim(), whoamiAll: groups.stdout.toString() } }));
+	assert.match(groups.stdout.toString(), /S-1-16-8192\b/, "Medium integrity required");
 	assert.doesNotMatch(groups.stdout.toString(), /S-1-5-32-544|S-1-16-(?:12288|16384)/, "genuinely nonadmin, non-elevated token required");
 });
 after(() => rmSync(root, { recursive: true, force: true }));

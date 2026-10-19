@@ -5,6 +5,7 @@ import { basename, join, resolve } from "node:path";
 import { BUN_TARGET_IDS, bunTarget, smokeLimits } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 import { assertOwnerLifecycle } from "./smoke-owner-lifecycle.mjs";
+import { assertWindowsOwnerGate } from "./smoke-windows-owner-gate.mjs";
 
 const [recordsArg, manifestArg, outputArg] = process.argv.slice(2);
 if (!recordsArg || !manifestArg || !outputArg) throw new Error("Usage: aggregate-binary-acceptance.mjs <records-dir> <manifest> <output>");
@@ -28,6 +29,7 @@ for (const id of BUN_TARGET_IDS) {
 	const features = String(record.runner.cpuFeatures ?? "").toLowerCase().replaceAll(".", "_");
 	for (const feature of descriptor.requiredCpuFeatures) if (!features.includes(feature)) throw new Error(`${id} CPU lacks required ${feature}`);
 	assertOwnerLifecycle(record.ownerLifecycle, descriptor.os);
+	if (descriptor.os === "windows") assertWindowsOwnerGate(record.ownerLifecycle.windowsRuntimeGate, id, record.asset.sha256, record.ownerLifecycle.identity, record.ownerLifecycle.artifactBunVersion);
 	const commands = record.commands ?? [];
 	if (JSON.stringify(commands.map(({ name }) => name)) !== JSON.stringify(descriptor.requiredCommands)) throw new Error(`${id} command inventory does not match authoritative descriptor`);
 	for (const command of commands) if (command.status !== 0 || !Number.isSafeInteger(command.elapsedMs) || command.elapsedMs < 0) throw new Error(`${id} invalid command evidence: ${command.name}`);

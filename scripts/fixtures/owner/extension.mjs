@@ -10,7 +10,7 @@ export default async function () {
 		child.once("error", reject);
 		child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`owner fixture bridge: ${code}`)));
 	});
-	writeFileSync(process.env.PI_OWNER_READY, JSON.stringify({ pid: process.pid, uid: process.getuid?.() ?? null, owner: process.env.PI_PROCESS_OWNER_BINARY ?? null }));
+	writeFileSync(process.env.PI_OWNER_READY, JSON.stringify({ pid: process.pid, uid: process.getuid?.() ?? null, bun: process.versions.bun ?? null, owner: process.env.PI_PROCESS_OWNER_BINARY ?? null }));
 	while (!existsSync(process.env.PI_OWNER_RELEASE)) await delay(10);
 	process.exit(0);
 }

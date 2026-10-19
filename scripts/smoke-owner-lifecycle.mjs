@@ -1,23 +1,27 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { bunTarget, isMainModulePath } from "./lib/bun-targets.mjs";
+import { assertWindowsOwnerGate, smokeWindowsOwnerGate, stageWindowsOwnerGate } from "./smoke-windows-owner-gate.mjs";
 
+// Absolute System32 paths: Git for Windows puts GNU coreutils (e.g. whoami) on PATH.
+const windowsTool = (name) => join(process.env.SystemRoot ?? "C:\\Windows", "System32", name);
 function query(command, args) {
-	const result = spawnSync(command, args, { encoding: "utf8", timeout: 10_000 });
+	// Cold PowerShell start on hosted Windows arm64 runners exceeds 10s.
+	const result = spawnSync(command, args, { encoding: "utf8", timeout: 60_000 });
 	if (result.status !== 0) throw new Error(`${command}: ${result.stderr || result.error?.message || result.status}`);
 	return result.stdout.trim();
 }
 
 export function ownerIdentity() {
 	if (process.platform === "win32") {
-		const token = JSON.parse(query("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$i=[Security.Principal.WindowsIdentity]::GetCurrent(); $p=New-Object Security.Principal.WindowsPrincipal($i); @{name=$i.Name; elevated=$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); groups=@($i.Groups | ForEach-Object {$_.Value})} | ConvertTo-Json -Compress"]));
-		const groups = query("whoami.exe", ["/groups", "/fo", "csv"]);
+		const token = JSON.parse(query(windowsTool("WindowsPowerShell\\v1.0\\powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", "$i=[Security.Principal.WindowsIdentity]::GetCurrent(); $p=New-Object Security.Principal.WindowsPrincipal($i); @{name=$i.Name; elevated=$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); groups=@($i.Groups | ForEach-Object {$_.Value})} | ConvertTo-Json -Compress"]));
+		const groups = query(windowsTool("whoami.exe"), ["/groups", "/fo", "csv"]);
 		return { ...token, tokenGroups: groups, mediumIntegrity: /S-1-16-8192\b/.test(groups), adminGroup: token.groups.includes("S-1-5-32-544"), elevated: token.elevated || /S-1-16-(12288|16384)/.test(groups) };
 	}
 	const identity = { uid: process.getuid(), euid: process.geteuid(), gid: process.getgid(), egid: process.getegid(), groups: process.getgroups(), credentials: query("id", []), elevated: process.getuid() === 0 || process.geteuid() === 0 };
@@ -45,7 +49,7 @@ export function ownerProcessAlive(pid) {
 		catch (error) { if (error.code === "ENOENT" || error.code === "ESRCH") return false; throw error; }
 	}
 	if (process.platform === "win32") {
-		return query("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) {'alive'} else {'gone'}`]) === "alive";
+		return query(windowsTool("WindowsPowerShell\\v1.0\\powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) {'alive'} else {'gone'}`]) === "alive";
 	}
 	const result = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8", timeout: 10_000 });
 	if (result.status === 1 && !result.stdout.trim() && !result.stderr.trim()) return false;
@@ -64,6 +68,16 @@ export function ownerPrivilegeDropRequired(platform, identity, env) {
 		(identity.uid === 0 || identity.euid === 0 || identity.elevated === true || identity.adminGroup === true);
 }
 
+export function artifactBunFromOwnerRows(rows) {
+	const missing = rows.filter((row) => typeof row.pi?.bun !== "string" || !row.pi.bun.trim()).map(({ name }) => name);
+	const versions = [...new Set(rows.map((row) => row.pi?.bun).filter((version) => typeof version === "string" && version.trim()))];
+	const reasons = [];
+	if (!rows.length) reasons.push("no owner rows");
+	if (missing.length) reasons.push(`missing embedded Bun version: ${missing.join(", ")}`);
+	if (versions.length > 1) reasons.push(`owner rows disagree on embedded Bun version: ${versions.join(", ")}`);
+	return { artifactBunVersion: reasons.length ? null : versions[0], artifactBunError: reasons.join("; ") || null };
+}
+
 export function assertOwnerLifecycle(evidence, os) {
 	assertNonadminIdentity(evidence?.identity, os);
 	const expected = ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(os === "darwin" ? ["darwin-fast-escape"] : [])];
@@ -74,12 +88,16 @@ export function assertOwnerLifecycle(evidence, os) {
 			if (row.status !== "known-limitation" || !row.limitation) throw new Error("Darwin fast escape must be labeled known-limitation");
 		} else if (row.status !== "passed" || row.aliveAfter !== false) throw new Error(`owner lifecycle containment failed: ${row.name}`);
 	}
+	if (os === "windows") {
+		const { artifactBunVersion, artifactBunError } = artifactBunFromOwnerRows(evidence.rows);
+		if (!artifactBunVersion || evidence.artifactBunVersion !== artifactBunVersion) throw new Error(`owner lifecycle artifact Bun version invalid: ${artifactBunError ?? "differs from owner rows"}`);
+	}
 	if (evidence.status !== "passed") throw new Error("owner lifecycle did not pass");
 }
 
-export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_000 } = {}) {
+export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_000, windowsGateRoot = process.env.PI_WINDOWS_GATE_ROOT } = {}) {
 	const started = performance.now();
-	const evidence = { status: "failed", identity: null, rows: [], path: "ownCliProcesses + explicit extension factory; no model, prompt or API", peerPid: null };
+	const evidence = { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), path: "ownCliProcesses + explicit extension factory; no model, prompt or API", peerPid: null };
 	try { evidence.identity = ownerIdentity(); assertNonadminIdentity(evidence.identity, target.os); }
 	catch (error) { evidence.error = error.message; return evidence; }
 	const work = mkdtempSync(join(tmpdir(), "pi-owner-smoke-"));
@@ -143,8 +161,13 @@ export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_0
 				if (row.aliveAfter !== false && Number.isSafeInteger(pid) && pid > 1) { try { process.kill(pid, "SIGKILL"); } catch {} }
 			}
 		}
+		Object.assign(evidence, artifactBunFromOwnerRows(evidence.rows));
+		if (target.os === "windows") evidence.windowsRuntimeGate = smokeWindowsOwnerGate(executable, target, evidence.rows[0]?.pi?.owner, evidence.identity, { work: windowsGateRoot, artifactBunVersion: evidence.artifactBunVersion });
 		evidence.status = "passed";
-		try { assertOwnerLifecycle(evidence, target.os); }
+		try {
+			assertOwnerLifecycle(evidence, target.os);
+			if (target.os === "windows" && evidence.windowsRuntimeGate.status !== "passed") throw new Error(evidence.windowsRuntimeGate.error);
+		}
 		catch (error) { evidence.status = "failed"; evidence.error = error.message; }
 		evidence.elapsedMs = Math.round(performance.now() - started);
 		return evidence;
@@ -158,13 +181,21 @@ export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_0
 export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platform = process.platform, env = process.env, identityProbe = ownerIdentity, run = spawnSync } = {}) {
 	let identity;
 	try { identity = identityProbe(); }
-	catch (error) { return { status: "failed", identity: null, rows: [], error: `owner identity probe failed: ${error.message}` }; }
-	if (!ownerPrivilegeDropRequired(platform, identity, env)) return smokeOwnerLifecycle(executable, target, { timeoutMs: target.emulated ? 180_000 : 60_000 });
+	catch (error) { return { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), error: `owner identity probe failed: ${error.message}` }; }
+	if (!ownerPrivilegeDropRequired(platform, identity, env)) {
+		if (platform !== "win32" || env.PI_WINDOWS_GATE_ROOT) return smokeOwnerLifecycle(executable, target, { timeoutMs: target.emulated ? 180_000 : 60_000 });
+		const scratch = mkdtempSync(join(tmpdir(), "pi-windows-gate-"));
+		try {
+			stageWindowsOwnerGate(scratch, { env, run });
+			return await smokeOwnerLifecycle(executable, target, { windowsGateRoot: scratch });
+		} catch (error) { return { status: "failed", identity, rows: [], ...artifactBunFromOwnerRows([]), error: error.message }; }
+		finally { rmSync(scratch, { recursive: true, force: true }); }
+	}
 	const user = "pi-owner-smoke";
 	const privilegeDrop = { method: platform === "win32" ? "Start-Process -Credential" : platform === "darwin" ? "sudo -u" : "su -m", user, verifiedNonadmin: false };
 	let work;
 	let created = false;
-	let evidence = { status: "failed", identity: null, rows: [], privilegeDrop };
+	let evidence = { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), privilegeDrop };
 	const command = (file, args, options = {}) => {
 		const result = run(file, args, { encoding: "utf8", timeout: 120_000, ...options });
 		if (result.status !== 0) throw new Error(`${file}: ${result.stderr || result.error?.message || result.status}`);
@@ -191,16 +222,20 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		mkdirSync(join(scripts, "lib"), { recursive: true });
 		copyFileSync(fileURLToPath(import.meta.url), join(scripts, "smoke-owner-lifecycle.mjs"));
 		copyFileSync(fileURLToPath(new URL("./lib/bun-targets.mjs", import.meta.url)), join(scripts, "lib", "bun-targets.mjs"));
+		copyFileSync(fileURLToPath(new URL("./smoke-windows-owner-gate.mjs", import.meta.url)), join(scripts, "smoke-windows-owner-gate.mjs"));
+		if (platform === "win32") stageWindowsOwnerGate(work, { env, run });
 		cpSync(fileURLToPath(new URL("./fixtures/owner/", import.meta.url)), join(scripts, "fixtures", "owner"), { recursive: true });
 		mkdirSync(join(work, "tmp"));
 		const childEnv = { PATH: platform === "win32" ? `${work};${env.SystemRoot}\\System32;${env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0` : `${work}:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin`, HOME: work, USERPROFILE: work, USER: user, LOGNAME: user, TMPDIR: join(work, "tmp"), TMP: join(work, "tmp"), TEMP: join(work, "tmp"), CI: "true", PI_OFFLINE: "1" };
+		if (platform === "win32") childEnv.PI_WINDOWS_GATE_ROOT = work;
 		privilegeDrop.path = childEnv.PATH;
 		const args = [join(scripts, "smoke-owner-lifecycle.mjs"), staged, target.id, join(work, "child-evidence.json")];
 		let result;
-		const timeout = target.emulated ? 1_050_000 : 420_000;
+		const timeout = platform === "win32" ? 1_200_000 : target.emulated ? 1_050_000 : 420_000;
 		if (platform === "win32") {
 			const account = `${env.COMPUTERNAME}\\${user}`;
-			command("icacls.exe", [work, "/grant", `${account}:(OI)(CI)F`, "/T"]);
+			command("icacls.exe", [work, "/inheritance:r", "/grant:r", `${account}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T"]);
+			for (const directory of ["packages", "node_modules", "scripts"]) command("icacls.exe", [join(work, directory), "/inheritance:r", "/grant:r", `${account}:(OI)(CI)RX`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T"]);
 			const launcher = join(work, "launch.ps1");
 			writeFileSync(launcher, `$ErrorActionPreference='Stop'\n${Object.entries(childEnv).map(([key, value]) => `$env:${key}=${ps(value)}`).join("\n")}\nRemove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue\n& ${[runtime, ...args].map(ps).join(" ")}\nexit $LASTEXITCODE\n`);
 			const stdout = join(work, "stdout.txt");
@@ -215,7 +250,8 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 			else command("chown", ["-R", user, work]);
 			const invocation = ["env", "-i", ...Object.entries(childEnv).map(([key, value]) => `${key}=${value}`), runtime, ...args];
 			result = platform === "darwin"
-				? run("sudo", ["-n", "-u", user, "-H", ...invocation], { encoding: "utf8", timeout, cwd: work })
+				// The non-root runner cannot chdir into scratch once it is chowned 0700 to the dropped user.
+				? run("sudo", ["-n", "-u", user, "-H", ...invocation], { encoding: "utf8", timeout, cwd: "/" })
 				: run("su", ["-m", user, "-c", `exec ${invocation.map((value) => `'${value.replaceAll("'", "'\\''")}'`).join(" ")}`], { encoding: "utf8", timeout, cwd: work });
 		}
 		try { evidence = { ...JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)), privilegeDrop }; }
@@ -224,6 +260,7 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		privilegeDrop.verifiedNonadmin = true;
 		if (result.status !== 0 || evidence.status !== "passed") throw new Error(evidence.error || `child failed (${result.status ?? result.error?.message}): ${result.stderr}`);
 		assertOwnerLifecycle(evidence, target.os);
+		if (target.os === "windows") assertWindowsOwnerGate(evidence.windowsRuntimeGate, target.id, createHash("sha256").update(readFileSync(executable)).digest("hex"), evidence.identity, evidence.artifactBunVersion);
 	} catch (error) {
 		evidence.status = "failed";
 		evidence.error = `owner privilege drop${privilegeDrop.verifiedNonadmin ? " child" : " identity/setup"} failed: ${error.message}`;

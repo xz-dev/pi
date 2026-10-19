@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { bunTarget } from "./lib/bun-targets.mjs";
-import { assertOwnerLifecycle, ownerPrivilegeDropRequired, smokeOwnerLifecycleAsNonadmin } from "./smoke-owner-lifecycle.mjs";
+import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
+import { windowsOwnerGateDependencies } from "./smoke-windows-owner-gate.mjs";
+import { artifactBunFromOwnerRows, assertOwnerLifecycle, ownerPrivilegeDropRequired, smokeOwnerLifecycleAsNonadmin } from "./smoke-owner-lifecycle.mjs";
 
-const standard = { uid: 1001, euid: 1001, elevated: false, adminGroup: false, mediumIntegrity: true };
+const standard = { name: "host\\pi-owner-smoke", uid: 1001, euid: 1001, elevated: false, adminGroup: false, mediumIntegrity: true };
 const root = { uid: 0, euid: 0, elevated: true };
-const rows = ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 }));
+const rows = ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, pi: { bun: "1.3.14" }, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 }));
 
 // Host commands are mocked; copied scripts, runtime and artifact use real temporary files.
 async function dropped(platform, { childIdentity = standard, childError, failCommand, existing = false, cleanupFailure = false } = {}) {
@@ -19,20 +22,34 @@ async function dropped(platform, { childIdentity = standard, childError, failCom
 	const childRows = structuredClone(rows);
 	if (platform === "darwin") childRows.push({ ...childRows[0], name: "darwin-fast-escape", status: "known-limitation", limitation: "25ms sweep" });
 	if (childError) { childRows[0].aliveAfter = true; childRows[0].status = "failed"; }
-	const child = { status: childError ? "failed" : "passed", identity: childIdentity, rows: childRows, ...(childError ? { error: childError } : {}) };
+	const child = { status: childError ? "failed" : "passed", identity: childIdentity, rows: childRows, ...artifactBunFromOwnerRows(childRows), ...(childError ? { error: childError } : {}) };
+	if (platform === "win32") child.windowsRuntimeGate = passedWindowsOwnerGate(target.id, createHash("sha256").update(readFileSync(process.execPath)).digest("hex"), standard);
 	try {
 		const evidence = await smokeOwnerLifecycleAsNonadmin(process.execPath, target, {
 			platform, env: { CI: "true", SystemRoot: temp, COMPUTERNAME: "host" },
 			identityProbe: () => platform === "darwin" ? { ...standard, adminGroup: true } : root,
 			run: (file, args, options) => {
 				calls.push({ file, args, options });
+				if (file === process.execPath && args.includes("install")) {
+					const work = args[args.indexOf("--prefix") + 1];
+					const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+					const dependencies = windowsOwnerGateDependencies(lock);
+					writeFileSync(join(work, "package-lock.json"), JSON.stringify({ packages: Object.fromEntries(dependencies.map(({ name }) => [`node_modules/${name}`, lock.packages[`node_modules/${name}`]])) }));
+					return { status: 0, stdout: "", stderr: "" };
+				}
+				if (file === process.execPath && args.includes("ls")) {
+					const dependencies = windowsOwnerGateDependencies(JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")));
+					return { status: 0, stdout: JSON.stringify({ dependencies: Object.fromEntries(dependencies.map((entry) => [entry.name, entry])) }), stderr: "" };
+				}
+				if (file === "bun") return { status: 0, stdout: args[0] === "--version" ? "1.3.14\n" : `${process.execPath}\n`, stderr: "" };
 				if (file === "sudo" && args.includes("rm")) rmSync(args.at(-1), { recursive: true, force: true });
 				if (file === "id" || (file === "net.exe" && args.length === 2)) return { status: existing ? 0 : platform === "win32" ? 2 : 1, stdout: "", stderr: "" };
 				if (file === failCommand) return { status: 1, stderr: "provision denied" };
 				if (cleanupFailure && (args.includes("userdel") || args.includes("-deleteUser") || args.includes("/delete"))) return { status: 1, stderr: "cleanup denied" };
 				const launch = file === "su" || (file === "sudo" && args.includes("-u")) || file === "powershell.exe";
 				if (launch) {
-					const stage = options.cwd;
+					const stage = file === "sudo" ? dirname(dirname(args.find((value) => value.endsWith("smoke-owner-lifecycle.mjs")))) : options.cwd;
+					if (file === "sudo") assert.equal(options.cwd, "/");
 					assert.equal(existsSync(join(stage, target.executable)), true);
 					assert.equal(existsSync(join(stage, "scripts", "fixtures", "owner", "descendant.mjs")), true);
 					assert.equal(existsSync(join(stage, "scripts", "lib", "bun-targets.mjs")), true);
@@ -40,6 +57,10 @@ async function dropped(platform, { childIdentity = standard, childError, failCom
 						const launcher = readFileSync(join(stage, "launch.ps1"), "utf8");
 						assert.match(launcher, /\$env:HOME=/);
 						assert.match(launcher, /Remove-Item Env:NODE_OPTIONS/);
+						assert.match(launcher, /PI_WINDOWS_GATE_ROOT/);
+						assert.equal(existsSync(join(stage, "packages", "coding-agent", "test", "windows-owner-runtime.mjs")), true);
+						assert.equal(existsSync(join(stage, "packages", "chord", "src", "manager.ts")), true);
+						assert.equal(options.timeout, 1_200_000);
 					}
 					return { status: childError ? 1 : 0, stdout: JSON.stringify(child), stderr: "" };
 				}
@@ -49,6 +70,18 @@ async function dropped(platform, { childIdentity = standard, childError, failCom
 		return { evidence, calls };
 	} finally { rmSync(temp, { recursive: true, force: true }); }
 }
+
+test("missing or disagreeing Bun versions remain informational outside Windows", () => {
+	for (const os of ["linux", "freebsd", "darwin"]) {
+		const observations = structuredClone(rows);
+		delete observations[0].pi.bun;
+		observations[1].pi.bun = "1.4.2";
+		if (os === "darwin") observations.push({ ...observations[0], name: "darwin-fast-escape", status: "known-limitation", limitation: "25ms sweep" });
+		const evidence = { status: "passed", identity: standard, rows: observations, ...artifactBunFromOwnerRows(observations) };
+		assert.equal(evidence.artifactBunVersion, null);
+		assert.doesNotThrow(() => assertOwnerLifecycle(evidence, os));
+	}
+});
 
 test("drop decisions require explicit CI and a privileged supported host identity", () => {
 	for (const platform of ["linux", "freebsd", "darwin", "win32"]) {
@@ -86,10 +119,12 @@ for (const platform of ["linux", "freebsd", "darwin", "win32"]) {
 			assert.equal(calls.some(({ file, args }) => file === "net.exe" && args.includes("/add")), true);
 			assert.equal(calls.some(({ file, args }) => file === "powershell.exe" && args.at(-1).includes("-Credential $c") && args.at(-1).includes("-Wait -PassThru")), true);
 			assert.equal(calls.some(({ file }) => file === "icacls.exe"), true);
+			for (const directory of ["packages", "node_modules", "scripts"]) assert.equal(calls.some(({ file, args }) => file === "icacls.exe" && args[0].endsWith(directory) && args.includes("host\\pi-owner-smoke:(OI)(CI)RX") && args.includes("/inheritance:r")), true);
 		}
 		assert.equal(calls.some(({ args }) => args.includes("userdel") || args.includes("-deleteUser") || args.includes("/delete") || args.some((arg) => arg.includes('exec userdel "$1"'))), true);
 		const launch = calls.find(({ file, args }) => file === "su" || file === "powershell.exe" || (file === "sudo" && args.includes("-u")));
-		assert.equal(existsSync(launch.options.cwd), false);
+		const stage = launch.file === "sudo" ? dirname(dirname(launch.args.find((value) => value.endsWith("smoke-owner-lifecycle.mjs")))) : launch.options.cwd;
+		assert.equal(existsSync(stage), false);
 	});
 }
 

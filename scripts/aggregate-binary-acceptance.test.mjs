@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { BUN_TARGETS, binaryArchiveName, releaseArchiveName, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
+import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 
 const nativeBytes = Buffer.from("native helper fixture");
 const nativeDigest = createHash("sha256").update(nativeBytes).digest("hex");
@@ -34,8 +35,10 @@ function record(target, assetIdentity) {
 		},
 		ownerLifecycle: {
 			status: "passed",
-			identity: { elevated: false, ...(target.os === "windows" ? { mediumIntegrity: true } : {}) },
-			rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(target.os === "darwin" ? ["darwin-fast-escape"] : [])].map((name) => ({ name, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", limitation: name === "darwin-fast-escape" ? "unseen setsid escape" : undefined, aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })),
+			artifactBunVersion: "1.3.14",
+			identity: { name: "host\\pi-owner-smoke", elevated: false, ...(target.os === "windows" ? { mediumIntegrity: true } : {}) },
+			...(target.os === "windows" ? { windowsRuntimeGate: passedWindowsOwnerGate(target.id, assetIdentity.sha256) } : {}),
+			rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(target.os === "darwin" ? ["darwin-fast-escape"] : [])].map((name) => ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", limitation: name === "darwin-fast-escape" ? "unseen setsid escape" : undefined, aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })),
 		},
 		commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })),
 		tui: {
@@ -249,4 +252,29 @@ test("aggregator rejects missing owner lifecycle evidence and uncontained Window
 			assert.match(result.stderr, /owner lifecycle/);
 		} finally { rmSync(value.root, { recursive: true, force: true }); }
 	}
+});
+
+for (const [label, mutate] of [
+	["missing", (owner) => { delete owner.windowsRuntimeGate; }],
+	["Bun version mismatch", (owner) => { owner.windowsRuntimeGate.runtimes[1].runnerBunVersion = "1.4.2"; }],
+	["missing Bun match", (owner) => { delete owner.windowsRuntimeGate.runtimes[1].match; }],
+	["missing embedded Bun", (owner) => { delete owner.rows[0].pi.bun; }],
+	["disagreeing embedded Bun", (owner) => { owner.rows[1].pi.bun = "1.4.2"; }],
+	["unbound Bun version", (owner) => { owner.artifactBunVersion = "1.4.2"; }],
+	["failed Bun", (owner) => { owner.windowsRuntimeGate.runtimes[1].status = "failed"; }],
+	["skipped test", (owner) => { owner.windowsRuntimeGate.runtimes[0].tests[0].status = "skipped"; owner.windowsRuntimeGate.runtimes[0].counts.skipped = 1; }],
+	["incomplete inventory", (owner) => { owner.windowsRuntimeGate.runtimes[0].tests.pop(); }],
+	["wrong shipped hash", (owner) => { owner.windowsRuntimeGate.runtimes[0].artifact.cliSha256 = "f".repeat(64); }],
+]) test(`aggregator rejects ${label} Windows runtime gate evidence`, () => {
+	const value = fixture();
+	try {
+		const target = BUN_TARGETS.find(({ os }) => os === "windows");
+		const path = join(value.records, `${target.id}.json`);
+		const changed = JSON.parse(readFileSync(path, "utf8"));
+		mutate(changed.ownerLifecycle);
+		writeFileSync(path, JSON.stringify(changed));
+		const result = runAggregator(value);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /Windows owner runtime gate|owner lifecycle artifact Bun version/);
+	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });

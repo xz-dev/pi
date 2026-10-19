@@ -7,10 +7,10 @@ $env:PI_WINDOWS_OWNER_ARTIFACT = 'windows-x64-baseline' # also windows-x64-moder
 $env:PI_PROCESS_OWNER_TEST_BINARY = 'C:\artifact\native\process-owner\pi-env.exe'
 $env:PI_WINDOWS_OWNER_TEST_CLI = 'C:\artifact\pi.exe'
 node --test test/windows-owner-runtime.mjs
-bun test/windows-owner-runtime.mjs
+bun test --reporter=junit --reporter-outfile=bun-junit.xml --timeout 60000 ./test/windows-owner-runtime.mjs
 ```
 
-Use Node 22 and pinned Bun 1.3.14. Supply actual extracted shipped artifact paths; retain logged SHA-256 values alongside artifact provenance. No builds or mocked helpers substitute for shipped artifacts. Run all three artifacts on their designated Windows runners. The gate rejects unavailable ownership, elevated/admin tokens, incomplete cleanup, and unsupported IPC instead of skipping. `whoami /all`, effective elevation, inherited Job state, runtime versions and artifact hashes are logged.
+Use Node 22 and the Bun version embedded in the artifact (runner Bun must match). CI reads that version from every owner fixture row, copies runner Bun into nonadmin scratch with its SHA-256, then runs only the exact runtime test file with the JUnit reporter and a 60000 ms per-test timeout. Bun's plain-script mode cannot run the `node:test` hooks. Acceptance requires the complete per-test inventory, zero failures/skips/todos and exit status 0; missing or invalid JUnit evidence fails. Supply actual extracted shipped artifact paths; retain logged SHA-256 values alongside artifact provenance. No builds or mocked helpers substitute for shipped artifacts. Run all three artifacts on their designated Windows runners. The gate rejects unavailable ownership, elevated/admin tokens, incomplete cleanup, and unsupported IPC instead of skipping. `whoami /all`, effective elevation, inherited Job state, runtime versions and artifact hashes are logged.
 
 Covered: recursive/new-console descendants, nested Job, breakaway denial, primary exit, cancellation, timeout, full lease loss (cleanup without caller acknowledgment), real launcher/guardian/bootstrap death at six handshake boundaries, private failure injection, cleanup delayed beyond 50 ms, early worker exit before/after guardian OpenProcess, bounded phase expiry, separate binary stdio, argv/environment/cwd/stdin, unsigned statuses, CLI respawn, ConPTY console Ctrl-C and interactive TUI exit, Node/Bun IPC message/TCP-handle/disconnect round trips, post-attach Chord work and failed attachment. Test-only fault flags require `PI_ENV_SUPERVISE_TEST_FAULTS=1`; ordinary JS callers never pass them.
 
