@@ -409,6 +409,13 @@ export const OpenAIResponsesCompatSchema = Type.Object(
 				default: true,
 			}),
 		),
+		supportsResponseCheckpoints: Type.Optional(
+			Type.Boolean({
+				description:
+					"Whether the endpoint provides durable, persistent response state for previous_response_id continuation (store:true hydration across connections). Only used by responseCheckpointMode 'auto' (skips an explicit false) and 'declared' (requires true, or the official OpenAI Responses WebSocket service); the default 'always' mode tries checkpoints regardless.",
+				default: false,
+			}),
+		),
 	},
 	{ description: "Compatibility settings for OpenAI Responses APIs.", additionalProperties: true },
 );
