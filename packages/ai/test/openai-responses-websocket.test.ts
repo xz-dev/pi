@@ -9,6 +9,7 @@ import {
 import type { Model, TranscriptContext } from "../src/types.ts";
 import { type RetryPolicy, retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { jsonRequestBody } from "./utils/request-body.ts";
 
 const model: Model<"openai-responses"> = {
 	id: "gpt-5.5",
@@ -125,11 +126,9 @@ function mockTransport() {
 
 describe("openai-responses WebSocket transport", () => {
 	it("falls back to SSE in auto mode when the runtime has no WebSocket", async () => {
-		vi.useFakeTimers();
 		const { recover, sockets, fetchMock } = mockTransport();
 		vi.stubGlobal("WebSocket", undefined);
 		const request = recover();
-		await vi.runAllTimersAsync();
 		expect((await request).stopReason).toBe("stop");
 		expect(sockets).toHaveLength(0);
 		expect(fetchMock).toHaveBeenCalledOnce();
@@ -295,7 +294,7 @@ describe("openai-responses WebSocket transport", () => {
 		expect(sent).toHaveLength(0);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		const request = (fetchMock.mock.calls[0] as unknown[] | undefined)?.[1] as RequestInit | undefined;
-		const body = JSON.parse((request?.body ?? "{}") as string);
+		const body = jsonRequestBody(request);
 		expect(body.stream).toBe(true);
 		expect(body.store).toBe(false);
 		expect(body.previous_response_id).toBeUndefined();
