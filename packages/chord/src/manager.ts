@@ -4,8 +4,9 @@ import { createHash } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { lstat, mkdir, rm } from "node:fs/promises";
 import { connect, createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Duplex } from "node:stream";
 import { ChordError } from "./errors.ts";
 import { type IpcChannel, type IpcLink, ipcLink } from "./link.ts";
 
@@ -40,6 +41,7 @@ export interface Exit {
 
 /** A running child: its link (for `host.accept`) and its exit. */
 export interface Instance {
+	/** Primary PID; -1 until the native startup handshake, completed before manager.start() resolves. */
 	readonly pid: number;
 	readonly link: IpcLink;
 	readonly exited: Promise<Exit>;
@@ -164,17 +166,32 @@ const ignoreSendError = (): void => {};
 export function forkDriver(options: ForkDriverOptions): Driver {
 	return {
 		spawn() {
+			const owner = process.env.PI_PROCESS_OWNER_BINARY;
+			if (owner === "") throw new Error("Process owner path is empty");
 			// A lock this process inherited (e.g. as a child host itself) is not the child's: it gets only its own.
 			const env: NodeJS.ProcessEnv = { ...process.env };
 			delete env[LOCK_ENV];
 			Object.assign(env, options.env);
 			if (options.lock !== undefined) env[LOCK_ENV] = options.lock;
-			// Detached: the child leads a process group, so the whole tree can be killed.
+			if (owner === undefined) delete env.PI_PROCESS_OWNER_BINARY;
+			else env.PI_PROCESS_OWNER_BINARY = owner;
 			const child: ChildProcess = fork(options.entry, [...(options.args ?? [])], {
 				env,
-				execArgv: [...(options.execArgv ?? [])],
+				execPath: owner ?? process.execPath,
+				execArgv: [
+					...(owner !== undefined
+						? ["supervise", "--control-fd", "4", "--ipc-fd", "3", "--", process.execPath]
+						: []),
+					...(options.execArgv ?? []),
+				],
 				detached: true,
-				stdio: ["ignore", options.onOutput ? "pipe" : "inherit", options.onOutput ? "pipe" : "inherit", "ipc"],
+				stdio: [
+					"ignore",
+					options.onOutput ? "pipe" : "inherit",
+					options.onOutput ? "pipe" : "inherit",
+					"ipc",
+					...(owner !== undefined ? ["pipe" as const] : []),
+				],
 			});
 			if (options.onOutput) {
 				for (const stream of ["stdout", "stderr"] as const) {
@@ -184,40 +201,188 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 					});
 				}
 			}
-			const pid = child.pid ?? -1;
+			const lease = owner !== undefined ? (child.stdio[4] as Duplex | null) : undefined;
+			let pid = owner !== undefined ? -1 : (child.pid ?? -1);
+			let primaryExit: Exit | undefined;
+			let primaryCode: number | undefined;
+			let spawnErrno: number | undefined;
+			let cleanupConfirmed = false;
+			let protocolError: Error | undefined;
+			let launchError: Error | undefined;
+			const listeners = new Set<(message: ControlMessage) => void>();
+			const deliver = (message: unknown): void => {
+				options.onMessage?.(message);
+				const control = (message as { chord2control?: ControlMessage } | null)?.chord2control;
+				if (control !== undefined) for (const listener of listeners) listener(control);
+			};
+			const queued: unknown[] = [];
+			child.on("message", (message: unknown) => {
+				if (owner !== undefined && pid < 0) queued.push(message);
+				else deliver(message);
+			});
+			const failOwner = (message: string): void => {
+				if (protocolError) return;
+				protocolError = Object.assign(new Error(message), { code: "ERR_PROCESS_OWNER_CLEANUP" });
+				lease?.destroy();
+				deliver({ chord2control: { type: "fatal", message } });
+			};
+			let buffer = "";
+			lease?.on("data", (chunk: Buffer) => {
+				if (protocolError) return;
+				try {
+					buffer += chunk.toString("utf8");
+					if (buffer.length > 4096) throw new Error("Process owner record exceeds limit");
+					for (;;) {
+						const end = buffer.indexOf("\n");
+						if (end < 0) break;
+						const line = buffer.slice(0, end);
+						buffer = buffer.slice(end + 1);
+						if (cleanupConfirmed) throw new Error("Process owner record after cleanup");
+						if (line === "C") {
+							if (!primaryExit && spawnErrno === undefined)
+								throw new Error("Early process owner cleanup record");
+							cleanupConfirmed = true;
+							continue;
+						}
+						if (primaryExit || spawnErrno !== undefined) throw new Error("Unexpected process owner record order");
+						const failure = /^E(\d+) [\s\S]*$/.exec(line);
+						if (failure) {
+							const errno = Number(failure[1]);
+							if (pid > 0 || !Number.isSafeInteger(errno) || errno <= 0 || errno > 2_147_483_647)
+								throw new Error("Invalid process owner spawn error");
+							spawnErrno = errno;
+							continue;
+						}
+						const record: unknown = JSON.parse(line.slice(1));
+						if (!record || typeof record !== "object") throw new Error("Invalid process owner record");
+						if (line.startsWith("S") && "pid" in record && pid < 0) {
+							if (typeof record.pid !== "number" || !Number.isSafeInteger(record.pid) || record.pid <= 0) {
+								throw new Error("Invalid process owner primary PID");
+							}
+							pid = record.pid;
+							for (const message of queued.splice(0)) deliver(message);
+						} else if (
+							line.startsWith("X") &&
+							"code" in record &&
+							"signal" in record &&
+							pid > 0 &&
+							!primaryExit
+						) {
+							if (
+								typeof record.code === "number" &&
+								Number.isInteger(record.code) &&
+								record.code >= 0 &&
+								record.code <= 255 &&
+								record.signal === null
+							) {
+								primaryExit = { code: record.code, signal: null };
+								primaryCode = record.code;
+							} else if (
+								record.code === null &&
+								typeof record.signal === "number" &&
+								Number.isInteger(record.signal) &&
+								record.signal > 0
+							) {
+								const signal = Object.entries(osConstants.signals).find(
+									([, number]) => number === record.signal,
+								)?.[0];
+								if (!signal) throw new Error("Unknown process owner exit signal");
+								primaryExit = { code: null, signal };
+								primaryCode = 128 + record.signal;
+							} else throw new Error("Invalid process owner exit status");
+						} else throw new Error("Unexpected process owner record");
+					}
+				} catch (error) {
+					failOwner(error instanceof Error ? error.message : String(error));
+				}
+			});
+			lease?.on("error", (error: Error) => failOwner(error.message));
 			const killGroup = (): void => {
+				if (pid <= 0) return;
 				try {
 					process.kill(-pid, "SIGKILL");
 				} catch {
 					// No group left.
 				}
 			};
-			const exited = new Promise<Exit>((resolve) => {
-				child.once("exit", (code, signal) => {
-					// However the leader ended (graceful, crash, kill), nothing it spawned outlives it.
-					killGroup();
+			const drained = lease
+				? new Promise<void>((resolve) => {
+						let finished = false;
+						const finish = (eof: boolean): void => {
+							if (finished) return;
+							finished = true;
+							if (!eof) failOwner("Process owner cleanup unconfirmed: control closed before EOF");
+							else if (buffer !== "" || !cleanupConfirmed)
+								failOwner("Process owner cleanup unconfirmed: incomplete report");
+							resolve();
+						};
+						lease.once("end", () => finish(true));
+						lease.once("close", () => finish(false));
+					})
+				: Promise.resolve();
+			const closed = new Promise<Exit>((resolve) => {
+				child.once("error", (error: Error) => {
+					if (owner !== undefined) {
+						if (child.pid === undefined && pid < 0) {
+							launchError = error;
+							lease?.destroy();
+							deliver({ chord2control: { type: "fatal", message: error.message } });
+						} else failOwner(error.message);
+					} else if (child.pid === undefined) resolve({ code: 125, signal: null });
+				});
+				child.once(owner !== undefined ? "close" : "exit", (code, signal) => {
+					if (owner === undefined) killGroup();
 					resolve({ code, signal });
 				});
 			});
-			const listeners = new Set<(message: ControlMessage) => void>();
-			child.on("message", (message) => {
-				options.onMessage?.(message);
-				const control = (message as { chord2control?: ControlMessage } | null)?.chord2control;
-				if (control !== undefined) for (const listener of listeners) listener(control);
-			});
+			const exited =
+				owner === undefined
+					? closed
+					: Promise.all([closed, drained]).then(([helper]) => {
+							lease?.destroy();
+							if (launchError) throw launchError;
+							if (!cleanupConfirmed || (!primaryExit && spawnErrno === undefined))
+								failOwner("Process owner cleanup unconfirmed: incomplete report");
+							if (helper.signal !== null || helper.code !== (spawnErrno === undefined ? primaryCode : 125))
+								failOwner(
+									`Process owner cleanup unconfirmed: unexpected helper exit ${helper.signal ?? helper.code}`,
+								);
+							if (protocolError) throw protocolError;
+							if (spawnErrno !== undefined) {
+								const code =
+									Object.entries(osConstants.errno).find(([, number]) => number === spawnErrno)?.[0] ??
+									"UNKNOWN";
+								throw Object.assign(new Error(`spawn ${process.execPath} ${code}`), {
+									code,
+									errno: -spawnErrno,
+									syscall: `spawn ${process.execPath}`,
+									path: process.execPath,
+									spawnargs: [...(options.execArgv ?? []), options.entry, ...(options.args ?? [])],
+								});
+							}
+							return primaryExit!;
+						});
+			// Direct driver users may attach their exit observer after readiness.
+			void exited.catch(() => {});
 			const send = (message: ControlMessage): void => {
 				// A child that exited before the channel reported it fails the write (EPIPE): its exit is what counts.
 				if (child.connected) child.send({ chord2control: message }, ignoreSendError);
 			};
 			if (options.init !== undefined) send({ type: "init", value: options.init });
 			return {
-				pid,
+				get pid() {
+					return pid;
+				},
 				link: ipcLink(child as unknown as IpcChannel),
 				exited,
 				send,
 				killTree: () => {
+					if (owner !== undefined) {
+						if (lease?.writable && !lease.destroyed && !lease.writableEnded) lease.end("K");
+						return;
+					}
 					try {
-						process.kill(-pid, "SIGKILL");
+						if (pid > 0) process.kill(-pid, "SIGKILL");
 					} catch {
 						child.kill("SIGKILL");
 					}
@@ -286,13 +451,17 @@ export function createHostManager(options: HostManagerOptions): HostManager {
 		if (timer !== undefined) clearInterval(timer);
 		current.send({ type: "shutdown" });
 		let graceTimer: ReturnType<typeof setTimeout> | undefined;
-		const graceful = await Promise.race([
-			current.exited.then(() => true),
-			new Promise<boolean>((resolve) => {
-				graceTimer = setTimeout(() => resolve(false), options.grace ?? 5000);
-			}),
-		]);
-		clearTimeout(graceTimer);
+		let graceful: boolean;
+		try {
+			graceful = await Promise.race([
+				current.exited.then(() => true),
+				new Promise<boolean>((resolve) => {
+					graceTimer = setTimeout(() => resolve(false), options.grace ?? 5000);
+				}),
+			]);
+		} finally {
+			clearTimeout(graceTimer);
+		}
 		if (!graceful) current.killTree();
 		await current.exited;
 		if (instance === current) instance = undefined;
@@ -300,7 +469,10 @@ export function createHostManager(options: HostManagerOptions): HostManager {
 	};
 
 	const doStart = async (): Promise<Instance> => {
-		if (instance !== undefined && status === "running") return instance;
+		if (instance !== undefined) {
+			if (status === "running") return instance;
+			await doStop();
+		}
 		status = "starting";
 		booting = true;
 		report = { activeCalls: 0, viewers: 0, durableTasks: 0 };
@@ -313,14 +485,28 @@ export function createHostManager(options: HostManagerOptions): HostManager {
 			throw error;
 		}
 		instance = current;
-		current.exited.then((exit) => {
-			if (instance === current) {
-				instance = undefined;
-				status = "stopped";
+		current.exited.then(
+			(exit) => {
+				if (instance === current) {
+					instance = undefined;
+					status = "stopped";
+					if (timer !== undefined) clearInterval(timer);
+				}
+				options.onExit?.(exit);
+			},
+			(error: unknown) => {
+				if (instance !== current) return;
+				booting = false;
 				if (timer !== undefined) clearInterval(timer);
-			}
-			options.onExit?.(exit);
-		});
+				if (error instanceof Error && "code" in error && error.code === "ERR_PROCESS_OWNER_CLEANUP") {
+					// Retain failed instance: stop/start/replace must not claim cleanup or start another host.
+					status = "stopping";
+				} else {
+					instance = undefined;
+					status = "stopped";
+				}
+			},
+		);
 		await new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(
 				() => reject(new ChordError("unavailable", "child not ready in time")),
@@ -330,10 +516,12 @@ export function createHostManager(options: HostManagerOptions): HostManager {
 				clearTimeout(timeout);
 				fn();
 			};
-			current.exited.then((exit) =>
-				settle(() =>
-					reject(new ChordError("unavailable", `child exited before ready (${exit.code ?? exit.signal})`)),
-				),
+			current.exited.then(
+				(exit) =>
+					settle(() =>
+						reject(new ChordError("unavailable", `child exited before ready (${exit.code ?? exit.signal})`)),
+					),
+				(error: unknown) => settle(() => reject(error)),
 			);
 			current.onControl((message) => {
 				if (message.type === "ready") settle(resolve);
@@ -363,7 +551,7 @@ export function createHostManager(options: HostManagerOptions): HostManager {
 		if (options.keepAlive !== undefined) {
 			const keepAlive = options.keepAlive;
 			timer = setInterval(() => {
-				if (status === "running" && !keepAlive(liveness())) void serialized(doStop);
+				if (status === "running" && !keepAlive(liveness())) void serialized(doStop).catch(() => {});
 			}, options.checkInterval ?? 1000);
 			timer.unref?.();
 		}

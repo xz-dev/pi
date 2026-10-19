@@ -10,6 +10,11 @@ mod list;
 mod output;
 mod pty;
 mod scan;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod supervise;
+#[cfg(target_os = "macos")]
+#[path = "supervise_darwin.rs"]
+mod supervise;
 mod sys;
 mod watch;
 mod window;
@@ -524,6 +529,11 @@ fn serve(token: &str) -> io::Result<()> {
 }
 
 fn main() {
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    if env::args_os().nth(1).is_some_and(|arg| arg == "supervise") {
+        let args: Vec<_> = env::args_os().skip(2).collect();
+        std::process::exit(supervise::run(&args));
+    }
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("serve") => {
