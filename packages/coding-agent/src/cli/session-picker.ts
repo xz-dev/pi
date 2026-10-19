@@ -6,6 +6,7 @@ import { setKeybindings } from "@earendil-works/pi-tui";
 import { KeybindingsManager } from "../core/keybindings.ts";
 import type { SessionInfo, SessionListProgress } from "../core/session-manager.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
+import { SelectorHost } from "../modes/interactive/components/selector-host.ts";
 import { SessionSelectorComponent } from "../modes/interactive/components/session-selector.ts";
 import { createStartupTui, startStartupTui } from "./startup-ui.ts";
 
@@ -48,7 +49,9 @@ export async function selectSession(
 			{ showRenameHint: false, keybindings },
 		);
 
-		ui.addChild(selector);
+		const host = new SelectorHost(ui, () => []);
+		host.addChild(selector);
+		ui.addChild(host);
 		ui.setFocus(selector.getSessionList());
 		startStartupTui(ui, settingsManager);
 	});
