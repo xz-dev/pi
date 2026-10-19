@@ -242,6 +242,18 @@ export const SettingsSchema = Type.Object(
 				description: 'Per-model default thinking level overrides keyed by "provider/modelId".',
 			}),
 		),
+		responseCheckpointExclude: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"Raw Responses checkpoint exclusions. Missing uses the request owner's default; [] enables eligible targets.",
+			}),
+		),
+		responseCheckpointMode: Type.Optional(
+			Type.Union([Type.Literal("always"), Type.Literal("auto"), Type.Literal("declared")], {
+				description:
+					"How eagerly durable Responses checkpoints (store:true) are requested: 'always' tries regardless of the declared capability, 'auto' skips an explicit compat.supportsResponseCheckpoints:false, 'declared' requires declared capability or the official OpenAI service. Missing uses the request owner's default (always).",
+			}),
+		),
 		transport: Type.Optional(
 			Type.Union(
 				[Type.Literal("auto"), Type.Literal("sse"), Type.Literal("websocket"), Type.Literal("websocket-cached")],
@@ -528,6 +540,7 @@ export interface CodemodeSettings extends Static<typeof CodemodeSettingsSchema> 
 export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
 export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
 export type TransportSetting = NonNullable<SettingsInput["transport"]>;
+export type ResponseCheckpointModeSetting = NonNullable<SettingsInput["responseCheckpointMode"]>;
 export type SessionShareDestination = NonNullable<SettingsInput["sessionShareDestination"]>;
 export interface BackgroundToolCallSetting extends Static<typeof BackgroundToolCallSettingSchema> {}
 export type BackgroundToolCallsSettings = Static<typeof BackgroundToolCallsSettingsSchema>;
