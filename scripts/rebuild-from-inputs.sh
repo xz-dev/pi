@@ -118,6 +118,7 @@ PATCH_ORDER=(
 	ws-cached-empty-delta
 	codex-websocket-recovery
 	responses-websocket-transport
+	request-compression
 	provider-transport-indicator
 	model-selector-refresh-selection
 	ai-drop-empty-messages
@@ -154,6 +155,7 @@ CHAIN_EDGES=(
 	retry-non-retryable-patterns:ws-cached-empty-delta
 	ws-cached-empty-delta:codex-websocket-recovery
 	codex-websocket-recovery:responses-websocket-transport
+	responses-websocket-transport:request-compression
 	responses-websocket-transport:provider-transport-indicator
 	slow-hook-tui-only:defer-threshold-compaction
 	defer-threshold-compaction:startup-submit-readiness

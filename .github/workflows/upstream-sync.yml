@@ -50,6 +50,7 @@ jobs:
             +refs/heads/patch/ws-cached-empty-delta:refs/remotes/origin/patch/ws-cached-empty-delta \
             +refs/heads/patch/codex-websocket-recovery:refs/remotes/origin/patch/codex-websocket-recovery \
             +refs/heads/patch/responses-websocket-transport:refs/remotes/origin/patch/responses-websocket-transport \
+            +refs/heads/patch/request-compression:refs/remotes/origin/patch/request-compression \
             +refs/heads/patch/provider-transport-indicator:refs/remotes/origin/patch/provider-transport-indicator \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
@@ -97,6 +98,7 @@ jobs:
             ws-cached-empty-delta \
             codex-websocket-recovery \
             responses-websocket-transport \
+            request-compression \
             provider-transport-indicator \
             model-selector-refresh-selection \
             ai-drop-empty-messages \
@@ -244,6 +246,9 @@ jobs:
               test/openai-codex-websocket-lazy.test.ts \
               test/openai-codex-websocket-recovery.test.ts \
               test/openai-codex-stream.test.ts \
+              test/request-compression.test.ts \
+              test/request-compression-loopback.test.ts \
+              test/websocket-compression.test.ts \
               test/ws-cached-stale-continuation-repro.test.ts \
               test/providers.test.ts \
               test/retry.test.ts

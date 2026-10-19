@@ -398,22 +398,32 @@ test("Codex recovery rejects a tip that skips its cache predecessor", () => {
 	}
 });
 
-test("Responses transport and indicator preserve their predecessor deltas", () => {
+test("Responses transport, compression and indicator preserve their predecessor deltas", () => {
 	const fixture = buildFixture();
-	const names = ["retry-non-retryable-patterns", "ws-cached-empty-delta", "codex-websocket-recovery", "responses-websocket-transport", "provider-transport-indicator"];
+	// Compression integrates its transport-relative range immediately after
+	// transport; indicator remains a sibling descendant of transport and its
+	// ancestry edge stays responses-websocket-transport, not compression.
+	const names = ["retry-non-retryable-patterns", "ws-cached-empty-delta", "codex-websocket-recovery", "responses-websocket-transport", "request-compression", "provider-transport-indicator"];
+	const chain = names.slice(0, 5);
 	let predecessor = "upstream-main";
 	let content = "";
 	const args = ["--upstream", fixture.upstream, "--ci", fixture.ci];
-	for (const name of names) {
+	for (const name of chain) {
 		content += `${name}\n`;
 		const branch = `patch/${name}`;
 		const tip = fixture.file("transport.txt", content, name, branch, predecessor);
 		args.push("--patch", `${name}=${tip}`);
 		predecessor = branch;
 	}
+	// Indicator is based on the transport tip (its declared predecessor), so
+	// its delta carries no compression content and applies as a clean sibling
+	// range on top of the already-integrated compression step.
+	const indicator = fixture.file("indicator.txt", "provider-transport-indicator\n", "indicator", "patch/provider-transport-indicator", "patch/responses-websocket-transport");
+	args.push("--patch", `provider-transport-indicator=${indicator}`);
 	const { target } = replay(fixture, args);
 	try {
 		assert.equal(readFileSync(join(target, "transport.txt"), "utf8"), content);
+		assert.equal(readFileSync(join(target, "indicator.txt"), "utf8"), "provider-transport-indicator\n");
 		assert.deepEqual(log(target), [
 			"base", "merge ci branch",
 			...names.map((name) => `merge patch/${name} branch`),
@@ -526,6 +536,7 @@ for (const [ancestor, descendant] of [
 	["compaction-boundary-insert", "async-compaction"],
 	["retry-non-retryable-patterns", "ws-cached-empty-delta"],
 	["codex-websocket-recovery", "responses-websocket-transport"],
+	["responses-websocket-transport", "request-compression"],
 	["responses-websocket-transport", "provider-transport-indicator"],
 ]) {
 	test(`${descendant} rejects a tip missing ${ancestor}`, () => {
@@ -616,7 +627,7 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 32);
+	assert.equal(order.length, 33);
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
 	assert.equal(order.at(-1), "env-native-test-fixtures");
