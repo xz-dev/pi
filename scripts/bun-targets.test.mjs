@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import * as path from "node:path";
 import test from "node:test";
-import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, EMULATED_SMOKE_SLOWDOWN, GITHUB_HOSTED_RUNNERS, RELEASE_BUILD, SMOKE_LIMITS, binaryArchiveName, bunBuildFlags, githubBuildMatrix, githubSmokeMatrix, isMainModulePath, smokeLimits } from "./lib/bun-targets.mjs";
+import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, binaryArchiveName, bunBuildFlags, EMULATED_SMOKE_SLOWDOWN, GITHUB_HOSTED_RUNNERS, githubBuildMatrix, githubSmokeMatrix, isMainModulePath, RELEASE_BUILD, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
 
 const EXPECTED = [
 	"freebsd-x64", "freebsd-arm64",
@@ -47,7 +47,16 @@ test("authoritative Bun target descriptors contain the exact supported matrix", 
 		assert.equal(target.filesystemHelperFile, undefined);
 		assert.equal(target.requiredCommands.some((command) => command.startsWith("win32-filesystem-snapshot") || command === "usage-claim" || command === "extract" || command === "measure-extracted-size"), false);
 		assert.ok(target.requiredCommands.includes("resource-materialization"));
+		assert.ok(target.requiredCommands.includes("owner-lifecycle"));
 		assert.match(target.clipboardNativePackage, target.os === "freebsd" ? /native-freebsd-/ : target.libc ? new RegExp(`${target.libc}$`) : /clipboard-/);
+		// cargoTarget derives from the same os/arch/libc fields (no second matrix).
+		const rustArch = target.arch === "x64" ? "x86_64" : "aarch64";
+		const expectedTriple =
+			target.os === "darwin" ? `${rustArch}-apple-darwin`
+			: target.os === "windows" ? `${rustArch}-pc-windows-msvc`
+			: target.os === "freebsd" ? `${rustArch}-unknown-freebsd`
+			: `${rustArch}-unknown-linux-${target.libc === "musl" ? "musl" : "gnu"}`;
+		assert.equal(target.cargoTarget, expectedTriple, target.id);
 	}
 	for (const group of [
 		BUN_TARGETS.filter((target) => target.os === "darwin" && target.arch === "x64"),

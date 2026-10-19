@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -14,8 +14,21 @@ export function selectExecutable(messages) {
 	return artifacts[0].executable;
 }
 
+/** CI runners only carry stable Rust: install the toolchain pinned by rust-toolchain.toml (and the cross target) there. Local builds never install. */
+function ensurePinnedToolchain(daemonDirectory) {
+	if (process.env.CI !== "true") return;
+	const channel = /channel\s*=\s*"([^"]+)"/.exec(readFileSync(join(daemonDirectory, "rust-toolchain.toml"), "utf8"))?.[1];
+	assert.ok(channel, "rust-toolchain.toml must pin a channel");
+	const install = ["toolchain", "install", channel, "--profile", "minimal"];
+	if (process.env.CARGO_BUILD_TARGET) install.push("--target", process.env.CARGO_BUILD_TARGET);
+	const result = spawnSync("rustup", install, { stdio: "inherit" });
+	if (result.error) throw result.error;
+	assert.equal(result.status, 0, `rustup could not install pinned toolchain ${channel}`);
+}
+
 export function buildProcessOwner(destinationDirectory) {
 	const manifest = fileURLToPath(new URL("../../env/daemon/Cargo.toml", import.meta.url));
+	ensurePinnedToolchain(dirname(manifest));
 	const result = spawnSync("cargo", [
 		"build", "--manifest-path", manifest, "--locked", "--release", "--message-format=json-render-diagnostics",
 	], {

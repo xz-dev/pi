@@ -24,6 +24,12 @@ trap cleanup EXIT
 curl -fL --retry 3 "https://github.com/oven-sh/bun/releases/latest/download/$bun_asset.zip" -o "$work/bun.zip"
 unzip -q "$work/bun.zip" -d "$work"
 export PATH="$work/$bun_asset:$PATH"
+# The process-owner daemon needs cargo; rustup installs the toolchain pinned by packages/env/daemon/rust-toolchain.toml.
+if ! command -v rustup >/dev/null; then
+	curl -fsSL --retry 3 https://sh.rustup.rs -o "$work/rustup-init.sh"
+	sh "$work/rustup-init.sh" -y --profile minimal --default-toolchain none --no-modify-path
+fi
+export PATH="$HOME/.cargo/bin:$PATH"
 npm ci --ignore-scripts --include=dev
 npm run hydrate:model-data
 npm run build:offline

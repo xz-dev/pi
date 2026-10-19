@@ -83,8 +83,16 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	# `/$bunfs/root/<basename>` (see config.ts getEmbeddedAssetPath). Physical
 	# resources (native .node addons, README/docs/examples) are materialized to
 	# the tmpdir cache lazily at first use.
+	# Build the process-owner daemon (feature-owned builder; absent in the CI
+	# checkout by design) into $build_dir/process-owner so it embeds under
+	# `/$bunfs/root/process-owner` and materializes to cacheRoot/process-owner.
+	# CARGO_BUILD_TARGET comes from the same target descriptor as the Bun
+	# triple, keeping the two matrices locked together.
+	cargo_target=$(node ../../scripts/lib/bun-targets.mjs --get "$target" cargoTarget)
+	CARGO_BUILD_TARGET="$cargo_target" node scripts/build-process-owner.mjs "$build_dir/process-owner"
 	asset_args=(
 		--asset="$build_dir/package.json"
+		--asset="$build_dir/process-owner"
 		--asset=README.md
 		--asset=CHANGELOG.md
 		--asset=docs
