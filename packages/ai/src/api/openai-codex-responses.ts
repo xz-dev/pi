@@ -23,10 +23,10 @@ import {
 	formatThrownValue,
 } from "../utils/diagnostics.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
+import { AssistantMessageEventStream, emitTransport, transportLabel } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
-import { createRequestCompressionFetch } from "../utils/request-compression.ts";
+import { createRequestCompressionFetch, getRequestCompressionEncoding } from "../utils/request-compression.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
 	getDeclaredTools,
@@ -518,7 +518,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			const reportSseOnce = async () => {
 				if (sseReported) return;
 				sseReported = true;
-				await emitTransport(options?.onTransport, "SSE", model);
+				await emitTransport(
+					options?.onTransport,
+					transportLabel("SSE", getRequestCompressionEncoding(response!)),
+					model,
+				);
 			};
 			if (isSseMediaType(response.headers.get("content-type"))) {
 				await reportSseOnce();

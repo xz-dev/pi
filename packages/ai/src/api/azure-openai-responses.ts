@@ -3,11 +3,11 @@ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/r
 import { clampThinkingLevel } from "../models.ts";
 import type { Api, AssistantMessage, Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
+import { AssistantMessageEventStream, emitTransport, transportLabel } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { createRequestCompressionFetch } from "../utils/request-compression.ts";
+import { createRequestCompressionFetch, getRequestCompressionEncoding } from "../utils/request-compression.ts";
 import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { type AzureEndpointOptions, resolveAzureConfig, resolveDeploymentName } from "./azure-openai-config.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
@@ -102,7 +102,11 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 			const reportSseOnce = async () => {
 				if (sseReported) return;
 				sseReported = true;
-				await emitTransport(options?.onTransport, "SSE", model);
+				await emitTransport(
+					options?.onTransport,
+					transportLabel("SSE", getRequestCompressionEncoding(response)),
+					model,
+				);
 			};
 			// Report SSE only once observed: media type proves it now, otherwise
 			// the first decoded event does (the SDK decoder keys off stream:true,
