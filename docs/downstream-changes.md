@@ -91,6 +91,18 @@ Resume stored Responses state after a socket reconnect or session restart withou
 - Details: [Settings](../packages/coding-agent/docs/settings.md#response-checkpoints), [endpoint capability](../packages/coding-agent/docs/models.md#response-checkpoint-capability), [SDK policy and repair boundaries](../packages/ai/README.md#response-checkpoints), and [maintenance ownership and validation record](../MAINTAIN.md#response-checkpoint-documentation).
 - Patch branch: [`patch/responses-websocket-transport`](https://github.com/xz-dev/pi/tree/patch/responses-websocket-transport)
 
+## Request compression
+
+Losslessly compress buffered JSON request bodies and Responses WebSocket frames to reduce upload bytes on image-heavy or long-context requests.
+
+- Use case: Shrink large JSON model uploads (base64 images, long tool loops) on bandwidth-constrained links without changing what the model receives.
+- HTTP: The shared `createRequestCompressionFetch` helper wraps buffered JSON `POST` uploads in the native Responses, Chat Completions, Azure Responses, Anthropic Messages and Codex HTTP paths. Unknown endpoints actively try `zstd` (level 3) without requiring an `Accept-Encoding` advertisement; `api.anthropic.com` starts at `gzip` level 4. The fallback ladder is `zstd → gzip → deflate → br → identity`, at level 3/4 with unprofitable bodies sent unchanged.
+- Downgrade policy: only explicit request-encoding refusal advances a process-local, per-target+auth floor — a `415` with `Accept-Encoding`, or a bounded `400`/`415` error body that names the encoding rejection. Generic `400`s, media-type-only `415`s, auth/rate-limit/network/abort failures and started streams never trigger a compressed retry; the original error response is preserved verbatim. Floors live in process memory only and never upgrade within a run.
+- WebSocket: Node/Bun Responses WebSockets negotiate `permessage-deflate` independently; a shared policy records declined extensions per target/auth scope until process exit.
+- Limits: compression is lossless — no image resizing, re-encoding, JSON changes, or token-reduction claim. Signed (`AWS4-*`, `X-Amz-Signature`), already-encoded, and non-JSON bodies bypass it. Only buffered JSON `POST`s are compressed; streaming-first codecs, OAuth, MCP, downloads and model-list GETs are not rewritten. A gateway returning only an ambiguous malformed-JSON error keeps the surfaced error instead of risking a duplicate inference. No compressed inference POST to a production gateway has been validated.
+- Companion plugin: the independent [OpenAI API plugin](https://github.com/xz-dev/openai-api-pi-extension) must be a version that exports/uses the same host compression helpers; it calls them only at its final network send while its upstream JSON codec bridge stays raw. An older plugin continues to work uncompressed.
+- Patch branch: [`patch/request-compression`](https://github.com/xz-dev/pi/tree/patch/request-compression)
+
 ## TUI and display
 
 Presentation-only changes: layout, selectors, thinking display, startup screen.

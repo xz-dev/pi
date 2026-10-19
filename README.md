@@ -35,6 +35,7 @@ Features:
 - Resume interrupted work (`/retry`, eligible sessions also recover on startup)
 - WebSocket recovery and incremental context for OpenAI Responses and Codex
 - Optional [Response checkpoints](docs/downstream-changes.md#response-checkpoints) across reconnects and session restarts
+- Lossless [request-body compression](docs/downstream-changes.md#request-compression) for model JSON posts and Responses WebSocket frames
 - Custom fail-fast patterns for terminal gateway errors
 - Actual connection and request mode beside Working (`SSE`, `WS/full`, `WS/continuation`, or another reported protocol)
 - Detach long tool calls, keep chatting (`tool_task`)
