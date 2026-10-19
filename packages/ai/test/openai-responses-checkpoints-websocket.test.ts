@@ -19,6 +19,7 @@ import { buildBaseOptions } from "../src/api/simple-options.ts";
 import type { AssistantMessage, Model, ProviderHeaders } from "../src/types.ts";
 import { getAssistantRetryPlan, retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { jsonRequestBody } from "./utils/request-body.ts";
 
 const OFFICIAL_URL = "https://api.openai.com/v1";
 const CUSTOM_URL = "https://checkpoint-gateway.example.com/v1";
@@ -3038,7 +3039,7 @@ describe("checkpoint failure cooldown", () => {
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (_input: unknown, init?: RequestInit) => {
-				bodies.push(JSON.parse(String(init?.body)));
+				bodies.push(jsonRequestBody(init));
 				return new Response(
 					'data: {"type":"response.completed","response":{"id":"resp_sse","status":"completed"}}\n\n',
 					{ headers: { "content-type": "text/event-stream" } },
@@ -3066,7 +3067,7 @@ describe("checkpoint failure cooldown", () => {
 	it("SSE fallback requests never carry the policy store", async () => {
 		const bodies: unknown[] = [];
 		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
-			bodies.push(init?.body ? JSON.parse(String(init.body)) : undefined);
+			bodies.push(init?.body ? jsonRequestBody(init) : undefined);
 			return new Response(
 				'data: {"type":"response.completed","response":{"id":"resp_sse","status":"completed"}}\n\n',
 				{ headers: { "content-type": "text/event-stream" } },
@@ -3224,7 +3225,8 @@ describe("checkpoint failure cooldown", () => {
 				headers: { "content-type": "text/event-stream" },
 			});
 		fetchMock.mockImplementation(async () => sse());
-		const run = () => stream(makeModel(OFFICIAL_URL), ctx1, { ...OPTS, timeoutMs: 0, maxRetries: 0 }).result();
+		// The HTTP SDK treats timeout:0 as immediate cancellation, not disabled timeout.
+		const run = () => stream(makeModel(OFFICIAL_URL), ctx1, { ...OPTS, maxRetries: 0 }).result();
 		await run(); // Store deadline 121000.
 		now = 61_000;
 		drop = true;
