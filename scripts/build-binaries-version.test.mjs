@@ -71,6 +71,10 @@ const files = native ? fs.readdirSync(native.slice(8), { recursive: true }).filt
 fs.writeFileSync(args[args.indexOf("--outfile") + 1], JSON.stringify(files.map(file => path.basename(file))));
 `);
     chmodSync(bun, 0o755);
+    // The FreeBSD owner NEEDED guard reads the stub helper; report a portable libc-only link.
+    const readelf = join(temporary, "readelf");
+    writeFileSync(readelf, "#!/bin/sh\necho ' 0x0000000000000001 (NEEDED)             Shared library: [libc.so.7]'\n");
+    chmodSync(readelf, 0o755);
     for (const [target, withoutX11] of [
       ["linux-x64-gnu-baseline", false],
       ["linux-x64-gnu-baseline", true],
