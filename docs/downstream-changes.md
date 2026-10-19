@@ -83,8 +83,9 @@ Manual and automatic retry of interrupted work, plus transport-level recovery.
 Resume stored Responses state after a socket reconnect or session restart without replacing local conversation history.
 
 - Use case: Send only new input after reconnecting or reopening a session when the endpoint still retains the verified response.
-- Enable: Native requests require an explicit `responseCheckpointExclude` list. Absent means disabled, `[]` enables eligible targets, and `["*"]` excludes all. The independent [OpenAI API plugin](https://github.com/xz-dev/openai-api-pi-extension) instead treats absence as `[]` and remains the sole request owner when loaded on the fork.
-- Compatibility: Use `auto` or `websocket-cached`. Custom endpoints need verified persistent Responses support and `compat.supportsResponseCheckpoints: true`; generic OpenAI compatibility or a response ID is not proof. SSE, uncached `websocket`, and unsupported Codex/ChatGPT modes retain their existing behavior.
+- Enable: Eligible cached transports default to `responseCheckpointMode: "always"` and an absent exclusion list behaves as `[]`. Use `responseCheckpointMode: "declared"` to require declared capability, or `responseCheckpointExclude: ["*"]` to opt out. See [settings](../packages/coding-agent/docs/settings.md#response-checkpoints).
+- Compatibility: Use `auto` or `websocket-cached`. In `declared` mode, custom endpoints need verified persistent Responses support and `compat.supportsResponseCheckpoints: true`; generic OpenAI compatibility or a response ID is not proof. The default `always` policy can try without that declaration. SSE, uncached `websocket`, and unsupported Codex/ChatGPT modes retain their existing behavior.
+- Companion plugin: The independent [OpenAI API plugin's checkpoint guide](https://github.com/xz-dev/openai-api-pi-extension/blob/main/docs/response-checkpoints.md) covers its settings, privacy and recovery. When loaded on the fork, that extension remains the sole request owner.
 - Privacy: Enabling checkpoints requests remote `store: true`. An explicit payload-hook `store: false` disables durable use and capture; a server's `store: false` prevents capture. Check the service's retention policy before enabling this.
 - History: Full session JSONL remains canonical. Bounded assistant metadata is reused only after exact active-branch, request and credential/endpoint scope validation; invalid metadata falls back to full history. There is no side database.
 - Limits: No universal retention time, prompt/KV-cache hit, reduced billing, or live-service durability guarantee. Existing validation uses loopback fixtures, not every real gateway or account-isolation policy.
@@ -93,14 +94,10 @@ Resume stored Responses state after a socket reconnect or session restart withou
 
 ## Request compression
 
-Losslessly compress buffered JSON request bodies and Responses WebSocket frames to reduce upload bytes on image-heavy or long-context requests.
+Losslessly reduce model-upload bytes without changing JSON or image data. HTTP senders use a conservative encoding fallback policy; Responses WebSockets negotiate compression separately.
 
-- Use case: Shrink large JSON model uploads (base64 images, long tool loops) on bandwidth-constrained links without changing what the model receives.
-- HTTP: The shared `createRequestCompressionFetch` helper wraps buffered JSON `POST` uploads in the native Responses, Chat Completions, Azure Responses, Anthropic Messages and Codex HTTP paths. Unknown endpoints actively try `zstd` (level 3) without requiring an `Accept-Encoding` advertisement; `api.anthropic.com` starts at `gzip` level 4. The fallback ladder is `zstd → gzip → deflate → br → identity`, at level 3/4 with unprofitable bodies sent unchanged.
-- Downgrade policy: only explicit request-encoding refusal advances a process-local, per-target+auth floor — a `415` with `Accept-Encoding`, or a bounded `400`/`415` error body that names the encoding rejection. Generic `400`s, media-type-only `415`s, auth/rate-limit/network/abort failures and started streams never trigger a compressed retry; the original error response is preserved verbatim. Floors live in process memory only and never upgrade within a run.
-- WebSocket: Node/Bun Responses WebSockets negotiate `permessage-deflate` independently; a shared policy records declined extensions per target/auth scope until process exit.
-- Limits: compression is lossless — no image resizing, re-encoding, JSON changes, or token-reduction claim. Signed (`AWS4-*`, `X-Amz-Signature`), already-encoded, and non-JSON bodies bypass it. Only buffered JSON `POST`s are compressed; streaming-first codecs, OAuth, MCP, downloads and model-list GETs are not rewritten. A gateway returning only an ambiguous malformed-JSON error keeps the surfaced error instead of risking a duplicate inference. One bounded synthetic zstd inference POST was accepted by a real gateway without an `Accept-Encoding` response; this does not establish support for every gateway, provider, account, or proxy.
-- Companion plugin: update the independent [OpenAI API plugin](https://github.com/xz-dev/openai-api-pi-extension) with a matching host that exports both compression helpers. The plugin applies HTTP compression only at its final network send while its upstream JSON codec bridge stays raw. Older bridge revisions do not opt their custom HTTP fallback path into the shared helper.
+- Details: [Request compression](request-compression.md) — supported paths, codec levels, refusal rules and compatibility limits.
+- Companion plugin: [Host requirements and bridge integration](https://github.com/xz-dev/openai-api-pi-extension/blob/main/docs/request-compression.md).
 - Patch branch: [`patch/request-compression`](https://github.com/xz-dev/pi/tree/patch/request-compression)
 
 ## TUI and display
