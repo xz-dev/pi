@@ -15,6 +15,7 @@ import type { Api, Context, Model } from "../src/types.ts";
 import { formatUserAgent } from "../src/utils/identity.ts";
 import { retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { waitForNativeIo } from "./utils/native-io.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
@@ -2552,7 +2553,7 @@ describe("openai-codex streaming", () => {
 			transport: "sse",
 			maxRetries: 1,
 		}).result();
-		await vi.advanceTimersByTimeAsync(0);
+		await waitForNativeIo(() => setTimeoutSpy.mock.calls.some((call) => call[1] === expectedDelay));
 		expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), expectedDelay);
 
 		await vi.advanceTimersToNextTimerAsync();
@@ -2736,13 +2737,15 @@ describe("openai-codex streaming", () => {
 			transport: "sse",
 			maxRetries: 3,
 		}).result();
-		await vi.advanceTimersByTimeAsync(0);
+		await waitForNativeIo(() => retryTimeoutDelays().length === 1);
 		expect(retryTimeoutDelays()).toEqual([1000]);
 
 		await vi.advanceTimersToNextTimerAsync();
+		await waitForNativeIo(() => retryTimeoutDelays().length === 2);
 		expect(retryTimeoutDelays()).toEqual([1000, 2000]);
 
 		await vi.advanceTimersToNextTimerAsync();
+		await waitForNativeIo(() => retryTimeoutDelays().length === 3);
 		expect(retryTimeoutDelays()).toEqual([1000, 2000, 4000]);
 
 		await vi.advanceTimersToNextTimerAsync();
