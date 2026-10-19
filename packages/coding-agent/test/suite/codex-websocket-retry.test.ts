@@ -4,6 +4,7 @@ import {
 	stream,
 } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitForNativeIo } from "../../../ai/test/utils/native-io.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const apiKey = `aaa.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "offline-test" } })).toString("base64")}.bbb`;
@@ -86,6 +87,10 @@ describe("Codex retries through Pi settings", () => {
 			vi.useFakeTimers();
 			const request = harness.session.prompt("Keep this user input");
 			await vi.advanceTimersByTimeAsync(100);
+			await waitForNativeIo(() => fetchMock.mock.calls.length >= 1);
+			await vi.advanceTimersByTimeAsync(100);
+			if (enabled) await waitForNativeIo(() => fetchMock.mock.calls.length >= 2);
+			await vi.advanceTimersByTimeAsync(0);
 			await request;
 			expect(sent).toHaveLength(4);
 			expect(fetchMock).toHaveBeenCalledTimes(enabled ? 2 : 1);
