@@ -148,3 +148,17 @@ export async function emitTransport<TModel>(
 		await hook(transport, model);
 	} catch {}
 }
+
+const UPLOAD_ENCODING_LABELS: Record<string, string> = {
+	zstd: "Zstd",
+	gzip: "gzip",
+	deflate: "DEFLATE",
+	br: "Brotli",
+};
+
+/** Append the standard algorithm name only for a known upload encoding. */
+export function transportLabel(label: string, encoding: string | undefined): string {
+	return encoding && Object.hasOwn(UPLOAD_ENCODING_LABELS, encoding)
+		? `${label} ${UPLOAD_ENCODING_LABELS[encoding]}`
+		: label;
+}
