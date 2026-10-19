@@ -100,7 +100,7 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { McpHttpServerConfig } from "../../core/mcp-servers.ts";
-import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
+import { createCustomMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -112,6 +112,7 @@ import { RADIUS_MCP_URL, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
+	getEntriesAfterLatestCompaction,
 	type SessionEntry,
 	SessionManager,
 	sessionEntryToContextMessages,
@@ -3691,24 +3692,13 @@ export class InteractiveMode {
 				} else if (event.entry.type === "compaction") {
 					const entries = this.sessionManager.buildContextEntries();
 					if (entries[0]?.id !== event.entry.id) break;
+					// The summary precedes the entries it keeps, as on reload.
 					this.chatContainer.clear();
-					const branch = this.sessionManager.getBranch();
-					const compactionIndex = branch.findIndex((entry) => entry.id === event.entry.id);
-					const entriesAfterCompaction = new Set(branch.slice(compactionIndex + 1).map((entry) => entry.id));
-					const retainedEntries = entries.slice(1);
-					this.renderSessionEntries(retainedEntries.filter((entry) => !entriesAfterCompaction.has(entry.id)));
-					this.addMessageToChat(
-						createCompactionSummaryMessage(event.entry.summary, event.entry.tokensBefore, event.entry.timestamp),
-					);
-					if (event.entry.usage) {
-						this.addCompactionCostNotice({
-							type: "compaction_cost",
-							kind: "compaction",
-							usage: event.entry.usage,
-						});
+					this.renderSessionEntries(entries);
+					// Entries recorded after the summary in the same boundary batch arrive as later events.
+					for (const entry of getEntriesAfterLatestCompaction(this.sessionManager.getBranch()) ?? []) {
+						this.entriesRenderedByBoundaryCompaction.add(entry.id);
 					}
-					this.renderSessionEntries(retainedEntries.filter((entry) => entriesAfterCompaction.has(entry.id)));
-					for (const entryId of entriesAfterCompaction) this.entriesRenderedByBoundaryCompaction.add(entryId);
 					this.footer.invalidate();
 					this.ui.requestRender();
 				}
@@ -3958,23 +3948,9 @@ export class InteractiveMode {
 					if (entries[0]?.type !== "compaction") {
 						throw new Error("Completed compaction is missing from the session context");
 					}
+					// The summary precedes the entries it keeps, as on reload.
 					this.chatContainer.clear();
-					// The latest compaction is prepended for model context; append it below at its chronological position.
-					this.renderSessionEntries(entries.slice(1));
-					this.addMessageToChat(
-						createCompactionSummaryMessage(
-							event.result.summary,
-							event.result.tokensBefore,
-							new Date().toISOString(),
-						),
-					);
-					if (event.result.usage) {
-						this.addCompactionCostNotice({
-							type: "compaction_cost",
-							kind: "compaction",
-							usage: event.result.usage,
-						});
-					}
+					this.renderSessionEntries(entries);
 					this.footer.invalidate();
 				} else if (event.errorMessage) {
 					if (event.reason === "manual") {
