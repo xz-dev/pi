@@ -6,7 +6,7 @@ import NodeWebSocket from "ws";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type { Api, AssistantMessage, Model, ProviderEnv, ResponseCheckpoint, StreamOptions } from "../types.ts";
 import { formatThrownValue } from "../utils/diagnostics.ts";
-import { type AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
+import { type AssistantMessageEventStream, emitTransport, transportLabel } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import {
@@ -18,7 +18,7 @@ import {
 	sha256Hex,
 } from "../utils/response-checkpoints.ts";
 import { CODEX_AUTO_WEBSOCKET_RETRIES } from "../utils/retry.ts";
-import { getWebSocketCompressionPolicy } from "../utils/websocket-compression.ts";
+import { getWebSocketCompressionEncoding, getWebSocketCompressionPolicy } from "../utils/websocket-compression.ts";
 
 // ============================================================================
 // Shared Responses WebSocket transport
@@ -1400,7 +1400,14 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		});
 	}
 	config.onPlanned?.(fullHistory, storedReference);
-	await emitTransport(onTransport, requestBody.previous_response_id ? "WS/continuation" : "WS/full", model);
+	await emitTransport(
+		onTransport,
+		transportLabel(
+			requestBody.previous_response_id ? "WS/continuation" : "WS/full",
+			getWebSocketCompressionEncoding(socket.extensions),
+		),
+		model,
+	);
 	transportCleared = false;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(getScope(scope), cacheSessionId) : undefined;
 	if (stats) {
