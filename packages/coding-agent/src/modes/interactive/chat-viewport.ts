@@ -1,4 +1,5 @@
 import {
+	BoundedHost,
 	type Component,
 	Container,
 	ScrollView,
@@ -58,7 +59,13 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 	};
 	const showExtras = () => transcript.isFollowingEnd || expanded;
 	const showDock = () => showExtras() || getCompactEditor() !== undefined;
-	const editorView = new (class extends Container {
+	const editorView = new (class extends BoundedHost {
+		override renderInBounds(width: number, height: number): string[] {
+			// Keep the reading-mode draft projection; expanded selectors receive
+			// the dock's actual allocation through the extra wrapper.
+			return showExtras() ? super.renderInBounds(width, height) : this.render(width);
+		}
+
 		override render(width: number): string[] {
 			const editor = transcript.isFollowingEnd || expanded ? undefined : getCompactEditor();
 			if (!editor) return super.render(width);
