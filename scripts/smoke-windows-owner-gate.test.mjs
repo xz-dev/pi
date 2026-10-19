@@ -176,6 +176,13 @@ test("Bun JUnit accepts the cwd-relative test file Bun writes, and nothing else"
 	for (const path of ["packages\\coding-agent\\test\\windows-owner-runtime.mjs", "packages/coding-agent/test/windows-owner-runtime.mjs", file]) assert.equal(parseBunOwnerGate(xml(path), "", file, work).counts.passed, WINDOWS_OWNER_TEST_NAMES.length);
 	for (const path of ["windows-owner-runtime.mjs", "other\\windows-owner-runtime.mjs", "C:\\elsewhere\\packages\\coding-agent\\test\\windows-owner-runtime.mjs"]) assert.throws(() => parseBunOwnerGate(xml(path), "", file, work), /unexpected test file|testcase identity/);
 });
+test("Node gate failures keep a bounded cause, and each runtime has an independent budget", async () => {
+	const { default: reporter } = await import("./smoke-windows-owner-gate.mjs");
+	async function* events() { yield { type: "test:fail", data: { name: "x", details: { error: { cause: new Error("why it failed") } } } }; }
+	let line = ""; for await (const chunk of reporter(events())) line += chunk;
+	assert.equal(parseWindowsOwnerGate(line).tests[0].error.includes("why it failed"), true);
+	assert.ok(windowsOwnerGateCommand("/work", "/node").includes("--test-force-exit"));
+});
 test("Node gate reporter is passed as a file URL (Windows drive paths are rejected by the ESM loader)", () => {
 	const command = windowsOwnerGateCommand("/work", "/node");
 	assert.match(command.find((arg) => arg.startsWith("--test-reporter=")), /^--test-reporter=file:\/\//);

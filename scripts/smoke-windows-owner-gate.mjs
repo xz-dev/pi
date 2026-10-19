@@ -25,7 +25,12 @@ export const WINDOWS_OWNER_TEST_NAMES = [
 // Node's built-in reporter API keeps per-test results separate from fixture stdout.
 export default async function* reporter(events) {
 	for await (const event of events) {
-		if (["test:pass", "test:fail", "test:stdout", "test:stderr", "test:summary"].includes(event.type)) yield `${JSON.stringify(event)}\n`;
+		if (event.type === "test:fail") {
+			// Keep the failure cause (bounded) so CI diagnostics show why, not only which, test failed.
+			const error = event.data.details?.error;
+			const cause = error?.cause ?? error;
+			yield `${JSON.stringify({ type: event.type, data: { name: event.data.name, skip: event.data.skip, todo: event.data.todo, error: String(cause?.stack ?? cause?.message ?? cause ?? error).slice(0, 4000) } })}\n`;
+		} else if (["test:pass", "test:stdout", "test:stderr", "test:summary"].includes(event.type)) yield `${JSON.stringify(event)}\n`;
 	}
 }
 
@@ -97,7 +102,7 @@ export function stageWindowsOwnerGate(work, { env, run, source = fileURLToPath(n
 export function windowsOwnerGateCommand(work, runtime = process.execPath, name = "node") {
 	const file = join(work, "packages", "coding-agent", "test", "windows-owner-runtime.mjs");
 	if (name === "bun") return [runtime, "test", "--reporter=junit", `--reporter-outfile=${join(work, "bun-junit.xml")}`, "--timeout", "60000", file];
-	return [runtime, "--experimental-strip-types", "--test", "--test-concurrency=1", `--test-reporter=${pathToFileURL(join(work, "scripts", "smoke-windows-owner-gate.mjs")).href}`, file];
+	return [runtime, "--experimental-strip-types", "--test", "--test-concurrency=1", "--test-force-exit", `--test-reporter=${pathToFileURL(join(work, "scripts", "smoke-windows-owner-gate.mjs")).href}`, file];
 }
 
 function gateObservations(tests, logs) {
@@ -115,7 +120,7 @@ export function parseWindowsOwnerGate(stdout) {
 		const event = JSON.parse(line);
 		if (event.type === "test:stdout" || event.type === "test:stderr") logs += event.data.message;
 		if (event.type === "test:summary") summaries.push(event.data);
-		if (event.type === "test:pass" || event.type === "test:fail") tests.push({ name: event.data.name, status: event.data.skip ? "skipped" : event.data.todo ? "todo" : event.type === "test:pass" ? "passed" : "failed" });
+		if (event.type === "test:pass" || event.type === "test:fail") tests.push({ name: event.data.name, status: event.data.skip ? "skipped" : event.data.todo ? "todo" : event.type === "test:pass" ? "passed" : "failed", ...(event.data.error ? { error: event.data.error } : {}) });
 	}
 	return { ...gateObservations(tests, logs), summaries };
 }
@@ -202,7 +207,8 @@ export function smokeWindowsOwnerGate(executable, target, owner, identity, { wor
 					rmSync(join(work, "bun-junit.xml"), { force: true });
 				}
 				runtime.command = windowsOwnerGateCommand(work, runtime.name === "bun" ? runtime.runnerBunPath : process.execPath, runtime.name);
-				const remaining = Math.floor(WINDOWS_OWNER_GATE_TIMEOUT_MS - 60_000 - (performance.now() - started));
+				// Each runtime gets an equal share, so a hung Node half cannot starve the Bun half.
+				const remaining = Math.min(Math.floor(WINDOWS_OWNER_GATE_TIMEOUT_MS - 60_000 - (performance.now() - started)), Math.floor((WINDOWS_OWNER_GATE_TIMEOUT_MS - 60_000) / evidence.runtimes.length));
 				if (remaining <= 0) throw new Error("Windows gate runtime budget exhausted");
 				const result = run(runtime.command[0], runtime.command.slice(1), { encoding: "utf8", timeout: remaining, maxBuffer: 16 * 1024 * 1024, cwd: work, env: { ...env, NODE_OPTIONS: "", PI_WINDOWS_OWNER_ARTIFACT: target.id, PI_PROCESS_OWNER_TEST_BINARY: owner, PI_WINDOWS_OWNER_TEST_CLI: executable } });
 				runtime.exitCode = result.status;

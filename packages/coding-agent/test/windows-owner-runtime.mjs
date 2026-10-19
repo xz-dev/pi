@@ -274,7 +274,7 @@ test("direct Node/Bun fork message, TCP handle transfer and disconnect through a
 			opened.creationTime >= beforeFork - 16 && opened.creationTime <= afterFork &&
 			child.exitCode === null && child.signalCode === null;
 		scope.lease.write(valid ? "permit\n" : "deny\n");
-		assert.ok(valid, "attach identity denied");
+		assert.ok(valid, `attach identity denied: ${JSON.stringify({ opened, pid: child.pid, parentPid: process.pid, beforeFork, afterFork, exitCode: child.exitCode, signalCode: child.signalCode })}`);
 		assert.equal(scope.wire.includes("S{"), false, "opened must precede assignment");
 		await until(() => scope.wire.includes("\nS"), "attach failed before first IPC message");
 		child.send({ kind: "echo", value: "世界" });
