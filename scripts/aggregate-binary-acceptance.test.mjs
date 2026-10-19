@@ -34,7 +34,7 @@ function record(target, assetIdentity) {
 		},
 		ownerLifecycle: {
 			status: "passed",
-			identity: { elevated: false },
+			identity: { elevated: false, ...(target.os === "windows" ? { mediumIntegrity: true } : {}) },
 			rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(target.os === "darwin" ? ["darwin-fast-escape"] : [])].map((name) => ({ name, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", limitation: name === "darwin-fast-escape" ? "unseen setsid escape" : undefined, aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })),
 		},
 		commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })),
@@ -217,6 +217,20 @@ for (const [label, mutate] of [
 		const result = runAggregator(value);
 		assert.notEqual(result.status, 0);
 		assert.match(result.stderr, /clipboard|native helper|musl library/);
+	} finally { rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("aggregator rejects Windows owner identity without medium integrity evidence", () => {
+	const value = fixture();
+	try {
+		const target = BUN_TARGETS.find(({ os }) => os === "windows");
+		const path = join(value.records, `${target.id}.json`);
+		const changed = JSON.parse(readFileSync(path, "utf8"));
+		delete changed.ownerLifecycle.identity.mediumIntegrity;
+		writeFileSync(path, JSON.stringify(changed));
+		const result = runAggregator(value);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /owner lifecycle missing nonadmin identity/);
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 

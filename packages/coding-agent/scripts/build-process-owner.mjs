@@ -17,6 +17,8 @@ export function selectExecutable(messages) {
 /** CI runners only carry stable Rust: install the toolchain pinned by rust-toolchain.toml (and the cross target) there. Local builds never install. */
 function ensurePinnedToolchain(daemonDirectory) {
 	if (process.env.CI !== "true") return;
+	// freebsd-release.sh sets this where rustup has no host toolchain; packaged cargo ignores rust-toolchain.toml.
+	if (process.env.PI_XZ_UNPINNED_RUST) return;
 	const channel = /channel\s*=\s*"([^"]+)"/.exec(readFileSync(join(daemonDirectory, "rust-toolchain.toml"), "utf8"))?.[1];
 	assert.ok(channel, "rust-toolchain.toml must pin a channel");
 	const install = ["toolchain", "install", channel, "--profile", "minimal"];

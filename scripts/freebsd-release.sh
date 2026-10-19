@@ -25,11 +25,18 @@ curl -fL --retry 3 "https://github.com/oven-sh/bun/releases/latest/download/$bun
 unzip -q "$work/bun.zip" -d "$work"
 export PATH="$work/$bun_asset:$PATH"
 # The process-owner daemon needs cargo; rustup installs the toolchain pinned by packages/env/daemon/rust-toolchain.toml.
-if ! command -v rustup >/dev/null; then
-	curl -fsSL --retry 3 https://sh.rustup.rs -o "$work/rustup-init.sh"
-	sh "$work/rustup-init.sh" -y --profile minimal --default-toolchain none --no-modify-path
+if [[ $target == freebsd-x64 ]]; then
+	if ! command -v rustup >/dev/null; then
+		curl -fsSL --retry 3 https://sh.rustup.rs -o "$work/rustup-init.sh"
+		sh "$work/rustup-init.sh" -y --profile minimal --default-toolchain none --no-modify-path
+	fi
+	export PATH="$HOME/.cargo/bin:$PATH"
+else
+	# rustup ships no aarch64-unknown-freebsd host (tier 3): use FreeBSD's packaged Rust, recorded as unpinned.
+	command -v cargo >/dev/null || pkg install -y rust
+	export PI_XZ_UNPINNED_RUST="$(rustc --version)"
+	echo "Unpinned system Rust for $target: $PI_XZ_UNPINNED_RUST"
 fi
-export PATH="$HOME/.cargo/bin:$PATH"
 npm ci --ignore-scripts --include=dev
 npm run hydrate:model-data
 npm run build:offline

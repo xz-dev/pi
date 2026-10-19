@@ -125,10 +125,9 @@ try {
 	if (!help.stdout.includes("Usage") && !help.stdout.includes("pi")) throw new Error("help output was not recognized");
 	const listModels = run("list-models", executable, ["--list-models"], { env, maxMs: SMOKE_LIMITS.listModelsMs });
 	if (!listModels.stdout.trim()) throw new Error("list-models produced no output");
-	// The musl container starts as root; its owner probe drops to nobody before spawning Pi.
-	chmodSync(work, 0o755);
+	// The owner probe provisions a standard CI user when this host token is privileged.
 	const ownerStarted = performance.now();
-	const ownerResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), executable, targetId, ownerEvidencePath], { encoding: "utf8", env, timeout: (target.emulated ? 950_000 : 320_000) });
+	const ownerResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), executable, targetId, ownerEvidencePath], { encoding: "utf8", env, timeout: (target.emulated ? 1_100_000 : 460_000) });
 	try { ownerLifecycle = JSON.parse(ownerResult.stdout.trim().split(/\r?\n/).at(-1)); } catch {}
 	commands.push({ name: "owner-lifecycle", command: `${process.execPath} smoke-owner-lifecycle.mjs ${executable}`, status: ownerResult.status, elapsedMs: Math.round(performance.now() - ownerStarted) });
 	if (ownerResult.status !== 0 || ownerLifecycle?.status !== "passed") throw new Error(`owner lifecycle failed: ${ownerResult.stderr || ownerLifecycle?.error || ownerResult.error?.message || "missing evidence"}`);
@@ -191,7 +190,7 @@ try {
 		schemaVersion: 1, target: targetId, version: expectedVersion,
 		asset: { file: basename(asset), sha256: sha256(asset), bytes: assetBytes },
 		runner: { name: process.env.RUNNER_NAME ?? "local", os: process.env.RUNNER_OS ?? platform(), arch: process.env.RUNNER_ARCH ?? osArchitecture, osArchitecture, imageOs: process.env.ImageOS ?? null, imageVersion: process.env.ImageVersion ?? null, cpuModel: cpus()[0]?.model ?? "unknown", cpuFeatures: cpuFeatures(), libc: target.libc ?? null },
-		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, libraries: muslLibraries, emulated: target.emulated },
+		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, libraries: muslLibraries, emulated: target.emulated, ...(process.env.PI_XZ_UNPINNED_RUST ? { unpinnedRust: process.env.PI_XZ_UNPINNED_RUST } : {}) },
 		commands, tui, clipboard, ownerLifecycle,
 		timingsMs: { coldVersion: coldVersion.elapsedMs, version: version.elapsedMs, help: help.elapsedMs, listModels: listModels.elapsedMs, interactive: commands.filter(({ name }) => name.startsWith("tui-")).reduce((sum, entry) => sum + entry.elapsedMs, 0) },
 		limits: SMOKE_LIMITS,
