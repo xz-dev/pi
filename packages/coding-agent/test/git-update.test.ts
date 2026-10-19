@@ -391,15 +391,28 @@ describe("DefaultPackageManager git update", () => {
 			const otherRemote = join(tempDir, "other-remote");
 			mkdirSync(otherRemote, { recursive: true });
 			initGitRepo(otherRemote);
-			const otherHead = createCommit(otherRemote, "extension.ts", "// other", "other commit");
+			createCommit(otherRemote, "extension.ts", "// other", "other commit");
 			const otherDir = join(agentDir, "git", "github.com", "test", "other");
 			git(["clone", otherRemote, otherDir], tempDir);
+			// Advance after cloning so an unfinished update cannot pass as already up to date.
+			const otherHead = createCommit(otherRemote, "extension.ts", "// other v2", "other second commit");
 			settingsManager.setPackages([gitSource, otherSource]);
 
 			recordSleeps();
 			const internals = packageManager as unknown as RunCommandInternals;
 			const original = internals.runCommand.bind(packageManager);
 			const fetchesByDir = new Map<string, number>();
+			const otherUpdateCompleted = new Promise<boolean>((resolve) => {
+				packageManager.setProgressCallback((event) => {
+					if (
+						event.action === "update" &&
+						event.source === otherSource &&
+						(event.type === "complete" || event.type === "error")
+					) {
+						resolve(event.type === "complete");
+					}
+				});
+			});
 			vi.spyOn(internals, "runCommand").mockImplementation((command, args, options) => {
 				if (command === "git" && args[0] === "fetch" && options?.cwd) {
 					const count = (fetchesByDir.get(options.cwd) ?? 0) + 1;
@@ -414,10 +427,12 @@ describe("DefaultPackageManager git update", () => {
 			await expect(packageManager.update()).rejects.toThrow("TLS EOF");
 
 			expect(fetchesByDir.get(installedDir)).toBe(4);
-			// The rejected Promise.all does not cancel the still-running sibling task.
-			await vi.waitFor(() => expect(fetchesByDir.get(otherDir)).toBe(1));
+			// Rejection does not cancel the sibling; drain its terminal event before cleanup.
+			expect(await otherUpdateCompleted).toBe(true);
+			expect(fetchesByDir.get(otherDir)).toBe(1);
 			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 			expect(getCurrentCommit(otherDir)).toBe(otherHead);
+			expect(getFileContent(otherDir, "extension.ts")).toBe("// other v2");
 		});
 	});
 });
