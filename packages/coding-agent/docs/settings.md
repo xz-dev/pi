@@ -143,6 +143,16 @@ See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and p
 | `retry.provider.maxRetries` | number | `0` | Provider-level retry attempts. |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Maximum server-requested delay in milliseconds. Set to `0` to disable the limit. |
 
+### Request compression
+
+Buffered JSON uploads in the OpenAI Responses, Chat Completions, Azure Responses, Anthropic Messages, and Codex HTTP adapters use lossless request compression. Unknown endpoints are actively tried with zstd level 3 without requiring an `Accept-Encoding` response header; `api.anthropic.com` starts with gzip level 4. Explicit encoding refusals can step down through gzip, deflate, Brotli, then uncompressed JSON. A payload that would grow after compression is sent unchanged.
+
+Codec rejection state stays in process memory, isolated by request target and credentials. It is not saved to settings or sessions and never automatically upgrades after a rejection. Authentication, rate-limit, server, network, cancellation, and started-stream failures do not trigger compression-specific replay. A generic malformed-JSON error does not prove encoding refusal and is surfaced rather than guessed around.
+
+Node/Bun Responses WebSockets independently negotiate `permessage-deflate`; they do not use HTTP gzip/zstd bodies. A declined extension remains disabled for that target and credential scope until process exit. Compression changes neither JSON/image bytes nor token usage, and is separate from context compaction and transport/checkpoint cooldowns.
+
+SDK callers that supply custom `fetch` own its encoding (Codex preserves its existing encoded custom-fetch contract). Codec-bridge plugins should apply the public `createRequestCompressionFetch` helper only at their final HTTP sender; they can share `getWebSocketCompressionPolicy` for WS negotiation. There is no new compression setting.
+
 ### Response checkpoints
 
 Durable Responses checkpoints are requested by default (`responseCheckpointMode: "always"`): eligible `auto`/`websocket-cached` requests ask the service to store state (`store: true`) so the next turn sends only `previous_response_id` plus the delta. Set `"responseCheckpointMode": "declared"` to require `compat.supportsResponseCheckpoints: true` (or the official OpenAI service), or `"auto"` to skip endpoints that explicitly declare `supportsResponseCheckpoints: false`. SSE, uncached `websocket`, Codex/ChatGPT modes, any `chatgpt.com` base URL,
