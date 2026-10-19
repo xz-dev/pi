@@ -93,7 +93,8 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	if [[ $target == freebsd-* ]]; then
 		# One artifact must run on every supported FreeBSD release; libutil.so.9 (14) became .10 (15).
 		# Assignment (not a for-list) so a readelf failure stops the build under set -e/pipefail.
-		needed=$(readelf -d "$build_dir/process-owner/pi-env" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+		# LLVM readelf (FreeBSD 15) prints "(NEEDED)"; ELF Tool Chain readelf (14) prints "NEEDED" without parentheses.
+		needed=$(readelf -d "$build_dir/process-owner/pi-env" | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }')
 		[[ $needed == *libc.so.7* ]] || { echo "process-owner NEEDED check found no libc.so.7" >&2; exit 1; }
 		for library in $needed; do
 			case $library in libc.so.7 | libthr.so.3 | libm.so.5 | libgcc_s.so.1) ;; *) echo "process-owner links non-portable $library" >&2; exit 1 ;; esac
