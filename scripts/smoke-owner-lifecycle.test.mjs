@@ -26,7 +26,7 @@ async function dropped(platform, { childIdentity = standard, childError, failCom
 	if (platform === "win32") child.windowsRuntimeGate = passedWindowsOwnerGate(target.id, createHash("sha256").update(readFileSync(process.execPath)).digest("hex"), standard);
 	try {
 		const evidence = await smokeOwnerLifecycleAsNonadmin(process.execPath, target, {
-			platform, env: { CI: "true", SystemRoot: temp, COMPUTERNAME: "host" },
+			platform, env: { CI: "true", SystemRoot: temp, SystemDrive: temp, COMPUTERNAME: "host" },
 			identityProbe: () => platform === "darwin" ? { ...standard, adminGroup: true } : root,
 			run: (file, args, options) => {
 				calls.push({ file, args, options });
@@ -58,6 +58,10 @@ async function dropped(platform, { childIdentity = standard, childError, failCom
 						assert.match(launcher, /\$env:HOME=/);
 						assert.match(launcher, /Remove-Item Env:NODE_OPTIONS/);
 						assert.match(launcher, /PI_WINDOWS_GATE_ROOT/);
+						// Scratch is outside %SystemRoot%\Temp, and every runtime layer is preflighted before the strict child run.
+						assert.equal(stage.startsWith(join(temp, "Temp")), false);
+						for (const probe of [/cmd\.exe' '\/d' '\/c' 'ver'/, /'--version'/, /'--experimental-strip-types' '-e' '0'/, /whoami\.exe' '\/groups'/]) assert.match(launcher, probe);
+						assert.ok(launcher.indexOf("preflight") < launcher.indexOf("$ErrorActionPreference='Stop'"), "preflight must not stop the launcher");
 						assert.equal(existsSync(join(stage, "packages", "coding-agent", "test", "windows-owner-runtime.mjs")), true);
 						assert.equal(existsSync(join(stage, "packages", "chord", "src", "manager.ts")), true);
 						assert.equal(options.timeout, 1_200_000);

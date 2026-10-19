@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { bunTarget, isMainModulePath } from "./lib/bun-targets.mjs";
@@ -217,7 +217,10 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		// Never reuse or delete a pre-existing account, including on self-hosted CI.
 		const lookup = run(platform === "win32" ? "net.exe" : "id", platform === "win32" ? ["user", user] : ["-u", user], { encoding: "utf8", timeout: 10_000 });
 		if (lookup.status !== (platform === "win32" ? 2 : 1)) throw new Error(`cannot create dedicated user: account exists or lookup failed (${lookup.status ?? lookup.error?.message})`);
-		work = mkdtempSync(join(platform === "win32" ? join(env.SystemRoot, "Temp") : "/tmp", "pi-owner-nonadmin-"));
+		// Windows: not under %SystemRoot%\Temp, which standard users cannot execute from; a drive-root directory
+		// carries only the explicit ACEs granted below.
+		if (platform === "win32" && !env.SystemDrive) throw new Error("SystemDrive is not set");
+		work = mkdtempSync(join(platform === "win32" ? `${env.SystemDrive}${sep}` : "/tmp", "pi-owner-nonadmin-"));
 		// net user otherwise prompts for confirmation for passwords longer than 14 characters.
 		const password = `Pi!9${randomBytes(8).toString("base64url").slice(0, 10)}`;
 		secrets.push(password);
@@ -248,8 +251,12 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 			const account = `${env.COMPUTERNAME}\\${user}`;
 			command("icacls.exe", [work, "/inheritance:r", "/grant:r", `${account}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T"]);
 			for (const directory of ["packages", "node_modules", "scripts"]) command("icacls.exe", [join(work, directory), "/inheritance:r", "/grant:r", `${account}:(OI)(CI)RX`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T"]);
+			privilegeDrop.diagnostics.acl = ["", "node.exe", "scripts"].map((entry) => tail(run("icacls.exe", [join(work, entry)], { encoding: "utf8", timeout: 30_000 }).stdout));
 			const launcher = join(work, "launch.ps1");
-			writeFileSync(launcher, `$ErrorActionPreference='Stop'\n${Object.entries(childEnv).map(([key, value]) => `$env:${key}=${ps(value)}`).join("\n")}\nRemove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue\n& ${[runtime, ...args].map(ps).join(" ")}\nexit $LASTEXITCODE\n`);
+			// Preflight each runtime layer as the dropped user, all to stderr, so one CI round reports every blocked layer.
+			const preflight = [[`${env.SystemRoot}\\System32\\cmd.exe`, "/d", "/c", "ver"], [runtime, "--version"], [runtime, "--experimental-strip-types", "-e", "0"], ...(existsSync(join(work, "bun.exe")) ? [[join(work, "bun.exe"), "--version"]] : []), [`${env.SystemRoot}\\System32\\whoami.exe`, "/groups"]];
+			const probes = preflight.map((probe) => `try { $o = & ${probe.map(ps).join(" ")} 2>&1 | Out-String; [Console]::Error.WriteLine("preflight ${probe.slice(1).join(" ").replaceAll("\"", "")}: exit $LASTEXITCODE $o") } catch { [Console]::Error.WriteLine("preflight ${probe.slice(1).join(" ").replaceAll("\"", "")}: $($_.Exception.Message)") }`).join("\n");
+			writeFileSync(launcher, `${Object.entries(childEnv).map(([key, value]) => `$env:${key}=${ps(value)}`).join("\n")}\nRemove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue\n${probes}\n$ErrorActionPreference='Stop'\n& ${[runtime, ...args].map(ps).join(" ")}\nexit $LASTEXITCODE\n`);
 			const stdout = join(work, "stdout.txt");
 			const stderr = join(work, "stderr.txt");
 			result = traced("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; $c=New-Object System.Management.Automation.PSCredential(${ps(account)}, (ConvertTo-SecureString ${ps(password)} -AsPlainText -Force)); $p=Start-Process -FilePath "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Credential $c -LoadUserProfile -WorkingDirectory ${ps(work)} -ArgumentList ${ps(`-NoProfile -NonInteractive -File "${launcher}"`)} -RedirectStandardOutput ${ps(stdout)} -RedirectStandardError ${ps(stderr)} -Wait -PassThru; exit $p.ExitCode`], { encoding: "utf8", timeout, cwd: work });
