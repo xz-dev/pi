@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.ts";
+import { createHarness } from "./suite/harness.ts";
 
 type SubmitContext = {
 	defaultEditor: { onSubmit?: (text: string) => void };
@@ -55,6 +60,137 @@ function createSubmitContext(): SubmitContext {
 }
 
 describe("InteractiveMode startup input", () => {
+	it.each(["/retry", "continue"])(
+		"retains %s until session startup finishes, including custom editors",
+		async (text) => {
+			let allowSessionStart: () => void = () => {};
+			let sessionStartEntered: () => void = () => {};
+			const sessionStartReady = new Promise<void>((resolve) => {
+				sessionStartEntered = resolve;
+			});
+			const sessionStartGate = new Promise<void>((resolve) => {
+				allowSessionStart = resolve;
+			});
+			const harness = await createHarness({
+				settings: { theme: "dark", quietStartup: true },
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_start", async (_event, ctx) => {
+							ctx.ui.setEditorComponent((tui, theme, keybindings) => new CustomEditor(tui, theme, keybindings));
+							sessionStartEntered();
+							await sessionStartGate;
+						});
+					},
+				],
+			});
+			const terminal = new VirtualTerminal(100, 30);
+			const runtime = {
+				session: harness.session,
+				setBeforeSessionInvalidate: () => {},
+				setRebindSession: () => {},
+			} as unknown as AgentSessionRuntime;
+			const mode = new InteractiveMode(runtime, { terminal, tuiMode: "regular", initialThemeSetting: "dark" });
+			let initializing: Promise<void> | undefined;
+			try {
+				initializing = mode.init();
+				await sessionStartReady;
+				terminal.sendInput(text);
+				terminal.sendInput("\r");
+				const editor = Reflect.get(mode, "editor") as CustomEditor;
+				expect(editor.getText()).toBe(text);
+				expect(harness.faux.state.callCount).toBe(0);
+				expect(Reflect.get(mode, "unsubscribe")).toBeUndefined();
+				allowSessionStart();
+				await initializing;
+				expect(editor.getText()).toBe(text);
+				expect(editor.onSubmit).toBe((Reflect.get(mode, "defaultEditor") as CustomEditor).onSubmit);
+				if (text === "continue") {
+					terminal.sendInput("\r");
+					expect(await mode.getUserInput()).toBe(text);
+				}
+				expect(harness.faux.state.callCount).toBe(0);
+			} finally {
+				allowSessionStart();
+				await initializing?.catch(() => {});
+				mode.stop();
+				stopThemeWatcher();
+				harness.cleanup();
+			}
+		},
+	);
+
+	it("retains input submitted while a replacement session (/new) is still binding", async () => {
+		const first = await createHarness({ settings: { theme: "dark", quietStartup: true } });
+		let allowSessionStart: () => void = () => {};
+		let sessionStartEntered: () => void = () => {};
+		const sessionStartReady = new Promise<void>((resolve) => {
+			sessionStartEntered = resolve;
+		});
+		const sessionStartGate = new Promise<void>((resolve) => {
+			allowSessionStart = resolve;
+		});
+		const second = await createHarness({
+			settings: { theme: "dark", quietStartup: true },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", async () => {
+						sessionStartEntered();
+						await sessionStartGate;
+					});
+				},
+			],
+		});
+		let beforeInvalidate: () => void = () => {};
+		let rebind: () => Promise<void> = async () => {};
+		const runtime = {
+			session: first.session,
+			setBeforeSessionInvalidate: (fn: () => void) => {
+				beforeInvalidate = fn;
+			},
+			setRebindSession: (fn: () => Promise<void>) => {
+				rebind = fn;
+			},
+		};
+		const terminal = new VirtualTerminal(100, 30);
+		const mode = new InteractiveMode(runtime as unknown as AgentSessionRuntime, {
+			terminal,
+			tuiMode: "regular",
+			initialThemeSetting: "dark",
+		});
+		let replacing: Promise<void> | undefined;
+		try {
+			await mode.init();
+			const live = (Reflect.get(mode, "defaultEditor") as CustomEditor).onSubmit;
+
+			// Mirror AgentSessionRuntime.newSession(): invalidate, swap, rebind.
+			beforeInvalidate();
+			runtime.session = second.session;
+			replacing = rebind();
+			await sessionStartReady;
+
+			terminal.sendInput("continue");
+			terminal.sendInput("\r");
+			const editor = Reflect.get(mode, "editor") as CustomEditor;
+			expect(editor.getText()).toBe("continue");
+			expect(Reflect.get(mode, "pendingUserInputs")).toEqual([]);
+
+			allowSessionStart();
+			await replacing;
+			const restored = (Reflect.get(mode, "defaultEditor") as CustomEditor).onSubmit;
+			expect(restored).not.toBe(live);
+			terminal.sendInput("\r");
+			expect(await mode.getUserInput()).toBe("continue");
+			expect(first.faux.state.callCount + second.faux.state.callCount).toBe(0);
+		} finally {
+			allowSessionStart();
+			await replacing?.catch(() => {});
+			mode.stop();
+			stopThemeWatcher();
+			first.cleanup();
+			second.cleanup();
+		}
+	});
+
 	it("restores a prompt submitted while managed-tool setup is running", () => {
 		const context: StartupSubmitContext = {
 			editor: { setText: vi.fn() },
@@ -64,7 +200,7 @@ describe("InteractiveMode startup input", () => {
 		interactiveModePrototype.handleStartupSubmit.call(context, "early prompt");
 
 		expect(context.editor.setText).toHaveBeenCalledWith("early prompt");
-		expect(context.showStatus).toHaveBeenCalledWith("Startup is still in progress");
+		expect(context.showStatus).toHaveBeenCalledWith("Session is still starting");
 	});
 
 	it("queues a normal prompt submitted before the input callback is installed", async () => {
