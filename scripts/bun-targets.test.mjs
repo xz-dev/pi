@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import { BUN_BUILD_FLAGS, BUN_TARGET_IDS, BUN_TARGETS, binaryArchiveName, bunBuildFlags, EMULATED_SMOKE_SLOWDOWN, GITHUB_HOSTED_RUNNERS, githubBuildMatrix, githubSmokeMatrix, isMainModulePath, RELEASE_BUILD, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
 
@@ -15,6 +18,19 @@ test("target descriptor CLI recognizes native Windows paths", () => {
 	assert.equal(isMainModulePath("D:\\a\\pi\\pi\\scripts\\lib\\bun-targets.mjs", "D:\\a\\pi\\pi\\scripts\\lib\\bun-targets.mjs", path.win32), true);
 	assert.equal(isMainModulePath("D:\\A\\PI\\scripts\\lib\\bun-targets.mjs", "d:\\a\\pi\\scripts\\lib\\bun-targets.mjs", path.win32), true);
 	assert.equal(isMainModulePath("D:\\a\\pi\\scripts\\lib\\bun-targets.mjs", "D:\\a\\pi\\scripts\\other.mjs", path.win32), false);
+});
+
+test("main-module check sees through symlinked argv paths (macOS /tmp -> /private/tmp)", { skip: process.platform === "win32" }, () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-main-module-"));
+	try {
+		mkdirSync(join(root, "real"));
+		writeFileSync(join(root, "real", "entry.mjs"), "");
+		symlinkSync(join(root, "real"), join(root, "link"));
+		assert.equal(isMainModulePath(realpathSync(join(root, "real", "entry.mjs")), join(root, "link", "entry.mjs")), true);
+		assert.equal(isMainModulePath(join(root, "real", "entry.mjs"), join(root, "link", "other.mjs")), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("authoritative Bun target descriptors contain the exact supported matrix", () => {

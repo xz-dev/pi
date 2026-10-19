@@ -130,7 +130,11 @@ try {
 	const ownerResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), executable, targetId, ownerEvidencePath], { encoding: "utf8", env, timeout: target.os === "windows" ? 1_250_000 : (target.emulated ? 1_100_000 : 460_000) });
 	try { ownerLifecycle = JSON.parse(ownerResult.stdout.trim().split(/\r?\n/).at(-1)); } catch {}
 	commands.push({ name: "owner-lifecycle", command: `${process.execPath} smoke-owner-lifecycle.mjs ${executable}`, status: ownerResult.status, elapsedMs: Math.round(performance.now() - ownerStarted) });
-	if (ownerResult.status !== 0 || ownerLifecycle?.status !== "passed") throw new Error(`owner lifecycle failed: ${ownerResult.stderr || ownerLifecycle?.error || ownerResult.error?.message || "missing evidence"}`);
+	if (ownerResult.status !== 0 || ownerLifecycle?.status !== "passed") {
+		// Print the full privilege-drop trail: hosted Darwin/Windows failures are only diagnosable from CI logs.
+		if (ownerLifecycle?.privilegeDrop?.diagnostics) console.error(`owner privilege-drop diagnostics: ${JSON.stringify(ownerLifecycle.privilegeDrop.diagnostics)}`);
+		throw new Error(`owner lifecycle failed: ${ownerLifecycle?.error || ownerResult.stderr || ownerResult.error?.message || "missing evidence"}`);
+	}
 	// Resource materialization: the paste-probed TUI session below unfolds the
 	// embedded native helper into the per-user tmpdir cache (Linux needs a
 	// display, which CI provides via Xvfb; Windows loads the helper at TUI

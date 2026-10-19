@@ -14,7 +14,7 @@ const root = { uid: 0, euid: 0, elevated: true };
 const rows = ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, pi: { bun: "1.3.14" }, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 }));
 
 // Host commands are mocked; copied scripts, runtime and artifact use real temporary files.
-async function dropped(platform, { childIdentity = standard, childError, failCommand, existing = false, cleanupFailure = false } = {}) {
+async function dropped(platform, { childIdentity = standard, childError, failCommand, existing = false, cleanupFailure = false, silentChild = false } = {}) {
 	const temp = mkdtempSync(join(tmpdir(), "pi-owner-drop-test-"));
 	mkdirSync(join(temp, "Temp"));
 	const calls = [];
@@ -62,6 +62,7 @@ async function dropped(platform, { childIdentity = standard, childError, failCom
 						assert.equal(existsSync(join(stage, "packages", "chord", "src", "manager.ts")), true);
 						assert.equal(options.timeout, 1_200_000);
 					}
+					if (silentChild) return { status: 0, stdout: "", stderr: "child stderr tail" };
 					return { status: childError ? 1 : 0, stdout: JSON.stringify(child), stderr: "" };
 				}
 				return { status: 0, stdout: "", stderr: "" };
@@ -69,6 +70,23 @@ async function dropped(platform, { childIdentity = standard, childError, failCom
 		});
 		return { evidence, calls };
 	} finally { rmSync(temp, { recursive: true, force: true }); }
+}
+
+for (const platform of ["darwin", "win32"]) {
+	test(`${platform} silent child failure carries child tails and a step trail without passwords`, async () => {
+		const { evidence, calls } = await dropped(platform, { silentChild: true });
+		assert.equal(evidence.status, "failed");
+		assert.equal(evidence.privilegeDrop.verifiedNonadmin, false);
+		assert.match(evidence.error, /child produced no identity evidence: \{"status":0/);
+		assert.match(evidence.error, /child stderr tail/);
+		const { child, steps } = evidence.privilegeDrop.diagnostics;
+		assert.equal(child.stdout, "");
+		assert.match(child.scriptRealpath, /smoke-owner-lifecycle\.mjs$|realpath failed/);
+		assert.ok(steps.length > 0);
+		const password = calls.find(({ args }) => args.includes("-addUser") || args.includes("/add"))?.args.find((value) => value.startsWith("Pi!9"));
+		assert.ok(password, "account creation call carries a password");
+		assert.equal(JSON.stringify(evidence).includes(password), false, "password must never be recorded");
+	});
 }
 
 test("missing or disagreeing Bun versions remain informational outside Windows", () => {

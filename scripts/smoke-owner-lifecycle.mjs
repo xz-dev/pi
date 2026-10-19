@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -196,8 +196,19 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 	let work;
 	let created = false;
 	let evidence = { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), privilegeDrop };
-	const command = (file, args, options = {}) => {
+	// Bounded per-step trail so one CI round exposes every failing layer, not just the first symptom.
+	const tail = (value) => (typeof value === "string" ? value.slice(-4096) : value == null ? null : String(value).slice(-4096));
+	const steps = [];
+	const secrets = [];
+	privilegeDrop.diagnostics = { steps };
+	const traced = (file, args, options = {}) => {
 		const result = run(file, args, { encoding: "utf8", timeout: 120_000, ...options });
+		// Passwords appear only in argv of account creation and the launcher command; never record them.
+		steps.push({ file, args: args.map((value) => (secrets.some((secret) => value.includes(secret)) ? "<redacted>" : value)), status: result.status ?? null, signal: result.signal ?? null, error: result.error?.message ?? null, stderr: tail(result.stderr) });
+		return result;
+	};
+	const command = (file, args, options = {}) => {
+		const result = traced(file, args, options);
 		if (result.status !== 0) throw new Error(`${file}: ${result.stderr || result.error?.message || result.status}`);
 		return result;
 	};
@@ -209,6 +220,7 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		work = mkdtempSync(join(platform === "win32" ? join(env.SystemRoot, "Temp") : "/tmp", "pi-owner-nonadmin-"));
 		// net user otherwise prompts for confirmation for passwords longer than 14 characters.
 		const password = `Pi!9${randomBytes(8).toString("base64url").slice(0, 10)}`;
+		secrets.push(password);
 		if (platform === "freebsd") command("pw", ["useradd", user, "-m", "-d", work, "-s", "/bin/sh", "-G", ""]);
 		else if (platform === "darwin") command("sudo", ["-n", "sysadminctl", "-addUser", user, "-password", password, "-home", work, "-shell", "/bin/sh"]);
 		else if (platform === "win32") command("net.exe", ["user", user, password, "/add"]);
@@ -223,7 +235,7 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		copyFileSync(fileURLToPath(import.meta.url), join(scripts, "smoke-owner-lifecycle.mjs"));
 		copyFileSync(fileURLToPath(new URL("./lib/bun-targets.mjs", import.meta.url)), join(scripts, "lib", "bun-targets.mjs"));
 		copyFileSync(fileURLToPath(new URL("./smoke-windows-owner-gate.mjs", import.meta.url)), join(scripts, "smoke-windows-owner-gate.mjs"));
-		if (platform === "win32") stageWindowsOwnerGate(work, { env, run });
+		if (platform === "win32") stageWindowsOwnerGate(work, { env, run: traced });
 		cpSync(fileURLToPath(new URL("./fixtures/owner/", import.meta.url)), join(scripts, "fixtures", "owner"), { recursive: true });
 		mkdirSync(join(work, "tmp"));
 		const childEnv = { PATH: platform === "win32" ? `${work};${env.SystemRoot}\\System32;${env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0` : `${work}:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin`, HOME: work, USERPROFILE: work, USER: user, LOGNAME: user, TMPDIR: join(work, "tmp"), TMP: join(work, "tmp"), TEMP: join(work, "tmp"), CI: "true", PI_OFFLINE: "1" };
@@ -240,7 +252,7 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 			writeFileSync(launcher, `$ErrorActionPreference='Stop'\n${Object.entries(childEnv).map(([key, value]) => `$env:${key}=${ps(value)}`).join("\n")}\nRemove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue\n& ${[runtime, ...args].map(ps).join(" ")}\nexit $LASTEXITCODE\n`);
 			const stdout = join(work, "stdout.txt");
 			const stderr = join(work, "stderr.txt");
-			result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; $c=New-Object System.Management.Automation.PSCredential(${ps(account)}, (ConvertTo-SecureString ${ps(password)} -AsPlainText -Force)); $p=Start-Process -FilePath "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Credential $c -LoadUserProfile -WorkingDirectory ${ps(work)} -ArgumentList ${ps(`-NoProfile -NonInteractive -File "${launcher}"`)} -RedirectStandardOutput ${ps(stdout)} -RedirectStandardError ${ps(stderr)} -Wait -PassThru; exit $p.ExitCode`], { encoding: "utf8", timeout, cwd: work });
+			result = traced("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; $c=New-Object System.Management.Automation.PSCredential(${ps(account)}, (ConvertTo-SecureString ${ps(password)} -AsPlainText -Force)); $p=Start-Process -FilePath "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Credential $c -LoadUserProfile -WorkingDirectory ${ps(work)} -ArgumentList ${ps(`-NoProfile -NonInteractive -File "${launcher}"`)} -RedirectStandardOutput ${ps(stdout)} -RedirectStandardError ${ps(stderr)} -Wait -PassThru; exit $p.ExitCode`], { encoding: "utf8", timeout, cwd: work });
 			if (existsSync(stdout)) result.stdout = readFileSync(stdout, "utf8").replace(/^\uFEFF/, "");
 			if (existsSync(stderr)) result.stderr = `${result.stderr ?? ""}${readFileSync(stderr, "utf8")}`;
 		} else {
@@ -251,11 +263,12 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 			const invocation = ["env", "-i", ...Object.entries(childEnv).map(([key, value]) => `${key}=${value}`), runtime, ...args];
 			result = platform === "darwin"
 				// The non-root runner cannot chdir into scratch once it is chowned 0700 to the dropped user.
-				? run("sudo", ["-n", "-u", user, "-H", ...invocation], { encoding: "utf8", timeout, cwd: "/" })
-				: run("su", ["-m", user, "-c", `exec ${invocation.map((value) => `'${value.replaceAll("'", "'\\''")}'`).join(" ")}`], { encoding: "utf8", timeout, cwd: work });
+				? traced("sudo", ["-n", "-u", user, "-H", ...invocation], { encoding: "utf8", timeout, cwd: "/" })
+				: traced("su", ["-m", user, "-c", `exec ${invocation.map((value) => `'${value.replaceAll("'", "'\\''")}'`).join(" ")}`], { encoding: "utf8", timeout, cwd: work });
 		}
+		privilegeDrop.diagnostics.child = { status: result.status ?? null, signal: result.signal ?? null, error: result.error?.message ?? null, stdout: tail(result.stdout), stderr: tail(result.stderr), script: args[0], scriptRealpath: (() => { try { return realpathSync(args[0]); } catch (error) { return `realpath failed: ${error.message}`; } })() };
 		try { evidence = { ...JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)), privilegeDrop }; }
-		catch { throw new Error(`child produced no identity evidence: ${result.stderr || result.error?.message || result.status}`); }
+		catch { throw new Error(`child produced no identity evidence: ${JSON.stringify(privilegeDrop.diagnostics.child)}`); }
 		assertNonadminIdentity(evidence.identity, target.os);
 		privilegeDrop.verifiedNonadmin = true;
 		if (result.status !== 0 || evidence.status !== "passed") throw new Error(evidence.error || `child failed (${result.status ?? result.error?.message}): ${result.stderr}`);

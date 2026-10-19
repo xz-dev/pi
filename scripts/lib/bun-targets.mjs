@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -157,8 +158,10 @@ export function githubSmokeMatrix() {
 }
 
 export function isMainModulePath(modulePath, argvPath, pathApi = path) {
-	const resolvedModule = pathApi.resolve(modulePath);
-	const resolvedArgv = pathApi.resolve(argvPath);
+	// import.meta.url is the real path; argv keeps symlinks such as macOS /tmp -> /private/tmp.
+	const real = (value) => { try { return realpathSync(value); } catch { return value; } };
+	const resolvedModule = pathApi.resolve(pathApi === path ? real(modulePath) : modulePath);
+	const resolvedArgv = pathApi.resolve(pathApi === path ? real(argvPath) : argvPath);
 	return pathApi.sep === "\\" ? resolvedModule.toLowerCase() === resolvedArgv.toLowerCase() : resolvedModule === resolvedArgv;
 }
 

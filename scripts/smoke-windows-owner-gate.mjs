@@ -46,13 +46,14 @@ export function assertWindowsOwnerDependencies(expected, installedLock, tree) {
 	const actual = Object.entries(installedLock.packages ?? {}).filter(([path]) => path).map(([path, entry]) => ({ name: path.replace(/^node_modules\//, ""), version: entry.version, resolved: entry.resolved, integrity: entry.integrity })).sort((a, b) => a.name.localeCompare(b.name));
 	if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("Windows gate installed dependency version/integrity differs from root lockfile");
 	const seen = new Set();
-	function visit(node) {
+	// npm ls omits `resolved` on nested (deduped) entries; top-level entries and the lockfile above carry it.
+	function visit(node, nested = false) {
 		if (node.problems?.length) throw new Error("Windows gate npm ls reported dependency problems");
 		for (const [name, dependency] of Object.entries(node.dependencies ?? {})) {
 			const locked = expected.find((entry) => entry.name === name);
-			if (!locked || dependency.version !== locked.version || dependency.resolved !== locked.resolved) throw new Error(`Windows gate npm ls differs from locked dependency: ${name}`);
+			if (!locked || dependency.version !== locked.version || (!nested && dependency.resolved !== locked.resolved)) throw new Error(`Windows gate npm ls differs from locked dependency: ${name}`);
 			seen.add(name);
-			visit(dependency);
+			visit(dependency, true);
 		}
 	}
 	visit(tree);
