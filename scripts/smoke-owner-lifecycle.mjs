@@ -249,8 +249,14 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		const timeout = platform === "win32" ? 1_200_000 : target.emulated ? 1_050_000 : 420_000;
 		if (platform === "win32") {
 			const account = `${env.COMPUTERNAME}\\${user}`;
-			command("icacls.exe", [work, "/inheritance:r", "/grant:r", `${account}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T"]);
-			for (const directory of ["packages", "node_modules", "scripts"]) command("icacls.exe", [join(work, directory), "/inheritance:r", "/grant:r", `${account}:(OI)(CI)RX`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T"]);
+			// Protect each directory's own DACL, then reset its contents to inherit it. `/inheritance:r ... /T` would strip
+			// files' inherited ACEs while (OI)(CI) grants never apply to files, leaving node.exe with an empty DACL.
+			const secure = (directory, access) => {
+				command("icacls.exe", [directory, "/inheritance:r", "/grant:r", `${account}:(OI)(CI)${access}`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"]);
+				command("icacls.exe", [join(directory, "*"), "/reset", "/T", "/Q"]);
+			};
+			secure(work, "F");
+			for (const directory of ["packages", "node_modules", "scripts"]) secure(join(work, directory), "RX");
 			privilegeDrop.diagnostics.acl = ["", "node.exe", "scripts"].map((entry) => tail(run("icacls.exe", [join(work, entry)], { encoding: "utf8", timeout: 30_000 }).stdout));
 			const launcher = join(work, "launch.ps1");
 			// Preflight each runtime layer as the dropped user, all to stderr, so one CI round reports every blocked layer.

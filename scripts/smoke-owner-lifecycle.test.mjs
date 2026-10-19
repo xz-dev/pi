@@ -141,7 +141,13 @@ for (const platform of ["linux", "freebsd", "darwin", "win32"]) {
 			assert.equal(calls.some(({ file, args }) => file === "net.exe" && args.includes("/add")), true);
 			assert.equal(calls.some(({ file, args }) => file === "powershell.exe" && args.at(-1).includes("-Credential $c") && args.at(-1).includes("-Wait -PassThru")), true);
 			assert.equal(calls.some(({ file }) => file === "icacls.exe"), true);
-			for (const directory of ["packages", "node_modules", "scripts"]) assert.equal(calls.some(({ file, args }) => file === "icacls.exe" && args[0].endsWith(directory) && args.includes("host\\pi-owner-smoke:(OI)(CI)RX") && args.includes("/inheritance:r")), true);
+			for (const directory of ["packages", "node_modules", "scripts"]) {
+				assert.equal(calls.some(({ file, args }) => file === "icacls.exe" && args[0].endsWith(directory) && args.includes("host\\pi-owner-smoke:(OI)(CI)RX") && args.includes("/inheritance:r") && !args.includes("/T")), true);
+				assert.equal(calls.some(({ file, args }) => file === "icacls.exe" && args[0].endsWith(join(directory, "*")) && args.includes("/reset") && args.includes("/T")), true);
+			}
+			// Contents (node.exe) must inherit the scratch grant: never combine /inheritance:r with /T.
+			assert.equal(calls.some(({ file, args }) => file === "icacls.exe" && args.includes("/inheritance:r") && args.includes("/T")), false);
+			assert.equal(calls.some(({ file, args }) => file === "icacls.exe" && args.includes("host\\pi-owner-smoke:(OI)(CI)F") && !args.includes("/T")), true);
 		}
 		assert.equal(calls.some(({ args }) => args.includes("userdel") || args.includes("-deleteUser") || args.includes("/delete") || args.some((arg) => arg.includes('exec userdel "$1"'))), true);
 		const launch = calls.find(({ file, args }) => file === "su" || file === "powershell.exe" || (file === "sudo" && args.includes("-u")));
