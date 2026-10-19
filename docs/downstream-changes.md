@@ -4,7 +4,8 @@ Complete reference for every patch branch integrated into this fork, grouped by 
 
 ## Distribution and self-update
 
-The single-executable bundle, update verification, and packaging fixes.
+The single-executable bundle, update verification, and packaging fixes. See the
+[update guide](updating.md) for commands, mirrors, verification and backup handling.
 
 - Single-file executable with embedded Bun runtime (JIT) and precompiled JavaScript bytecode; the extracted `pi` is the complete product, no Node.js, npm, or companion binary required.
   - Use case: Run Pi by downloading and extracting one ZIP, on a machine with no JavaScript tooling.
@@ -13,7 +14,7 @@ The single-executable bundle, update verification, and packaging fixes.
 - Retry failed `pi update` operations up to three additional times, waiting 3, 6, and 12 seconds. Covers self-update, Git/npm extension updates and explicit model-catalog refresh without repeating completed sibling updates.
   - Use case: Recover from a transient TLS EOF or dropped connection without rerunning the command.
   - Limits: Four attempts maximum per failed operation; retries cannot repair permanent failures. Signature/checksum verification, pinned versions, rollback and final failure reports remain enforced.
-  - Details: [Update](../README.md#update)
+  - Details: [Automatic update retries](updating.md#automatic-retries)
   - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 - Run the native FreeBSD amd64 and arm64 executables with CLI, TUI, extension loading, self-update, and cleanup of obsolete backup copies.
   - Use case: Use Pi on FreeBSD without a Linux compatibility layer or a separately installed JavaScript runtime.

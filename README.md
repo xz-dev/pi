@@ -34,7 +34,7 @@ Features:
 - FreeBSD support
 - Resume interrupted work (`/retry`, eligible sessions also recover on startup)
 - WebSocket recovery and incremental context for OpenAI Responses and Codex
-- Optional [Response checkpoints](docs/downstream-changes.md#response-checkpoints) across reconnects and session restarts
+- [Response checkpoints](docs/downstream-changes.md#response-checkpoints) across reconnects and session restarts
 - Lossless [request-body compression](docs/request-compression.md) for model JSON posts and Responses WebSocket frames
 - Custom fail-fast patterns for terminal gateway errors
 - Actual connection and request mode beside Working (`SSE`, `WS/full`, `WS/continuation`, or another reported protocol)
@@ -43,9 +43,9 @@ Features:
 - Thinking shown as one preview line (`Ctrl+T` to expand)
 - Smaller input dock when reading fullscreen history
 - See where each message came from (you, extension, RPC, SDK)
-- Update mirrors and self-update (`pi update --self`, `--mirror`)
-- Retry failed update operations three times, with 3, 6, and 12 second waits
-- Verified downloads (Sigstore signatures)
+- [Self-update and mirrors](docs/updating.md) (`pi update --self`, `--mirror`)
+- [Update retries](docs/updating.md#automatic-retries) with 3, 6 and 12 second waits
+- [Verified downloads](docs/updating.md#verification-backups-and-managed-installs) (Sigstore signatures)
 - Install extensions without npm or Node
 - English locale for tools, keeps your UI language
 - Quieter startup screen
@@ -128,94 +128,25 @@ Release assets include `SHA256SUMS` and GitHub build-provenance attestations for
 
 ### Install through a GitHub mirror
 
-First install a current [GitHub CLI](https://cli.github.com/) through a trusted channel (for example your OS package manager), independently of the Release mirror. Its `gh attestation verify` command authenticates the archive **before extraction or execution**. Do not download a verifier or a replacement trust root from the same mirror.
-
-Choose `target` from the platform table, and obtain the desired version and full 40-character source commit from a trusted Release page at `https://github.com/xz-dev/pi/releases`. For Linux x64 with glibc:
-
-```sh
-target=linux-x64-gnu-modern
-version='<VERSION>'
-commit='<FULL_COMMIT_SHA>'
-mirror=https://gh-proxy.com/https://github.com
-base="${mirror}/xz-dev/pi/releases/download/xz-v${version}"
-curl --fail --location --output "pi-${target}.zip" "${base}/pi-${target}.zip" &&
-curl --fail --location --output attestation-subjects.jsonl "${base}/attestation-subjects.jsonl" &&
-gh attestation verify "pi-${target}.zip" --bundle attestation-subjects.jsonl \
-  --repo xz-dev/pi \
-  --cert-identity 'https://github.com/xz-dev/pi/.github/workflows/publish-github-release.yml@refs/heads/main' \
-  --cert-oidc-issuer https://token.actions.githubusercontent.com \
-  --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners &&
-unzip "pi-${target}.zip" &&
-./pi --version
-```
-
-If GH-Proxy is unavailable, set `mirror=https://ghfast.top/https://github.com` (or `https://github.com`) and retry the whole chain. Keep the same exact version and commit. Missing or invalid attestations mean **stop**, not execute anyway. On Windows, download both files, run the same `gh attestation verify` command with your platform ZIP and full commit, and check `$LASTEXITCODE -eq 0` before `Expand-Archive` or running Pi.
-
-These are third-party services, not infrastructure operated by this fork. A mirror can withhold or replay authentic releases; signatures prove origin and integrity, not that a release is the newest. SHA256 checks alone cannot authenticate a mirror that replaces both the archive and checksums. jsDelivr is not included: its GitHub repository-file CDN is not a proxy for these Release ZIP attachments.
+Follow the [mirror installation and verification guide](docs/updating.md#install-through-a-mirror).
+Use an independently trusted `gh` to verify the exact archive, workflow identity
+and full source commit **before extraction or execution**. Missing or invalid
+proof means stop; a mirror must not supply the verifier or a replacement trust root.
 
 ### Update
 
-An installed executable updates itself from the matching `pi-<target>.zip`:
-
-```bash
-pi update --self
-```
-
-Failed update operations get three extra attempts, waiting **3, 6, and 12 seconds** between attempts. This applies to self-update, Git/npm extension updates, and `pi update --models`. Successful operations are not repeated. Exhausted retries retain the existing failure report; signatures, checksums, version pins, and rollback protections remain enforced. The behavior lives on [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable).
-
-To accelerate updates without changing settings:
+For the standalone executable:
 
 ```sh
-pi update --mirror
-pi update --mirror-url https://ghfast.top/https://github.com
-pi update --mirror-url http://localhost:8080
+pi update --self        # Pi itself
+pi update --extensions  # Installed packages
+pi update --models      # Pi-managed model catalogs
 ```
 
-`--mirror` tries **GH-Proxy → GHFast → direct GitHub**, in that order, for release discovery and again for the selected version's ZIP. Each failed source prints one gray message before trying the next; only an exhausted chain reports a final error. Failed requests or invalid downloads advance without skipping verification.
-
-Repeat `--mirror-url` to build your own ordered chain. A single URL is simply a one-element chain. Each value replaces the literal `https://github.com` in download URLs, including its protocol and optional path. Values are not prevalidated or normalized; invalid addresses fail when requested. Do not add a trailing slash, since the original URL already supplies it. Custom chains contain only the sources you name; append GitHub explicitly if you want a direct fallback:
-
-```sh
-pi update --mirror-url https://ghfast.top/https://github.com \
-          --mirror-url https://gh.llkk.cc/https://github.com \
-          --mirror-url https://github.com
-```
-
-[gh.llkk.cc](https://gh.llkk.cc/) is another proxy supporting Release downloads. It is not in the built-in chain; availability varies by network.
-
-Save a global default without performing an update:
-
-```sh
-pi update --mirror --permanent
-# Or save your own ordered chain:
-pi update --mirror-url http://localhost:8080 \
-          --mirror-url https://ghfast.top/https://github.com --permanent
-# A later command uses the saved choice:
-pi update
-```
-
-`--permanent` **only saves settings and exits**, even if an address is unreachable. Settings are stored in `~/.pi/agent/settings.json` (or the directory selected by `PI_CODING_AGENT_DIR`) as an ordered `updateMirrors` array. `--mirror --permanent` saves the current built-in list; one custom URL is saved as a one-element array. Saved chains also apply to automatic version checks, which remain silent on failure. Project settings cannot override this download source. Extension, npm, and model-catalog requests are unaffected.
-
-```sh
-pi update --no-mirror              # Direct GitHub this time; keep the saved setting
-pi update --no-mirror --permanent  # Clear the saved mirror; do not update
-```
-
-Without a saved setting or a mirror flag, updates continue to use GitHub directly. Command-line choices override saved settings for one invocation unless `--permanent` is present. Mirror flags cannot be combined with `--clean` or extension/model-only updates; `--permanent` also cannot be combined with `--force` or `--all`.
-
-Extension updates are separate:
-
-```bash
-pi update --extensions
-```
-
-Standalone extension operations spawn the running executable itself, so public `pi` on `PATH` is not required. Git sources also require Git. See [package-manager selection](packages/coding-agent/docs/packages.md#choose-a-source) for overrides and compatibility limits.
-
-Pi authenticates the manifest using Sigstore trust roots bundled in the trusted client, requiring the `xz-dev/pi` main-branch `publish-github-release.yml` workflow, GitHub-hosted signing runner, and the manifest's source commit. It then checks the ZIP and extracted executable against that authenticated manifest before writing or replacing files. This verification is mandatory for every mirror **and direct GitHub**, including `--force`. Missing, forged, or wrong-identity attestations reject that source; only another fully verified source can succeed. No mirror-supplied trust root or verification-disable flag is accepted. Root rotations require a trusted Pi update; if the installed roots no longer cover a new signer, update through a separately trusted installation path.
-
-On successful update, the old executable is retained as `pi-<old-version>` (`pi-<old-version>.exe` on Windows) and the verified candidate replaces the public path. `pi update --clean` removes only regular backups next to the executable that match the strict distribution-version pattern; the running executable, symlinks, directories, and unrelated files are left untouched.
-
-Installations from releases up to `xz-v1.0.0-xz.253` (raw `pi-<target>` downloads) cannot self-update onto ZIP releases: their updater only knows the raw asset and reports an invalid manifest. Reinstall once by downloading and extracting the current `pi-<target>.zip` over the old `pi`; later updates work with `pi update --self` again. Older ZIP bundle installations (`pi` + `pi-native` + loose assets) need the same one-time reinstall and should delete the old extracted directory.
+Failed eligible operations retry after **3, 6 and 12 seconds**, without repeating
+successful siblings or bypassing verification. See the
+[update guide](docs/updating.md) for retry scope, mirrors, saved preferences,
+package sources, mandatory signatures, backups and managed-install limits.
 
 ### Building without the native X11 helper
 

@@ -5,7 +5,7 @@ This fork is rebuilt from `earendil-works/pi` rather than developed directly on 
 ## Branch ownership
 
 - `upstream/main` is the rebuild baseline.
-- `ci` owns downstream workflows, packaging, release gates, this guide, and the downstream README.
+- `ci` owns downstream workflows, packaging, release gates, this guide, the downstream README, and root `docs/` feature guides.
 - `scoop` is an unrelated-root distribution branch containing only generated `bucket/pi.json`.
 - Product changes remain on the ordered `patch/*` branches declared in `.github/workflows/upstream-sync.yml`.
 - The never-published `patch/chord-websocket-test-deps` is retired from active inputs: upstream now declares the exact websocket test dependencies. Retain its ref/evidence, not an empty integration. Real Chord websocket and thinking gates remain enabled.
@@ -46,7 +46,7 @@ When an explicitly authorized commit touches `ci`-owned files:
 
 Run this checklist whenever a downstream feature, fix, default, command, installation requirement, release target, or patch activation/retirement changes. README updates belong on `ci`, alongside the corresponding integration change.
 
-1. Compare the enabled patch refs in `.github/workflows/upstream-sync.yml` with the root `README.md` and `docs/downstream-changes.md`. Keep README highlights as concise, unordered Features/Fixes lists. Put detailed descriptions, concrete use cases, limits, and persistent patch-branch links in `docs/downstream-changes.md`, with a dedicated chapter when needed. Keep validation logs and historical test counts in maintenance records, not the README highlights. Internal support patches may be covered by the feature they support; document their dependency/order details here rather than presenting them as separate user features.
+1. Compare the enabled patch refs in `.github/workflows/upstream-sync.yml` with the root `README.md` and `docs/downstream-changes.md`. Keep README highlights as concise, linked Features/Fixes lists. The downstream catalog records use cases, limits and persistent branch links; longer guides live under `docs/` with a short catalog entry rather than a second copy of the guide. Shared host/extension features need paired feature guides with reciprocal links and short README entries in both repositories. Keep validation logs and historical test counts in maintenance records, not README highlights. Internal support patches may be covered by their parent feature; document dependency/order here rather than advertising each internal patch.
 2. Update affected installation, update, compatibility, and disabled/removed-patch sections as well as the feature list. A change to defaults or failure handling must state the current behavior and limits, with links to detailed package docs. Updating package docs or this guide alone does not complete the root README update.
 3. Verify branch links and technical claims against current source and workflows: target/CPU requirements, package-manager prerequisites, sync order, and blocking versus advisory checks. Remove obsolete compatibility-branch descriptions when integration changes.
 4. Before reporting delivery complete, inspect the README at the rebuilt remote `main` SHA and confirm it contains the intended `ci` documentation. Distinguish unpublished documentation changes from descriptions verified in a released artifact. If synchronization or publication has not run, report it as pending.
@@ -89,7 +89,7 @@ Run this checklist whenever a downstream feature, fix, default, command, install
 - Integrate `patch/retry-error-presentation` independently before `patch/message-origin`. It alone owns immediate, persistent interactive provider-error display, removal of unexecuted tool previews, count-only exhausted-retry outcomes and explicit backoff-cancellation outcomes. Retry classification, budgets, transport recovery and model-context omission remain with their existing owners. Its retry tests do not depend on the model-switch feature.
 - Integrate `patch/message-origin` immediately before `patch/model-thinking-sort` as a descendant of `patch/cold-start-retry`. Apply only its predecessor-relative range and rebase when the cold-start tip changes; terminal source stamping runs through its pending-input wrapper rather than bypassing recovery feedback. It records optional per-message origin metadata (interactive, extension, RPC, SDK, CLI), stamps each boundary at its own ingress, preserves origin through persistence, queue handling, resume and provider conversion, annotates nonhuman model input with a deterministic source label, and renders nonhuman transcript entries with a source heading and uniform gray tool-style body. It is provenance metadata, not an authenticated sender boundary or an audit of arbitrary prompt transformations. It also owns the existing model-switch indicator: `old → new` settles in place when the next request starts; no-op reselection adds no indicator. Its core and interactive origin implementation, persistence metadata and indicator stay on this source, not copied into cold-start. The two indicator regressions live in `packages/coding-agent/test/interactive-model-switch-indicator.test.ts`; `ci` runs them with the existing origin core/rendering gates. `ci` owns registration, root README wording, and the deterministic core and rendering regression gates `packages/coding-agent/test/suite/message-origin.test.ts` and `packages/coding-agent/test/message-origin-rendering.test.ts`.
 - Integrate `patch/model-thinking-sort` last as an independent patch based on upstream. It only touches the model-step ordering of the per-model thinking submenu in `packages/coding-agent/src/modes/interactive/components/settings-selector.ts` and `packages/coding-agent/test/settings-selector.test.ts`.
-- Integrate `patch/model-selector-refresh-selection` after `patch/self-update-managed-by` as an independent selection-preservation patch. It only touches `packages/coding-agent/src/modes/interactive/components/model-selector.ts` and `packages/coding-agent/test/model-selector.test.ts` and complements the upstream 7209 filter-reset regression without changing the same behavior.
+- Integrate `patch/model-selector-refresh-selection` after `patch/provider-transport-indicator` as an independent selection-preservation patch. It only touches `packages/coding-agent/src/modes/interactive/components/model-selector.ts` and `packages/coding-agent/test/model-selector.test.ts` and complements the upstream 7209 filter-reset regression without changing the same behavior.
 - `patch/model-catalog-test-fixtures` is retired from active inputs. Upstream commit `99fe1489707f9f6accbef4377be79ef0544c42f2` supplies the same Xiaomi MiMo 2.6 model IDs and test behavior; the residual downstream differences are descriptive names only. Retain the source branch without integrating this duplicate overlay. No test or assertion is removed and no exclusion is added.
 - Patch branches must never carry `packages/*/CHANGELOG.md` hunks.
 
@@ -107,13 +107,15 @@ Keep reciprocal ordinary links between the [SDK checkpoint section](packages/ai/
 [capability example](packages/coding-agent/docs/models.md#response-checkpoint-capability),
 [native adapter](packages/ai/src/api/openai-responses.ts),
 [public metadata](packages/ai/src/types.ts), and the independently owned
-[plugin repository](https://github.com/xz-dev/openai-api-pi-extension). Source
+[plugin checkpoint guide](https://github.com/xz-dev/openai-api-pi-extension/blob/main/docs/response-checkpoints.md). Source
 comments belong at adapters/types, not in the byte-identical portable kernel.
 The plugin owns its checkpoint policy and transport independently.
 
-Preserve one optional exclusion setting and raw absence (native absent `["*"]`,
-plugin absent `[]`), verified endpoint capability, remote-storage privacy,
-canonical JSONL, exact active-branch validation, and bounded no-replay repair.
+Preserve raw absence until the request owner applies policy: absent mode means
+`always`, and an absent exclusion list means `[]` in both native and plugin
+owners. `declared` requires verified capability; `["*"]` excludes all. Keep
+malformed-policy rejection, remote-storage privacy, canonical JSONL, exact
+active-branch validation and bounded no-replay repair.
 Do not duplicate the full policy here: package docs and source are the detailed
 references. The plugin's inner SSE is a codec bridge, not HTTP continuation or a
 second planner. Optional local OMD range links can flag drift but cannot replace
