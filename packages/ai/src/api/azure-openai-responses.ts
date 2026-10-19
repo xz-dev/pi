@@ -7,6 +7,7 @@ import { AssistantMessageEventStream, emitTransport } from "../utils/event-strea
 import { headersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
+import { createRequestCompressionFetch } from "../utils/request-compression.ts";
 import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { type AzureEndpointOptions, resolveAzureConfig, resolveDeploymentName } from "./azure-openai-config.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
@@ -188,7 +189,7 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 		apiKey,
 		apiVersion,
 		dangerouslyAllowBrowser: true,
-		fetch: options?.fetch,
+		fetch: options?.fetch ?? createRequestCompressionFetch(),
 		defaultHeaders: headers,
 		baseURL: baseUrl,
 	});
