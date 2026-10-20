@@ -76,11 +76,6 @@ swept as a group, to protect the caller and unrelated processes. These limits ap
 libproc availability and permissions depend on the macOS runtime. Darwin does not gain the Linux-only remote
 `ownedExec1` capability from this CLI backend.
 
-On Linux, startup may show a read-only cgroup delegation hint when systemd user delegation appears available but
-`PI_ENV_CGROUP_PARENT` is absent or unusable. It suggests `systemd-run --user --scope -p Delegate=yes pi` or enabling
-`Delegate=yes` for `user@.service`, plus a writable delegated parent. The external cgroup runner stays disabled;
-startup never creates or migrates cgroups. `--offline` / `PI_OFFLINE` and `quietStartup: true` skip detection and warning.
-
 ## Watching
 
 - The daemon runs Durable's `NodeFileWatcher` next to the files: native events (inotify, FSEvents) only trigger a
