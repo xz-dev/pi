@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { macOSOwnershipDiagnostics } from "../src/utils/process-ownership-diagnostics.ts";
+import { macOSOwnershipDiagnostics } from "../src/utils/macos-ownership-diagnostics.ts";
 
 const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
 const options = { offlineMode: false, quietStartup: false };
