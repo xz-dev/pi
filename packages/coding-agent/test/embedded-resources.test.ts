@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -131,6 +131,40 @@ describe("materializeResourceTree", () => {
 		});
 		expect(target).toBe(join(cacheRoot, "native", "linux", "prebuilds", "linux-x64"));
 		expect(readFileSync(join(target, "top.txt"), "utf8")).toBe("top");
+	});
+
+	test(
+		"fileMode applies to every file on the initial copy, including nested",
+		{ skip: process.platform === "win32" },
+		() => {
+			const source = makeSource();
+			const cacheRoot = makeCacheRoot();
+			const target = materializeResourceTree({
+				sourceDir: source,
+				relativePath: "process-owner",
+				cacheRoot,
+				fileMode: 0o700,
+			});
+			expect(statSync(join(target, "top.txt")).mode & 0o777).toBe(0o700);
+			expect(statSync(join(target, "sub", "nested.txt")).mode & 0o777).toBe(0o700);
+		},
+	);
+
+	test("fileMode does not repair permissions on nonempty-cache reuse", { skip: process.platform === "win32" }, () => {
+		const source = makeSource();
+		const cacheRoot = makeCacheRoot();
+		const targetDir = join(cacheRoot, "process-owner");
+		mkdirSync(targetDir, { recursive: true });
+		writeFileSync(join(targetDir, "top.txt"), "user-edited", { mode: 0o600 });
+
+		const target = materializeResourceTree({
+			sourceDir: source,
+			relativePath: "process-owner",
+			cacheRoot,
+			fileMode: 0o700,
+		});
+		expect(target).toBe(targetDir);
+		expect(statSync(join(target, "top.txt")).mode & 0o777).toBe(0o600);
 	});
 });
 
