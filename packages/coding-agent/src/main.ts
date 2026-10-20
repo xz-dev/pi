@@ -76,8 +76,8 @@ import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { validateThemeJson } from "./modes/interactive/theme/theme-schema.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
+import { macOSOwnershipDiagnostics } from "./utils/macos-ownership-diagnostics.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
-import { macOSOwnershipDiagnostics } from "./utils/process-ownership-diagnostics.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;
