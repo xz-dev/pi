@@ -40,6 +40,7 @@ jobs:
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/freebsd-support:refs/remotes/origin/patch/freebsd-support \
             +refs/heads/patch/single-executable:refs/remotes/origin/patch/single-executable \
+            +refs/heads/patch/process-ownership:refs/remotes/origin/patch/process-ownership \
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
             +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
@@ -88,6 +89,7 @@ jobs:
             startup-benchmark-exit \
             freebsd-support \
             single-executable \
+            process-ownership \
             agent-run-failure-seam \
             managed-tool-executions \
             esc-abort \

@@ -108,6 +108,7 @@ PATCH_ORDER=(
 	model-refresh-session-rebind
 	startup-benchmark-exit
 	single-executable
+	process-ownership
 	agent-run-failure-seam
 	managed-tool-executions
 	esc-abort
@@ -148,6 +149,7 @@ PATCH_ORDER=(
 # is rebased.
 CHAIN_EDGES=(
 	model-refresh:single-executable
+	single-executable:process-ownership
 	agent-run-failure-seam:managed-tool-executions
 	managed-tool-executions:esc-abort
 	esc-abort:manual-retry

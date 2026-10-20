@@ -83,8 +83,26 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	# `/$bunfs/root/<basename>` (see config.ts getEmbeddedAssetPath). Physical
 	# resources (native .node addons, README/docs/examples) are materialized to
 	# the tmpdir cache lazily at first use.
+	# Build the process-owner daemon (feature-owned builder; absent in the CI
+	# checkout by design) into $build_dir/process-owner so it embeds under
+	# `/$bunfs/root/process-owner` and materializes to cacheRoot/process-owner.
+	# CARGO_BUILD_TARGET comes from the same target descriptor as the Bun
+	# triple, keeping the two matrices locked together.
+	cargo_target=$(node ../../scripts/lib/bun-targets.mjs --get "$target" cargoTarget)
+	CARGO_BUILD_TARGET="$cargo_target" node scripts/build-process-owner.mjs "$build_dir/process-owner"
+	if [[ $target == freebsd-* ]]; then
+		# One artifact must run on every supported FreeBSD release; libutil.so.9 (14) became .10 (15).
+		# Assignment (not a for-list) so a readelf failure stops the build under set -e/pipefail.
+		# LLVM readelf (FreeBSD 15) prints "(NEEDED)"; ELF Tool Chain readelf (14) prints "NEEDED" without parentheses.
+		needed=$(readelf -d "$build_dir/process-owner/pi-env" | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }')
+		[[ $needed == *libc.so.7* ]] || { echo "process-owner NEEDED check found no libc.so.7" >&2; exit 1; }
+		for library in $needed; do
+			case $library in libc.so.7 | libthr.so.3 | libm.so.5 | libgcc_s.so.1) ;; *) echo "process-owner links non-portable $library" >&2; exit 1 ;; esac
+		done
+	fi
 	asset_args=(
 		--asset="$build_dir/package.json"
+		--asset="$build_dir/process-owner"
 		--asset=README.md
 		--asset=CHANGELOG.md
 		--asset=docs

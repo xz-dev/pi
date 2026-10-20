@@ -102,6 +102,14 @@ Losslessly reduce model-upload bytes without changing JSON or image data. HTTP s
 - Companion plugin: [Host requirements and bridge integration](https://github.com/xz-dev/openai-api-pi-extension/blob/main/docs/request-compression.md).
 - Patch branch: [`patch/request-compression`](https://github.com/xz-dev/pi/tree/patch/request-compression)
 
+## Process ownership
+
+Pi owns every subprocess tree it starts and stops it when the task or Pi ends, as an ordinary user, with no root, cgroups or setup.
+
+- Details: [Process ownership](process-ownership.md): owners, per-platform guarantees, macOS limits, remote execution and verification.
+- Kernel-enforced on Linux, FreeBSD and Windows. Best effort on macOS, where a fast `setsid` escape is possible; use a container for a hard boundary.
+- Patch branch: [`patch/process-ownership`](https://github.com/xz-dev/pi/tree/patch/process-ownership)
+
 ## TUI and display
 
 Presentation-only changes: layout, selectors, thinking display, startup screen.

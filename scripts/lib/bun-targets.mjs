@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -74,6 +75,17 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 	if (os === "freebsd" && (buildPlatform.os !== "linux" || buildPlatform.arch !== "x64")) throw new Error(`FreeBSD requires an x64 KVM host: ${id}`);
 	const emulated = os === "freebsd" && arch !== "x64";
 	const executor = os === "freebsd" ? "freebsd-vm" : libc === "musl" ? "pinned-musl-container" : "native";
+	// Rust target triple for the process-owner daemon, derived from the same
+	// os/arch/libc fields so it cannot drift from the Bun target matrix.
+	const rustArch = arch === "x64" ? "x86_64" : "aarch64";
+	const cargoTarget =
+		os === "darwin"
+			? `${rustArch}-apple-darwin`
+			: os === "windows"
+				? `${rustArch}-pc-windows-msvc`
+				: os === "freebsd"
+					? `${rustArch}-unknown-freebsd`
+					: `${rustArch}-unknown-linux-${libc === "musl" ? "musl" : "gnu"}`;
 	return Object.freeze({
 		id,
 		bunTarget,
@@ -81,6 +93,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 		arch,
 		libc,
 		cpu,
+		cargoTarget,
 		runner,
 		buildRunner,
 		buildRunnerOs: buildPlatform.os === "darwin" ? "macOS" : buildPlatform.os === "windows" ? "Windows" : "Linux",
@@ -97,6 +110,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 			"version",
 			"help",
 			"list-models",
+			"owner-lifecycle",
 			os === "windows" ? "tui-pseudoconsole" : "tui-pseudoterminal",
 			"resource-materialization",
 			"clipboard",
@@ -144,8 +158,10 @@ export function githubSmokeMatrix() {
 }
 
 export function isMainModulePath(modulePath, argvPath, pathApi = path) {
-	const resolvedModule = pathApi.resolve(modulePath);
-	const resolvedArgv = pathApi.resolve(argvPath);
+	// import.meta.url is the real path; argv keeps symlinks such as macOS /tmp -> /private/tmp.
+	const real = (value) => { try { return realpathSync(value); } catch { return value; } };
+	const resolvedModule = pathApi.resolve(pathApi === path ? real(modulePath) : modulePath);
+	const resolvedArgv = pathApi.resolve(pathApi === path ? real(argvPath) : argvPath);
 	return pathApi.sep === "\\" ? resolvedModule.toLowerCase() === resolvedArgv.toLowerCase() : resolvedModule === resolvedArgv;
 }
 

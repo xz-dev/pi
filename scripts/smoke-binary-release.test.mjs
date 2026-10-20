@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { bunTarget } from "./lib/bun-targets.mjs";
+import { assertOwnerLifecycle, smokeOwnerLifecycle } from "./smoke-owner-lifecycle.mjs";
+
+// Test-only owner: real detached descendants, deterministic cleanup, no native backend dependency.
+function ownerDriver(root, cleanup) {
+	const driver = join(root, "owner-driver.mjs");
+	writeFileSync(driver, `import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const exit = process.exit.bind(process);
+const cleanup = () => { try { process.kill(Number(readFileSync(process.env.PI_OWNER_PID_FILE, "utf8")), "SIGKILL"); } catch {} };
+${cleanup ? 'process.exit = (code) => { cleanup(); exit(code); }; process.on("SIGTERM", () => { cleanup(); exit(143); });' : ""}
+await (await import(pathToFileURL(process.argv.at(-1)).href)).default();
+`);
+	return driver;
+}
 
 const target = "linux-x64-gnu-baseline";
 const bunAvailable = spawnSync("bun", ["--version"]).status === 0;
@@ -207,7 +221,7 @@ export async function load(url, context, next) {
 		writeFileSync(join(root, "register.mjs"), `import { register } from "node:module";
 const real = process.getBuiltinModule("os");
 const names = Object.keys(real).filter((name) => name !== "platform" && name !== "userInfo" && name !== "default");
-const osSource = \`import { createRequire } from "node:module";\nconst real = createRequire(process.cwd() + "/x.cjs")("os");\n\` + names.map((name) => \`export const \${name} = real[\\\'\${name}\\\'];\n\`).join("") + \`export const platform = () => "darwin";\nexport const userInfo = () => { throw new Error("FAULT_USERINFO") };\nexport default real;\n\`;
+const osSource = \`import { createRequire } from "node:module";\nconst real = createRequire(process.cwd() + "/x.cjs")("os");\n\` + names.map((name) => \`export const \${name} = real[\\'\${name}\\'];\n\`).join("") + \`export const platform = () => "darwin";\nexport const userInfo = () => { throw new Error("FAULT_USERINFO") };\nexport default real;\n\`;
 register("./os-hooks.mjs", { parentURL: import.meta.url, data: { osSource } });
 `);
 		const pi = join(root, `pi-${target}`);
@@ -236,6 +250,7 @@ test("external TUI evidence contributes the authoritative pseudoterminal command
 		const descriptor = bunTarget(target);
 		const helperRelative = `${descriptor.nativeHelperDir}/${descriptor.nativeHelperFile}`;
 		const pi = join(stage, `pi-${target}`);
+		const driver = ownerDriver(root, true);
 		writeFileSync(pi, `#!/bin/sh
 uid=$(id -u)
 cache="$TMPDIR/pi-resources-$uid/${target}/1.2.3/${helperRelative}"
@@ -248,6 +263,7 @@ case "$1" in
   --version) echo 1.2.3;;
   --help) echo Usage: pi;;
   --list-models) echo model;;
+  -p) exec "${process.execPath}" "${driver}" "$@";;
   *) exit 0;;
 esac
 `); chmodSync(pi, 0o755);
@@ -260,7 +276,8 @@ esac
 		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-v,ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: null, exitSent: true, cleanExit: true }));
 		const recordPath = join(root, "record.json");
 		mkdirSync(join(root, "smoke-tmp"));
-		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_TUI_EVIDENCE: evidence, TMPDIR: join(root, "smoke-tmp"), RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
+		// Fixture smoke runs as this test user; never trigger the CI-only dedicated-account drop here.
+		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { env: { ...process.env, CI: "false", GITHUB_ACTIONS: "false", PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_TUI_EVIDENCE: evidence, TMPDIR: join(root, "smoke-tmp"), RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
 		const record = JSON.parse(readFileSync(recordPath, "utf8"));
 		assert.deepEqual(record.commands.map(({ name }) => name), descriptor.requiredCommands);
 		assert.deepEqual(record.commands.at(-2).name, "resource-materialization");
@@ -269,6 +286,58 @@ esac
 		assert.equal(record.clipboard.loadedAndCalled, true);
 		assert.equal(record.clipboard.textRead, true);
 		assert.equal(record.clipboard.imageRead, true);
+		assert.equal(record.ownerLifecycle.status, "passed");
+		assertOwnerLifecycle(record.ownerLifecycle, "linux");
 		assert.equal(record.timingsMs.interactive, 37);
 	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("owner lifecycle measures immediate normal/kill containment and same-user peer isolation", { skip: process.platform !== "linux" || process.getuid?.() === 0 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-owner-positive-"));
+	try {
+		const driver = ownerDriver(root, true);
+		const executable = join(root, "pi");
+		writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${driver}" "$@"\n`); chmodSync(executable, 0o755);
+		const evidence = await smokeOwnerLifecycle(executable, bunTarget(target), { timeoutMs: 10_000 });
+		assert.equal(evidence.status, "passed", JSON.stringify(evidence));
+		assert.equal(evidence.identity.elevated, false);
+		assert.ok(evidence.identity.capabilities.CapEff);
+		assertOwnerLifecycle(evidence, "linux");
+		assert.equal(evidence.rows.length, 4);
+		assert.ok(evidence.rows.every((row) => row.aliveBefore && !row.aliveAfter && row.peerAlive && row.immediateChecks === 1));
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("owner lifecycle fails leaked descendants without polling or expiry credit", { skip: process.platform !== "linux" || process.getuid?.() === 0 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-owner-negative-"));
+	try {
+		const driver = ownerDriver(root, false);
+		const executable = join(root, "pi");
+		writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${driver}" "$@"\n`); chmodSync(executable, 0o755);
+		const evidence = await smokeOwnerLifecycle(executable, bunTarget(target), { timeoutMs: 10_000 });
+		assert.equal(evidence.status, "failed");
+		assert.ok(evidence.rows.every((row) => row.aliveAfter && row.peerAlive && row.immediateChecks === 1 && row.status === "failed"), JSON.stringify(evidence));
+		assert.throws(() => assertOwnerLifecycle(evidence, "linux"), /owner lifecycle/);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("owner lifecycle acceptance rejects elevated identity, missing rows, peer loss, and Windows leaks", () => {
+	const evidence = { status: "passed", artifactBunVersion: "1.3.14", identity: { elevated: false, mediumIntegrity: true }, rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, pi: { bun: "1.3.14" }, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })) };
+	assertOwnerLifecycle(evidence, "windows");
+	for (const mutate of [
+		(value) => { value.identity.elevated = true; },
+		(value) => { value.identity.adminGroup = true; },
+		(value) => { value.identity.mediumIntegrity = false; },
+		(value) => { value.rows.pop(); },
+		(value) => { value.rows[0].peerAlive = false; },
+		(value) => { value.rows[0].aliveAfter = true; },
+		(value) => { value.rows[0].immediateChecks = 2; },
+		(value) => { value.rows[0].guardExpired = true; },
+	]) {
+		const changed = structuredClone(evidence); mutate(changed);
+		assert.throws(() => assertOwnerLifecycle(changed, "windows"), /owner lifecycle/);
+	}
+	assert.throws(() => assertOwnerLifecycle(evidence, "darwin"), /inventory/);
+	evidence.rows.push({ ...evidence.rows[0], name: "darwin-fast-escape", aliveAfter: true, status: "known-limitation", limitation: "unseen setsid reparent before sweep" });
+	assertOwnerLifecycle(evidence, "darwin");
 });
