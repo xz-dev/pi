@@ -22,6 +22,7 @@ import { main } from "../src/main.ts";
 import { ConfigSelectorComponent } from "../src/modes/interactive/components/config-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
+import * as sleepModule from "../src/utils/sleep.ts";
 import { allowNetwork } from "./test-network-env.ts";
 
 describe("package commands", () => {
@@ -458,9 +459,95 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it.each([
+		[
+			["--mirror"],
+			["https://gh-proxy.com/https://github.com", "https://ghfast.top/https://github.com", "https://github.com"],
+		],
+		[["--mirror-url", "http://localhost:8080"], ["http://localhost:8080"]],
+		[["--mirror-url", "not a URL"], ["not a URL"]],
+		[
+			["--mirror-url", "http://first.local", "--mirror-url", "https://second.example"],
+			["http://first.local", "https://second.example"],
+		],
+		[["--no-mirror"], undefined],
+	] as const)("saves mirror choice %j without updating or accessing the network", async (flags, expected) => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ theme: "dark", updateMirrors: ["https://old.example"] }));
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const update = vi.spyOn(DefaultPackageManager.prototype, "update");
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", ...flags, "--permanent"]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(update).not.toHaveBeenCalled();
+		expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+			theme: "dark",
+			...(expected === undefined ? {} : { updateMirrors: expected }),
+		});
+	});
+
+	it("reports a failed mirror save without overwriting malformed settings", async () => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, "{broken");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--mirror", "--permanent"]);
+
+		expect(process.exitCode).toBe(1);
+		expect(readFileSync(settingsPath, "utf8")).toBe("{broken");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.flat().join("\n")).toContain("Could not save mirror setting");
+		expect(logSpy).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["--permanent"],
+		["--mirror-url"],
+		["--mirror", "--no-mirror"],
+		["--mirror", "--mirror-url", "http://localhost"],
+		["--mirror", "--clean"],
+		["--mirror", "--models"],
+		["--mirror", "--extensions"],
+		["--mirror", "--permanent", "--all"],
+		["--mirror", "--permanent", "--force"],
+	])("rejects invalid mirror option combination %j without side effects", async (...flags) => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, "{}");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		await runPackageCommandDirectly(["update", ...flags]);
+		expect(process.exitCode).toBe(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(readFileSync(settingsPath, "utf8")).toBe("{}");
+	});
+
+	it("rejects update --clean combined with another update target", async () => {
+		const create = vi.spyOn(ModelRuntime, "create");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(runPackageCommandDirectly(["update", "--clean", "--models"])).resolves.toBeUndefined();
+
+		expect(create).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"--clean cannot be combined with another update target",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("refreshes only model catalogs with update --models", async () => {
 		const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
-		const create = vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh } as unknown as ModelRuntime);
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		const create = vi
+			.spyOn(ModelRuntime, "create")
+			.mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -470,16 +557,199 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 			authPath: join(agentDir, "auth.json"),
 			modelsPath: join(agentDir, "models.json"),
 			allowModelNetwork: false,
-			signal: expect.any(AbortSignal),
 		});
 		expect(refresh).toHaveBeenCalledWith({
 			allowNetwork: true,
 			force: true,
+			providers: ["openai"],
 			signal: expect.any(AbortSignal),
+			disableImmediateRetries: true,
 		});
 		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Model catalogs refreshed");
 		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("retries failed model catalogs with 3s/6s/12s waits and reports the original error", async () => {
+		const refresh = vi.fn(async (_options?: Record<string, unknown>) => ({
+			aborted: false,
+			errors: new Map<string, Error>([["openai", new Error("catalog boom")]]),
+		}));
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const delays: number[] = [];
+		vi.spyOn(sleepModule, "sleep").mockImplementation(async (ms) => {
+			delays.push(ms);
+		});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(refresh).toHaveBeenCalledTimes(4);
+		expect(delays).toEqual([3000, 6000, 12000]);
+		expect(refresh.mock.calls[1]?.[0]).toMatchObject({ providers: ["openai"] });
+		expect(refresh.mock.calls[2]?.[0]).toMatchObject({ providers: ["openai"] });
+		expect(refresh.mock.calls[3]?.[0]).toMatchObject({ providers: ["openai"] });
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Could not refresh model catalogs: openai: catalog boom",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("recovers a transient model catalog failure on the delayed retry", async () => {
+		const refresh = vi
+			.fn(async (_options?: Record<string, unknown>) => ({ aborted: false, errors: new Map<string, Error>() }))
+			.mockResolvedValueOnce({
+				aborted: false,
+				errors: new Map<string, Error>([["openai", new Error("boom")]]),
+			});
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(refresh).toHaveBeenCalledTimes(2);
+		expect(refresh.mock.calls[1]?.[0]).toMatchObject({ providers: ["openai"] });
+		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Model catalogs refreshed");
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("makes only four catalog requests when the real catalog endpoint keeps failing", async () => {
+		// Regression: the explicit update retry must own the whole budget — inner
+		// transport retries are disabled, so a persistent 503 is 4 requests, not 12.
+		vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+		const requests: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request) => {
+				const url = String(input);
+				requests.push(url);
+				if (url.includes("/providers/openai?")) return new Response("unavailable", { status: 503 });
+				return new Response("not found", { status: 404 });
+			}),
+		);
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		const openaiRequests = requests.filter((url) => url.includes("/providers/openai?"));
+		expect(openaiRequests).toHaveLength(4);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("does not refetch a successful catalog when a sibling times out", async () => {
+		// Regression: per-provider retry ownership means a timed-out sibling only
+		// retries itself; the already-fetched provider is not part of any retry.
+		// The configured models.refreshTimeoutMs drives the per-attempt signal.
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ models: { refreshTimeoutMs: 50_000 } }));
+		vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+		vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+		const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+		const timeoutSpy = vi
+			.spyOn(AbortSignal, "timeout")
+			.mockImplementation((ms) => originalTimeout(ms === 50_000 ? 50 : ms));
+		const requests: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				requests.push(url);
+				if (url.includes("/providers/openai?")) {
+					return Response.json([], { headers: { "last-modified": new Date().toUTCString() } });
+				}
+				if (url.includes("/providers/anthropic?")) {
+					return new Promise<Response>((_resolve, reject) => {
+						const signal = init?.signal;
+						if (signal?.aborted) reject(signal.reason);
+						else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+					});
+				}
+				return new Response("not found", { status: 404 });
+			}),
+		);
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(requests.filter((url) => url.includes("/providers/openai?"))).toHaveLength(1);
+		expect(requests.filter((url) => url.includes("/providers/anthropic?"))).toHaveLength(4);
+		// The configured 50_000ms value is what drives the per-attempt signal
+		// (other internal timeouts may also call AbortSignal.timeout).
+		expect(timeoutSpy.mock.calls.filter(([ms]) => ms === 50_000).length).toBeGreaterThanOrEqual(4);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("uses the configured model refresh timeout fresh for each retry attempt", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ models: { refreshTimeoutMs: 42_000 } }));
+		const refresh = vi
+			.fn(async (_options?: Record<string, unknown>) => ({ aborted: false, errors: new Map<string, Error>() }))
+			.mockResolvedValueOnce({
+				aborted: false,
+				errors: new Map<string, Error>([["openai", new Error("boom")]]),
+			});
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(refresh).toHaveBeenCalledTimes(2);
+		// Fresh timeout per attempt: AbortSignal.timeout called once per refresh call.
+		expect(timeoutSpy.mock.calls.filter(([ms]) => ms === 42_000)).toHaveLength(2);
+	});
+
+	it("a zero models.refreshTimeoutMs aborts each attempt immediately", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ models: { refreshTimeoutMs: 0 } }));
+		const refresh = vi.fn(async (_options?: Record<string, unknown>) => ({
+			aborted: true,
+			errors: new Map<string, Error>(),
+		}));
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(timeoutSpy).toHaveBeenCalledWith(0);
+		expect(refresh).toHaveBeenCalledTimes(4);
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Could not refresh model catalogs: openai: Model catalog refresh timed out.",
+		);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("a negative models.refreshTimeoutMs disables the per-attempt timeout signal", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ models: { refreshTimeoutMs: -1 } }));
+		const refresh = vi.fn(async (_options?: Record<string, unknown>) => ({
+			aborted: false,
+			errors: new Map<string, Error>(),
+		}));
+		const getProviders = vi.fn(() => [{ id: "openai" }]);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh, getProviders } as unknown as ModelRuntime);
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await runPackageCommandDirectly(["update", "--models"]);
+
+		expect(refresh).toHaveBeenCalledTimes(1);
+		expect(refresh.mock.calls[0]?.[0]).not.toHaveProperty("signal");
+		expect(timeoutSpy).not.toHaveBeenCalled();
 	});
 
 	it("rejects update --models combined with another update target", async () => {
@@ -618,6 +888,29 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it("refuses self-update for a channel-managed install before any release lookup", async () => {
+		const lockDir = join(tempDir, "channel-install");
+		mkdirSync(lockDir, { recursive: true });
+		writeFileSync(join(lockDir, ".scoop.managed.lock"), "");
+		process.env.PI_PACKAGE_DIR = lockDir;
+		const fetchMock = vi.fn(async () => Response.json({ version: VERSION }));
+		vi.stubGlobal("fetch", fetchMock);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
+
+			// The refusal must happen offline, before any release/version lookup.
+			expect(fetchMock).not.toHaveBeenCalled();
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("managed by scoop");
+			expect(stderr).toContain("self-update is disabled");
+			expect(process.exitCode).toBe(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("allows explicit self-update checks when automatic version checks are disabled", async () => {
 		const previousSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
 		process.env.PI_SKIP_VERSION_CHECK = "1";
@@ -644,6 +937,79 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it("retries a failed self-update version check after the update delays", async () => {
+		const previousSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
+		delete process.env.PI_SKIP_VERSION_CHECK;
+		const fetchMock = vi
+			.fn()
+			.mockRejectedValueOnce(new Error("fetch failed"))
+			.mockResolvedValue(Response.json({ version: VERSION }));
+		vi.stubGlobal("fetch", fetchMock);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const delays: number[] = [];
+		vi.spyOn(sleepModule, "sleep").mockImplementation(async (ms) => {
+			delays.push(ms);
+		});
+
+		try {
+			await runPackageCommandDirectly(["update", "--self"]);
+		} finally {
+			if (previousSkipVersionCheck === undefined) delete process.env.PI_SKIP_VERSION_CHECK;
+			else process.env.PI_SKIP_VERSION_CHECK = previousSkipVersionCheck;
+		}
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(delays).toEqual([3000]);
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("retries a failing self-update package step four times", async () => {
+		const globalPrefix = join(tempDir, "global-prefix");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+		const fakeNpmPath = join(tempDir, "fake-npm-fail.cjs");
+		const recordPath = join(tempDir, "self-update-retry.json");
+		mkdirSync(selfPackageDir, { recursive: true });
+		writeFileSync(
+			fakeNpmPath,
+			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
+if(args.includes("root")) {
+	console.log(path.join(prefix,"lib","node_modules"));
+	process.exit(0);
+}
+const records=fs.existsSync(${JSON.stringify(recordPath)})?JSON.parse(fs.readFileSync(${JSON.stringify(recordPath)},"utf-8")):[];
+records.push(args);
+fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(records));
+process.exit(23);
+`,
+		);
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
+		);
+		process.env.PI_PACKAGE_DIR = selfPackageDir;
+		Object.defineProperty(process, "execPath", {
+			value: join(selfPackageDir, "dist", "cli.js"),
+			configurable: true,
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json({ version: getNewerPatchVersion() })),
+		);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
+
+		await runPackageCommandDirectly(["update", "--self"]);
+
+		expect(process.exitCode).toBe(1);
+		const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
+		expect(recordedCalls).toHaveLength(4);
+		expect(recordedCalls.every((args) => args.includes("install") || args.includes("add"))).toBe(true);
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("exited with code 23");
+	});
+
 	it("retries a transient self-update version check", async () => {
 		const previousSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
 		delete process.env.PI_SKIP_VERSION_CHECK;
@@ -655,6 +1021,7 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		vi.stubGlobal("fetch", fetchMock);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
 
 		try {
 			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
@@ -781,6 +1148,7 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		mockManagedUpdate(targetVersion);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
 
 		await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
 
@@ -977,6 +1345,7 @@ else {
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
 
 		try {
 			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
@@ -1030,6 +1399,7 @@ if(args.includes("install")) process.exit(23);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(sleepModule, "sleep").mockResolvedValue(undefined);
 
 		try {
 			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
@@ -1042,6 +1412,9 @@ if(args.includes("install")) process.exit(23);
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
 			expect(recordedCalls).toEqual([
 				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
+				expect.arrayContaining(["install", "-g", `${activePackageName}@0.73.0`]),
+				expect.arrayContaining(["install", "-g", `${activePackageName}@0.73.0`]),
+				expect.arrayContaining(["install", "-g", `${activePackageName}@0.73.0`]),
 				expect.arrayContaining(["install", "-g", `${activePackageName}@0.73.0`]),
 			]);
 		} finally {
