@@ -3,7 +3,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { constants } from "node:os";
 import { waitForChildProcess } from "../utils/child-process.ts";
+import { observeOwnedProcess, ownedCommand } from "../utils/process-owner.ts";
 
 /**
  * Options for executing shell commands.
@@ -38,27 +40,52 @@ export async function execCommand(
 	options?: ExecOptions,
 ): Promise<ExecResult> {
 	return new Promise((resolve) => {
-		const proc = spawn(command, args, {
+		const invocation = ownedCommand(command, args, 3);
+		const proc = spawn(invocation.command, invocation.args, {
 			cwd,
 			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["ignore", "pipe", "pipe", ...(invocation.nativeOwner ? ["pipe" as const] : [])],
 		});
-
 		let stdout = "";
 		let stderr = "";
+		const setupStderr: string[] = [];
+		const owner = invocation.nativeOwner
+			? observeOwnedProcess(proc, () => {
+					stderr += setupStderr.splice(0).join("");
+				})
+			: undefined;
 		let killed = false;
+		let settled = false;
 		let timeoutId: NodeJS.Timeout | undefined;
+		let forceKillId: NodeJS.Timeout | undefined;
+		// proc.killed only means a signal was sent; track actual exit so the
+		// escalation below reaches children that ignore SIGTERM (#7864).
+		let exited = false;
+		let exitSignal: NodeJS.Signals | null = null;
+
+		proc.once("exit", (_code, signal) => {
+			exited = true;
+			exitSignal = signal;
+			if (forceKillId) {
+				clearTimeout(forceKillId);
+				forceKillId = undefined;
+			}
+		});
 
 		const killProcess = () => {
-			if (!killed) {
+			if (!killed && !exited && !settled) {
 				killed = true;
-				proc.kill("SIGTERM");
-				// Force kill after 5 seconds if SIGTERM doesn't work
-				setTimeout(() => {
-					if (!proc.killed) {
-						proc.kill("SIGKILL");
-					}
-				}, 5000);
+				if (process.platform === "win32" && owner) owner.cancel();
+				else proc.kill("SIGTERM");
+				// Native owners escalate and acknowledge exit only after descendant cleanup.
+				if (!invocation.nativeOwner) {
+					forceKillId = setTimeout(() => {
+						forceKillId = undefined;
+						if (!exited && !settled) {
+							proc.kill("SIGKILL");
+						}
+					}, 5000);
+				}
 			}
 		};
 
@@ -78,28 +105,45 @@ export async function execCommand(
 			}, options.timeout);
 		}
 
+		proc.stdout?.setEncoding("utf8");
+		proc.stderr?.setEncoding("utf8");
 		proc.stdout?.on("data", (data) => {
 			stdout += data.toString();
 		});
 
-		proc.stderr?.on("data", (data) => {
-			stderr += data.toString();
+		proc.stderr?.on("data", (data: string) => {
+			if (!owner || owner.started) stderr += data;
+			else setupStderr.push(data);
 		});
+
+		const cleanup = () => {
+			settled = true;
+			if (timeoutId) clearTimeout(timeoutId);
+			if (forceKillId) {
+				clearTimeout(forceKillId);
+				forceKillId = undefined;
+			}
+			options?.signal?.removeEventListener("abort", killProcess);
+		};
 
 		// Wait for process termination without hanging on inherited stdio handles
 		// held open by detached descendants.
-		waitForChildProcess(proc)
+		const completion = owner
+			? owner.completion.then(({ code, errno }) => (errno === undefined ? code : 1))
+			: waitForChildProcess(proc);
+		completion
 			.then((code) => {
-				if (timeoutId) clearTimeout(timeoutId);
-				if (options?.signal) {
-					options.signal.removeEventListener("abort", killProcess);
-				}
-				resolve({ stdout, stderr, code: code ?? 0, killed });
+				cleanup();
+				// A null code means signal termination; report the conventional
+				// 128+signo instead of a false-success 0 (#7864).
+				const signalCode = exitSignal ? 128 + (constants.signals[exitSignal] ?? 0) : null;
+				resolve({ stdout, stderr, code: code ?? signalCode ?? 1, killed });
 			})
 			.catch((error: Error) => {
-				if (timeoutId) clearTimeout(timeoutId);
-				if (options?.signal) {
-					options.signal.removeEventListener("abort", killProcess);
+				cleanup();
+				if (owner) {
+					const message = error instanceof Error ? error.message : String(error);
+					stderr += `${stderr && !stderr.endsWith("\n") ? "\n" : ""}${message}\n`;
 				}
 				resolve({ stdout, stderr: stderr || error.message, code: 1, killed });
 			});
