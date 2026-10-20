@@ -140,7 +140,9 @@ See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and p
 
 Buffered JSON uploads in the OpenAI Responses, Chat Completions, Azure Responses, Anthropic Messages, and Codex HTTP adapters use lossless request compression. Unknown endpoints are actively tried with zstd level 3 without requiring an `Accept-Encoding` response header; `api.anthropic.com` starts with gzip level 4. Explicit encoding refusals can step down through gzip, deflate, Brotli, then uncompressed JSON. A payload that would grow after compression is sent unchanged.
 
-Codec rejection state stays in process memory, isolated by request target and credentials. It is not saved to settings or sessions and never automatically upgrades after a rejection. Authentication, rate-limit, server, network, cancellation, and started-stream failures do not trigger compression-specific replay. A generic malformed-JSON error does not prove encoding refusal and is surfaced rather than guessed around.
+Until a target accepts a codec, any other failed compressed request (for example a gateway 403/502, a body the backend cannot parse, or a reset connection) is resent once uncompressed. If that resend succeeds, the target stays uncompressed; if it also fails, its error is returned and the next request probes again. Authentication, payload-size, rate-limit, overload, and cancellation failures are never resent. Only one unverified compressed request per target is in flight at a time; concurrent requests wait for its verdict, so probing never multiplies concurrent load. After a target accepts a codec, later failures are returned directly.
+
+Codec state stays in process memory, isolated by request target and credentials. It is not saved to settings or sessions and never automatically upgrades after a rejection.
 
 Node/Bun Responses WebSockets independently negotiate `permessage-deflate`; they do not use HTTP gzip/zstd bodies. A declined extension remains disabled for that target and credential scope until process exit. Compression changes neither JSON/image bytes nor token usage, and is separate from context compaction and transport/checkpoint cooldowns.
 
