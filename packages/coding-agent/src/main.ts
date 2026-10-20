@@ -76,6 +76,7 @@ import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { validateThemeJson } from "./modes/interactive/theme/theme-schema.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
+import { macOSOwnershipDiagnostics } from "./utils/macos-ownership-diagnostics.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import {
 	completeStartupBenchmark,
@@ -969,7 +970,14 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	time("resolveModelScope");
-	const startupDiagnostics = deduplicateDiagnostics([...startupSettingsDiagnostics, ...runtime.diagnostics]);
+	const startupDiagnostics = deduplicateDiagnostics([
+		...startupSettingsDiagnostics,
+		...runtime.diagnostics,
+		// Interactive only: script runs (-p/json/rpc) must not get a per-run stderr line.
+		...(appMode === "interactive"
+			? macOSOwnershipDiagnostics({ offlineMode, quietStartup: settingsManager.getQuietStartup() })
+			: []),
+	]);
 	const hasRuntimeErrors = runtime.diagnostics.some((diagnostic) => diagnostic.type === "error");
 	if (appMode !== "interactive" || hasRuntimeErrors) {
 		reportDiagnostics(startupDiagnostics);
