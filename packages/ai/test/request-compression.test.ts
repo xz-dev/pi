@@ -534,6 +534,14 @@ describe("native adapter default transport", () => {
 			maxRetries: 0,
 			onTransport: (t) => void transports.push(t),
 		}).result();
+		expect(transports).toEqual(["SSE try Zstd", "SSE Zstd"]);
+		// A verified codec is labelled directly, without a try step.
+		transports.length = 0;
+		await streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			maxRetries: 0,
+			onTransport: (t) => void transports.push(t),
+		}).result();
 		expect(transports).toEqual(["SSE Zstd"]);
 	});
 
@@ -602,7 +610,40 @@ describe("native adapter default transport", () => {
 			onTransport: (t) => void transports.push(t),
 		}).result();
 		expect(refused).toBe(true);
-		expect(transports).toEqual(["SSE gzip"]);
+		expect(transports).toEqual(["SSE try Zstd", "SSE try gzip", "SSE gzip"]);
+	});
+
+	it("labels the uncompressed judging resend as try plain", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+				const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+				if (headers.has("content-encoding")) return new Response("Forbidden", { status: 403 });
+				return new Response(completionsSse, { status: 200, headers: { "content-type": "text/event-stream" } });
+			}),
+		);
+		const model: Model<"openai-completions"> = {
+			id: "test-model",
+			name: "Test",
+			api: "openai-completions",
+			provider: "test-provider",
+			baseUrl: "https://label-waf.test/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10_000,
+			maxTokens: 1_000,
+		};
+		const context = normalizeContext({
+			messages: [{ role: "user", content: `say ${"hello ".repeat(400)}`, timestamp: 1 }],
+		});
+		const transports: Array<string | undefined> = [];
+		await streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			maxRetries: 0,
+			onTransport: (t) => void transports.push(t),
+		}).result();
+		expect(transports).toEqual(["SSE try Zstd", "SSE try plain", "SSE"]);
 	});
 
 	it("keeps the bare SSE label for an uncompressed upload", async () => {

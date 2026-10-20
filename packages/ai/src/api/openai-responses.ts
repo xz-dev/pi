@@ -18,7 +18,12 @@ import type {
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic, createAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream, emitTransport, transportLabel } from "../utils/event-stream.ts";
+import {
+	AssistantMessageEventStream,
+	emitTransport,
+	probeTransportLabel,
+	transportLabel,
+} from "../utils/event-stream.ts";
 import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
@@ -323,7 +328,10 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				apiKey,
 				options?.headers,
 				options?.identity,
-				options?.fetch ?? createRequestCompressionFetch(),
+				options?.fetch ??
+					createRequestCompressionFetch(undefined, (encoding) =>
+						emitTransport(options?.onTransport, probeTransportLabel("SSE", encoding), model),
+					),
 				cacheSessionId,
 			);
 			let params = buildParams(

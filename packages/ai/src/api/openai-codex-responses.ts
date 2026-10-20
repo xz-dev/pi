@@ -23,7 +23,12 @@ import {
 	formatThrownValue,
 } from "../utils/diagnostics.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream, emitTransport, transportLabel } from "../utils/event-stream.ts";
+import {
+	AssistantMessageEventStream,
+	emitTransport,
+	probeTransportLabel,
+	transportLabel,
+} from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
 import { createRequestCompressionFetch, getRequestCompressionEncoding } from "../utils/request-compression.ts";
@@ -426,7 +431,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			}
 
 			// Preserve Codex's encoded custom-fetch contract while sharing bounded codec downgrade.
-			const fetchRequest = createRequestCompressionFetch(options?.fetch);
+			const fetchRequest = createRequestCompressionFetch(options?.fetch, (encoding) =>
+				emitTransport(options?.onTransport, probeTransportLabel("SSE", encoding), model),
+			);
 
 			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;

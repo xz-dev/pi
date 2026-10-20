@@ -571,7 +571,7 @@ describe("persisted Responses ancestry", () => {
 			const { sent, sockets, fetchMock } = checkpointServer();
 			const bodies: unknown[] = [];
 			fetchMock.mockImplementation(async (_input, init) => {
-				bodies.push(JSON.parse(String(init?.body)));
+				bodies.push(jsonRequestBody(init));
 				return new Response(
 					'data: {"type":"response.completed","response":{"id":"sse","status":"completed"}}\n\n',
 					{ headers: { "content-type": "text/event-stream" } },
