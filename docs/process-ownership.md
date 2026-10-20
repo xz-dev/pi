@@ -90,16 +90,6 @@ The `pi-env` daemon can run commands under the same owner on the remote host. It
 
 On other remote hosts, Pi uses the previous execution path: commands still run, but their descendants are not owned.
 
-## Linux cgroups
-
-Pi does not create or write cgroups. If your Linux session supports cgroup delegation but Pi cannot use it, Pi shows a startup hint, for example:
-
-```bash
-systemd-run --user --scope -p Delegate=yes pi
-```
-
-You can also point `PI_ENV_CGROUP_PARENT` at a writable delegated subtree. The hint is informational: process ownership above does not depend on cgroups, and the external cgroup runner stays disabled. The hint is not shown with `--offline`, `PI_OFFLINE=1` or a quiet startup.
-
 ## Verification
 
 Every Release candidate is checked on all 14 targets before publication. CI creates a dedicated standard account with no administrator, `sudo`, `wheel` or `docker` membership, then runs the shipped executable as that account:
