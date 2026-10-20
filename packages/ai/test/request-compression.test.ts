@@ -160,23 +160,48 @@ describe("request-compression fetch wrapper", () => {
 		expect(calls2.map((c) => c.encoding)).toEqual([null]);
 	});
 
-	it("does not treat an arbitrary 400 as an encoding refusal", async () => {
+	it("judges an arbitrary 400 with one uncompressed resend and surfaces that error", async () => {
 		const origin = "https://bad-json.test";
 		const { fn, calls } = makeFetch(
 			() => new Response(JSON.stringify({ error: { message: "invalid request: bad field" } }), { status: 400 }),
 		);
 		const res = await createRequestCompressionFetch(fn)(`${origin}/x`, jsonInit(BIG_JSON));
 		expect(res.status).toBe(400);
-		expect(calls).toHaveLength(1);
+		expect(calls.map((c) => c.encoding)).toEqual(["zstd", null]);
+		expect(calls[1].body).toBe(BIG_JSON);
 		expect(await res.json()).toEqual({ error: { message: "invalid request: bad field" } });
+		// Both forms failed: no capability verdict, the next request probes again.
+		const later = makeFetch(() => new Response("{}"));
+		await createRequestCompressionFetch(later.fn)(`${origin}/x`, jsonInit(BIG_JSON));
+		expect(later.calls[0].encoding).toBe("zstd");
 	});
 
-	it("does not replay media-type-only 415 or poison later codec selection", async () => {
+	it("stays uncompressed when a gateway blocks compressed bodies but accepts plain JSON", async () => {
+		const origin = "https://waf.test";
+		for (const block of [
+			() => new Response("Forbidden", { status: 403 }),
+			() => new Response("bad gateway", { status: 502 }),
+			() => new Response(JSON.stringify({ error: "invalid JSON" }), { status: 400 }),
+			() => {
+				throw new TypeError("fetch failed: connection reset");
+			},
+		]) {
+			const path = `${origin}/${Math.random()}`;
+			const { fn, calls } = makeFetch((c) => (c.encoding === null ? new Response("{}") : block()));
+			const wrapped = createRequestCompressionFetch(fn);
+			const res = await wrapped(path, jsonInit(BIG_JSON));
+			expect(res.status).toBe(200);
+			expect(getRequestCompressionEncoding(res)).toBeUndefined();
+			await wrapped(path, jsonInit(BIG_JSON));
+			expect(calls.map((c) => c.encoding)).toEqual(["zstd", null, null]);
+		}
+	});
+
+	it("does not resend media-type-only 415 twice or poison later codec selection", async () => {
 		const url = "https://media-type-only.test/v1/responses";
-		const response = new Response("Only application/vnd.api+json is accepted", { status: 415 });
-		const first = makeFetch(() => response);
-		expect(await createRequestCompressionFetch(first.fn)(url, jsonInit(BIG_JSON))).toBe(response);
-		expect(first.calls).toHaveLength(1);
+		const first = makeFetch(() => new Response("Only application/vnd.api+json is accepted", { status: 415 }));
+		const response = await createRequestCompressionFetch(first.fn)(url, jsonInit(BIG_JSON));
+		expect(first.calls.map((c) => c.encoding)).toEqual(["zstd", null]);
 		expect(await response.text()).toBe("Only application/vnd.api+json is accepted");
 		const later = makeFetch(() => new Response("{}"));
 		await createRequestCompressionFetch(later.fn)(url, jsonInit(BIG_JSON));
@@ -205,20 +230,38 @@ describe("request-compression fetch wrapper", () => {
 		expect(calls.map((c) => c.encoding)).toEqual(["zstd", "gzip"]);
 	});
 
-	it("never replays an algorithm on 401/403/429/5xx or network errors", async () => {
+	it("never resends on auth, size, rate-limit, or overload failures", async () => {
 		const origin = "https://no-replay.test";
-		for (const status of [401, 403, 429, 500]) {
+		for (const status of [401, 413, 429, 503]) {
 			const { fn, calls } = makeFetch(() => new Response("nope", { status }));
 			const res = await createRequestCompressionFetch(fn)(`${origin}/s${status}`, jsonInit(BIG_JSON));
 			expect(res.status).toBe(status);
 			expect(calls).toHaveLength(1);
 		}
-		const { fn } = makeFetch(() => {
-			throw new Error("socket hangup");
+	});
+
+	it("surfaces the uncompressed error when both probe forms fail", async () => {
+		const origin = "https://both-fail.test";
+		const { fn, calls } = makeFetch((c) => {
+			if (c.encoding === null) throw new Error("socket hangup");
+			throw new Error("compressed hangup");
 		});
 		await expect(createRequestCompressionFetch(fn)(`${origin}/net`, jsonInit(BIG_JSON))).rejects.toThrow(
 			"socket hangup",
 		);
+		expect(calls.map((c) => c.encoding)).toEqual(["zstd", null]);
+	});
+
+	it("returns later failures directly once the target accepted the codec", async () => {
+		const url = "https://verified.test/x";
+		let fail = false;
+		const { fn, calls } = makeFetch(() => (fail ? new Response("bad field", { status: 400 }) : new Response("{}")));
+		const wrapped = createRequestCompressionFetch(fn);
+		await wrapped(url, jsonInit(BIG_JSON));
+		fail = true;
+		const res = await wrapped(url, jsonInit(BIG_JSON));
+		expect(res.status).toBe(400);
+		expect(calls.map((c) => c.encoding)).toEqual(["zstd", "zstd"]);
 	});
 
 	it("forwards abort errors and does not downgrade", async () => {
@@ -259,48 +302,54 @@ describe("request-compression fetch wrapper", () => {
 		expect(second.calls[0].encoding).not.toBe("zstd");
 	});
 
-	it("a concurrent stale success never lowers a floor another send raised", async () => {
+	it("serializes probes per target: concurrent requests wait for the verdict", async () => {
 		const origin = "https://race-floor.test";
 		let admitFirst!: () => void;
-		let admitSecond!: () => void;
 		let finishFirst!: (response: Response) => void;
-		let finishSecond!: (response: Response) => void;
 		const firstAdmitted = new Promise<void>((resolve) => {
 			admitFirst = resolve;
-		});
-		const secondAdmitted = new Promise<void>((resolve) => {
-			admitSecond = resolve;
 		});
 		const firstResponse = new Promise<Response>((resolve) => {
 			finishFirst = resolve;
 		});
-		const secondResponse = new Promise<Response>((resolve) => {
-			finishSecond = resolve;
-		});
-		let probes = 0;
-		const { fn } = makeFetch((c) => {
-			if (c.encoding !== "zstd") return new Response("{}");
-			if (probes++ === 0) {
-				admitFirst();
-				return firstResponse;
-			}
-			admitSecond();
-			return secondResponse;
+		const { fn, calls } = makeFetch((c, index) => {
+			if (index > 0) return new Response("{}");
+			expect(c.encoding).toBe("zstd");
+			admitFirst();
+			return firstResponse;
 		});
 		const wrapped = createRequestCompressionFetch(fn);
 		const first = wrapped(`${origin}/x`, jsonInit(BIG_JSON));
 		await firstAdmitted;
 		const second = wrapped(`${origin}/x`, jsonInit(BIG_JSON));
-		await secondAdmitted;
+		const third = wrapped(`${origin}/x`, jsonInit(BIG_JSON));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(calls).toHaveLength(1);
 		finishFirst(new Response("unsupported content-encoding", { status: 415 }));
-		const downgraded = await first;
-		finishSecond(new Response("{}"));
-		const staleSuccess = await second;
-		expect(getRequestCompressionEncoding(downgraded)).toBe("gzip");
-		expect(getRequestCompressionEncoding(staleSuccess)).toBe("zstd");
-		const next = makeFetch(() => new Response("{}"));
-		await createRequestCompressionFetch(next.fn)(`${origin}/x`, jsonInit(BIG_JSON));
-		expect(next.calls[0].encoding).toBe("gzip");
+		const responses = await Promise.all([first, second, third]);
+		expect(responses.map(getRequestCompressionEncoding)).toEqual(["gzip", "gzip", "gzip"]);
+		// zstd refused, one gzip probe verified, then waiters reuse gzip.
+		expect(calls.map((c) => c.encoding)).toEqual(["zstd", "gzip", "gzip", "gzip"]);
+	});
+
+	it("lets a waiting request abort without waiting for the probe", async () => {
+		const origin = "https://wait-abort.test";
+		let finish!: (response: Response) => void;
+		const { fn } = makeFetch(
+			() =>
+				new Promise<Response>((resolve) => {
+					finish = resolve;
+				}),
+		);
+		const wrapped = createRequestCompressionFetch(fn);
+		const first = wrapped(`${origin}/x`, jsonInit(BIG_JSON));
+		await vi.waitFor(() => expect(finish).toBeDefined());
+		const controller = new AbortController();
+		const waiting = wrapped(`${origin}/x`, { ...jsonInit(BIG_JSON), signal: controller.signal });
+		controller.abort();
+		await expect(waiting).rejects.toThrow();
+		finish(new Response("{}"));
+		expect((await first).status).toBe(200);
 	});
 
 	it("starts api.anthropic.com at gzip", async () => {
@@ -369,17 +418,17 @@ describe("request-compression fetch wrapper", () => {
 		}
 	});
 
-	it("preserves large unrelated 400 bodies and does not retry unknown-model errors", async () => {
+	it("preserves large unrelated 400 bodies after a verified codec", async () => {
+		const url = "https://large-error.test/v1/responses";
 		const body = JSON.stringify({ error: "unknown model", detail: "x".repeat(100_000) });
 		const response = new Response(body, { status: 400 });
-		const mock = makeFetch(() => response);
-		const result = await createRequestCompressionFetch(mock.fn)(
-			"https://large-error.test/v1/responses",
-			jsonInit(BIG_JSON),
-		);
+		const mock = makeFetch((_c, index) => (index === 0 ? new Response("{}") : response));
+		const wrapped = createRequestCompressionFetch(mock.fn);
+		await wrapped(url, jsonInit(BIG_JSON));
+		const result = await wrapped(url, jsonInit(BIG_JSON));
 		expect(result).toBe(response);
 		expect(await result.text()).toBe(body);
-		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls).toHaveLength(2);
 	});
 
 	it("passes signed JSON through without altering bytes", async () => {
