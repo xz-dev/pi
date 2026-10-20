@@ -34,7 +34,42 @@ export class RemoteError extends Error {
 		this.code = typeof fields.code === "string" ? fields.code : "unknown";
 		if (typeof fields.path === "string") this.path = fields.path;
 		this.fields = fields;
+		if (fields.code === "unknown" && validOwner(fields.owner) && validOwnerError(fields.ownerError)) {
+			this.cause = Object.assign(new Error(fields.ownerError.message, { cause: fields.cause }), {
+				code: "ERR_PROCESS_OWNER_CLEANUP",
+			});
+		}
 	}
+}
+
+function validOwner(value: unknown): value is { v: 1; state: "complete" | "not-started" | "unconfirmed" } {
+	if (typeof value !== "object" || value === null) return false;
+	const owner = value as Json;
+	return (
+		Object.keys(owner).length === 2 &&
+		owner.v === 1 &&
+		(owner.state === "complete" || owner.state === "not-started" || owner.state === "unconfirmed")
+	);
+}
+
+function validOwnerError(value: unknown): value is { code: "ERR_PROCESS_OWNER_CLEANUP"; message: string } {
+	if (typeof value !== "object" || value === null) return false;
+	const error = value as Json;
+	return (
+		Object.keys(error).length === 2 && error.code === "ERR_PROCESS_OWNER_CLEANUP" && typeof error.message === "string"
+	);
+}
+
+function ownerFailure(error: Error, unconfirmed: boolean): RemoteError {
+	const failure = new RemoteError({
+		...(error instanceof RemoteError ? error.fields : {}),
+		code: "unknown",
+		message: error.message,
+		owner: { v: 1, state: unconfirmed ? "unconfirmed" : "not-started" },
+		ownerError: { code: "ERR_PROCESS_OWNER_CLEANUP", message: error.message },
+	});
+	if (failure.cause instanceof Error) failure.cause.cause = error;
+	return failure;
 }
 
 /** What `hello` reports about the remote machine. */
@@ -86,6 +121,8 @@ export interface Reply {
 }
 
 type Pending = {
+	owned: boolean;
+	dispatched: boolean;
 	resolve: (value: Reply) => void;
 	reject: (error: Error) => void;
 	onEvent?: (json: Json, payload: Uint8Array) => void;
@@ -166,6 +203,7 @@ class Session {
 	lastSeen = Date.now();
 	timer: ReturnType<typeof setInterval> | undefined;
 	live = true;
+	info: RemoteInfo | undefined;
 	stderrTail = "";
 
 	constructor(id: number, child: ChildProcessWithoutNullStreams, token: string) {
@@ -262,11 +300,24 @@ export class Connection {
 
 	#send(session: Session, op: string, json: Json, options: RequestOptions): Promise<Reply> {
 		if (!session.live) return Promise.reject(lost("pi-env connection lost"));
+		const owned = op === "exec" && Object.hasOwn(json, "owner");
+		const features = session.info?.features;
+		if (
+			owned &&
+			!options.signal?.aborted &&
+			(session.info?.os !== "linux" || !Array.isArray(features) || !features.includes("ownedExec1"))
+		) {
+			return Promise.reject(ownerFailure(new Error("Daemon does not support owned exec"), false));
+		}
 		const id = this.#nextId++;
 		return new Promise((resolve, reject) => {
-			const onAbort = () => this.#write(session, frame(CANCEL, id, {}));
+			const onAbort = () => {
+				if (!owned || pending.dispatched) this.#write(session, frame(CANCEL, id, {}));
+			};
 			const done = () => options.signal?.removeEventListener("abort", onAbort);
-			session.pending.set(id, {
+			const pending: Pending = {
+				owned,
+				dispatched: false,
 				resolve: (value) => {
 					done();
 					resolve(value);
@@ -276,16 +327,40 @@ export class Connection {
 					reject(error);
 				},
 				...(options.onEvent ? { onEvent: options.onEvent } : {}),
-			});
+			};
+			session.pending.set(id, pending);
 			options.signal?.addEventListener("abort", onAbort, { once: true });
-			options.onStart?.(id, session.id);
-			this.#write(session, frame(REQUEST, id, { ...json, op }, options.payload));
-			if (options.signal?.aborted) onAbort();
+			try {
+				if (!owned) options.onStart?.(id, session.id);
+				const data = frame(REQUEST, id, { ...json, op }, options.payload);
+				// No await between this no-write stop check and the same-session write.
+				if (owned && options.signal?.aborted) {
+					session.pending.delete(id);
+					pending.reject(
+						new RemoteError({ code: "aborted", message: "aborted", owner: { v: 1, state: "not-started" } }),
+					);
+					return;
+				}
+				pending.dispatched = true;
+				this.#write(session, data);
+				if (owned) options.onStart?.(id, session.id);
+				if (options.signal?.aborted) onAbort();
+			} catch (error) {
+				session.pending.delete(id);
+				const cause = error instanceof Error ? error : new Error(String(error));
+				pending.reject(owned && pending.dispatched ? ownerFailure(cause, true) : cause);
+			}
 		});
 	}
 
 	#write(session: Session, data: Buffer): void {
-		if (session.live) session.child.stdin.write(data);
+		if (!session.live) return;
+		try {
+			session.child.stdin.write(data);
+		} catch (error) {
+			if (![...session.pending.values()].some((pending) => pending.owned && pending.dispatched)) throw error;
+			this.#teardown(session, lost(error instanceof Error ? error.message : String(error)));
+		}
 	}
 
 	async #start(): Promise<{ info: RemoteInfo; session: Session }> {
@@ -323,12 +398,16 @@ export class Connection {
 			this.#options.onLog?.(text);
 		});
 		child.on("error", () => this.#teardown(session, lost("pi-env connection lost")));
-		// A ready session fails as soon as the daemon exits, even while a process it started keeps a pipe open.
+		// A ready session fails immediately; pre-ready close retains upstream's drained stderr diagnostics.
 		child.on("exit", () => {
 			if (ready) this.#teardown(session, lost("pi-env connection lost"));
 		});
 		child.on("close", () => this.#teardown(session, lost("pi-env connection lost")));
-		child.stdin.on("error", () => {});
+		child.stdin.on("error", () => {
+			if ([...session.pending.values()].some((pending) => pending.owned && pending.dispatched)) {
+				this.#teardown(session, lost("pi-env request write failed"));
+			}
+		});
 		session.timer = setInterval(() => {
 			this.#write(session, frame(PING, 0, {}));
 			if (Date.now() - session.lastSeen > SILENCE_LIMIT_MS) {
@@ -341,7 +420,8 @@ export class Connection {
 			if (json.protocol !== 1) throw lost(`Unsupported protocol ${json.protocol}`);
 			ready = true;
 			session.stderrTail = "";
-			return { info: json as unknown as RemoteInfo, session };
+			session.info = json as unknown as RemoteInfo;
+			return { info: session.info, session };
 		} catch (error) {
 			// Add the captured stderr to whatever ended the start; only a pre-ready exit waits for it to drain.
 			const failure =
@@ -369,7 +449,9 @@ export class Connection {
 		session.child.kill();
 		const pending = [...session.pending.values()];
 		session.pending.clear();
-		for (const request of pending) request.reject(error);
+		for (const request of pending) {
+			request.reject(request.owned && request.dispatched ? ownerFailure(error, true) : error);
+		}
 	}
 
 	#onData(session: Session, chunk: Buffer): void {
@@ -430,6 +512,24 @@ export class Connection {
 		}
 		if (type !== RESULT && type !== ERROR) return;
 		if (pending === undefined) return;
+		if (pending.owned) {
+			const owner = json.owner;
+			const valid =
+				validOwner(owner) &&
+				(type === RESULT
+					? owner.state === "complete" && json.ownerError === undefined
+					: (json.ownerError === undefined || (json.code === "unknown" && validOwnerError(json.ownerError))) &&
+						(owner.state !== "unconfirmed" || (json.code === "unknown" && validOwnerError(json.ownerError))));
+			if (!valid) {
+				const error = ownerFailure(
+					new RemoteError({ ...json, message: "Invalid owned exec terminal metadata" }),
+					true,
+				);
+				session.pending.delete(id);
+				pending.reject(error);
+				return;
+			}
+		}
 		session.pending.delete(id);
 		if (type === RESULT) pending.resolve({ json, payload, session: session.id });
 		else pending.reject(new RemoteError(json));

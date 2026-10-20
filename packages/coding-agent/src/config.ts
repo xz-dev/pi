@@ -71,15 +71,15 @@ export function isNonEmptyDirectory(path: string): boolean {
  * Copy a directory tree with `readdirSync`/`readFileSync`/`writeFileSync`.
  * `fs.cpSync`/`copyFileSync` cannot read `/$bunfs` files.
  */
-export function copyResourceTree(sourceDir: string, targetDir: string): void {
+export function copyResourceTree(sourceDir: string, targetDir: string, fileMode?: number): void {
 	mkdirSync(targetDir, { recursive: true });
 	for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
 		const source = join(sourceDir, entry.name);
 		const target = join(targetDir, entry.name);
 		if (entry.isDirectory()) {
-			copyResourceTree(source, target);
+			copyResourceTree(source, target, fileMode);
 		} else if (entry.isFile()) {
-			writeFileSync(target, readFileSync(source));
+			writeFileSync(target, readFileSync(source), fileMode === undefined ? undefined : { mode: fileMode });
 		}
 	}
 }
@@ -105,6 +105,8 @@ export interface MaterializeOptions {
 	relativePath: string;
 	/** Override the computed cache root (tests, custom tmpdir). */
 	cacheRoot?: string;
+	/** Applied to every file written on the initial copy only (e.g. 0o700 for executables). Nonempty-cache reuse never rewrites modes. */
+	fileMode?: number;
 }
 
 /**
@@ -123,7 +125,7 @@ export function materializeResourceTree(options: MaterializeOptions): string {
 	mkdirSync(dirname(targetDir), { recursive: true });
 	const stagingDir = mkdtempSync(join(dirname(targetDir), `.staging-${basename(targetDir)}-`));
 	try {
-		copyResourceTree(options.sourceDir, stagingDir);
+		copyResourceTree(options.sourceDir, stagingDir, options.fileMode);
 		renameSync(stagingDir, targetDir);
 	} catch (error) {
 		rmSync(stagingDir, { recursive: true, force: true });
