@@ -41,6 +41,8 @@ public class OwnerFixture {
         CloseHandle(inputRead); CloseHandle(outputWrite);
         IntPtr size = IntPtr.Zero; InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size);
         STARTUPEX startup = new STARTUPEX(); startup.startup.cb=(uint)Marshal.SizeOf(startup); startup.attributes=Marshal.AllocHGlobal(size);
+        // STARTF_USESTDHANDLES with null handles: otherwise the child inherits this fixture's redirected stdio and bypasses ConPTY.
+        startup.startup.flags=0x100; startup.startup.input=IntPtr.Zero; startup.startup.output=IntPtr.Zero; startup.startup.error=IntPtr.Zero;
         Check(InitializeProcThreadAttributeList(startup.attributes,1,0,ref size));
         Check(UpdateProcThreadAttribute(startup.attributes,0,new UIntPtr(0x20016),console,new IntPtr(IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
         PROCESS child;

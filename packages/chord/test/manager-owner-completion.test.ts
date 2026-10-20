@@ -525,7 +525,7 @@ describe("Windows direct-fork attach adapter (unit, not runtime proof)", () => {
 				fault === "no-open"
 					? startup
 					: opened(
-							performance.timeOrigin + 1000 + (fault === "old" ? -17 : fault === "future" ? 0.001 : 0),
+							performance.timeOrigin + 1000 + (fault === "old" ? -17 : fault === "future" ? 16.001 : 0),
 							fault === "parent" ? process.pid + 1 : process.pid,
 						),
 			);
@@ -541,17 +541,18 @@ describe("Windows direct-fork attach adapter (unit, not runtime proof)", () => {
 		});
 	}
 
-	it("allows 16 ms lower clock granularity margin without permitting future creation", async () => {
-		const { native, payload } = attachFixture();
-		const instance = forkDriver({ entry }).spawn();
-		native.record(opened(performance.timeOrigin + 1000 - 16));
-		assert.deepEqual(native.writes, ["permit\n"]);
-		native.record(`${startup}${exit(0)}C\n`);
-		native.drain();
-		native.close();
-		payload.close();
-		await instance.exited;
-	});
+	for (const margin of [-16, 16])
+		it(`allows ${margin} ms clock-tick margin, never beyond it`, async () => {
+			const { native, payload } = attachFixture();
+			const instance = forkDriver({ entry }).spawn();
+			native.record(opened(performance.timeOrigin + 1000 + margin));
+			assert.deepEqual(native.writes, ["permit\n"]);
+			native.record(`${startup}${exit(0)}C\n`);
+			native.drain();
+			native.close();
+			payload.close();
+			await instance.exited;
+		});
 
 	it("failed assignment sends no messages, kills P through Node handle and surfaces cleanup failure", async () => {
 		const { native, payload } = attachFixture();

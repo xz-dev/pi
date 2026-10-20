@@ -195,9 +195,10 @@ for (const phase of ["attach-opening", "attach-opened"]) test(`${phase}: worker 
 	});
 	try {
 		await until(() => held, "attach delay not reached");
-		child.disconnect(); await closed;
+		// Bounded, labeled stages: a hang reports where it stopped instead of a bare test timeout.
+		child.disconnect(); await bounded(closed, 4000).catch((error) => assert.fail(`forked worker did not close after disconnect: ${error.message}; exitCode=${child.exitCode} signal=${child.signalCode}`));
 		held.write("L\n");
-		const result = await scope.result;
+		const result = await scope.result.catch((error) => assert.fail(`${error.message}; wire=${JSON.stringify(scope.wire)} denied=${denied}`));
 		assert.equal(result.code, 125); assert.ok(!result.wire.includes("S{"), "exited worker must never be assigned");
 		if (phase === "attach-opened") assert.equal(denied, true, "held process must be explicitly denied");
 		assert.ok(!result.wire.includes("C\n"), "denial cannot report acknowledged success");
@@ -271,7 +272,7 @@ test("direct Node/Bun fork message, TCP handle transfer and disconnect through a
 		await until(() => scope.wire.startsWith("O") && scope.wire.includes("\n"), "attach did not open process");
 		const opened = JSON.parse(scope.wire.split("\n")[0].slice(1));
 		const valid = opened.pid === child.pid && opened.parentPid === process.pid &&
-			opened.creationTime >= beforeFork - 16 && opened.creationTime <= afterFork &&
+			opened.creationTime >= beforeFork - 16 && opened.creationTime <= afterFork + 16 && // same symmetric tick margin as Chord
 			child.exitCode === null && child.signalCode === null;
 		scope.lease.write(valid ? "permit\n" : "deny\n");
 		assert.ok(valid, `attach identity denied: ${JSON.stringify({ opened, pid: child.pid, parentPid: process.pid, beforeFork, afterFork, exitCode: child.exitCode, signalCode: child.signalCode })}`);

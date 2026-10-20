@@ -310,8 +310,10 @@ export function forkDriver(options: ForkDriverOptions): Driver {
 								!("creationTime" in opened) ||
 								typeof opened.creationTime !== "number" ||
 								!Number.isFinite(opened.creationTime) ||
+								// JS clocks extend one coarse GetSystemTimeAsFileTime sample (~15.6 ms tick), so the
+								// kernel creation time may lead or lag them by a tick: tolerate 16 ms on both sides.
 								opened.creationTime < beforeFork - 16 ||
-								opened.creationTime > afterFork ||
+								opened.creationTime > afterFork + 16 ||
 								child.exitCode !== null ||
 								child.signalCode !== null ||
 								cancelled
