@@ -265,7 +265,7 @@ describe("InteractiveMode working label", () => {
 
 	const fakeModel = {} as Model<string>;
 
-	it("shows Working(SSE) once the adapter reports and Working after it clears", async () => {
+	it("shows Working(SSE) once the adapter reports and keeps it after the request clears", async () => {
 		const mode = fakeMode();
 
 		// No report yet: bare default label.
@@ -278,9 +278,9 @@ describe("InteractiveMode working label", () => {
 		await mode.handleEvent({ type: "transport_status", transport: "WS", model: fakeModel });
 		expect(mode.formatWorkingMessage()).toBe("Working(WS)");
 
+		// Request settled (tool execution follows): the last transport stays visible.
 		await mode.handleEvent({ type: "transport_status", transport: undefined, model: fakeModel });
-		expect(mode.formatWorkingMessage()).toBe("Working");
-		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith("Working");
+		expect(mode.formatWorkingMessage()).toBe("Working(WS)");
 	});
 
 	it.each(["WS/full", "WS/continuation"])("renders and clears the actual %s request label", async (transport) => {
@@ -293,20 +293,21 @@ describe("InteractiveMode working label", () => {
 		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith("Custom progress");
 		mode.workingMessage = undefined;
 		await mode.handleEvent({ type: "transport_status", transport: undefined, model: fakeModel });
-		expect(mode.activeStatusIndicator?.setMessage).toHaveBeenLastCalledWith("Working");
+		expect(mode.formatWorkingMessage()).toBe(`Working(${transport})`);
 	});
 
-	it("keeps an extension working message verbatim and clears transport on turn_start", async () => {
+	it("keeps an extension working message verbatim and keeps transport across turn_start", async () => {
 		const mode = fakeMode();
 
 		await mode.handleEvent({ type: "transport_status", transport: "SSE", model: fakeModel });
 		mode.workingMessage = "Analyzing codebase...";
 		expect(mode.formatWorkingMessage()).toBe("Analyzing codebase...");
 
-		// turn_start resets the label before the next request reports its transport.
+		// The next request in the same run keeps the label until it reports its own.
 		await mode.handleEvent({ type: "turn_start" });
 		mode.workingMessage = undefined;
-		expect(mode.currentTransport).toBeUndefined();
-		expect(mode.formatWorkingMessage()).toBe("Working");
+		expect(mode.formatWorkingMessage()).toBe("Working(SSE)");
+		await mode.handleEvent({ type: "transport_status", transport: "SSE gzip", model: fakeModel });
+		expect(mode.formatWorkingMessage()).toBe("Working(SSE gzip)");
 	});
 });

@@ -3392,7 +3392,6 @@ export class InteractiveMode {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
-				this.currentTransport = undefined;
 				if (this.workingVisible) {
 					if (this.activeStatusIndicator?.kind !== "working") {
 						this.showWorkingStatusIndicator();
@@ -3465,6 +3464,9 @@ export class InteractiveMode {
 				break;
 
 			case "transport_status":
+				// Keep the last reported transport for the whole run: request-scoped clears
+				// between requests and during tool execution would make the suffix flicker.
+				if (event.transport === undefined) break;
 				this.currentTransport = event.transport;
 				this.updateWorkingIndicatorMessage();
 				this.ui.requestRender();
