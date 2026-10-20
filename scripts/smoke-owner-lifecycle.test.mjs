@@ -14,7 +14,7 @@ const root = { uid: 0, euid: 0, elevated: true };
 const rows = ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, pi: { bun: "1.3.14" }, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 }));
 
 // Host commands are mocked; copied scripts, runtime and artifact use real temporary files.
-async function dropped(platform, { childIdentity = standard, childError, failCommand, existing = false, cleanupFailure = false, silentChild = false } = {}) {
+async function dropped(platform, { childIdentity = standard, hostIdentity, childError, failCommand, existing = false, cleanupFailure = false, silentChild = false } = {}) {
 	const temp = mkdtempSync(join(tmpdir(), "pi-owner-drop-test-"));
 	mkdirSync(join(temp, "Temp"));
 	const calls = [];
@@ -27,7 +27,7 @@ async function dropped(platform, { childIdentity = standard, childError, failCom
 	try {
 		const evidence = await smokeOwnerLifecycleAsNonadmin(process.execPath, target, {
 			platform, env: { CI: "true", SystemRoot: temp, SystemDrive: temp, COMPUTERNAME: "host" },
-			identityProbe: () => platform === "darwin" ? { ...standard, adminGroup: true } : root,
+			identityProbe: () => hostIdentity ?? (platform === "darwin" ? { ...standard, adminGroup: true } : root),
 			run: (file, args, options) => {
 				calls.push({ file, args, options });
 				if (file === process.execPath && args.includes("install")) {
@@ -118,6 +118,8 @@ test("drop decisions require explicit CI and a privileged supported host identit
 			assert.equal(ownerPrivilegeDropRequired(platform, identity, { PI_XZ_EXECUTOR: "local" }), false);
 		}
 		assert.equal(ownerPrivilegeDropRequired(platform, standard, { CI: "true" }), false);
+		assert.equal(ownerPrivilegeDropRequired(platform, { ...standard, rootEquivalentGroup: true }, { CI: "true" }), true);
+		assert.equal(ownerPrivilegeDropRequired(platform, { ...standard, rootEquivalentGroup: true }, {}), false);
 	}
 	assert.equal(ownerPrivilegeDropRequired("aix", root, { CI: "true" }), false);
 });
@@ -156,8 +158,21 @@ for (const platform of ["linux", "freebsd", "darwin", "win32"]) {
 	});
 }
 
+test("non-root Linux runner in a root-equivalent group drops through sudo to the dedicated user", async () => {
+	const runner = { ...standard, name: undefined, groupNames: ["runner", "adm", "docker"], rootEquivalentGroup: true };
+	assert.equal(ownerPrivilegeDropRequired("linux", runner, { CI: "true" }), true);
+	const { evidence, calls } = await dropped("linux", { hostIdentity: runner });
+	assert.equal(evidence.status, "passed", JSON.stringify(evidence));
+	assert.equal(evidence.privilegeDrop.method, "sudo -u");
+	assert.equal(evidence.privilegeDrop.verifiedNonadmin, true);
+	assert.equal(calls.some(({ file, args }) => file === "sudo" && args[0] === "-n" && args.includes("sh") && args.some((arg) => arg.includes("useradd"))), true);
+	assert.equal(calls.some(({ file, args }) => file === "sudo" && args.includes("-u") && args.includes("pi-owner-smoke") && args.includes("-i")), true);
+	assert.equal(calls.some(({ file }) => file === "su"), false);
+	assert.equal(calls.some(({ file, args }) => file === "sudo" && args.some((arg) => arg.includes('exec userdel "$1"'))), true);
+});
+
 test("privileged and non-medium child tokens fail identity; never report verifiedNonadmin", async () => {
-	for (const [platform, childIdentity] of [["freebsd", root], ["darwin", { ...standard, adminGroup: true }], ["win32", { ...standard, mediumIntegrity: false }]]) {
+	for (const [platform, childIdentity] of [["freebsd", root], ["darwin", { ...standard, adminGroup: true }], ["win32", { ...standard, mediumIntegrity: false }], ["linux", { ...standard, rootEquivalentGroup: true }]]) {
 		const { evidence } = await dropped(platform, { childIdentity });
 		assert.equal(evidence.status, "failed");
 		assert.equal(evidence.privilegeDrop.verifiedNonadmin, false);

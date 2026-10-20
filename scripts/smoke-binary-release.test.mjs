@@ -276,7 +276,8 @@ esac
 		const evidence = join(root, "tui.json"); writeFileSync(evidence, JSON.stringify({ harness: "Bun.Terminal PTY", elapsedMs: 37, outputBytes: 42, input: "ctrl-v,ctrl-c,ctrl-d", childExitCode: 0, terminalClosed: true, terminalExitCode: 1, observedOutput: true, benchmarkCompleted: null, exitSent: true, cleanExit: true }));
 		const recordPath = join(root, "record.json");
 		mkdirSync(join(root, "smoke-tmp"));
-		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_TUI_EVIDENCE: evidence, TMPDIR: join(root, "smoke-tmp"), RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
+		// Fixture smoke runs as this test user; never trigger the CI-only dedicated-account drop here.
+		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { env: { ...process.env, CI: "false", GITHUB_ACTIONS: "false", PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_TUI_EVIDENCE: evidence, TMPDIR: join(root, "smoke-tmp"), RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
 		const record = JSON.parse(readFileSync(recordPath, "utf8"));
 		assert.deepEqual(record.commands.map(({ name }) => name), descriptor.requiredCommands);
 		assert.deepEqual(record.commands.at(-2).name, "resource-materialization");

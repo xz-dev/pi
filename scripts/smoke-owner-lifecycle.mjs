@@ -29,6 +29,9 @@ export function ownerIdentity() {
 		identity.capabilities = Object.fromEntries([...readFileSync("/proc/self/status", "utf8").matchAll(/^(Cap\w+):\s*([0-9a-f]+)$/gm)].map((match) => [match[1], match[2]]));
 		if (!["CapPrm", "CapEff", "CapAmb"].every((key) => /^[0-9a-f]+$/.test(identity.capabilities[key] ?? ""))) throw new Error("Linux capability evidence missing");
 		identity.elevated ||= ["CapPrm", "CapEff", "CapAmb"].some((key) => BigInt(`0x${identity.capabilities[key]}`) !== 0n);
+		identity.groupNames = query("id", ["-Gn"]).split(/\s+/);
+		// Root-equivalent groups: sudo/wheel/admin grant root, docker/lxd grant a root container. Hosted CI runners have them.
+		identity.rootEquivalentGroup = identity.groupNames.some((name) => ["root", "sudo", "wheel", "admin", "docker", "lxd"].includes(name));
 	} else if (process.platform === "freebsd") {
 		identity.groupNames = query("id", ["-Gn"]).split(/\s+/);
 		identity.adminGroup = identity.groupNames.some((name) => name === "wheel" || name === "operator");
@@ -65,7 +68,7 @@ export function ownerPrivilegeDropRequired(platform, identity, env) {
 	// The musl container receives only PI_XZ_* from the workflow, not CI/GITHUB_ACTIONS.
 	return (env.CI === "true" || env.GITHUB_ACTIONS === "true" || ["pinned-musl-container", "freebsd-vm"].includes(env.PI_XZ_EXECUTOR)) &&
 		["linux", "freebsd", "darwin", "win32"].includes(platform) &&
-		(identity.uid === 0 || identity.euid === 0 || identity.elevated === true || identity.adminGroup === true);
+		(identity.uid === 0 || identity.euid === 0 || identity.elevated === true || identity.adminGroup === true || identity.rootEquivalentGroup === true);
 }
 
 export function artifactBunFromOwnerRows(rows) {
@@ -192,7 +195,10 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		finally { rmSync(scratch, { recursive: true, force: true }); }
 	}
 	const user = "pi-owner-smoke";
-	const privilegeDrop = { method: platform === "win32" ? "Start-Process -Credential" : platform === "darwin" ? "sudo -u" : "su -m", user, verifiedNonadmin: false };
+	// A privileged non-root POSIX runner (Darwin admin, Linux sudo/docker) provisions and launches through sudo -n.
+	const viaSudo = platform !== "win32" && (platform === "darwin" || identity.uid !== 0);
+	const sudo = (file, args) => (viaSudo ? ["sudo", ["-n", file, ...args]] : [file, args]);
+	const privilegeDrop = { method: platform === "win32" ? "Start-Process -Credential" : viaSudo ? "sudo -u" : "su -m", user, verifiedNonadmin: false };
 	let work;
 	let created = false;
 	let evidence = { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), privilegeDrop };
@@ -224,10 +230,10 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		// net user otherwise prompts for confirmation for passwords longer than 14 characters.
 		const password = `Pi!9${randomBytes(8).toString("base64url").slice(0, 10)}`;
 		secrets.push(password);
-		if (platform === "freebsd") command("pw", ["useradd", user, "-m", "-d", work, "-s", "/bin/sh", "-G", ""]);
-		else if (platform === "darwin") command("sudo", ["-n", "sysadminctl", "-addUser", user, "-password", password, "-home", work, "-shell", "/bin/sh"]);
+		if (platform === "freebsd") command(...sudo("pw", ["useradd", user, "-m", "-d", work, "-s", "/bin/sh", "-G", ""]));
+		else if (platform === "darwin") command(...sudo("sysadminctl", ["-addUser", user, "-password", password, "-home", work, "-shell", "/bin/sh"]));
 		else if (platform === "win32") command("net.exe", ["user", user, password, "/add"]);
-		else command("sh", ["-c", 'if command -v useradd >/dev/null; then exec useradd -m -d "$1" -s /bin/sh "$2"; else exec adduser -D -h "$1" -s /bin/sh "$2"; fi', "sh", work, user]);
+		else command(...sudo("sh", ["-c", 'if command -v useradd >/dev/null; then exec useradd -m -d "$1" -s /bin/sh "$2"; else exec adduser -D -h "$1" -s /bin/sh "$2"; fi', "sh", work, user]));
 		created = true;
 		const runtime = join(work, basename(process.execPath));
 		const staged = join(work, target.executable);
@@ -271,10 +277,9 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		} else {
 			chmodSync(runtime, 0o755);
 			chmodSync(staged, 0o755);
-			if (platform === "darwin") command("sudo", ["-n", "chown", "-R", user, work]);
-			else command("chown", ["-R", user, work]);
+			command(...sudo("chown", ["-R", user, work]));
 			const invocation = ["env", "-i", ...Object.entries(childEnv).map(([key, value]) => `${key}=${value}`), runtime, ...args];
-			result = platform === "darwin"
+			result = viaSudo
 				// The non-root runner cannot chdir into scratch once it is chowned 0700 to the dropped user.
 				? traced("sudo", ["-n", "-u", user, "-H", ...invocation], { encoding: "utf8", timeout, cwd: "/" })
 				: traced("su", ["-m", user, "-c", `exec ${invocation.map((value) => `'${value.replaceAll("'", "'\\''")}'`).join(" ")}`], { encoding: "utf8", timeout, cwd: work });
@@ -283,6 +288,8 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		try { evidence = { ...JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)), privilegeDrop }; }
 		catch { throw new Error(`child produced no identity evidence: ${JSON.stringify(privilegeDrop.diagnostics.child)}`); }
 		assertNonadminIdentity(evidence.identity, target.os);
+		// The dedicated account must be least-privilege, not merely non-root.
+		if (evidence.identity.rootEquivalentGroup === true) throw new Error("owner lifecycle missing nonadmin identity: dropped user is in a root-equivalent group");
 		privilegeDrop.verifiedNonadmin = true;
 		if (result.status !== 0 || evidence.status !== "passed") throw new Error(evidence.error || `child failed (${result.status ?? result.error?.message}): ${result.stderr}`);
 		assertOwnerLifecycle(evidence, target.os);
@@ -294,15 +301,15 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		const warnings = [];
 		if (created) {
 			try {
-				if (platform === "freebsd") command("pw", ["userdel", user]);
-				else if (platform === "darwin") command("sudo", ["-n", "sysadminctl", "-deleteUser", user]);
+				if (platform === "freebsd") command(...sudo("pw", ["userdel", user]));
+				else if (platform === "darwin") command(...sudo("sysadminctl", ["-deleteUser", user]));
 				else if (platform === "win32") command("net.exe", ["user", user, "/delete"]);
-				else command("sh", ["-c", 'if command -v userdel >/dev/null; then exec userdel "$1"; else exec deluser "$1"; fi', "sh", user]);
+				else command(...sudo("sh", ["-c", 'if command -v userdel >/dev/null; then exec userdel "$1"; else exec deluser "$1"; fi', "sh", user]));
 			} catch (error) { warnings.push(`user cleanup: ${error.message}`); }
 		}
 		if (work) {
 			try {
-				if (platform === "darwin") command("sudo", ["-n", "rm", "-rf", work]);
+				if (viaSudo) command("sudo", ["-n", "rm", "-rf", work]);
 				else rmSync(work, { recursive: true, force: true });
 			} catch (error) { warnings.push(`scratch cleanup: ${error.message}`); }
 		}
