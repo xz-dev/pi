@@ -1,0 +1,9 @@
+salt = "l2OwNFQ6HgmGfxz7"
+previous_id = ""
+timestamp = "2026-10-20T15:05:23.229566861Z"
+schema = "omd.commit/3"
+kind = "init"
+content_ref = "4694eb39d8d3f01f3d31425025036331"
+
+[payload]
+path = "external/codex/codex-rs/protocol/src/models.rs"

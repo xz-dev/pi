@@ -1,0 +1,16 @@
+format = "omd.version/2"
+id = [70, 148, 235, 57, 216, 211, 240, 31, 61, 49, 66, 80, 37, 3, 99, 49]
+len = 167602
+sha256 = "753498bc730ba21ded710d9aa2b2f9163e6bbe4eaa18f1c25d998c36138a54f7"
+encoding = "utf-8"
+content_file = "content/753498bc730ba21ded710d9aa2b2f9163e6bbe4eaa18f1c25d998c36138a54f7"
+
+[acquisition]
+type = "command"
+executable = "curl"
+args = ["-fsSL", "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/models.rs"]
+
+[recovery]
+type = "command"
+executable = "curl"
+args = ["-fsSL", "https://raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/models.rs"]

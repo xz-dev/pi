@@ -1,0 +1,16 @@
+salt = "C6VOR2AeYFy97lo1"
+previous_id = "1ab5e5616c82b327bec8f307629f4080ed5f3e33487de783973dbeb330df6ffc"
+timestamp = "2026-10-20T15:05:33.842121977Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "f5ee168ff8dea5f98bcf8bca1892be30"
+
+[payload]
+mount = "file:b474ed5c8ddbed345e2af0b0a624d0b0dd8f4184cfe130f85d4c4a65fe3cdd01"
+path = "packages/ai/src/utils/json-parse.ts"
+reason = "encodeToolCallArguments follows Codex: replay the model's original arguments text instead of a re-encoding. Link records the design source only; it does not prove equivalent behavior."
+
+[payload.position]
+end = "4061"
+mode = "text"
+start = "3518"
