@@ -349,6 +349,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			...options,
 			timeoutMs: options.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
 			websocketConnectTimeoutMs: options.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
+			responseCheckpointExclude:
+				options.responseCheckpointExclude !== undefined
+					? options.responseCheckpointExclude
+					: settingsManager.getResponseCheckpointExclude(),
+			responseCheckpointMode:
+				options.responseCheckpointMode !== undefined
+					? options.responseCheckpointMode
+					: settingsManager.getResponseCheckpointMode(),
 			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,
 			maxRetryDelayMs: options.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 			transformHeaders: async (requestHeaders) => {
