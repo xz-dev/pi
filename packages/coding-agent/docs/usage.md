@@ -75,6 +75,18 @@ Prefix a command with `!` to run it and include its output in the conversation:
 
 Use `!!` when you want to run a command without sending its output to the model.
 
+## Manage long-running tool calls
+
+Long AI tool calls can detach from the conversation according to `backgroundToolCalls` rules in [Settings](settings.md#tools). The detached call returns a background task ID in place of its result, and the work continues under its original timeout.
+
+Once a call detaches, Pi adds the `tool_task` tool to the model's tools for the rest of the session:
+
+- `list` and `info` inspect managed executions.
+- `wait` returns the final output. `timeoutSeconds` is required, greater than 0, and at most 1800. Repeated waits return the cached outcome without re-running the tool.
+- `cancel` requests cancellation through the tool call's abort signal. It does not prove that a tool ignoring the signal has stopped.
+
+Escape does not cancel a detached execution; use `tool_task cancel`. Completion notifications carry task metadata only; raw output comes from `tool_task wait`. Executions survive `/reload`; `/new`, `/resume`, `/fork`, and shutdown cancel the executions owned by the replaced session. `--tools` is a strict allowlist, so include `tool_task` there to keep management controls. User-entered `!` and `!!` commands never become managed executions.
+
 ## Copy, export, or share results
 
 Press `Ctrl+X` or run `/copy` to copy the last assistant response. Use `/export` to save the session as HTML or JSONL.
