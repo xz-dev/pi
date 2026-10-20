@@ -8,7 +8,7 @@ import {
 	resetResponsesWebSocketDebugStats,
 } from "../src/api/openai-responses-websocket.ts";
 import type { Model } from "../src/types.ts";
-import { transportLabel } from "../src/utils/event-stream.ts";
+import { probeTransportLabel, transportLabel } from "../src/utils/event-stream.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 import { getWebSocketCompressionEncoding, getWebSocketCompressionPolicy } from "../src/utils/websocket-compression.ts";
 
@@ -43,6 +43,8 @@ describe("WebSocket compression", () => {
 		expect(transportLabel("SSE", undefined)).toBe("SSE");
 		expect(transportLabel("SSE", "bogus")).toBe("SSE");
 		expect(transportLabel("SSE", "constructor")).toBe("SSE");
+		expect(probeTransportLabel("SSE", "gzip")).toBe("SSE try gzip");
+		expect(probeTransportLabel("SSE", undefined)).toBe("SSE try plain");
 		expect(transportLabel("SSE", "__proto__")).toBe("SSE");
 	});
 
