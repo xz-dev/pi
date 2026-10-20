@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
-if (process.env.PI_WINDOWS_OWNER_PIDFILE) writeFileSync(process.env.PI_WINDOWS_OWNER_PIDFILE, String(process.pid));
+import { renameSync, writeFileSync } from "node:fs";
+// Atomic publish: a kill between open and write must never leave an empty pidfile (Number("") is pid 0 = self).
+const pidfile = process.env.PI_WINDOWS_OWNER_PIDFILE;
+if (pidfile) { writeFileSync(`${pidfile}.tmp`, String(process.pid)); renameSync(`${pidfile}.tmp`, pidfile); }
 
 // No descendants before first message: this is the explicit Windows attach contract.
 process.on("message", (message, handle) => {

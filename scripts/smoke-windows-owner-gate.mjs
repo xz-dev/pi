@@ -29,7 +29,9 @@ export default async function* reporter(events) {
 			// Keep the failure cause (bounded) so CI diagnostics show why, not only which, test failed.
 			const error = event.data.details?.error;
 			const cause = error?.cause ?? error;
-			yield `${JSON.stringify({ type: event.type, data: { name: event.data.name, skip: event.data.skip, todo: event.data.todo, error: String(cause?.stack ?? cause?.message ?? cause ?? error).slice(0, 4000) } })}\n`;
+			// A file-level failure (the test process itself exited) carries only exitCode/signal; record them.
+			const exit = error?.exitCode !== undefined || error?.signal ? ` (test process exitCode=${error.exitCode ?? null} signal=${error.signal ?? null})` : "";
+			yield `${JSON.stringify({ type: event.type, data: { name: event.data.name, skip: event.data.skip, todo: event.data.todo, error: `${String(cause?.stack ?? cause?.message ?? cause ?? error).slice(0, 4000)}${exit}` } })}\n`;
 		} else if (["test:pass", "test:stdout", "test:stderr", "test:summary"].includes(event.type)) yield `${JSON.stringify(event)}\n`;
 	}
 }

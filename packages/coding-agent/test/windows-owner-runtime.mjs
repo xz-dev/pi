@@ -20,6 +20,9 @@ const fixture = join(root, "owner-fixture.exe");
 const launcherFixture = fileURLToPath(new URL("./fixtures/windows-owner-launcher.mjs", import.meta.url));
 const ipcFixture = fileURLToPath(new URL("./fixtures/windows-owner-ipc.mjs", import.meta.url));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A stray async error must name itself instead of silently ending the test process (and every later test).
+for (const event of ["uncaughtException", "unhandledRejection"])
+	process.on(event, (error) => { console.error(`gate ${event}: ${error?.stack ?? error}`); process.exitCode = 1; });
 async function until(check, message, ms = 8000) {
 	const deadline = Date.now() + ms;
 	while (!check()) { assert.ok(Date.now() < deadline, message); await delay(10); }
@@ -29,7 +32,8 @@ async function bounded(pending, ms = 8000) {
 	try { return await Promise.race([pending, new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error("caller completion deadline")), ms); })]); }
 	finally { clearTimeout(timer); }
 }
-function alive(pid) { try { process.kill(pid, 0); return true; } catch (error) { if (error.code === "ESRCH") return false; throw error; } }
+// pid 0 means the caller itself on Windows (libuv uv_kill), so a malformed pid must fail loudly, never probe or kill self.
+function alive(pid) { if (!Number.isInteger(pid) || pid <= 0) throw new Error(`invalid pid ${JSON.stringify(pid)}`); try { process.kill(pid, 0); return true; } catch (error) { if (error.code === "ESRCH") return false; throw error; } }
 function pids(directory) { return readdirSync(directory).filter((name) => name.endsWith(".pid")).map((name) => Number(name.slice(0, -4))); }
 function directory() { return mkdtempSync(join(root, "tree-")); }
 async function run(command, args, options = {}) {

@@ -183,6 +183,12 @@ test("Node gate failures keep a bounded cause, and each runtime has an independe
 	assert.equal(parseWindowsOwnerGate(line).tests[0].error.includes("why it failed"), true);
 	assert.ok(windowsOwnerGateCommand("/work", "/node").includes("--test-force-exit"));
 });
+test("file-level Node gate failure records the test process exit code and signal", async () => {
+	const { default: reporter } = await import("./smoke-windows-owner-gate.mjs");
+	async function* events() { yield { type: "test:fail", data: { name: "C:\\gate.mjs", details: { error: Object.assign(new Error("test failed"), { exitCode: 3221225477, signal: null }) } } }; }
+	let line = ""; for await (const chunk of reporter(events())) line += chunk;
+	assert.match(parseWindowsOwnerGate(line).tests[0].error, /exitCode=3221225477 signal=null/);
+});
 test("Node gate reporter is passed as a file URL (Windows drive paths are rejected by the ESM loader)", () => {
 	const command = windowsOwnerGateCommand("/work", "/node");
 	assert.match(command.find((arg) => arg.startsWith("--test-reporter=")), /^--test-reporter=file:\/\//);
