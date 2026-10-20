@@ -184,7 +184,9 @@ for (const phase of ["attach-opening", "attach-opened"]) test(`${phase}: worker 
 	});
 	await new Promise((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
 	const child = fork(ipcFixture, [], { execArgv: [], stdio: ["ignore", "ignore", "inherit", "ipc"] });
-	const closed = new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+	// Wait for process exit, not 'close': after a parent-initiated disconnect() Node never counts the IPC channel
+	// toward 'close' (lib/internal/child_process.js _disconnect skips maybeClose), so 'close' cannot fire.
+	const exited = new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
 	const scope = supervise(["--attach-pid", String(child.pid)], ["--test-phase-pipe", path], { PI_ENV_SUPERVISE_TEST_FAULTS: "1" });
 	let denied = false;
 	scope.lease.on("data", () => {
@@ -196,7 +198,7 @@ for (const phase of ["attach-opening", "attach-opened"]) test(`${phase}: worker 
 	try {
 		await until(() => held, "attach delay not reached");
 		// Bounded, labeled stages: a hang reports where it stopped instead of a bare test timeout.
-		child.disconnect(); await bounded(closed, 4000).catch((error) => assert.fail(`forked worker did not close after disconnect: ${error.message}; exitCode=${child.exitCode} signal=${child.signalCode}`));
+		child.disconnect(); await bounded(exited, 4000).catch((error) => assert.fail(`forked worker did not exit after disconnect: ${error.message}; exitCode=${child.exitCode} signal=${child.signalCode}`));
 		held.write("L\n");
 		const result = await scope.result.catch((error) => assert.fail(`${error.message}; wire=${JSON.stringify(scope.wire)} denied=${denied}`));
 		assert.equal(result.code, 125); assert.ok(!result.wire.includes("S{"), "exited worker must never be assigned");
