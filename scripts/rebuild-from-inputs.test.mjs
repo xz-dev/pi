@@ -627,11 +627,14 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 34);
+	assert.equal(order.length, 35);
 	assert.equal(order[order.indexOf("single-executable") + 1], "process-ownership");
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
-	assert.equal(order.at(-1), "env-native-test-fixtures");
+	assert.equal(order.at(-2), "env-native-test-fixtures");
+	assert.equal(order.at(-1), "preserve-tool-arguments-json");
+	assert.ok(sync.includes("refs/heads/patch/preserve-tool-arguments-json:refs/remotes/origin/patch/preserve-tool-arguments-json"));
+	assert.ok(sync.includes("            preserve-tool-arguments-json \\\n"));
 	assert.ok(!order.includes("model-catalog-test-fixtures"));
 	assert.ok(!sync.includes("refs/heads/patch/model-catalog-test-fixtures"));
 	assert.ok(!sync.includes("            model-catalog-test-fixtures \\\n"));
