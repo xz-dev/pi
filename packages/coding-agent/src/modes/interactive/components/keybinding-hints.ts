@@ -39,6 +39,11 @@ export function keyDisplayText(keybinding: Keybinding): string {
 	return formatKeys(getKeybindings().getKeys(keybinding), { capitalize: true });
 }
 
+export function scrollToEndLabel(): string {
+	const shortcut = keyDisplayText("tui.altScreen.bottom");
+	return ` ↓ Jump to latest message${shortcut ? ` · ${shortcut}` : ""} `;
+}
+
 export function keyHint(keybinding: Keybinding, description: string): string {
 	return theme.fg("dim", keyText(keybinding)) + theme.fg("muted", ` ${description}`);
 }
