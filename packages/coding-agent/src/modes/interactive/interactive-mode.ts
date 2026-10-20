@@ -482,6 +482,9 @@ export class InteractiveMode {
 	private version: string;
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
+	private submittedInput: string | undefined;
+	/** Show the submitted text only while compaction delays its delivery. */
+	private showSubmittedInput = false;
 	private pendingUserInputs: string[] = [];
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
 	private activeWorkingIndicatorEmbedded = false;
@@ -1248,7 +1251,7 @@ export class InteractiveMode {
 		// Process initial messages
 		if (initialMessage) {
 			try {
-				await this.session.prompt(initialMessage, { images: initialImages });
+				await this.promptWithPendingDisplay(initialMessage, initialImages);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -1258,7 +1261,7 @@ export class InteractiveMode {
 		if (initialMessages) {
 			for (const message of initialMessages) {
 				try {
-					await this.session.prompt(message);
+					await this.promptWithPendingDisplay(message);
 				} catch (error: unknown) {
 					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 					this.showError(errorMessage);
@@ -1270,12 +1273,38 @@ export class InteractiveMode {
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
-				await this.session.prompt(userInput);
+				await this.promptWithPendingDisplay(userInput);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
 			}
 		}
+	}
+
+	private async promptWithPendingDisplay(text: string, images?: ImageContent[]): Promise<void> {
+		this.submittedInput = text;
+		try {
+			await this.session.prompt(text, { images });
+		} catch (error) {
+			this.restoreSubmittedInput();
+			throw error;
+		} finally {
+			this.clearSubmittedInput();
+		}
+	}
+
+	private clearSubmittedInput(): void {
+		this.submittedInput = undefined;
+		this.showSubmittedInput = false;
+		this.updatePendingMessagesDisplay();
+		this.ui.requestRender();
+	}
+
+	private restoreSubmittedInput(): void {
+		if (this.submittedInput === undefined) return;
+		const editorText = this.editor.getExpandedText?.() ?? this.editor.getText();
+		this.editor.setText([this.submittedInput, editorText].filter((text) => text.trim()).join("\n\n"));
+		this.clearSubmittedInput();
 	}
 
 	private async checkForPackageUpdates(): Promise<string[]> {
@@ -3583,6 +3612,8 @@ export class InteractiveMode {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
+					this.submittedInput = undefined;
+					this.showSubmittedInput = false;
 					this.addMessageToChat(event.message);
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
@@ -3639,6 +3670,12 @@ export class InteractiveMode {
 				break;
 
 			case "message_end":
+				if (
+					this.submittedInput !== undefined &&
+					event.message.role === "assistant" &&
+					(event.message.stopReason === "error" || event.message.stopReason === "aborted")
+				)
+					this.restoreSubmittedInput();
 				if (event.message.role === "user") break;
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
@@ -3767,6 +3804,11 @@ export class InteractiveMode {
 							)
 					: undefined;
 				this.showStatusIndicator(new CompactionStatusIndicator(this.ui, event.reason, colorFn));
+				// Compaction runs before the submitted input is delivered; keep the text visible meanwhile.
+				if (this.submittedInput !== undefined) {
+					this.showSubmittedInput = true;
+					this.updatePendingMessagesDisplay();
+				}
 				this.ui.requestRender();
 				break;
 			}
@@ -4845,6 +4887,12 @@ export class InteractiveMode {
 
 	private updatePendingMessagesDisplay(): void {
 		this.pendingMessagesContainer.clear();
+		if (this.showSubmittedInput && this.submittedInput) {
+			this.pendingMessagesContainer.addChild(new Spacer(1));
+			this.pendingMessagesContainer.addChild(
+				new TruncatedText(theme.fg("dim", `Pending: ${this.submittedInput}`), 1, 0),
+			);
+		}
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
