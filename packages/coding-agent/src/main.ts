@@ -76,6 +76,7 @@ import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { validateThemeJson } from "./modes/interactive/theme/theme-schema.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
+import { cgroupDelegationDiagnostics, macOSOwnershipDiagnostics } from "./utils/cgroup-delegation.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
@@ -699,6 +700,11 @@ export async function main(args: string[], options?: MainOptions) {
 
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
 	const startupSettingsDiagnostics = collectSettingsDiagnostics(startupSettingsManager);
+	if (!parsed.help && parsed.listModels === undefined) {
+		startupSettingsDiagnostics.push(
+			...cgroupDelegationDiagnostics({ offlineMode, quietStartup: startupSettingsManager.getQuietStartup() }),
+		);
+	}
 
 	// Experimental first-time setup: theme choice and analytics opt-in.
 	// Runs before any runtime services are created so the chosen settings apply everywhere.
@@ -905,7 +911,7 @@ export async function main(args: string[], options?: MainOptions) {
 	applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 
-	const startupDiagnostics = deduplicateDiagnostics([...startupSettingsDiagnostics, ...runtime.diagnostics]);
+	let startupDiagnostics = deduplicateDiagnostics([...startupSettingsDiagnostics, ...runtime.diagnostics]);
 	const hasRuntimeErrors = runtime.diagnostics.some((diagnostic) => diagnostic.type === "error");
 
 	if (parsed.help) {
@@ -973,6 +979,13 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	time("resolveModelScope");
+	startupDiagnostics = deduplicateDiagnostics([
+		...startupDiagnostics,
+		// Interactive only: script runs (-p/json/rpc) must not get a per-run stderr line.
+		...(appMode === "interactive"
+			? macOSOwnershipDiagnostics({ offlineMode, quietStartup: settingsManager.getQuietStartup() })
+			: []),
+	]);
 	if (appMode !== "interactive" || hasRuntimeErrors) {
 		reportDiagnostics(startupDiagnostics);
 	}

@@ -59,6 +59,28 @@ env conformance suite and `test/differential.test.ts` check each rule below.
 - Spill: once the output crosses `spill.afterBytes` or `spill.afterLines` (counted over raw chunks in arrival order, as
   Node counts), the complete raw output goes to `pi-output-<uuid>.log` in a fresh `tmp-` directory.
 
+## Local CLI process ownership on macOS
+
+The CLI's native `pi-env supervise` owner uses a best-effort sweep on macOS, not kernel-enforced descendant
+containment. Noninteractive tasks have a private process group; the interactive CLI keeps its foreground terminal
+group. Two observers use CLOEXEC liveness pipes and sample descendants with `proc_listchildpids`/`proc_pidinfo` every
+25 ms. Observed identities (PID, start time, UID) survive reparenting in the cache and are checked before every signal.
+Cleanup takes a final snapshot before TERM, rescans for 250 ms, then escalates to KILL with a five-second bound.
+Enumeration errors, denied signals and known live survivors make cleanup fail.
+
+The private protocol's `C` record means **best-effort sweep completed** on Darwin. It does **not** prove that no
+descendant exists. Double-forks retaining a private group and observed `setsid` descendants can be swept. A process
+that calls `setsid` and reparents before a snapshot can escape, as can its unseen children or a final-scan fork.
+PID/PGID check/use races remain; killing both observers also defeats cleanup. Shared foreground groups are never
+swept as a group, to protect the caller and unrelated processes. These limits apply without elevated privileges;
+libproc availability and permissions depend on the macOS runtime. Darwin does not gain the Linux-only remote
+`ownedExec1` capability from this CLI backend.
+
+On Linux, startup may show a read-only cgroup delegation hint when systemd user delegation appears available but
+`PI_ENV_CGROUP_PARENT` is absent or unusable. It suggests `systemd-run --user --scope -p Delegate=yes pi` or enabling
+`Delegate=yes` for `user@.service`, plus a writable delegated parent. The external cgroup runner stays disabled;
+startup never creates or migrates cgroups. `--offline` / `PI_OFFLINE` and `quietStartup: true` skip detection and warning.
+
 ## Watching
 
 - The daemon runs Durable's `NodeFileWatcher` next to the files: native events (inotify, FSEvents) only trigger a
