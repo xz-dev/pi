@@ -1,10 +1,17 @@
 import type * as NodeZlib from "node:zlib";
+import { raceWithAbortSignal } from "./abort.ts";
 import { sha256Hex } from "./response-checkpoints.ts";
 
 const CODECS = ["zstd", "gzip", "deflate", "br"] as const;
 type Codec = (typeof CODECS)[number];
 // Process lifetime only: wrapper recreation and session cleanup must not retry rejected codecs.
 const floors = new Map<string, number>();
+// Rung that already produced a successful response for a target; only unverified rungs probe.
+const verified = new Map<string, number>();
+// One unverified compressed send per target: parallel probes can trip gateway concurrency limits.
+const probes = new Map<string, Promise<void>>();
+// Failures a byte-identical uncompressed resend cannot clarify, or would only add load to.
+const NO_IDENTITY_JUDGE = new Set([401, 407, 408, 413, 429, 503, 529]);
 const uploadEncodings = new WeakMap<Response, Codec>();
 const AUTH_HEADERS = ["authorization", "proxy-authorization", "x-api-key", "api-key", "auth-token"];
 const ERROR_BYTES = 4096;
@@ -88,7 +95,10 @@ async function encodingRefused(response: Response): Promise<boolean> {
 
 /**
  * Losslessly compress buffered JSON POST uploads; actively probe unknown targets.
- * Only explicit encoding refusals advance a process-local, target/auth-scoped floor.
+ * Explicit encoding refusals advance a process-local, target/auth-scoped floor. Any other
+ * failed probe is judged by one uncompressed resend: if that succeeds, the target stays
+ * uncompressed (gateways may block or mangle encoded bodies without saying so).
+ * Probes are serialized per target; concurrent requests wait for the verdict.
  * Custom codec bridges should opt in at their final HTTP sender, not before parsing JSON.
  */
 export function createRequestCompressionFetch(
@@ -128,33 +138,72 @@ export function createRequestCompressionFetch(
 		const key = `${method} ${url.origin}${url.pathname}|${await sha256Hex(JSON.stringify(credentials))}`;
 		const initial = url.protocol === "https:" && url.hostname === "api.anthropic.com" ? 1 : 0;
 		const floor = () => floors.get(key) ?? initial;
+		const identity = async () => {
+			const response = await fetchImpl(input, init);
+			if (response.ok) floors.set(key, CODECS.length);
+			return response;
+		};
 		for (;;) {
 			signal?.throwIfAborted();
+			const pending = probes.get(key);
+			if (pending) {
+				await (signal ? raceWithAbortSignal(pending, signal) : pending);
+				continue;
+			}
 			const rung = floor();
 			if (rung >= CODECS.length) return fetchImpl(input, init);
 			const codec = CODECS[rung];
 			const encoded = await compress(zlib, codec, body);
 			signal?.throwIfAborted();
-			if (floor() > rung) continue;
+			if (floor() > rung || probes.has(key)) continue;
 			if (encoded === null) {
 				floors.set(key, Math.max(floor(), rung + 1));
 				continue;
 			}
 			// An unprofitable payload says nothing about endpoint capability.
 			if (encoded.byteLength >= body.byteLength) return fetchImpl(input, init);
-			const wireHeaders = new Headers(headers);
-			wireHeaders.set("content-encoding", codec);
-			wireHeaders.delete("content-length");
-			const response = request
-				? await fetchImpl(new Request(request, { ...init, method, headers: wireHeaders, body: encoded }))
-				: await fetchImpl(input, { ...init, method, headers: wireHeaders, body: encoded });
-			if (!(await encodingRefused(response))) {
-				uploadEncodings.set(response, codec);
-				return response;
+			const probing = verified.get(key) !== rung;
+			let release = () => {};
+			if (probing)
+				probes.set(
+					key,
+					new Promise((resolve) => {
+						release = () => {
+							probes.delete(key);
+							resolve();
+						};
+					}),
+				);
+			try {
+				const wireHeaders = new Headers(headers);
+				wireHeaders.set("content-encoding", codec);
+				wireHeaders.delete("content-length");
+				let response: Response;
+				try {
+					response = request
+						? await fetchImpl(new Request(request, { ...init, method, headers: wireHeaders, body: encoded }))
+						: await fetchImpl(input, { ...init, method, headers: wireHeaders, body: encoded });
+				} catch (error) {
+					if (!probing || signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
+					return await identity();
+				}
+				if (await encodingRefused(response)) {
+					signal?.throwIfAborted();
+					floors.set(key, Math.max(floor(), rung + 1));
+					void response.body?.cancel().catch(() => {});
+					continue;
+				}
+				if (response.ok || !probing || NO_IDENTITY_JUDGE.has(response.status)) {
+					if (response.ok && floor() === rung) verified.set(key, rung);
+					uploadEncodings.set(response, codec);
+					return response;
+				}
+				void response.body?.cancel().catch(() => {});
+				signal?.throwIfAborted();
+				return await identity();
+			} finally {
+				release();
 			}
-			signal?.throwIfAborted();
-			floors.set(key, Math.max(floor(), rung + 1));
-			void response.body?.cancel().catch(() => {});
 		}
 	};
 }
