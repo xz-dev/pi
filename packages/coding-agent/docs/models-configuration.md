@@ -155,6 +155,7 @@ Also applies to `azure-openai-responses` and `openai-codex-responses`.
 | `supportsExplicitPromptCacheMode` | boolean | `false` | Whether the model accepts prompt_cache_options. Older OpenAI models reject the parameter. |
 | `supportsMidConvoEffort` | boolean | `false` | Whether thinking level changes are sent as configuration_update input items instead of changing reasoning.effort, so a change keeps the prompt cache. Only used by the openai-responses API, and ignored with Sign in with ChatGPT on the openai provider. |
 | `supportsMaxOutputTokens` | boolean | `true` | Whether the provider accepts max_output_tokens. Some Codex-protocol gateways reject it. |
+| `supportsResponseCheckpoints` | boolean | `false` | Whether the endpoint provides durable, persistent response state for previous_response_id continuation (store:true hydration across connections). Only used by responseCheckpointMode 'auto' (skips an explicit false) and 'declared' (requires true, or the official OpenAI Responses WebSocket service); the default 'always' mode tries checkpoints regardless. |
 
 ### `anthropic-messages`
 
