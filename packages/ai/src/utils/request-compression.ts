@@ -99,10 +99,12 @@ async function encodingRefused(response: Response): Promise<boolean> {
  * failed probe is judged by one uncompressed resend: if that succeeds, the target stays
  * uncompressed (gateways may block or mangle encoded bodies without saying so).
  * Probes are serialized per target; concurrent requests wait for the verdict.
+ * `onProbe` is told each unverified attempt before it is sent (undefined = uncompressed resend).
  * Custom codec bridges should opt in at their final HTTP sender, not before parsing JSON.
  */
 export function createRequestCompressionFetch(
 	fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+	onProbe?: (encoding: Codec | undefined) => void | Promise<void>,
 ): typeof globalThis.fetch {
 	return async (input, init) => {
 		const request = input instanceof Request ? input : undefined;
@@ -139,6 +141,7 @@ export function createRequestCompressionFetch(
 		const initial = url.protocol === "https:" && url.hostname === "api.anthropic.com" ? 1 : 0;
 		const floor = () => floors.get(key) ?? initial;
 		const identity = async () => {
+			await onProbe?.(undefined);
 			const response = await fetchImpl(input, init);
 			if (response.ok) floors.set(key, CODECS.length);
 			return response;
@@ -175,6 +178,7 @@ export function createRequestCompressionFetch(
 					}),
 				);
 			try {
+				if (probing) await onProbe?.(codec);
 				const wireHeaders = new Headers(headers);
 				wireHeaders.set("content-encoding", codec);
 				wireHeaders.delete("content-length");
