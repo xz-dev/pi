@@ -482,6 +482,12 @@ export interface ToolCall {
 	 * Describes the problem and includes the text the model sent; tool argument validation fails with it.
 	 */
 	argumentsError?: string;
+	/**
+	 * The model's original arguments text, kept by APIs that replay arguments as text when it is valid JSON that
+	 * a fresh encoding would change. Replay sends it unchanged while it still encodes `arguments`, so the model
+	 * sees what it wrote and stored responses match byte for byte.
+	 */
+	argumentsJson?: string;
 }
 
 export interface Usage {
