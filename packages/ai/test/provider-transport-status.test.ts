@@ -158,7 +158,8 @@ function piSse(): string {
 
 type Case = {
 	name: string;
-	label: string;
+	/** Labels for a first request to an unverified target: compressed probe, then the verified label. */
+	labels: string[];
 	run: (onTransport: (t: string | undefined) => void) => Promise<AssistantMessage>;
 	validBody: () => string;
 };
@@ -166,38 +167,38 @@ type Case = {
 const cases: Case[] = [
 	{
 		name: "anthropic-messages",
-		label: "SSE gzip",
+		labels: ["SSE try gzip", "SSE gzip"],
 		run: (onTransport) => streamAnthropic(anthropicModel, context, { apiKey: "sk-ant-test", onTransport }).result(),
 		validBody: anthropicSse,
 	},
 	{
 		name: "openai-responses (explicit sse)",
-		label: "SSE Zstd",
+		labels: ["SSE try Zstd", "SSE Zstd"],
 		run: (onTransport) =>
 			streamResponses(responsesModel, context, { apiKey: "sk-test", transport: "sse", onTransport }).result(),
 		validBody: responsesSse,
 	},
 	{
 		name: "azure-openai-responses",
-		label: "SSE Zstd",
+		labels: ["SSE try Zstd", "SSE Zstd"],
 		run: (onTransport) => streamAzure(azureModel, context, { apiKey: "sk-test", onTransport }).result(),
 		validBody: responsesSse,
 	},
 	{
 		name: "openai-completions",
-		label: "SSE Zstd",
+		labels: ["SSE try Zstd", "SSE Zstd"],
 		run: (onTransport) => streamCompletions(completionsModel, context, { apiKey: "sk-test", onTransport }).result(),
 		validBody: completionsSse,
 	},
 	{
 		name: "mistral-conversations",
-		label: "SSE",
+		labels: ["SSE"],
 		run: (onTransport) => streamMistral(mistralModel, context, { apiKey: "sk-test", onTransport }).result(),
 		validBody: mistralSse,
 	},
 	{
 		name: "pi-messages",
-		label: "SSE",
+		labels: ["SSE"],
 		run: (onTransport) => streamPiMessages(piModel, context, { apiKey: "sk-test", onTransport }).result(),
 		validBody: piSse,
 	},
@@ -213,7 +214,7 @@ describe("onTransport SSE reporting", () => {
 			);
 			const result = await testCase.run((t) => void transports.push(t));
 			expect(result.stopReason).toBe("stop");
-			expect(transports).toEqual([testCase.label]);
+			expect(transports).toEqual(testCase.labels);
 		});
 
 		it(`does not report SSE for an empty-body ${testCase.name} success response`, async () => {
@@ -223,7 +224,7 @@ describe("onTransport SSE reporting", () => {
 				vi.fn(async () => new Response(null, { status: 200, headers: { "content-type": "text/event-stream" } })),
 			);
 			await testCase.run((t) => void transports.push(t));
-			expect(transports).toEqual([]);
+			expect(transports.filter((t) => !t?.includes(" try "))).toEqual([]);
 		});
 
 		it(`does not report SSE for a non-SSE ${testCase.name} success response`, async () => {
@@ -236,7 +237,7 @@ describe("onTransport SSE reporting", () => {
 				),
 			);
 			await testCase.run((t) => void transports.push(t));
-			expect(transports).toEqual([]);
+			expect(transports.filter((t) => !t?.includes(" try "))).toEqual([]);
 		});
 	}
 });

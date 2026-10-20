@@ -3,7 +3,12 @@ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/r
 import { clampThinkingLevel } from "../models.ts";
 import type { Api, AssistantMessage, Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream, emitTransport, transportLabel } from "../utils/event-stream.ts";
+import {
+	AssistantMessageEventStream,
+	emitTransport,
+	probeTransportLabel,
+	transportLabel,
+} from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
@@ -192,7 +197,11 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 		apiKey,
 		apiVersion,
 		dangerouslyAllowBrowser: true,
-		fetch: options?.fetch ?? createRequestCompressionFetch(),
+		fetch:
+			options?.fetch ??
+			createRequestCompressionFetch(undefined, (encoding) =>
+				emitTransport(options?.onTransport, probeTransportLabel("SSE", encoding), model),
+			),
 		defaultHeaders: headers,
 		baseURL: baseUrl,
 	});

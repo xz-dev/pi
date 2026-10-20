@@ -36,7 +36,12 @@ import type {
 	ToolResultMessage,
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream, emitTransport, transportLabel } from "../utils/event-stream.ts";
+import {
+	AssistantMessageEventStream,
+	emitTransport,
+	probeTransportLabel,
+	transportLabel,
+} from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
@@ -359,7 +364,10 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				apiKey,
 				options?.headers,
 				options?.identity,
-				options?.fetch ?? createRequestCompressionFetch(),
+				options?.fetch ??
+					createRequestCompressionFetch(undefined, (encoding) =>
+						emitTransport(options?.onTransport, probeTransportLabel("SSE", encoding), model),
+					),
 				cacheSessionId,
 				compat,
 			);

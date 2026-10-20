@@ -162,3 +162,8 @@ export function transportLabel(label: string, encoding: string | undefined): str
 		? `${label} ${UPLOAD_ENCODING_LABELS[encoding]}`
 		: label;
 }
+
+/** Label for an unverified upload attempt; an undefined encoding is the uncompressed resend. */
+export function probeTransportLabel(label: string, encoding: string | undefined): string {
+	return `${label} try ${encoding && Object.hasOwn(UPLOAD_ENCODING_LABELS, encoding) ? UPLOAD_ENCODING_LABELS[encoding] : "plain"}`;
+}
