@@ -40,7 +40,7 @@ beforeEach(() => {
 	state.access.mockReset();
 	execute.mockClear();
 	vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "");
-	vi.stubEnv("PI_PROCESS_OWNER_PID", "");
+	vi.stubEnv("PI_PROCESS_OWNER_PID", undefined);
 	vi.stubEnv("PI_PROCESS_OWNER_PENDING", "");
 	vi.stubEnv("PI_PROCESS_OWNER_BINARY", "");
 	vi.spyOn(process, "execve").mockImplementation(execute);
@@ -92,6 +92,7 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 			process.argv = [process.execPath, "pi", ...(mode === "flag" ? ["--no-process-ownership"] : [])];
 			vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", mode === "environment" ? "1" : "");
 			vi.stubEnv("PI_PROCESS_OWNER_PENDING", "1");
+			vi.stubEnv("PI_PROCESS_OWNER_PID", String(process.ppid + 1));
 			vi.stubEnv("PI_PROCESS_OWNER_BINARY", "/inherited/helper");
 			vi.stubEnv("PI_PROCESS_OWNER_TEST_FAULT", "inherited");
 			ownCliProcesses();
@@ -140,10 +141,49 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 			expect(execute).not.toHaveBeenCalled();
 		});
 
-		it("does not accept a marker belonging to another parent", () => {
-			vi.stubEnv("PI_PROCESS_OWNER_PID", String(process.ppid + 1));
-			expect(ownCliProcesses).toThrow(handoff);
-			expect(execute.mock.calls[0][2]?.PI_PROCESS_OWNER_PID).toBeUndefined();
+		it.each([{ args: [] }, { args: ["--version"] }])(
+			"rejects stale supplied owner before startup or re-owning (%j)",
+			({ args }) => {
+				process.argv = [process.execPath, "pi", ...args];
+				vi.stubEnv("PI_PROCESS_OWNER_PID", String(process.ppid + 1));
+				expect(ownCliProcesses).toThrow("Process owner exited before its startup handoff completed");
+				expect(execute).not.toHaveBeenCalled();
+				expect(state.access).not.toHaveBeenCalled();
+				expect(state.resource).not.toHaveBeenCalled();
+				expect(process.env.PI_PROCESS_OWNER_PID).toBeUndefined();
+			},
+		);
+
+		it("fails closed if guardian dies between handoff creation and bootstrap", () => {
+			const descriptor = Object.getOwnPropertyDescriptor(process, "ppid")!;
+			vi.stubEnv("PI_PROCESS_OWNER_PID", String(process.ppid));
+			try {
+				Object.defineProperty(process, "ppid", { configurable: true, value: process.ppid + 1 });
+				expect(ownCliProcesses).toThrow("Process owner exited before its startup handoff completed");
+				expect(execute).not.toHaveBeenCalled();
+				expect(state.access).not.toHaveBeenCalled();
+			} finally {
+				Object.defineProperty(process, "ppid", descriptor);
+			}
+		});
+
+		it("keeps validated guardian identity if it dies during helper resolution", () => {
+			vi.useFakeTimers();
+			const parent = process.ppid;
+			const descriptor = Object.getOwnPropertyDescriptor(process, "ppid")!;
+			const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+			vi.stubEnv("PI_PROCESS_OWNER_PID", String(parent));
+			state.access.mockImplementation(() =>
+				Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 }),
+			);
+			try {
+				ownCliProcesses();
+				vi.advanceTimersByTime(1_000);
+				expect(execute).not.toHaveBeenCalled();
+				expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, "SIGTERM");
+			} finally {
+				Object.defineProperty(process, "ppid", descriptor);
+			}
 		});
 
 		it("does not pass Bun's virtual entrypoint back as a user argument", () => {
@@ -225,6 +265,53 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 		});
 	},
 );
+
+describe("POSIX held-controller cancellation", () => {
+	for (const mode of ["live", "exited", "signaled", "unspawned", "resume-false", "resume-error"] as const) {
+		it(`resumes only live held controller, once: ${mode}`, async () => {
+			Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+			const events: string[] = [];
+			const lease = new Duplex({
+				read() {},
+				write(chunk, _encoding, done) {
+					events.push(chunk.toString());
+					done();
+				},
+			});
+			const child = Object.assign(new ChildProcess(), {
+				stdio: [null, null, null, lease],
+				pid: mode === "unspawned" ? undefined : 42,
+				exitCode: mode === "exited" ? 0 : null,
+				signalCode: mode === "signaled" ? ("SIGTERM" as const) : null,
+			});
+			const kill = vi.spyOn(child, "kill").mockImplementation(() => {
+				events.push("SIGCONT");
+				if (mode === "resume-error") throw new Error("resume denied");
+				return mode !== "resume-false";
+			});
+			const numericKill = vi.spyOn(process, "kill");
+			const owner = observeOwnedProcess(child);
+			const failed = mode === "resume-error" || mode === "resume-false";
+			const checked = failed
+				? expect(owner.completion).rejects.toMatchObject({ code: "ERR_PROCESS_OWNER_CLEANUP" })
+				: expect(owner.completion).resolves.toEqual({ code: mode === "exited" ? 0 : 143, errno: undefined });
+			child.emit("spawn");
+			owner.cancel();
+			owner.cancel();
+			const live = mode === "live" || failed;
+			expect(kill).toHaveBeenCalledTimes(live ? 1 : 0);
+			if (live) expect(kill).toHaveBeenCalledWith("SIGCONT");
+			expect(events).toEqual(live ? ["SIGCONT", "K"] : ["K"]);
+			expect(numericKill).not.toHaveBeenCalled();
+			lease.push(
+				`S{"pid":42}\nX${JSON.stringify(mode === "exited" ? { code: 0, signal: null } : { code: null, signal: 15 })}\nC\n`,
+			);
+			lease.push(null);
+			child.emit("close", mode === "exited" ? 0 : 143, null);
+			await checked;
+		});
+	}
+});
 
 describe("Windows CLI trusted respawn (unit, not runtime proof)", () => {
 	for (const lost of [false, true]) {

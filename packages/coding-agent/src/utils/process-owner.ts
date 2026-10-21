@@ -99,7 +99,18 @@ export function observeOwnedProcess(child: ChildProcess, onStartup?: () => void)
 					cancelled = true;
 					lease.write("K");
 				}
-			} else lease.end("K");
+			} else if (!cancelled) {
+				cancelled = true;
+				// ChildProcess retains the unreaped controller; never signal a cached PID/group.
+				if (child.pid && child.exitCode === null && child.signalCode === null) {
+					try {
+						if (!child.kill("SIGCONT")) fail("controller resume failed");
+					} catch (error) {
+						fail(error instanceof Error ? error.message : "controller resume failed");
+					}
+				}
+				lease.end("K");
+			}
 		}
 	};
 	const fail = (detail: string) => {
@@ -275,13 +286,16 @@ export function ownCliProcesses(): undefined | false {
 		return;
 	}
 	if (pending) throw new Error("Process owner did not complete its startup handoff");
+	const parent = process.ppid;
+	if (owner !== undefined && (parent <= 0 || owner !== String(parent))) {
+		throw new Error("Process owner exited before its startup handoff completed");
+	}
 	// Version-only startup cannot load extensions or run tasks.
 	if (cliArgs.length === 1 && (cliArgs[0] === "--version" || cliArgs[0] === "-v")) return;
 	// The guardian grants this one-shot handoff only to its immediate child.
-	if (process.ppid > 0 && owner === String(process.ppid)) {
+	if (owner !== undefined) {
 		process.env[OWNER_BINARY] = processOwnerBinary();
 		if (process.platform !== "win32") {
-			const parent = process.ppid;
 			const ownerWatch = setInterval(() => {
 				if (process.ppid === parent) return;
 				clearInterval(ownerWatch);

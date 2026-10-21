@@ -5,7 +5,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Identity {
+pub(super) struct Identity {
     pid: libc::pid_t,
     seconds: u64,
     micros: u64,
@@ -45,6 +45,58 @@ fn identity(record: &libc::proc_bsdinfo) -> Identity {
         seconds: record.pbi_start_tvsec,
         micros: record.pbi_start_tvusec,
         uid: record.pbi_uid,
+    }
+}
+
+impl Identity {
+    pub(super) fn pid(self) -> libc::pid_t {
+        self.pid
+    }
+    pub(super) fn current(pid: libc::pid_t) -> io::Result<Self> {
+        info(pid)?
+            .map(|record| identity(&record))
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ESRCH))
+    }
+    pub(super) fn encode(self) -> [u8; 24] {
+        let mut bytes = [0; 24];
+        bytes[..4].copy_from_slice(&self.pid.to_ne_bytes());
+        bytes[4..12].copy_from_slice(&self.seconds.to_ne_bytes());
+        bytes[12..20].copy_from_slice(&self.micros.to_ne_bytes());
+        bytes[20..].copy_from_slice(&self.uid.to_ne_bytes());
+        bytes
+    }
+    pub(super) fn decode(bytes: [u8; 24]) -> io::Result<Self> {
+        let value = Self {
+            pid: i32::from_ne_bytes(bytes[..4].try_into().unwrap()),
+            seconds: u64::from_ne_bytes(bytes[4..12].try_into().unwrap()),
+            micros: u64::from_ne_bytes(bytes[12..20].try_into().unwrap()),
+            uid: u32::from_ne_bytes(bytes[20..].try_into().unwrap()),
+        };
+        if value.pid <= 0 || value.micros >= 1_000_000 {
+            return Err(io::Error::other("invalid session birth identity"));
+        }
+        Ok(value)
+    }
+    pub(super) fn child(self, parent: libc::pid_t) -> io::Result<()> {
+        match info(self.pid)? {
+            Some(record) if identity(&record) == self && record.pbi_ppid == parent as u32 => Ok(()),
+            _ => Err(io::Error::other(
+                "session primary identity/parent changed before grant",
+            )),
+        }
+    }
+    pub(super) fn signal(self, signal: i32) -> io::Result<()> {
+        // Darwin's existing birth/UID check-use boundary; never an unchecked group signal.
+        if let Some(record) = info(self.pid)?
+            && identity(&record) == self
+            && unsafe { libc::kill(self.pid, signal) } != 0
+        {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -99,6 +151,18 @@ impl Inventory {
             private_groups,
             groups: HashSet::new(),
         }
+    }
+
+    pub(super) fn seed(&mut self, held: Identity) -> io::Result<()> {
+        if let Some(record) = info(held.pid)?
+            && identity(&record) == held
+        {
+            self.remember(&record);
+            return Ok(());
+        }
+        Err(io::Error::other(
+            "session primary identity unavailable before grant",
+        ))
     }
 
     pub(super) fn snapshot(&mut self) -> io::Result<()> {
@@ -176,12 +240,8 @@ impl Inventory {
     }
 
     pub(super) fn signal(&self, pid: libc::pid_t, signal: i32) -> io::Result<()> {
-        // Check/use is not atomic on Darwin. No unchecked killpg fallback.
-        if self.current(pid)? && unsafe { libc::kill(pid, signal) } != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
-            }
+        if let Some(held) = self.known.get(&pid) {
+            held.signal(signal)?;
         }
         Ok(())
     }
@@ -221,13 +281,16 @@ impl Inventory {
     }
 
     pub(super) fn cleanup(&mut self) -> io::Result<()> {
+        self.cleanup_until(Instant::now() + Duration::from_secs(5))
+    }
+    pub(super) fn cleanup_until(&mut self, deadline: Instant) -> io::Result<()> {
         // Final inventory precedes TERM, including termination of any parent.
         // Keep failures sticky while still attempting the rest of the sweep.
         let mut failure = self.snapshot().err();
-        if let Err(error) = self.signal_all(libc::SIGCONT) {
+        if let Err(error) = self.signal_all(libc::SIGTERM) {
             failure = Some(error);
         }
-        if let Err(error) = self.signal_all(libc::SIGTERM) {
+        if let Err(error) = self.signal_all(libc::SIGCONT) {
             failure = Some(error);
         }
         let start = Instant::now();
@@ -267,7 +330,7 @@ impl Inventory {
                 }
                 Ok(true) => {}
             }
-            if start.elapsed() >= Duration::from_secs(5) {
+            if Instant::now() >= deadline {
                 return Err(failure.unwrap_or_else(|| {
                     io::Error::new(io::ErrorKind::TimedOut, "known Darwin descendants remain")
                 }));

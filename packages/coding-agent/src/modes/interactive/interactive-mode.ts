@@ -4394,6 +4394,7 @@ export class InteractiveMode {
 	 * repaint the final frame while the process is exiting.
 	 */
 	private isShuttingDown = false;
+	private isSuspended = false;
 
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
@@ -4412,8 +4413,30 @@ export class InteractiveMode {
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
 			await this.runtimeHost.dispose();
 			this.themeController.disableAutoSync();
-			await this.ui.terminal.drainInput(1000);
+			if (!this.isSuspended) await this.ui.terminal.drainInput(1000);
 			this.stop();
+			if (this.isSuspended && !process.stdin.closed) {
+				// Runtime tty close/exit resets can SIGTTOU a background job after Ctrl-Z.
+				// Final-exit only: close our validated tty descriptor, then exit without yielding.
+				const input = process.stdin;
+				const handle: unknown = Reflect.get(input, "_handle");
+				const fd: unknown = handle && typeof handle === "object" ? Reflect.get(handle, "fd") : input.fd;
+				if (typeof fd !== "number" || !Number.isSafeInteger(fd) || fd < 0 || !input.isTTY) {
+					throw new Error("Terminal input descriptor unavailable during suspended shutdown");
+				}
+				const stdin = fs.fstatSync(input.fd);
+				const current = fs.fstatSync(fd);
+				if (
+					!stdin.isCharacterDevice() ||
+					!current.isCharacterDevice() ||
+					stdin.dev !== current.dev ||
+					stdin.ino !== current.ino ||
+					stdin.rdev !== current.rdev
+				) {
+					throw new Error("Terminal input descriptor identity changed during suspended shutdown");
+				}
+				fs.closeSync(fd);
+			}
 			process.exit(0);
 		}
 
@@ -4548,6 +4571,7 @@ export class InteractiveMode {
 			return;
 		}
 
+		const parent = process.ppid;
 		// Keep the event loop alive while suspended. Without this, stopping the TUI
 		// can leave Node with no ref'ed handles, causing the process to exit on fg
 		// before the SIGCONT handler gets a chance to restore the terminal.
@@ -4560,6 +4584,13 @@ export class InteractiveMode {
 
 		// Set up handler to restore TUI when resumed
 		process.once("SIGCONT", () => {
+			if (this.isShuttingDown) return;
+			if (process.ppid !== parent) {
+				// A death wake is not fg: touching the shell's tty would stop us on SIGTTOU.
+				process.kill(process.pid, "SIGTERM");
+				return;
+			}
+			this.isSuspended = false;
 			resumeBashTimeouts();
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
@@ -4570,11 +4601,13 @@ export class InteractiveMode {
 		try {
 			// Stop the TUI (restore terminal to normal mode)
 			this.ui.stop();
+			this.isSuspended = true;
 
 			pauseBashTimeouts();
 			// Send SIGTSTP to process group (pid=0 means all processes in group)
 			process.kill(0, "SIGTSTP");
 		} catch (error) {
+			this.isSuspended = false;
 			resumeBashTimeouts();
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
@@ -7212,7 +7245,7 @@ export class InteractiveMode {
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
 		this.disposeActiveSelector();
-		if (this.settingsManager.getShowTerminalProgress()) {
+		if (!this.isSuspended && this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}
 		this.clearStatusIndicator();
@@ -7224,7 +7257,7 @@ export class InteractiveMode {
 			this.unsubscribe();
 		}
 		if (this.isInitialized) {
-			this.stopInteractiveTui(fullscreenExitOutput);
+			if (!this.isSuspended) this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
 		this.unregisterSignalHandlers();

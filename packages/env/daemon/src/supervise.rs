@@ -3,14 +3,35 @@
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 static SIGNALS: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_os = "freebsd")]
+#[path = "freebsd_exit_wake.rs"]
+mod exit_wake;
 const FORWARDED: [i32; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
+#[cfg(target_os = "linux")]
+const WAIT_ALL: i32 = libc::__WALL;
+#[cfg(target_os = "freebsd")]
+const WAIT_ALL: i32 = 0;
+
+fn fork_guardian() -> libc::pid_t {
+    #[cfg(target_os = "linux")]
+    if crate::job_control::enabled() {
+        // Sole-thread supervise mode, before workers: fork-like clone with copied stack,
+        // address space and FD table; only the parent-directed exit signal differs.
+        // All optional clone arguments are null (no VM/files/TLS sharing flags).
+        #[cfg(target_arch = "s390x")]
+        return unsafe { libc::syscall(libc::SYS_clone, 0, libc::SIGCONT, 0, 0, 0) as libc::pid_t };
+        #[cfg(not(target_arch = "s390x"))]
+        return unsafe { libc::syscall(libc::SYS_clone, libc::SIGCONT, 0, 0, 0, 0) as libc::pid_t };
+    }
+    unsafe { libc::fork() }
+}
 #[cfg(target_os = "linux")]
 const KERNEL_SIGNAL_CODE: i32 = libc::SI_KERNEL;
 // FreeBSD sys/signal.h defines SI_KERNEL; libc 0.2.190 does not export it.
@@ -254,6 +275,30 @@ impl Control {
         Ok(Some(self.buffer[self.offset]))
     }
 
+    fn cancelled(&self) -> io::Result<bool> {
+        let mut byte = 0u8;
+        let got = unsafe {
+            libc::recv(
+                self.file.as_raw_fd(),
+                (&mut byte as *mut u8).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if got >= 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
     fn report(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.file.write_all(bytes)
     }
@@ -277,8 +322,8 @@ fn control_fd(descriptor: i32) -> io::Result<i32> {
 fn cleanup() -> io::Result<()> {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(5);
-    signal_owned(libc::SIGCONT)?;
     signal_owned(libc::SIGTERM)?;
+    signal_owned(libc::SIGCONT)?;
     loop {
         if start.elapsed() >= Duration::from_millis(250) {
             signal_owned(libc::SIGKILL)?;
@@ -286,7 +331,7 @@ fn cleanup() -> io::Result<()> {
         loop {
             let mut status = 0;
             // SAFETY: valid output word; only our own children are waitable.
-            let got = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            let got = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | WAIT_ALL) };
             if got > 0 {
                 continue;
             }
@@ -321,7 +366,7 @@ fn reap_non_primary(primary: libc::pid_t) -> io::Result<()> {
                 libc::P_ALL,
                 0,
                 &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | WAIT_ALL,
             )
         } != 0
         {
@@ -338,7 +383,7 @@ fn reap_non_primary(primary: libc::pid_t) -> io::Result<()> {
         if pid == 0 || pid == primary {
             return Ok(());
         }
-        let got = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        let got = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG | WAIT_ALL) };
         if got < 0 {
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
@@ -1094,6 +1139,7 @@ fn command(
     args: &[OsString],
     control: &mut Option<Control>,
     ipc: Option<std::fs::File>,
+    gate: Option<crate::job_control::Startup>,
 ) -> io::Result<i32> {
     let mut command = Command::new(&args[0]);
     command
@@ -1105,6 +1151,23 @@ fn command(
         command
             .env_remove("PI_PROCESS_OWNER_PENDING")
             .env("PI_PROCESS_OWNER_PID", std::process::id().to_string());
+    }
+    if let Some(mut gate) = gate {
+        gate.wait_active(|| {
+            control_pending(control)?;
+            if SIGNALS.load(Ordering::Relaxed)
+                & ((1 << libc::SIGTERM)
+                    | (1 << libc::SIGHUP)
+                    | (1 << libc::SIGINT)
+                    | (1 << libc::SIGQUIT))
+                != 0
+            {
+                return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+            }
+            Ok(())
+        })?;
+        let spawned = crate::job_control::Primary::spawn(command, Some(gate));
+        return observe_primary(spawned, control, ipc, false, false);
     }
     observe(command, control, ipc, false, false)
 }
@@ -1120,8 +1183,18 @@ fn observe(
         // Only this typed, fully validated prefork branch may emit spec-mode E0.
         Err(io::Error::from(io::ErrorKind::NotFound))
     } else {
-        command.spawn()
+        command.spawn().map(crate::job_control::Primary::Standard)
     };
+    observe_primary(spawned, control, ipc, spec_mode, no_attempt)
+}
+
+fn observe_primary(
+    spawned: io::Result<crate::job_control::Primary>,
+    control: &mut Option<Control>,
+    ipc: Option<std::fs::File>,
+    spec_mode: bool,
+    no_attempt: bool,
+) -> io::Result<i32> {
     // Only the exec child may retain IPC; a guardian copy would suppress disconnect EOF.
     drop(ipc);
     let mut child = match spawned {
@@ -1139,15 +1212,35 @@ fn observe(
             return Err(error);
         }
     };
-    if let Some(control) = control {
-        control.report(format!("S{{\"pid\":{}}}\n", child.id()).as_bytes())?;
-    }
+    let mut started = false;
     let mut deadline = None;
     let mut forced = false;
     let mut suspend = crate::job_control::State::default();
     let mut targets = crate::job_control::Targets::default();
     loop {
-        suspend.update(|paused| targets.apply(paused))?;
+        if !started {
+            match child.poll_exec() {
+                Ok(true) => {
+                    if let Some(control) = control {
+                        control.report(format!("S{{\"pid\":{}}}\n", child.id()).as_bytes())?;
+                    }
+                    started = true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    if let Some(control) = control
+                        && control.report(&spawn_error(&error)).is_ok()
+                    {
+                        return Ok(125);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        // The held native stub has no payload/tool tree and deliberately remains runnable.
+        if started {
+            suspend.update(|paused| targets.apply(paused))?;
+        }
         if let Some(status) = child.try_wait()? {
             if let Some(control) = control {
                 use std::os::unix::process::ExitStatusExt;
@@ -1163,6 +1256,16 @@ fn observe(
             send(child.id() as libc::pid_t, libc::SIGKILL)?;
             forced = true;
         }
+        if !started {
+            // A pre-exec child has default termination handlers. Queue termination before
+            // CONT so cancellation cannot let it execute behind a still-stopped outer.
+            let signals = SIGNALS.load(Ordering::Relaxed);
+            for signal in [libc::SIGTERM, libc::SIGHUP] {
+                if signals & (1 << signal) != 0 {
+                    send(child.id() as libc::pid_t, signal)?;
+                }
+            }
+        }
         pending(
             child.id() as libc::pid_t,
             &mut deadline,
@@ -1177,9 +1280,18 @@ fn guardian(
     parent: libc::pid_t,
     control: &mut Option<Control>,
     ipc: Option<std::fs::File>,
+    gate: Option<crate::job_control::Startup>,
+    #[cfg(target_os = "freebsd")] _exit_lease: Option<std::os::unix::net::UnixStream>,
     #[cfg(target_os = "linux")] spec: Option<exec_spec::Prepared>,
 ) -> i32 {
     SIGNALS.store(0, Ordering::Relaxed);
+    #[cfg(target_os = "freebsd")]
+    let gate = gate.map(|mut gate| {
+        if let Some(lease) = &_exit_lease {
+            gate.guardian_lifetime(lease.as_raw_fd());
+        }
+        gate
+    });
     let result = acquire()
         .and_then(|()| parent_death(parent))
         .and_then(|()| {
@@ -1187,7 +1299,7 @@ fn guardian(
             if let Some(spec) = spec {
                 return observe(spec.command, control, ipc, true, spec.no_attempt);
             }
-            command(args, control, ipc)
+            command(args, control, ipc, gate)
         });
     finish(result, cleanup(), None)
 }
@@ -1341,6 +1453,7 @@ pub fn run(args: &[OsString]) -> i32 {
     let _ = spec_fd;
     // SAFETY: parse() validated this inherited descriptor; each fork owns its copy.
     let ipc = ipc_fd.map(|fd| unsafe { std::fs::File::from_raw_fd(fd) });
+    let caller = unsafe { libc::getppid() };
     let job_mask = match prepare_signals().and_then(|mask| acquire().map(|()| mask)) {
         Ok(mask) => mask,
         Err(error) => {
@@ -1348,35 +1461,105 @@ pub fn run(args: &[OsString]) -> i32 {
             return 125;
         }
     };
+    if let Err(error) = crate::job_control::wake_on_parent_death(caller) {
+        eprintln!("pi-env supervise: {error}");
+        return 125;
+    }
+    #[cfg(target_os = "linux")]
+    let startup = if spec.is_some() {
+        Ok((None, None))
+    } else {
+        crate::job_control::startup()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let startup = crate::job_control::startup();
+    let (mut startup_owner, startup_child) = match startup {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("pi-env supervise: {error}");
+            return 125;
+        }
+    };
+    #[cfg(target_os = "freebsd")]
+    let (mut exit_wake, exit_lease) = if crate::job_control::enabled() {
+        match exit_wake::ExitWake::pair() {
+            Ok((wake, lease)) => (Some(wake), Some(lease)),
+            Err(error) => {
+                eprintln!("pi-env supervise: {error}");
+                return 125;
+            }
+        }
+    } else {
+        (None, None)
+    };
     let parent = std::process::id() as libc::pid_t;
     // SAFETY: this standalone mode has one thread. Neither branch shares running locks.
-    let guardian = unsafe { libc::fork() };
+    let guardian = fork_guardian();
     if guardian < 0 {
         eprintln!("pi-env supervise: {}", io::Error::last_os_error());
         return 125;
     }
-    if let Err(error) = job_mask.activate(guardian == 0) {
-        eprintln!("pi-env supervise: {error}");
-        return 125;
-    }
     if guardian == 0 {
+        if let Err(error) = job_mask.activate(true) {
+            eprintln!("pi-env supervise: {error}");
+            return 125;
+        }
+        #[cfg(target_os = "freebsd")]
+        drop(exit_wake);
+        drop(startup_owner);
         std::process::exit(self::guardian(
             command_args,
             parent,
             &mut control,
             ipc,
+            startup_child,
+            #[cfg(target_os = "freebsd")]
+            exit_lease,
             #[cfg(target_os = "linux")]
             spec,
         ));
     }
-    // Only the guardian reads control. The outer keeps its CLOEXEC copy solely
-    // for the final C write; retaining IPC would hide the child's disconnect.
+    #[cfg(target_os = "freebsd")]
+    {
+        drop(exit_lease);
+        if let Some(wake) = &mut exit_wake
+            && let Err(error) = wake.arm()
+        {
+            eprintln!("pi-env supervise: {error}");
+            return 125;
+        }
+    }
+    if let Err(error) = job_mask.activate(false) {
+        eprintln!("pi-env supervise: {error}");
+        return 125;
+    }
+    drop(startup_child);
+    if let Some(owner) = &mut startup_owner
+        && let Err(error) = owner.activate()
+    {
+        eprintln!("pi-env supervise: {error}");
+        return 125;
+    }
+    // Only guardian consumes control; outer also peeks for cancellation to wake a stopped guardian.
+    // Retaining IPC would hide the child's disconnect.
     drop(ipc);
     let mut deadline = None;
+    let mut cancelling = false;
     let result = loop {
+        #[cfg(target_os = "freebsd")]
+        if let Some(wake) = &mut exit_wake
+            && let Err(error) = wake.check()
+        {
+            break Err(error);
+        }
+        if let Some(owner) = &mut startup_owner
+            && let Err(error) = owner.poll()
+        {
+            break Err(error);
+        }
         let mut status = 0;
         // SAFETY: guardian is our unreaped child; status is a valid output word.
-        let got = unsafe { libc::waitpid(guardian, &mut status, libc::WNOHANG) };
+        let got = unsafe { libc::waitpid(guardian, &mut status, libc::WNOHANG | WAIT_ALL) };
         if got == guardian {
             use std::os::unix::process::ExitStatusExt;
             break Ok(crate::sys::exit_code(ExitStatus::from_raw(status)) as i32);
@@ -1387,19 +1570,52 @@ pub fn run(args: &[OsString]) -> i32 {
                 break Err(error);
             }
         }
+        if !cancelling
+            && (unsafe { libc::getppid() } != caller
+                || control
+                    .as_ref()
+                    .is_some_and(|control| !matches!(control.cancelled(), Ok(false))))
+        {
+            // Held unreaped direct child only; no ancestor or cached process-group signal.
+            if let Err(error) =
+                send(guardian, libc::SIGCONT).and_then(|()| send(guardian, libc::SIGTERM))
+            {
+                break Err(error);
+            }
+            deadline = Some(Instant::now() + Duration::from_secs(12));
+            cancelling = true;
+        }
         // Guardian has five seconds for command shutdown and five for owned cleanup.
         if let Err(error) = pending(guardian, &mut deadline, Duration::from_secs(12)) {
             break Err(error);
         }
         thread::sleep(Duration::from_millis(10));
     };
-    finish(result, cleanup(), control.as_mut())
+    let clean = cleanup();
+    #[cfg(target_os = "freebsd")]
+    let clean = if let Some(wake) = &mut exit_wake {
+        wake.finish().and(clean)
+    } else {
+        clean
+    };
+    finish(result, clean, control.as_mut())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::fd::{AsRawFd, IntoRawFd};
+
+    #[test]
+    fn outer_cancel_peek_does_not_consume_guardian_kill_record() {
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = control_fd(stream.into_raw_fd()).unwrap();
+        let mut control = Control::open(fd).unwrap();
+        peer.write_all(b"K").unwrap();
+        assert!(control.cancelled().unwrap());
+        assert!(control.cancelled().unwrap());
+        assert_eq!(control.peek().unwrap(), Some(b'K'));
+    }
 
     #[test]
     fn completion_record_depends_on_cleanup_not_primary_status() {
@@ -1461,7 +1677,7 @@ mod tests {
         let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let fd = control_fd(stream.into_raw_fd()).unwrap();
         let mut control = Some(Control::open(fd).unwrap());
-        assert_eq!(command(&args, &mut control, None).unwrap(), 125);
+        assert_eq!(command(&args, &mut control, None, None).unwrap(), 125);
         let mut report = [0; 256];
         let count = peer.read(&mut report).unwrap();
         assert_eq!(
@@ -1475,13 +1691,15 @@ mod tests {
         peer.shutdown(std::net::Shutdown::Both).unwrap();
         drop(peer);
         assert_eq!(
-            command(&args, &mut control, None)
+            command(&args, &mut control, None, None)
                 .unwrap_err()
                 .raw_os_error(),
             Some(libc::ENOTDIR)
         );
         assert_eq!(
-            command(&args, &mut None, None).unwrap_err().raw_os_error(),
+            command(&args, &mut None, None, None)
+                .unwrap_err()
+                .raw_os_error(),
             Some(libc::ENOTDIR)
         );
     }

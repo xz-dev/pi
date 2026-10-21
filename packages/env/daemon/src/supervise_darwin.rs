@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
@@ -66,7 +66,12 @@ static SHARED_FOREGROUND: AtomicBool = AtomicBool::new(false);
 
 #[path = "darwin_inventory.rs"]
 mod inventory;
-use inventory::Inventory;
+use inventory::{Identity, Inventory};
+#[path = "darwin_wake.rs"]
+mod wake;
+pub(super) fn startup_identity() -> io::Result<[u8; 24]> {
+    Identity::current(unsafe { libc::getpid() }).map(Identity::encode)
+}
 
 /// One private duplex stream between caller and supervise. `K` requests an
 /// immediate kill of the primary and its whole owned tree; the outer stays
@@ -123,6 +128,30 @@ impl Control {
         }
         self.offset -= 1;
         Ok(Some(self.buffer[self.offset]))
+    }
+
+    fn cancelled(&self) -> io::Result<bool> {
+        let mut byte = 0u8;
+        let got = unsafe {
+            libc::recv(
+                self.file.as_raw_fd(),
+                (&mut byte as *mut u8).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if got >= 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
     }
 
     fn report(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -284,7 +313,9 @@ fn command(
     lease: &mut Liveness,
     inventory: &mut Inventory,
     private_group: bool,
+    startup: (Option<crate::job_control::Startup>, Option<&wake::Guardian>),
 ) -> io::Result<i32> {
+    let (mut gate, watch) = startup;
     use std::os::unix::process::CommandExt;
     let mut command = Command::new(&args[0]);
     command
@@ -299,7 +330,31 @@ fn command(
             .env_remove("PI_PROCESS_OWNER_PENDING")
             .env("PI_PROCESS_OWNER_PID", std::process::id().to_string());
     }
-    let spawned = command.spawn();
+    if let Some(gate) = &mut gate {
+        if let Some(watch) = &watch {
+            gate.guardian_lifetime(watch.stream.as_raw_fd());
+        }
+        gate.wait_active(|| {
+            if let Some(watch) = &watch {
+                watch.check()?;
+            }
+            let requested = SIGNALS.load(Ordering::Relaxed)
+                & ((1 << libc::SIGTERM)
+                    | (1 << libc::SIGHUP)
+                    | (1 << libc::SIGINT)
+                    | (1 << libc::SIGQUIT))
+                != 0;
+            let cancelled = control
+                .as_mut()
+                .is_some_and(|control| !matches!(control.peek(), Ok(None)));
+            let mut completed = false;
+            if requested || cancelled || !alive(&mut lease.read, &mut completed)? {
+                return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+            }
+            Ok(())
+        })?;
+    }
+    let spawned = crate::job_control::Primary::spawn(command, gate);
     // Only the exec child retains IPC. The observer must not hide disconnect EOF.
     drop(ipc);
     let mut child = match spawned {
@@ -312,17 +367,48 @@ fn command(
             return Err(error);
         }
     };
-    if let Some(control) = control {
-        control.report(format!("S{{\"pid\":{}}}\n", child.id()).as_bytes())?;
-    }
+    let mut started = false;
     let mut terminating = None;
     let mut unused = false;
     let mut suspend = crate::job_control::State::default();
+    let mut observer_failed = false;
     loop {
-        suspend.update(|paused| {
-            inventory.snapshot()?;
-            inventory.signal_other_groups(if paused { libc::SIGSTOP } else { libc::SIGCONT })
-        })?;
+        if !observer_failed
+            && let Some(watch) = &watch
+            && watch.check().is_err()
+        {
+            observer_failed = true;
+            crate::job_control::receive(libc::SIGTERM);
+            SIGNALS.fetch_or(1 << libc::SIGTERM, Ordering::Relaxed);
+        }
+        if !started {
+            match child.poll_exec() {
+                Ok(true) => {
+                    if let Some(control) = control {
+                        control.report(format!("S{{\"pid\":{}}}\n", child.id()).as_bytes())?;
+                    }
+                    started = true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    if let Some(control) = control {
+                        control.report(&spawn_error(&error))?;
+                        return Ok(125);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        if started
+            && terminating.is_none()
+            && !observer_failed
+            && SIGNALS.load(Ordering::Relaxed) & ((1 << libc::SIGTERM) | (1 << libc::SIGHUP)) == 0
+        {
+            suspend.update(|paused| {
+                inventory.snapshot()?;
+                inventory.signal_other_groups(if paused { libc::SIGSTOP } else { libc::SIGCONT })
+            })?;
+        }
         // Two passes also discover private-group orphans before reaping a fast leader.
         inventory.snapshot()?;
         inventory.snapshot()?;
@@ -332,7 +418,11 @@ fn command(
                 let record = serde_json::json!({"code":status.code(), "signal":status.signal()});
                 let _ = control.report(format!("X{record}\n").as_bytes());
             }
-            return Ok(crate::sys::exit_code(status) as i32);
+            return if observer_failed {
+                Err(io::Error::other("session wake observer lost"))
+            } else {
+                Ok(crate::sys::exit_code(status) as i32)
+            };
         }
         let signals = SIGNALS.swap(0, Ordering::Relaxed);
         let requested = signals & ((1 << libc::SIGTERM) | (1 << libc::SIGHUP)) != 0;
@@ -344,8 +434,11 @@ fn command(
         {
             // This tick's final snapshot precedes every parent termination signal.
             // The outer may die while stopped; wake the payload before its TERM handler.
-            inventory.signal_all(libc::SIGCONT)?;
+            if !started {
+                inventory.signal(child.id() as libc::pid_t, libc::SIGTERM)?;
+            }
             inventory.signal_all(libc::SIGTERM)?;
+            inventory.signal_all(libc::SIGCONT)?;
             terminating = Some(Instant::now());
         }
         for signal in [libc::SIGINT, libc::SIGQUIT] {
@@ -388,27 +481,58 @@ pub fn run(args: &[OsString]) -> i32 {
     let ipc = ipc_fd.map(|fd| unsafe { std::fs::File::from_raw_fd(fd) });
     let private_group = std::env::var_os("PI_PROCESS_OWNER_PENDING").is_none();
     SHARED_FOREGROUND.store(!private_group, Ordering::Relaxed);
-    let setup = prepare_signals().and_then(|mask| Ok((mask, pipe()?, pipe()?)));
-    let (job_mask, (outer_read, guardian_write), (guardian_read, outer_write)) = match setup {
-        Ok(pipes) => pipes,
+    let setup = prepare_signals().and_then(|mask| {
+        Ok((
+            mask,
+            pipe()?,
+            pipe()?,
+            crate::job_control::startup()?,
+            if private_group {
+                None
+            } else {
+                Some((
+                    wake::Sockets::new()?,
+                    Identity::current(unsafe { libc::getpid() })?,
+                ))
+            },
+        ))
+    });
+    let (
+        job_mask,
+        (outer_read, guardian_write),
+        (guardian_read, outer_write),
+        (mut startup_owner, startup_child),
+        wake_setup,
+    ) = match setup {
+        Ok(value) => value,
         Err(error) => {
             eprintln!("pi-env supervise: {error}");
             return 125;
         }
     };
-    // SAFETY: standalone supervisor has only one thread and no shared running locks.
+    // Standalone supervise runs on its sole thread, before daemon workers. No shared FD table.
     let guardian = unsafe { libc::fork() };
     if guardian < 0 {
         eprintln!("pi-env supervise: {}", io::Error::last_os_error());
         return 125;
     }
-    if let Err(error) = job_mask.activate(guardian == 0) {
-        eprintln!("pi-env supervise: {error}");
-        return 125;
-    }
     if guardian == 0 {
+        let watch = wake_setup.map(|(sockets, outer)| {
+            drop(sockets.outer);
+            drop(sockets.observer);
+            drop(sockets.observer_guardian);
+            wake::Guardian {
+                stream: sockets.guardian,
+                outer,
+            }
+        });
+        drop(startup_owner);
         drop(outer_read);
         drop(outer_write);
+        if let Err(error) = job_mask.activate(true) {
+            eprintln!("pi-env supervise: {error}");
+            return 125;
+        }
         SIGNALS.store(0, Ordering::Relaxed);
         let mut lease = Liveness {
             read: guardian_read,
@@ -422,6 +546,7 @@ pub fn run(args: &[OsString]) -> i32 {
             &mut lease,
             &mut inventory,
             private_group,
+            (startup_child, watch.as_ref()),
         );
         let clean = inventory.cleanup();
         if clean.is_ok() && result.is_ok() {
@@ -429,16 +554,78 @@ pub fn run(args: &[OsString]) -> i32 {
         }
         std::process::exit(finish(result, clean, None));
     }
+    let mut watch = if let Some((sockets, outer_id)) = wake_setup {
+        drop(sockets.guardian);
+        let observer = unsafe { libc::fork() };
+        if observer < 0 {
+            let error = io::Error::last_os_error();
+            drop(sockets.outer);
+            drop(sockets.observer);
+            drop(sockets.observer_guardian);
+            drop(startup_owner);
+            drop(startup_child);
+            let _ = Inventory::new(false).cleanup();
+            eprintln!("pi-env supervise: {error}");
+            return 125;
+        }
+        if observer == 0 {
+            drop(sockets.outer);
+            drop(control);
+            drop(ipc);
+            drop(startup_owner);
+            drop(startup_child);
+            drop(outer_read);
+            drop(guardian_write);
+            drop(guardian_read);
+            drop(outer_write);
+            if unsafe { libc::setsid() } < 0 {
+                eprintln!("pi-env wake observer: {}", io::Error::last_os_error());
+                std::process::exit(125);
+            }
+            if let Err(error) = job_mask.activate(true) {
+                eprintln!("pi-env wake observer: {error}");
+                std::process::exit(125);
+            }
+            SIGNALS.store(0, Ordering::Relaxed);
+            std::process::exit(wake::observe(
+                sockets.observer,
+                sockets.observer_guardian,
+                outer_id,
+            ));
+        }
+        drop(sockets.observer);
+        drop(sockets.observer_guardian);
+        let mut watch = wake::Outer::new(sockets.outer, observer);
+        if let Err(error) = watch.reply(b'R') {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let _ = watch.finish(deadline);
+            let _ = Inventory::new(false).cleanup_until(deadline);
+            eprintln!("pi-env supervise: {error}");
+            return 125;
+        }
+        Some(watch)
+    } else {
+        None
+    };
+    // Observer has established its independent lifetime watch before pending outer TSTP acts.
+    let activation = job_mask.activate(false);
+    drop(startup_child);
     drop(guardian_read);
     drop(guardian_write);
     drop(ipc);
+    let activation = activation.and_then(|()| {
+        if let Some(owner) = &mut startup_owner {
+            owner.activate()?;
+        }
+        Ok(())
+    });
     let mut lease = Liveness {
         read: outer_read,
         write: outer_write,
     };
     let mut inventory = Inventory::new(private_group);
     let mut completed = false;
-    let result = (|| {
+    let result = activation.and_then(|()| {
         let mut terminating = None;
         loop {
             inventory.snapshot()?;
@@ -451,15 +638,46 @@ pub fn run(args: &[OsString]) -> i32 {
                 return if completed {
                     Ok(crate::sys::exit_code(ExitStatus::from_raw(status)) as i32)
                 } else {
-                    Err(io::Error::other("Darwin observer cleanup unconfirmed"))
+                    Err(io::Error::other("Darwin guardian cleanup unconfirmed"))
                 };
             }
             if got < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
                 return Err(io::Error::last_os_error());
             }
+            if let Some(watch) = &mut watch
+                && watch.exited()?
+            {
+                // A normal guardian exit closes its lifetime FD only after writing C.
+                alive(&mut lease.read, &mut completed)?;
+                if !completed {
+                    return Err(io::Error::other("session wake observer lost"));
+                }
+            }
+            if let Some(owner) = &mut startup_owner {
+                owner.poll(|bytes| {
+                    let held = Identity::decode(bytes)?;
+                    held.child(guardian)?;
+                    inventory.seed(held)?;
+                    watch
+                        .as_mut()
+                        .ok_or_else(|| io::Error::other("session wake observer missing"))?
+                        .publish(held)
+                })?;
+            }
+            let cancelled = control
+                .as_ref()
+                .is_some_and(|control| !matches!(control.cancelled(), Ok(false)));
+            if cancelled && terminating.is_none() {
+                inventory.signal(guardian, libc::SIGCONT)?;
+                inventory.signal(guardian, libc::SIGTERM)?;
+                terminating = Some(Instant::now());
+            }
             let signals = SIGNALS.swap(0, Ordering::Relaxed);
             for signal in FORWARDED {
                 if signals & (1 << signal) != 0 {
+                    if matches!(signal, libc::SIGTERM | libc::SIGHUP) {
+                        inventory.signal(guardian, libc::SIGCONT)?;
+                    }
                     inventory.signal(guardian, signal)?;
                     if matches!(signal, libc::SIGTERM | libc::SIGHUP) && terminating.is_none() {
                         terminating = Some(Instant::now());
@@ -469,18 +687,22 @@ pub fn run(args: &[OsString]) -> i32 {
             if terminating.is_some_and(|start| start.elapsed() >= Duration::from_secs(12)) {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "Darwin observer did not exit",
+                    "Darwin guardian did not exit",
                 ));
             }
             thread::sleep(Duration::from_millis(25));
         }
-    })();
-    // Keep our writer until cleanup has taken its final snapshot. Its EOF lets
-    // a surviving guardian sweep independently if the outer exits or is killed.
-    let mut clean = inventory.cleanup();
+    });
+    // Reap the extra direct child before the existing inventory can reap it. Both share
+    // the original five-second cleanup budget, not sequential new timeout windows.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let watch_clean = watch
+        .as_mut()
+        .map_or(Ok(()), |watch| watch.finish(deadline));
+    let mut clean = inventory.cleanup_until(deadline).and(watch_clean);
     if !completed && clean.is_ok() {
         clean = Err(io::Error::other(
-            "Darwin observer did not confirm its sweep",
+            "Darwin guardian did not confirm its sweep",
         ));
     }
     drop(lease);

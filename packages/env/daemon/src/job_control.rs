@@ -1,6 +1,10 @@
 //! Session job control. The guardian stays runnable; only the shell-facing outer stops.
 
-use std::io;
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SESSION: AtomicBool = AtomicBool::new(false);
@@ -55,8 +59,16 @@ impl Drop for SignalMask {
 }
 
 pub(super) fn initialize() -> io::Result<SignalMask> {
+    SESSION.store(
+        std::env::var_os("PI_PROCESS_OWNER_PENDING").is_some(),
+        Ordering::Relaxed,
+    );
+    block()
+}
+
+fn block() -> io::Result<SignalMask> {
     let mut mask = SignalMask { previous: None };
-    if std::env::var_os("PI_PROCESS_OWNER_PENDING").is_some() {
+    if enabled() {
         let mut block: libc::sigset_t = unsafe { std::mem::zeroed() };
         let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
         unsafe {
@@ -70,7 +82,6 @@ pub(super) fn initialize() -> io::Result<SignalMask> {
         if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut previous) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        SESSION.store(true, Ordering::Relaxed);
         mask.previous = Some(previous);
     }
     Ok(mask)
@@ -102,6 +113,336 @@ pub(super) fn receive(signal: i32) -> bool {
         _ => return false,
     }
     true
+}
+
+/// Two barriers: outer activation before primary fork, then exec permission after child exists.
+/// A pre-child TSTP parks outer before permission; a later TSTP reaches the child itself.
+pub(super) struct OuterStartup {
+    stream: UnixStream,
+    #[cfg(target_os = "macos")]
+    record: [u8; 25],
+    #[cfg(target_os = "macos")]
+    length: usize,
+}
+pub(super) struct Startup(UnixStream, Option<i32>);
+pub(super) fn startup() -> io::Result<(Option<OuterStartup>, Option<Startup>)> {
+    if !enabled() {
+        return Ok((None, None));
+    }
+    let (outer, guardian) = UnixStream::pair()?;
+    outer.set_nonblocking(true)?;
+    Ok((
+        Some(OuterStartup {
+            stream: outer,
+            #[cfg(target_os = "macos")]
+            record: [0; 25],
+            #[cfg(target_os = "macos")]
+            length: 0,
+        }),
+        Some(Startup(guardian, None)),
+    ))
+}
+impl OuterStartup {
+    pub(super) fn activate(&mut self) -> io::Result<()> {
+        self.stream.write_all(b"A")
+    }
+    pub(super) fn poll(
+        &mut self,
+        #[cfg(target_os = "macos")] mut publish: impl FnMut([u8; 24]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            while self.length < self.record.len() {
+                match self.stream.read(&mut self.record[self.length..]) {
+                    Ok(0) if self.length == 0 => return Ok(()),
+                    Ok(0) => return Err(io::Error::other("incomplete session identity")),
+                    Ok(n) => self.length += n,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if self.record[0] != b'R' {
+                return Err(io::Error::other("invalid session identity"));
+            }
+            publish(self.record[1..].try_into().unwrap())?;
+            self.stream.write_all(b"G")?;
+            self.length = 0;
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut byte = [0];
+            match self.stream.read(&mut byte) {
+                Ok(0) => Ok(()),
+                Ok(_) if byte == *b"R" => self.stream.write_all(b"G"),
+                Ok(_) => Err(io::Error::other("invalid session startup request")),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+impl Startup {
+    #[cfg(any(target_os = "freebsd", target_os = "macos"))]
+    pub(super) fn guardian_lifetime(&mut self, fd: i32) {
+        self.1 = Some(fd);
+    }
+    pub(super) fn wait_active(
+        &mut self,
+        mut cancelled: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        loop {
+            cancelled()?;
+            let mut byte = [0u8];
+            let got = unsafe {
+                libc::recv(
+                    self.0.as_raw_fd(),
+                    byte.as_mut_ptr().cast(),
+                    1,
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if got == 1 && byte == *b"A" {
+                return Ok(());
+            }
+            if got >= 0 {
+                return Err(io::Error::other("session owner lost before startup"));
+            }
+            let error = io::Error::last_os_error();
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
+                return Err(error);
+            }
+            let mut fd = libc::pollfd {
+                fd: self.0.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // Bounded event wait keeps cancellation/owner-death processing live without a payload.
+            if unsafe { libc::poll(&mut fd, 1, 10) } < 0
+                && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+}
+
+pub(super) fn wake_on_parent_death(parent: i32) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGCONT, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        let mut signal = libc::SIGCONT;
+        if unsafe {
+            libc::procctl(
+                libc::P_PID,
+                libc::getpid() as libc::id_t,
+                libc::PROC_PDEATHSIG_CTL,
+                (&mut signal as *mut i32).cast(),
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // Fork clears the setting; normal non-privileged exec retains it on Linux/FreeBSD.
+    // Check after arming: a parent already dead would not produce a death signal.
+    if unsafe { libc::getppid() } != parent {
+        return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+    }
+    Ok(())
+}
+
+/// Session-only asynchronous exec handshake; non-session launch stays std::Command::spawn.
+/// Supervise mode is single-threaded: build Command before fork; child only sets dispositions,
+/// exchanges fixed gate bytes, and calls CommandExt::exec (no extra process/helper generation).
+pub(super) enum Primary {
+    Standard(std::process::Child),
+    Session {
+        pid: i32,
+        error: UnixStream,
+        bytes: [u8; 4],
+        length: usize,
+        started: bool,
+        status: Option<ExitStatus>,
+    },
+}
+impl Primary {
+    pub(super) fn spawn(mut command: Command, gate: Option<Startup>) -> io::Result<Self> {
+        let Some(mut gate) = gate else {
+            return command.spawn().map(Self::Standard);
+        };
+        let (read, mut write) = UnixStream::pair()?;
+        read.set_nonblocking(true)?;
+        let parent = unsafe { libc::getpid() };
+        let mask = block()?;
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if pid == 0 {
+            drop(read);
+            if let Some(fd) = gate.1 {
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+            let result: io::Result<()> = (|| {
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = libc::SIG_DFL;
+                unsafe {
+                    libc::sigemptyset(&mut action.sa_mask);
+                }
+                for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
+                    if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                wake_on_parent_death(parent)?;
+                #[cfg(not(target_os = "macos"))]
+                gate.0.write_all(b"R")?;
+                #[cfg(target_os = "macos")]
+                {
+                    let identity = crate::supervise::startup_identity()?;
+                    let mut record = [0; 25];
+                    record[0] = b'R';
+                    record[1..].copy_from_slice(&identity);
+                    gate.0.write_all(&record)?;
+                }
+                let mut byte = [0];
+                gate.0.read_exact(&mut byte)?;
+                if byte != *b"G" || unsafe { libc::getppid() } != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+                }
+                loop {
+                    let alive = unsafe {
+                        libc::recv(
+                            gate.0.as_raw_fd(),
+                            byte.as_mut_ptr().cast(),
+                            1,
+                            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                        )
+                    };
+                    if alive == 0 {
+                        return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+                    }
+                    if alive > 0 {
+                        return Err(io::Error::other("invalid session startup permission"));
+                    }
+                    let error = io::Error::last_os_error();
+                    match error.kind() {
+                        io::ErrorKind::WouldBlock => break,
+                        io::ErrorKind::Interrupted => continue,
+                        _ => return Err(error),
+                    }
+                }
+                drop(gate);
+                mask.activate(false)?;
+                if unsafe { libc::getppid() } != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+                }
+                Err(command.exec())
+            })();
+            let error: io::Error = result.unwrap_err();
+            let bytes = error
+                .raw_os_error()
+                .unwrap_or(libc::ECANCELED)
+                .to_ne_bytes();
+            // Fixed error record only; parent formats existing spawn error/status protocol.
+            let _ = write.write_all(&bytes);
+            unsafe {
+                libc::_exit(127);
+            }
+        }
+        drop(write);
+        drop(gate);
+        mask.activate(true)?;
+        Ok(Self::Session {
+            pid,
+            error: read,
+            bytes: [0; 4],
+            length: 0,
+            started: false,
+            status: None,
+        })
+    }
+    pub(super) fn id(&self) -> u32 {
+        match self {
+            Self::Standard(child) => child.id(),
+            Self::Session { pid, .. } => *pid as u32,
+        }
+    }
+    pub(super) fn poll_exec(&mut self) -> io::Result<bool> {
+        let Self::Session {
+            error,
+            bytes,
+            length,
+            started,
+            ..
+        } = self
+        else {
+            return Ok(true);
+        };
+        if *started {
+            return Ok(true);
+        }
+        loop {
+            match error.read(&mut bytes[*length..]) {
+                Ok(0) if *length == 0 => {
+                    *started = true;
+                    return Ok(true);
+                }
+                Ok(0) => return Err(io::Error::other("incomplete session exec error")),
+                Ok(n) => {
+                    *length += n;
+                    if *length == bytes.len() {
+                        return Err(io::Error::from_raw_os_error(i32::from_ne_bytes(*bytes)));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    pub(super) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        match self {
+            Self::Standard(child) => child.try_wait(),
+            Self::Session { pid, status, .. } => {
+                if status.is_some() {
+                    return Ok(*status);
+                }
+                let mut raw = 0;
+                let got = unsafe { libc::waitpid(*pid, &mut raw, libc::WNOHANG) };
+                if got == *pid {
+                    *status = Some(ExitStatus::from_raw(raw));
+                } else if got < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(*status)
+            }
+        }
+    }
 }
 
 #[derive(Default)]
