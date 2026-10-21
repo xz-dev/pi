@@ -46,6 +46,9 @@ const invalid = [
 	["no birth", (r) => { delete r.faultTargets[0].birth; }],
 	["moving paused heartbeat", (r) => { r.heartbeats.pauseEnd++; }],
 	["continued heartbeat", (r) => { r.heartbeats.after++; }],
+	["missing foreground job", (r) => { delete r.pty.jobForeground; }],
+	["no positive paused peer", (r) => { delete r.peerPaused; }],
+	["running peer at pause", (r) => { r.peerPaused.state = "S"; }],
 	["resumed peer", (r) => { r.peerStoppedAfter = false; }],
 	["peer heartbeat CONT", (r) => { r.heartbeats.peerAfter++; }],
 	["unbound peer", (r) => { r.peer.group++; }],
@@ -66,6 +69,13 @@ for (const [label, mutate] of [
 	for (const name of ["suspend-resume", ...unixOwnerFaultRows("darwin")]) {
 		const row = proof("darwin", name); mutate(row);
 		assert.throws(() => verify(row, "darwin"), /owner lifecycle PTY/);
+	}
+});
+
+test("normal PTY resume still requires clean exit, not merely containment", () => {
+	for (const exit of [undefined, { code: 1, signal: null }, { code: null, signal: 15 }]) {
+		const row = proof("linux", "suspend-resume"); row.exit = exit;
+		assert.throws(() => verify(row), /normal fg\/Ctrl-D exit was not clean/);
 	}
 });
 

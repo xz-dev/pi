@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
@@ -503,6 +503,11 @@ fn session(
     row["pty"]["rawObserved"] = json!(true);
     sleep(Duration::from_millis(500));
     drain(master, output)?;
+    row["pty"]["jobForeground"] = json!(unsafe { libc::tcgetpgrp(0) } == outer_pid);
+    require(
+        row["pty"]["jobForeground"] == true,
+        "Pi job is not PTY foreground",
+    )?;
     master.write_all(&[26]).map_err(|e| e.to_string())?;
     let processes = row["processes"].clone();
     let peer_identity = row["peer"].clone();
@@ -544,6 +549,8 @@ fn session(
             })
             .collect::<Vec<_>>()
     );
+    row["peerPaused"] = paused[&peer_pid].clone();
+    row["peerPaused"]["birth"] = row["peer"]["birth"].clone();
     let pause_start = ticks(&work.join("heartbeat"))?;
     let peer_start = ticks(&work.join("peer-heartbeat"))?;
     sleep(Duration::from_millis(250));
@@ -613,7 +620,9 @@ fn session(
     wait_for(
         || {
             for child in children.iter_mut().take(1) {
-                child.try_wait().map_err(|e| e.to_string())?;
+                if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                    row["exit"] = json!({"code":status.code(),"signal":status.signal()});
+                }
             }
             let table = snapshot()?;
             for held in owned.iter().filter(|h| h.identity["pid"] != peer_pid) {
@@ -636,6 +645,12 @@ fn session(
         output,
         "owned teardown exceeded 8s (stopped processes count as alive)",
     )?;
+    if name == "suspend-resume" {
+        require(
+            row["exit"]["code"] == 0 && row["exit"]["signal"].is_null(),
+            "normal fg/Ctrl-D exit was not clean",
+        )?;
+    }
     row["postDeathMs"] = json!(death_start.elapsed().as_millis() as u64);
     let table = snapshot()?;
     row["after"] = json!(owned.iter().filter(|h| h.identity["pid"] != peer_pid).map(|h| {

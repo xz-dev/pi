@@ -38,7 +38,7 @@ function fixturePty(executable, descriptor, name, _work, identity) {
 	const row = passedUnixOwnerPtyRow(name, descriptor.os, descriptor.id, createHash("sha256").update(readFileSync(executable)).digest("hex"));
 	row.identity = { uid: identity.uid, euid: identity.euid };
 	row.pi.uid = identity.uid;
-	for (const p of [...Object.values(row.processes), ...row.paused, row.peer]) p.uid = identity.uid;
+	for (const p of [...Object.values(row.processes), ...row.paused, row.peer, row.peerPaused]) p.uid = identity.uid;
 	return row;
 }
 function fixturePtyExecutable(root) {
@@ -49,7 +49,7 @@ import { readFileSync } from "node:fs";
 import { passedUnixOwnerPtyRow } from ${JSON.stringify(new URL("./fixtures/unix-owner-pty.mjs", import.meta.url).href)};
 const row = passedUnixOwnerPtyRow(process.argv[6], "linux", ${JSON.stringify(target)}, createHash("sha256").update(readFileSync(process.argv[3])).digest("hex"));
 row.identity = { uid: process.getuid(), euid: process.geteuid() }; row.pi.uid = process.getuid();
-for (const p of [...Object.values(row.processes), ...row.paused, row.peer]) p.uid = process.getuid();
+for (const p of [...Object.values(row.processes), ...row.paused, row.peer, row.peerPaused]) p.uid = process.getuid();
 console.log(JSON.stringify(row));
 `);
 	chmodSync(script, 0o755);

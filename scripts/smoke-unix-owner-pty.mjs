@@ -19,7 +19,7 @@ export function assertUnixOwnerPtyRow(row, os, identity, targetId, cliSha256) {
 	if (row.identity?.uid !== identity.uid || row.identity?.euid !== identity.euid || row.pi?.uid !== identity.uid || identity.uid <= 0) fail("nonadmin UID binding missing");
 	if (typeof row.pi?.bun !== "string" || !row.pi.bun.trim() || typeof row.pi.owner !== "string" || !row.pi.owner.trim()) fail("shipped Bun/native owner missing");
 	const tty = row.pty;
-	if (tty?.harness !== "native-openpty" || tty.interactive !== true || tty.input !== "ctrl-z" || tty.rawObserved !== true || tty.noRescueCont !== true || tty.shellForeground !== true || tty.shellAlive !== true) fail("actual interactive PTY/no-rescue proof missing");
+	if (tty?.harness !== "native-openpty" || tty.interactive !== true || tty.input !== "ctrl-z" || tty.rawObserved !== true || tty.jobForeground !== true || tty.noRescueCont !== true || tty.shellForeground !== true || tty.shellAlive !== true) fail("actual interactive PTY/no-rescue proof missing");
 	for (const key of ["isig", "icanon", "echo"]) if (tty.original?.[key] !== true || tty.after?.[key] !== true) fail("original/restored cooked terminal missing");
 	for (const stage of ["original", "after"]) for (const flag of ["lflag", "iflag", "oflag", "cflag"]) if (!count(tty[stage]?.[flag])) fail("terminal state incomplete");
 	const roles = ["outer", "guardian", "pi", "taskOuter", "taskGuardian", "payload", "leaf", ...(os === "darwin" ? ["observer"] : [])];
@@ -40,6 +40,7 @@ export function assertUnixOwnerPtyRow(row, os, identity, targetId, cliSha256) {
 	}
 	const peer = row.peer;
 	if (!pid(peer?.pid) || peer.pid === p.outer.pid || peer.parent !== p.outer.parent || peer.group !== p.outer.group || peer.uid !== identity.uid || typeof peer.birth !== "string" || !peer.birth || !runnable(peer.state)) fail("unowned same-job-group sibling missing");
+	if (!row.peerPaused || ["pid", "parent", "group", "birth", "uid"].some((key) => row.peerPaused[key] !== peer[key]) || !stopped(row.peerPaused.state)) fail("positive paused peer observation missing");
 	const heartbeat = row.heartbeats;
 	for (const key of ["before", "advancing", "pauseStart", "pauseEnd", "exit", "after", "peerPause", "peerAfter", "stableMs"]) if (!count(heartbeat?.[key])) fail("heartbeat observation missing");
 	if (heartbeat.advancing <= heartbeat.before || heartbeat.pauseStart <= 0 || heartbeat.pauseEnd !== heartbeat.pauseStart || heartbeat.exit !== heartbeat.after || heartbeat.stableMs < 250 || heartbeat.peerPause <= 0) fail("heartbeat not advancing/stable at required boundaries");
@@ -49,6 +50,7 @@ export function assertUnixOwnerPtyRow(row, os, identity, targetId, cliSha256) {
 		const v = row.after.find((v) => v.pid === p[role].pid);
 		if (!v || v.birth !== p[role].birth || !dead(v.state) || (role === "observer" && v.state !== "gone")) fail(`owned ${role} survived/unreaped`);
 	}
+	if (row.name === "suspend-resume" && (row.resumed !== true || row.exit?.code !== 0 || row.exit?.signal !== null)) fail("normal fg/Ctrl-D exit was not clean");
 	const faults = row.name === "suspend-resume" ? [] : row.name === "paused-both-owners-death" ? ["outer", "guardian"] : row.name === "paused-observer-death" ? ["observer"] : ["guardian"];
 	if (JSON.stringify(row.faultTargets?.map((v) => v.role)) !== JSON.stringify(faults)) fail("fault inventory wrong");
 	for (const v of row.faultTargets) if (["pid", "birth", "parent"].some((key) => v[key] !== p[v.role]?.[key]) || v.method !== (os === "linux" ? "pidfd" : "checked-birth")) fail("fault target birth/ancestry/pidfd proof missing");
