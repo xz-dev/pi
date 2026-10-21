@@ -52,6 +52,8 @@ fn primary_fixture() {
         thread::sleep(Duration::from_millis(5));
     }
     fs::write(root.join("term"), "restored").unwrap();
+    // Give teardown time to expose any healthy-work resume before leaf termination.
+    thread::sleep(Duration::from_millis(400));
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -234,6 +236,55 @@ fn repeated_suspend_resume_freezes_setsid_grandchild() {
 }
 
 #[test]
+fn paused_guardian_termination_does_not_resume_work_during_primary_cleanup() {
+    for signal in [libc::SIGTERM, libc::SIGHUP] {
+        let mut fixture = Fixture::start();
+        let primary = fixture.pid("primary-pid");
+        let guardian: i32 = String::from_utf8(
+            Command::new("ps")
+                .args(["-o", "ppid=", "-p", &primary.to_string()])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+        fixture.pause();
+        wait_for(|| {
+            state(fixture.child.id() as i32).starts_with('T') && state(primary).starts_with('T')
+        });
+        let tick = fixture.tick();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(fixture.tick(), tick);
+        let start = Instant::now();
+        assert_eq!(unsafe { libc::kill(guardian, signal) }, 0);
+        while fixture.child.try_wait().unwrap().is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(8),
+                "paused termination exceeded eight seconds without rescue CONT"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(start.elapsed() < Duration::from_secs(8));
+        assert!(
+            fixture.root.join("term").exists(),
+            "primary must receive graceful termination"
+        );
+        assert_eq!(
+            fixture.tick(),
+            tick,
+            "paused leaf ran during delayed primary cleanup (signal {signal})"
+        );
+        wait_for(|| {
+            let state = state(fixture.pid("heartbeat-pid"));
+            state.is_empty() || state.starts_with('Z')
+        });
+    }
+}
+
+#[test]
 fn session_guardian_exit_wakes_only_its_outer_not_unowned_job_peer() {
     let mut fixture = Fixture::start();
     let _ = fixture.peer.kill();
@@ -363,6 +414,7 @@ fn normal_session_completion_reaps_wake_observer() {
         0
     );
     wait_for(|| fixture.child.try_wait().unwrap().is_some());
+    assert_eq!(fixture.child.try_wait().unwrap().unwrap().code(), Some(0));
     for pid in children {
         assert!(
             state(pid).is_empty(),
@@ -372,16 +424,17 @@ fn normal_session_completion_reaps_wake_observer() {
 }
 
 #[test]
-fn lease_eof_while_paused_cleans_descendants_before_fg() {
+fn lease_eof_while_paused_automatically_cleans_whole_session() {
     let mut fixture = Fixture::start_inner(true);
     fixture.pause();
+    let tick = fixture.tick();
     drop(fixture.lease.take());
     wait_for(|| {
         let state = state(fixture.pid("heartbeat-pid"));
         state.is_empty() || state.starts_with('Z')
     });
-    fixture.group_signal(libc::SIGCONT);
     wait_for(|| fixture.child.try_wait().unwrap().is_some());
+    assert_eq!(fixture.tick(), tick, "lease EOF resumed paused work");
 }
 
 #[test]

@@ -9,6 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static SESSION: AtomicBool = AtomicBool::new(false);
 static PAUSE: AtomicBool = AtomicBool::new(false);
+static TERMINATING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub(super) fn terminating() -> bool {
+    TERMINATING.load(Ordering::SeqCst)
+}
 
 /// Keep job signals blocked across fork until each process installs its role's dispositions.
 pub(super) struct SignalMask {
@@ -59,6 +65,7 @@ impl Drop for SignalMask {
 }
 
 pub(super) fn initialize() -> io::Result<SignalMask> {
+    TERMINATING.store(false, Ordering::SeqCst);
     SESSION.store(
         std::env::var_os("PI_PROCESS_OWNER_PENDING").is_some(),
         Ordering::Relaxed,
@@ -104,6 +111,7 @@ pub(super) fn receive(signal: i32) -> bool {
         return false;
     }
     if matches!(signal, libc::SIGTERM | libc::SIGHUP) {
+        TERMINATING.store(true, Ordering::SeqCst);
         PAUSE.store(false, Ordering::SeqCst);
         return false;
     }
@@ -623,7 +631,7 @@ mod platform {
     }
     #[derive(Default)]
     pub(crate) struct Targets {
-        stopped: Vec<(Identity, OwnedFd)>,
+        stopped: Vec<(Identity, OwnedFd, bool)>,
     }
     impl Targets {
         pub(crate) fn apply(&mut self, paused: bool) -> io::Result<()> {
@@ -658,7 +666,7 @@ mod platform {
                         continue;
                     }
                 }
-                if pid != root && p.group != group {
+                if pid != root {
                     let fd = match open(pid) {
                         Ok(fd) => fd,
                         Err(e) if gone(&e) => continue,
@@ -676,8 +684,12 @@ mod platform {
                     {
                         continue;
                     }
-                    signal(&fd, libc::SIGSTOP)?;
-                    self.stopped.push((p.identity, fd));
+                    if p.group != group {
+                        signal(&fd, libc::SIGSTOP)?;
+                    }
+                    // Hold the kernel-stopped foreground primary too, so error/drop teardown
+                    // can terminate it without ever using a reaped numeric PID.
+                    self.stopped.push((p.identity, fd, p.group == group));
                 }
                 if pid != root {
                     // Stop parents before enumerating their children. This also waits for Pi's
@@ -707,9 +719,30 @@ mod platform {
             }
             Ok(())
         }
+        pub(crate) fn teardown(&mut self, primary: i32) -> io::Result<()> {
+            // pending() has already queued TERM for its held primary, but has not resumed it.
+            // Queue every other target before any CONT; on failure leave them frozen.
+            for (identity, fd, _) in &self.stopped {
+                if identity.pid != primary {
+                    signal(fd, libc::SIGTERM)?;
+                }
+            }
+            for (identity, fd, _) in &self.stopped {
+                if identity.pid != primary {
+                    signal(fd, libc::SIGCONT)?;
+                }
+            }
+            self.stopped.clear();
+            Ok(())
+        }
         fn resume(&mut self) -> io::Result<()> {
-            for (_, fd) in &self.stopped {
-                signal(fd, libc::SIGCONT)?;
+            if terminating() {
+                return self.teardown(0);
+            }
+            for (_, fd, foreground) in &self.stopped {
+                if !foreground {
+                    signal(fd, libc::SIGCONT)?;
+                }
             }
             self.stopped.clear();
             Ok(())
@@ -717,8 +750,8 @@ mod platform {
     }
     impl Drop for Targets {
         fn drop(&mut self) {
-            if let Err(error) = self.resume() {
-                eprintln!("pi-env: failed to resume owned processes: {error}");
+            if let Err(error) = self.teardown(0) {
+                eprintln!("pi-env: failed to terminate frozen owned processes: {error}");
             }
         }
     }
@@ -731,6 +764,16 @@ mod platform {
     pub(crate) struct Targets {}
     impl Targets {
         pub(crate) fn apply(&mut self, paused: bool) -> io::Result<()> {
+            if !paused && terminating() {
+                return self.teardown(0);
+            }
+            self.signal(if paused { libc::SIGSTOP } else { libc::SIGCONT })
+        }
+        pub(crate) fn teardown(&mut self, _: i32) -> io::Result<()> {
+            self.signal(libc::SIGTERM)?;
+            self.signal(libc::SIGCONT)
+        }
+        fn signal(&mut self, signal: i32) -> io::Result<()> {
             #[repr(C)]
             struct ReaperKill {
                 signal: i32,
@@ -741,7 +784,7 @@ mod platform {
                 reserved: [u32; 15],
             }
             let mut request = ReaperKill {
-                signal: if paused { libc::SIGSTOP } else { libc::SIGCONT },
+                signal,
                 flags: 0,
                 subtree: 0,
                 killed: 0,
@@ -769,7 +812,7 @@ mod platform {
     }
     impl Drop for Targets {
         fn drop(&mut self) {
-            let _ = self.apply(false);
+            let _ = self.teardown(0);
         }
     }
 }

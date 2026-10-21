@@ -7,6 +7,12 @@ import * as packageConfig from "../config.ts";
 const OWNER_PID = "PI_PROCESS_OWNER_PID";
 const OWNER_PENDING = "PI_PROCESS_OWNER_PENDING";
 const OWNER_BINARY = "PI_PROCESS_OWNER_BINARY";
+let cliOwnerPid: number | undefined;
+
+/** Only the validated immediate native owner can arm owner-loss shutdown. */
+export function hasLostCliProcessOwner(): boolean {
+	return cliOwnerPid !== undefined && process.ppid !== cliOwnerPid;
+}
 
 function processOwnerBinary(): string {
 	const root = packageConfig.getPackageDir();
@@ -273,6 +279,7 @@ function ownershipDisabled(args: string[]): boolean {
 
 /** Enter the shipped native owner before any CLI task or extension runs. */
 export function ownCliProcesses(): undefined | false {
+	cliOwnerPid = undefined;
 	const owner = process.env[OWNER_PID];
 	const pending = process.env[OWNER_PENDING];
 	delete process.env[OWNER_PID];
@@ -296,8 +303,9 @@ export function ownCliProcesses(): undefined | false {
 	if (owner !== undefined) {
 		process.env[OWNER_BINARY] = processOwnerBinary();
 		if (process.platform !== "win32") {
+			cliOwnerPid = parent;
 			const ownerWatch = setInterval(() => {
-				if (process.ppid === parent) return;
+				if (!hasLostCliProcessOwner()) return;
 				clearInterval(ownerWatch);
 				process.kill(process.pid, "SIGTERM");
 			}, 1_000);
