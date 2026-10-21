@@ -432,6 +432,43 @@ describe("output capture eligibility", () => {
 		const changed = { ...withLogprobs, content: withLogprobs.content.map((part) => ({ ...part, text: "no" })) };
 		expect(responseOutputItemsCapturable([changed], [encoded])).toBe(false);
 	});
+	it("captures output with omitted annotations and resumes from its SDK-encoded prefix", async () => {
+		const encoded = assistantItem("ok");
+		const omitted = { ...encoded, content: [{ type: "output_text", text: "ok" }] };
+		const before = structuredClone(omitted);
+		expect(responseOutputItemsCapturable([omitted], [encoded])).toBe(true);
+		expect(responseOutputItemsCapturable([encoded], [omitted])).toBe(true);
+		expect(omitted).toEqual(before);
+		const request = baseRequest();
+		const prefix = [...request.input, encoded];
+		const checkpoint = await captureValid({ encodedPrefix: prefix });
+		const plan = await planCheckpoint({
+			request: { ...request, input: [...prefix, userInput("next")] },
+			candidate: { responseId: "resp_1", responseCheckpoint: checkpoint },
+			scopeHash: SCOPE_A,
+			now: NOW + 1,
+			eligible: true,
+		});
+		expect(plan?.request.previous_response_id).toBe("resp_1");
+		expect(plan?.request.input).toEqual([userInput("next")]);
+	});
+	it("keeps annotation content, text and IDs strict when annotations are omitted", () => {
+		const encoded = assistantItem("ok");
+		const omitted = { ...encoded, content: [{ type: "output_text", text: "ok" }] };
+		for (const annotations of [null, {}, ["citation"], [{ type: "url_citation", url: "https://example.com" }]]) {
+			const changed = { ...encoded, content: [{ type: "output_text", text: "ok", annotations }] };
+			expect(responseOutputItemsCapturable([omitted], [changed])).toBe(false);
+			expect(responseOutputItemsCapturable([changed], [encoded])).toBe(false);
+			expect(responseOutputItemsCapturable([changed], [changed])).toBe(true);
+		}
+		expect(responseOutputItemsCapturable([{ ...omitted, id: "msg_other" }], [encoded])).toBe(false);
+		expect(
+			responseOutputItemsCapturable(
+				[{ ...omitted, content: [{ type: "output_text", text: "changed" }] }],
+				[encoded],
+			),
+		).toBe(false);
+	});
 	it("compares exact tool argument bytes and opaque reasoning, allowing only omitted tool status", () => {
 		const call = functionCallItem();
 		expect(responseOutputItemsCapturable([{ ...call, status: "completed" }], [call])).toBe(true);

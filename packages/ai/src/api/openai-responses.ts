@@ -351,7 +351,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 
 			const transport = options?.transport || "auto";
 			const sessionId = options?.sessionId;
-			const identityKey = transport === "sse" ? "" : websocketIdentityKey(model, apiKey, websocketHeaders);
+			const identityKey = transport === "sse" ? "" : websocketIdentityKey(model, websocketHeaders);
 			const fallbackState = sessionId
 				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
 				: undefined;
@@ -880,9 +880,9 @@ function isSseMediaType(contentType: string | null | undefined): boolean {
 	return contentType?.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";
 }
 
-function websocketIdentityKey(model: Model<"openai-responses">, apiKey: string, headers: Headers): string {
-	// Ordinary affinity headers are session-stable, or absent with cacheRetention:none.
-	return `${model.baseUrl}\n${apiKey}\n${JSON.stringify(headersToRecord(headers))}`;
+function websocketIdentityKey(model: Model<"openai-responses">, headers: Headers): string {
+	// Effective headers include automatic auth; an overridden API key is not part of the wire identity.
+	return `${model.baseUrl}\n${JSON.stringify(headersToRecord(headers))}`;
 }
 
 function resolveResponsesWebSocketUrl(baseUrl?: string): string {
