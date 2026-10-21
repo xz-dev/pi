@@ -1,19 +1,83 @@
 //! Session job control. The guardian stays runnable; only the shell-facing outer stops.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-static OUTER: AtomicI32 = AtomicI32::new(0);
+static SESSION: AtomicBool = AtomicBool::new(false);
 static PAUSE: AtomicBool = AtomicBool::new(false);
 
-pub(super) fn initialize() {
-    if std::env::var_os("PI_PROCESS_OWNER_PENDING").is_some() {
-        OUTER.store(unsafe { libc::getpid() }, Ordering::Relaxed);
+/// Keep job signals blocked across fork until each process installs its role's dispositions.
+pub(super) struct SignalMask {
+    previous: Option<libc::sigset_t>,
+}
+impl SignalMask {
+    pub(super) fn activate(mut self, guardian: bool) -> io::Result<()> {
+        if self.previous.is_some() && !guardian {
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            action.sa_sigaction = libc::SIG_DFL;
+            unsafe {
+                libc::sigemptyset(&mut action.sa_mask);
+            }
+            for signal in signals() {
+                if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+        }
+        self.restore()
+    }
+    fn restore(&mut self) -> io::Result<()> {
+        if let Some(previous) = &self.previous {
+            let mut unblock: libc::sigset_t = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::sigemptyset(&mut unblock);
+            }
+            for signal in signals() {
+                if unsafe { libc::sigismember(previous, signal) } == 0 {
+                    unsafe {
+                        libc::sigaddset(&mut unblock, signal);
+                    }
+                }
+            }
+            if unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &unblock, std::ptr::null_mut()) } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            self.previous = None;
+        }
+        Ok(())
+    }
+}
+impl Drop for SignalMask {
+    fn drop(&mut self) {
+        let _ = self.restore();
     }
 }
 
+pub(super) fn initialize() -> io::Result<SignalMask> {
+    let mut mask = SignalMask { previous: None };
+    if std::env::var_os("PI_PROCESS_OWNER_PENDING").is_some() {
+        let mut block: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut block);
+        }
+        for signal in [libc::SIGTSTP, libc::SIGCONT] {
+            unsafe {
+                libc::sigaddset(&mut block, signal);
+            }
+        }
+        if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut previous) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        SESSION.store(true, Ordering::Relaxed);
+        mask.previous = Some(previous);
+    }
+    Ok(mask)
+}
+
 pub(super) fn enabled() -> bool {
-    OUTER.load(Ordering::Relaxed) != 0
+    SESSION.load(Ordering::Relaxed)
 }
 
 pub(super) fn signals() -> impl Iterator<Item = i32> {
@@ -22,8 +86,8 @@ pub(super) fn signals() -> impl Iterator<Item = i32> {
         .filter(|_| enabled())
 }
 
-/// Called from sigaction: atomics and async-signal-safe libc calls only.
-/// OUTER is set before fork, so even a signal immediately after fork cannot stop the guardian.
+/// Guardian only: record requests without generating a new stop signal.
+/// Outer uses kernel-default TSTP so a later CONT cancels an earlier stop.
 pub(super) fn receive(signal: i32) -> bool {
     if !enabled() {
         return false;
@@ -33,14 +97,7 @@ pub(super) fn receive(signal: i32) -> bool {
         return false;
     }
     match signal {
-        libc::SIGTSTP => {
-            PAUSE.store(true, Ordering::SeqCst);
-            if unsafe { libc::getpid() } == OUTER.load(Ordering::Relaxed) {
-                unsafe {
-                    libc::raise(libc::SIGSTOP);
-                }
-            }
-        }
+        libc::SIGTSTP => PAUSE.store(true, Ordering::SeqCst),
         libc::SIGCONT => PAUSE.store(false, Ordering::SeqCst),
         _ => return false,
     }

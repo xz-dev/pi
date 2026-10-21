@@ -31,8 +31,8 @@ extern "C" fn receive(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_v
     SIGNALS.fetch_or(1u32 << signal, Ordering::Relaxed);
 }
 
-fn prepare_signals() -> io::Result<()> {
-    crate::job_control::initialize();
+fn prepare_signals() -> io::Result<crate::job_control::SignalMask> {
+    let job_mask = crate::job_control::initialize()?;
     // SAFETY: this mode starts on the sole thread, before any fork or command.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
@@ -56,14 +56,14 @@ fn prepare_signals() -> io::Result<()> {
         let mut mask: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut mask);
         libc::sigaddset(&mut mask, libc::SIGCHLD);
-        for signal in FORWARDED.into_iter().chain(crate::job_control::signals()) {
+        for signal in FORWARDED {
             libc::sigaddset(&mut mask, signal);
         }
         if libc::sigprocmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut()) != 0 {
             return Err(io::Error::last_os_error());
         }
     }
-    Ok(())
+    Ok(job_mask)
 }
 
 #[cfg(target_os = "linux")]
@@ -1341,15 +1341,22 @@ pub fn run(args: &[OsString]) -> i32 {
     let _ = spec_fd;
     // SAFETY: parse() validated this inherited descriptor; each fork owns its copy.
     let ipc = ipc_fd.map(|fd| unsafe { std::fs::File::from_raw_fd(fd) });
-    if let Err(error) = prepare_signals().and_then(|()| acquire()) {
-        eprintln!("pi-env supervise: {error}");
-        return 125;
-    }
+    let job_mask = match prepare_signals().and_then(|mask| acquire().map(|()| mask)) {
+        Ok(mask) => mask,
+        Err(error) => {
+            eprintln!("pi-env supervise: {error}");
+            return 125;
+        }
+    };
     let parent = std::process::id() as libc::pid_t;
     // SAFETY: this standalone mode has one thread. Neither branch shares running locks.
     let guardian = unsafe { libc::fork() };
     if guardian < 0 {
         eprintln!("pi-env supervise: {}", io::Error::last_os_error());
+        return 125;
+    }
+    if let Err(error) = job_mask.activate(guardian == 0) {
+        eprintln!("pi-env supervise: {error}");
         return 125;
     }
     if guardian == 0 {
