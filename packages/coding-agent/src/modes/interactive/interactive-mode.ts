@@ -131,6 +131,7 @@ import { parseGitUrl } from "../../utils/git.ts";
 import { ensurePngTranscoder } from "../../utils/image-convert.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
+import { hasLostCliProcessOwner } from "../../utils/process-owner.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
@@ -4283,25 +4284,11 @@ export class InteractiveMode {
 	 */
 	private isShuttingDown = false;
 	private isSuspended = false;
+	private ownerLossExitTimer?: ReturnType<typeof setTimeout>;
 
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
-		if (this.isShuttingDown) return;
-		this.isShuttingDown = true;
-		// Keep signal handlers registered until terminal cleanup has completed.
-		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
-		// dispatch and re-sends the signal if only its own listeners remain.
-
-		if (options?.fromSignal) {
-			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
-			// (session_shutdown) BEFORE touching the terminal. Extension teardown
-			// such as removing sockets does not write to the tty, so it must not be
-			// skipped if a later terminal-restore write fails on a dead or stalled
-			// terminal. If the terminal is gone, the restore writes below emit EIO,
-			// which the stdout/stderr error handler turns into emergencyTerminalExit;
-			// the render loop is already idle, so this cannot hot-spin (see #4144).
-			await this.runtimeHost.dispose();
-			this.themeController.disableAutoSync();
-			if (!this.isSuspended) await this.ui.terminal.drainInput(1000);
+		const finishSignalShutdown = () => {
+			if (this.ownerLossExitTimer) clearTimeout(this.ownerLossExitTimer);
 			this.stop();
 			if (this.isSuspended && !process.stdin.closed) {
 				// Runtime tty close/exit resets can SIGTTOU a background job after Ctrl-Z.
@@ -4326,6 +4313,34 @@ export class InteractiveMode {
 				fs.closeSync(fd);
 			}
 			process.exit(0);
+		};
+		// Both native owners may already be gone: extension cleanup cannot own our exit.
+		// Arm before the re-entry guard, including owner loss during an earlier shutdown.
+		if (options?.fromSignal && hasLostCliProcessOwner() && !this.ownerLossExitTimer) {
+			this.ownerLossExitTimer = setTimeout(() => {
+				this.themeController.disableAutoSync();
+				finishSignalShutdown();
+			}, 5_000);
+		}
+
+		if (this.isShuttingDown) return;
+		this.isShuttingDown = true;
+		// Keep signal handlers registered until terminal cleanup has completed.
+		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
+		// dispatch and re-sends the signal if only its own listeners remain.
+
+		if (options?.fromSignal) {
+			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
+			// (session_shutdown) BEFORE touching the terminal. Extension teardown
+			// such as removing sockets does not write to the tty, so it must not be
+			// skipped if a later terminal-restore write fails on a dead or stalled
+			// terminal. If the terminal is gone, the restore writes below emit EIO,
+			// which the stdout/stderr error handler turns into emergencyTerminalExit;
+			// the render loop is already idle, so this cannot hot-spin (see #4144).
+			await this.runtimeHost.dispose();
+			this.themeController.disableAutoSync();
+			if (!this.isSuspended) await this.ui.terminal.drainInput(1000);
+			finishSignalShutdown();
 		}
 
 		// Interactive quit (Ctrl+D, Ctrl+C, /quit, extension shutdown()). Stop the

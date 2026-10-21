@@ -393,14 +393,30 @@ fn reap_non_primary(primary: libc::pid_t) -> io::Result<()> {
     }
 }
 
-fn pending(pid: libc::pid_t, deadline: &mut Option<Instant>, grace: Duration) -> io::Result<()> {
+fn pending(
+    pid: libc::pid_t,
+    deadline: &mut Option<Instant>,
+    grace: Duration,
+    mut before_continue: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
     let signals = SIGNALS.swap(0, Ordering::Relaxed);
     for signal in FORWARDED {
         if signals & (1u32 << signal) != 0 {
-            if matches!(signal, libc::SIGTERM | libc::SIGHUP) {
+            let terminating = matches!(signal, libc::SIGTERM | libc::SIGHUP);
+            // Session owner loss terminates the cohort, as on Darwin. Legacy task HUP
+            // forwarding is unchanged outside a session.
+            send(
+                pid,
+                if terminating && crate::job_control::enabled() {
+                    libc::SIGTERM
+                } else {
+                    signal
+                },
+            )?;
+            if terminating {
+                before_continue()?;
                 send(pid, libc::SIGCONT)?;
             }
-            send(pid, signal)?;
             if matches!(signal, libc::SIGTERM | libc::SIGHUP) && deadline.is_none() {
                 *deadline = Some(Instant::now() + grace);
             }
@@ -1238,7 +1254,7 @@ fn observe_primary(
             }
         }
         // The held native stub has no payload/tool tree and deliberately remains runnable.
-        if started {
+        if started && deadline.is_none() && !crate::job_control::terminating() {
             suspend.update(|paused| targets.apply(paused))?;
         }
         if let Some(status) = child.try_wait()? {
@@ -1270,6 +1286,7 @@ fn observe_primary(
             child.id() as libc::pid_t,
             &mut deadline,
             Duration::from_secs(5),
+            || targets.teardown(child.id() as libc::pid_t),
         )?;
         thread::sleep(Duration::from_millis(10));
     }
@@ -1578,7 +1595,7 @@ pub fn run(args: &[OsString]) -> i32 {
         {
             // Held unreaped direct child only; no ancestor or cached process-group signal.
             if let Err(error) =
-                send(guardian, libc::SIGCONT).and_then(|()| send(guardian, libc::SIGTERM))
+                send(guardian, libc::SIGTERM).and_then(|()| send(guardian, libc::SIGCONT))
             {
                 break Err(error);
             }
@@ -1586,7 +1603,7 @@ pub fn run(args: &[OsString]) -> i32 {
             cancelling = true;
         }
         // Guardian has five seconds for command shutdown and five for owned cleanup.
-        if let Err(error) = pending(guardian, &mut deadline, Duration::from_secs(12)) {
+        if let Err(error) = pending(guardian, &mut deadline, Duration::from_secs(12), || Ok(())) {
             break Err(error);
         }
         thread::sleep(Duration::from_millis(10));

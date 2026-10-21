@@ -75,9 +75,12 @@ native child behind an exec gate; freezing starts only after exec is confirmed. 
 `SIGCONT` guardian-exit notification, so even a paused outer resumes to finish cleanup. FreeBSD instead arms a
 one-byte socket-AIO read with `SIGEV_SIGNAL`/`SIGCONT`: only the guardian retains the writer, so its exit completes
 the read at EOF. Failure to arm this wake fails session startup; no module or sysctl changes are made.
-Final cleanup queues TERM before resuming stopped payloads and retains bounded KILL escalation; Unix guardians reap
-adopted zombies without consuming the primary child's status. Pi also requests graceful shutdown when its
-immediate Unix owner disappears, without restarting an already-suspended terminal.
+Termination bypasses healthy resume reconciliation: frozen primary and detached targets receive TERM before any
+teardown CONT, including rollback/drop paths. Bounded KILL escalation and adopted-zombie reaping preserve the
+primary child's status. Pi also requests graceful shutdown when its immediate Unix owner disappears, without
+restarting an already-suspended terminal. Once validated owner loss is observed, Pi allows five seconds for
+asynchronous extension shutdown before final tty release and exit, even if shutdown was already in progress.
+Ordinary interactive quit still waits for extension cleanup without this deadline.
 Interactive Ctrl-Z pauses shell timeout budgets; external signals, print/JSON/RPC shell deadlines and MCP request
 deadlines may still count suspended time. Windows job-control behavior is unchanged.
 

@@ -2,6 +2,7 @@ import type * as FsModule from "node:fs";
 import * as fs from "node:fs";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { ownCliProcesses } from "../src/utils/process-owner.ts";
 
 vi.mock("node:fs", async (original) => {
 	const actual = await original<typeof FsModule>();
@@ -183,6 +184,83 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		expect(ui.start).not.toHaveBeenCalled();
 		expect(ui.requestRender).not.toHaveBeenCalled();
 	});
+});
+
+describe("owner-loss shutdown deadline", () => {
+	for (const mode of ["owner-loss", "loss-during-shutdown", "ordinary-signal", "interactive-quit"] as const) {
+		test(mode, async () => {
+			vi.useFakeTimers();
+			const parentDescriptor = Object.getOwnPropertyDescriptor(process, "ppid")!;
+			const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+			const stdinDescriptor = Object.getOwnPropertyDescriptor(process, "stdin")!;
+			const parent = process.ppid;
+			const stopped = vi.fn();
+			const exited = new Error("exit intercepted");
+			const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+				throw exited;
+			});
+			vi.spyOn(process, "kill").mockReturnValue(true);
+			vi.spyOn(fs, "accessSync").mockImplementation(() => {});
+			Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+			Object.defineProperty(process, "stdin", {
+				configurable: true,
+				value:
+					mode === "owner-loss" ? { closed: false, fd: 0, isTTY: true, _handle: { fd: 42 } } : { closed: true },
+			});
+			const stat = fs.statSync(new URL(import.meta.url));
+			vi.spyOn(stat, "isCharacterDevice").mockReturnValue(true);
+			vi.mocked(fs.fstatSync).mockReturnValue(stat);
+			const close = vi.mocked(fs.closeSync).mockImplementation(() => {});
+			vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "");
+			vi.stubEnv("PI_PROCESS_OWNER_PENDING", undefined);
+			vi.stubEnv("PI_PROCESS_OWNER_PID", String(parent));
+			ownCliProcesses();
+			const context = {
+				isShuttingDown: false,
+				isSuspended: true,
+				runtimeHost: { dispose: vi.fn(() => new Promise<void>(() => {})) },
+				themeController: { disableAutoSync: vi.fn() },
+				ui: { terminal: { drainInput: vi.fn(async () => {}) } },
+				stop: stopped,
+			};
+			const prototype = interactiveModePrototype as {
+				shutdown(this: typeof context, options?: { fromSignal: boolean }): Promise<void>;
+			};
+			try {
+				if (mode === "owner-loss")
+					Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 });
+				void prototype.shutdown.call(context, mode === "interactive-quit" ? undefined : { fromSignal: true });
+				if (mode === "loss-during-shutdown") {
+					Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 });
+					await prototype.shutdown.call(context, { fromSignal: true });
+				}
+				if (mode === "owner-loss" || mode === "loss-during-shutdown") {
+					await vi.advanceTimersByTimeAsync(4_999);
+					expect(exit).not.toHaveBeenCalled();
+					await expect(vi.advanceTimersByTimeAsync(1)).rejects.toBe(exited);
+					expect(exit).toHaveBeenCalledExactlyOnceWith(0);
+					expect(stopped).toHaveBeenCalledOnce();
+					if (mode === "owner-loss") expect(close).toHaveBeenCalledExactlyOnceWith(42);
+				} else {
+					await vi.advanceTimersByTimeAsync(20_000);
+					expect(exit).not.toHaveBeenCalled();
+				}
+				expect(context.runtimeHost.dispose).toHaveBeenCalledOnce();
+			} finally {
+				Object.defineProperty(process, "ppid", parentDescriptor);
+				Object.defineProperty(process, "platform", platformDescriptor);
+				Object.defineProperty(process, "stdin", stdinDescriptor);
+				vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "1");
+				ownCliProcesses();
+				vi.clearAllTimers();
+				vi.useRealTimers();
+				vi.restoreAllMocks();
+				vi.mocked(fs.fstatSync).mockRestore();
+				vi.mocked(fs.closeSync).mockRestore();
+				vi.unstubAllEnvs();
+			}
+		});
+	}
 });
 
 describe("suspended final-exit descriptor boundary", () => {
