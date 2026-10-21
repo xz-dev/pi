@@ -2327,26 +2327,10 @@ describe("openai-codex streaming", () => {
 					const body = JSON.parse(data) as { input: unknown[]; previous_response_id?: string };
 					sentBodies.push({ ...body, connectionId: this.connectionId });
 					if (sentBodies.length === 2) {
+						// Pre-start repair: the missing-continuation error must arrive
+						// before response.created. Any earlier event (e.g. rate_limits)
+						// marks the stream started and forbids in-stream repair.
 						this.dispatchEvents([
-							{
-								type: "codex.rate_limits",
-								plan_type: "plus",
-								rate_limits: {
-									allowed: true,
-									limit_reached: false,
-									primary: {
-										used_percent: 7,
-										window_minutes: 10080,
-										reset_after_seconds: 556112,
-										reset_at: 1785269351,
-									},
-									secondary: null,
-								},
-								code_review_rate_limits: null,
-								additional_rate_limits: null,
-								credits: { has_credits: false, unlimited: false, balance: "0" },
-								promo: null,
-							},
 							{
 								type: "error",
 								status: 400,
