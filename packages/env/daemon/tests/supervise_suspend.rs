@@ -391,6 +391,64 @@ fn session_wake_observer_is_runnable_sibling_and_failure_is_fatal() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn outer_cancellation_and_forwarded_termination_never_thaw_paused_work() {
+    use std::io::Write;
+    // Wake only the held outer controller, as caller cancellation does, never the payload group.
+    for signal in [None, Some(libc::SIGTERM), Some(libc::SIGHUP)] {
+        let mut fixture = Fixture::start_inner(signal.is_none());
+        let primary = fixture.pid("primary-pid");
+        let guardian: i32 = String::from_utf8(
+            Command::new("ps")
+                .args(["-o", "ppid=", "-p", &primary.to_string()])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+        fixture.pause();
+        wait_for(|| {
+            state(fixture.child.id() as i32).starts_with('T') && state(primary).starts_with('T')
+        });
+        let tick = fixture.tick();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(fixture.tick(), tick);
+        // Keep guardian from consuming K before the outer's cancellation forwarding path.
+        assert_eq!(unsafe { libc::kill(guardian, libc::SIGSTOP) }, 0);
+        wait_for(|| state(guardian).starts_with('T'));
+        if let Some(signal) = signal {
+            assert_eq!(unsafe { libc::kill(fixture.child.id() as i32, signal) }, 0);
+        } else {
+            fixture.lease.as_mut().unwrap().write_all(b"K").unwrap();
+        }
+        let start = Instant::now();
+        assert_eq!(
+            unsafe { libc::kill(fixture.child.id() as i32, libc::SIGCONT) },
+            0
+        );
+        while fixture.child.try_wait().unwrap().is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(8),
+                "outer cancellation did not finish"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            fixture.tick(),
+            tick,
+            "outer teardown thawed paused heartbeat (signal {signal:?})"
+        );
+        wait_for(|| {
+            let state = state(fixture.pid("heartbeat-pid"));
+            state.is_empty() || state.starts_with('Z')
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn normal_session_completion_reaps_wake_observer() {
     let mut fixture = Fixture::start();
     let output = Command::new("ps")
