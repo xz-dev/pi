@@ -1407,6 +1407,10 @@ mod tests {
             spawn_error(&io::Error::from_raw_os_error(libc::ENOTDIR))
         );
 
+        // Keep a duplicate alive: a concurrent fork may retain the
+        // peer until exec, so dropping the parent copy is not enough.
+        let _inherited_peer = peer.try_clone().unwrap();
+        peer.shutdown(std::net::Shutdown::Both).unwrap();
         drop(peer);
         assert_eq!(
             command(&args, &mut control, None)
