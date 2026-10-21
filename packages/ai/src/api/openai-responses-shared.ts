@@ -33,7 +33,7 @@ import type {
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
-import { parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.ts";
+import { encodeToolCallArguments, parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import { resolveTranscript, resolveTranscriptTools, type TranscriptToolSupport } from "../utils/transcript.ts";
@@ -392,7 +392,7 @@ export function convertResponsesMessages<TApi extends Api>(
 							id: itemId,
 							call_id: callId,
 							name: toolCall.name,
-							arguments: JSON.stringify(toolCall.arguments),
+							arguments: encodeToolCallArguments(toolCall),
 							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
 						});
 					}
@@ -792,7 +792,10 @@ export async function processResponsesStream<TApi extends Api>(
 				slot?.type === "toolCall" &&
 				slot.block.partialJson !== undefined
 			) {
-				Object.assign(slot.block, parseToolCallArguments(item.arguments || slot.block.partialJson));
+				Object.assign(
+					slot.block,
+					parseToolCallArguments(item.arguments || slot.block.partialJson, { keepJson: true }),
+				);
 				if (item.namespace !== undefined) slot.block.namespace = item.namespace;
 				// Finalize in-place and strip the scratch buffer so replay only
 				// carries parsed arguments.
