@@ -278,6 +278,99 @@ describe("durable response checkpoint entry policy", () => {
 		expect(sent[1].previous_response_id).toBe(first.responseId);
 	});
 
+	it.each(["Authorization", "cf-aig-authorization"])(
+		"wire identity preserves pooled continuation across unused keys with %s",
+		async (name) => {
+			const { sent, sockets, fetchMock } = checkpointServer();
+			const model = makeModel(CUSTOM_URL, { supportsResponseCheckpoints: true });
+			const headers = { [name]: "Bearer opaque-account" };
+			const first = await stream(model, ctx1, { ...OPTS, headers }).result();
+			expect(first.responseCheckpoint).toBeDefined();
+			const next = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
+			const options = { ...OPTS, headers, apiKey: "unused-other-key" };
+			const second = await stream(model, next, options).result();
+			expect(second.stopReason).toBe("stop");
+			expect(sockets).toHaveLength(1);
+			expect(sent[1].connection).toBe(sent[0].connection);
+			expect(sent[1].previous_response_id).toBe(first.responseId);
+			expect(sent[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Next" }] }]);
+			expect(sockets[0].headers[name.toLowerCase()]).toBe(headers[name]);
+			if (name === "cf-aig-authorization") expect(sockets[0].headers.authorization).toBeUndefined();
+
+			const changedHeaders = { [name]: "Bearer different-account" };
+			const changed = await stream(model, next, { ...options, headers: changedHeaders }).result();
+			expect(changed.stopReason).toBe("stop");
+			expect(sockets).toHaveLength(2);
+			expect(sockets[1].headers[name.toLowerCase()]).toBe(changedHeaders[name]);
+			expect(sent[2].previous_response_id).toBeUndefined();
+			expect(sent[2].input).toHaveLength(3);
+			const routed = await stream(model, next, {
+				...options,
+				headers: { ...changedHeaders, "x-tenant": "other-tenant" },
+			}).result();
+			expect(routed.stopReason).toBe("stop");
+			expect(sockets).toHaveLength(3);
+			expect(sent[3].previous_response_id).toBeUndefined();
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it("wire identity still isolates automatic API-key Authorization without resetting sessions", async () => {
+		const { sent, sockets } = checkpointServer();
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, OPTS).result();
+		const second = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+			{ ...OPTS, apiKey: "sk-other-key" },
+		).result();
+		expect(second.stopReason).toBe("stop");
+		expect(sockets.map((socket) => socket.headers.authorization)).toEqual([
+			`Bearer ${apiKey}`,
+			"Bearer sk-other-key",
+		]);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input).toHaveLength(3);
+	});
+
+	it("wire identity preserves transport cooldown across unused keys but isolates Authorization", async () => {
+		let now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		let failConnect = true;
+		const { sent, sockets, fetchMock } = checkpointServer({ connectError: () => failConnect });
+		fetchMock.mockImplementation(
+			async () =>
+				new Response('data: {"type":"response.completed","response":{"id":"resp_sse","status":"completed"}}\n\n', {
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		const model = makeModel(CUSTOM_URL, { supportsResponseCheckpoints: true });
+		const options = { ...OPTS, headers: { Authorization: "Bearer opaque-account" }, maxRetries: 0 };
+		for (let attempt = 0; attempt < 4; attempt++) await stream(model, ctx1, options).result();
+		expect(sockets).toHaveLength(4);
+		expect(fetchMock).toHaveBeenCalledOnce();
+		const unusedChanged = { ...options, apiKey: "unused-other-key" };
+		expect((await stream(model, ctx1, unusedChanged).result()).stopReason).toBe("stop");
+		expect(sockets).toHaveLength(4);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const changed = await stream(model, ctx1, {
+			...unusedChanged,
+			headers: { Authorization: "Bearer different-account" },
+		}).result();
+		expect(changed.stopReason).toBe("error");
+		expect(sockets).toHaveLength(5);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		now += 119_999;
+		await stream(model, ctx1, unusedChanged).result();
+		expect(sockets).toHaveLength(5);
+		now++;
+		failConnect = false;
+		expect((await stream(model, ctx1, unusedChanged).result()).responseCheckpoint).toBeDefined();
+		expect(sockets).toHaveLength(6);
+		expect(sent).toHaveLength(1);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
 	it.each(["openai", "openrouter"] as const)("generated %s affinity changes do not change scope", async (format) => {
 		const { sent, sockets } = checkpointServer();
 		const model = makeModel(CUSTOM_URL, { supportsResponseCheckpoints: true, sessionAffinityFormat: format });
@@ -715,6 +808,27 @@ describe("checkpoint execution and capture safety", () => {
 });
 
 describe("durable response checkpoints over WS", () => {
+	it("captures omitted output_text annotations and resumes exact delta on a new socket", async () => {
+		const { sent, sockets } = checkpointServer({
+			events: (events) => {
+				const response = events[3].response as { output: Array<{ content: Array<{ annotations?: unknown }> }> };
+				delete response.output[0].content[0].annotations;
+				return events;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, OPTS).result();
+		expect(first.stopReason).toBe("stop");
+		expect(first.responseCheckpoint).toBeDefined();
+		closeOpenAIResponsesWebSocketSessions();
+		const next = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
+		const second = await stream(model, next, OPTS).result();
+		expect(second.stopReason).toBe("stop");
+		expect(second.responseCheckpoint).toBeDefined();
+		expect(sockets).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBe(first.responseId);
+		expect(sent[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Next" }] }]);
+	});
 	it("checkpoint-eligible by default: store:true, capture, cross-connection delta", async () => {
 		const { sent, sockets } = checkpointServer();
 		const model = makeModel(OFFICIAL_URL);
@@ -1316,6 +1430,41 @@ describe("checkpoint failure cooldown", () => {
 			expect(sent[expectedFrames + 2].previous_response_id).toBe(fourth.responseId);
 		},
 	);
+
+	it("wire identity preserves checkpoint cooldown across unused keys but isolates Authorization", async () => {
+		let now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { sent, sockets, fetchMock, heal } = serverFail("store");
+		const model = makeModel(CUSTOM_URL, { supportsResponseCheckpoints: true });
+		const options = { ...OPTS, headers: { Authorization: "Bearer opaque-account" } };
+		expect((await stream(model, ctx1, options).result()).stopReason).toBe("stop");
+		expect(sent.map((frame) => frame.store)).toEqual([true, undefined]);
+		const repairedConnection = sent[1].connection;
+		heal();
+		const unusedChanged = { ...options, apiKey: "unused-other-key" };
+		const cooled = await stream(model, ctx1, unusedChanged).result();
+		expect(cooled.stopReason).toBe("stop");
+		expect(cooled.responseCheckpoint).toBeUndefined();
+		expect(sent).toHaveLength(3);
+		expect(sent[2].store).toBeUndefined();
+		expect(sent[2].connection).toBe(repairedConnection);
+		const changed = await stream(model, ctx1, {
+			...unusedChanged,
+			headers: { Authorization: "Bearer different-account" },
+		}).result();
+		expect(changed.responseCheckpoint).toBeDefined();
+		expect(sent[3].store).toBe(true);
+		expect(sent[3].connection).not.toBe(repairedConnection);
+		expect(sockets.at(-1)!.headers.authorization).toBe("Bearer different-account");
+		now += 119_999;
+		await stream(model, ctx1, unusedChanged).result();
+		expect(sent.at(-1)!.store).toBeUndefined();
+		now++;
+		expect((await stream(model, ctx1, unusedChanged).result()).responseCheckpoint).toBeDefined();
+		expect(sent.at(-1)!.store).toBe(true);
+		expect(sent.at(-1)!.previous_response_id).toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
 
 	it.each(["session", "endpoint", "credential"] as const)(
 		"keeps storage progression isolated by %s",
