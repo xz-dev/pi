@@ -234,6 +234,144 @@ fn repeated_suspend_resume_freezes_setsid_grandchild() {
 }
 
 #[test]
+fn session_guardian_exit_wakes_only_its_outer_not_unowned_job_peer() {
+    let mut fixture = Fixture::start();
+    let _ = fixture.peer.kill();
+    let _ = fixture.peer.wait();
+    fixture.peer = Command::new("/bin/sleep")
+        .arg("60")
+        .process_group(fixture.child.id() as i32)
+        .spawn()
+        .unwrap();
+    let primary = fixture.pid("primary-pid");
+    let guardian: i32 = String::from_utf8(
+        Command::new("ps")
+            .args(["-o", "ppid=", "-p", &primary.to_string()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse()
+    .unwrap();
+    fixture.pause();
+    wait_for(|| state(fixture.peer.id() as i32).starts_with('T'));
+    assert_eq!(unsafe { libc::kill(guardian, libc::SIGKILL) }, 0);
+    wait_for(|| fixture.child.try_wait().unwrap().is_some());
+    wait_for(|| {
+        let value = state(fixture.pid("heartbeat-pid"));
+        value.is_empty() || value.starts_with('Z')
+    });
+    assert!(
+        state(fixture.peer.id() as i32).starts_with('T'),
+        "unowned same-job peer was resumed"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn session_wake_observer_is_runnable_sibling_and_failure_is_fatal() {
+    let mut fixture = Fixture::start();
+    let primary = fixture.pid("primary-pid");
+    let guardian: i32 = String::from_utf8(
+        Command::new("ps")
+            .args(["-o", "ppid=", "-p", &primary.to_string()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse()
+    .unwrap();
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .unwrap();
+    let direct: Vec<i32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() == 2 && fields[1].parse::<u32>().ok() == Some(fixture.child.id()) {
+                fields[0].parse().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        direct.len(),
+        2,
+        "session must have guardian and exactly one wake observer"
+    );
+    let observer = *direct.iter().find(|pid| **pid != guardian).unwrap();
+    let group: i32 = String::from_utf8(
+        Command::new("ps")
+            .args(["-o", "pgid=", "-p", &observer.to_string()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse()
+    .unwrap();
+    assert_ne!(group, fixture.child.id() as i32);
+    fixture.pause();
+    assert!(!state(observer).starts_with('T'));
+    let tick = fixture.tick();
+    assert_eq!(unsafe { libc::kill(observer, libc::SIGKILL) }, 0);
+    wait_for(|| fixture.child.try_wait().unwrap().is_some());
+    wait_for(|| {
+        let value = state(fixture.pid("heartbeat-pid"));
+        value.is_empty() || value.starts_with('Z')
+    });
+    assert_eq!(
+        fixture.tick(),
+        tick,
+        "observer failure must not resume healthy work"
+    );
+    assert!(
+        state(observer).is_empty(),
+        "outer must reap failed observer"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn normal_session_completion_reaps_wake_observer() {
+    let mut fixture = Fixture::start();
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .unwrap();
+    let children: Vec<i32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() == 2 && fields[1].parse::<u32>().ok() == Some(fixture.child.id()) {
+                fields[0].parse().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(children.len(), 2);
+    assert_eq!(
+        unsafe { libc::kill(fixture.pid("primary-pid"), libc::SIGTERM) },
+        0
+    );
+    wait_for(|| fixture.child.try_wait().unwrap().is_some());
+    for pid in children {
+        assert!(
+            state(pid).is_empty(),
+            "session left an unreaped native child"
+        );
+    }
+}
+
+#[test]
 fn lease_eof_while_paused_cleans_descendants_before_fg() {
     let mut fixture = Fixture::start_inner(true);
     fixture.pause();

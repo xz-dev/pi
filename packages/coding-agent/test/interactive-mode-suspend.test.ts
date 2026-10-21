@@ -1,5 +1,12 @@
+import type * as FsModule from "node:fs";
+import * as fs from "node:fs";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+
+vi.mock("node:fs", async (original) => {
+	const actual = await original<typeof FsModule>();
+	return { ...actual, fstatSync: vi.fn(actual.fstatSync), closeSync: vi.fn(actual.closeSync) };
+});
 
 type FakeUi = {
 	start: () => void;
@@ -26,6 +33,8 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown;
 describe("InteractiveMode.handleCtrlZ", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.mocked(fs.fstatSync).mockRestore();
+		vi.mocked(fs.closeSync).mockRestore();
 	});
 
 	test("shows a status message and skips suspend on Windows", () => {
@@ -112,6 +121,34 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		expect(ui.requestRender).toHaveBeenCalledWith(true);
 	});
 
+	test("requests shutdown without restarting the background tty on a parent-death CONT", () => {
+		const ui: FakeUi = { start: vi.fn(), stop: vi.fn(), requestRender: vi.fn() };
+		const parent = process.ppid;
+		const descriptor = Object.getOwnPropertyDescriptor(process, "ppid")!;
+		const keepAlive = setTimeout(() => undefined, 0);
+		clearTimeout(keepAlive);
+		vi.spyOn(globalThis, "setInterval").mockReturnValue(keepAlive);
+		const clear = vi.spyOn(globalThis, "clearInterval");
+		let resume: ProcessSignalHandler | undefined;
+		vi.spyOn(process, "on").mockImplementation((() => process) as typeof process.on);
+		vi.spyOn(process, "once").mockImplementation(((event: string, listener: ProcessSignalHandler) => {
+			if (event === "SIGCONT") resume = listener;
+			return process;
+		}) as typeof process.once);
+		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+		try {
+			callHandleCtrlZ({ ui });
+			Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 });
+			resume?.();
+			expect(kill).toHaveBeenLastCalledWith(process.pid, "SIGTERM");
+			expect(ui.start).not.toHaveBeenCalled();
+			expect(ui.requestRender).not.toHaveBeenCalled();
+			expect(clear).not.toHaveBeenCalled(); // keep shutdown alive until SIGTERM is handled
+		} finally {
+			Object.defineProperty(process, "ppid", descriptor);
+		}
+	});
+
 	test("cleans up the temporary handlers if suspension fails", () => {
 		const ui: FakeUi = {
 			start: vi.fn(),
@@ -146,4 +183,110 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		expect(ui.start).not.toHaveBeenCalled();
 		expect(ui.requestRender).not.toHaveBeenCalled();
 	});
+});
+
+describe("suspended final-exit descriptor boundary", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.mocked(fs.fstatSync).mockRestore();
+		vi.mocked(fs.closeSync).mockRestore();
+	});
+	for (const mode of [
+		"private",
+		"public",
+		"closed",
+		"missing",
+		"negative",
+		"fraction",
+		"unsafe",
+		"string",
+		"not-tty",
+		"not-char",
+		"reused",
+		"stat-error",
+	] as const) {
+		test(`validates own tty before final close: ${mode}`, async () => {
+			const descriptor = Object.getOwnPropertyDescriptor(process, "stdin")!;
+			const events: string[] = [];
+			const expectedExit = new Error("exit intercepted");
+			const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+				events.push("exit");
+				throw expectedExit;
+			});
+			const base = fs.statSync(new URL(import.meta.url));
+			const current = fs.statSync(new URL(import.meta.url));
+			vi.spyOn(base, "isCharacterDevice").mockReturnValue(true);
+			vi.spyOn(current, "isCharacterDevice").mockReturnValue(mode !== "not-char");
+			if (mode === "reused") current.ino++;
+			const stat = vi.mocked(fs.fstatSync).mockReturnValueOnce(base).mockReturnValueOnce(current);
+			if (mode === "stat-error")
+				stat.mockReset().mockImplementation(() => {
+					throw new Error("EBADF");
+				});
+			const close = vi.mocked(fs.closeSync).mockImplementation(() => {
+				events.push("close");
+			});
+			const fd: unknown =
+				mode === "missing"
+					? undefined
+					: mode === "negative"
+						? -1
+						: mode === "fraction"
+							? 1.5
+							: mode === "unsafe"
+								? Number.MAX_SAFE_INTEGER + 1
+								: mode === "string"
+									? "42"
+									: 42;
+			Object.defineProperty(process, "stdin", {
+				configurable: true,
+				value: {
+					fd: 0,
+					isTTY: mode !== "not-tty",
+					closed: mode === "closed",
+					_handle: mode === "public" ? undefined : { fd },
+				},
+			});
+			const context = {
+				isShuttingDown: false,
+				isSuspended: true,
+				runtimeHost: {
+					dispose: async () => {
+						events.push("dispose");
+					},
+				},
+				themeController: { disableAutoSync: vi.fn() },
+				ui: { terminal: { drainInput: vi.fn(async () => {}) } },
+				stop: () => {
+					events.push("stop");
+				},
+			};
+			const prototype = interactiveModePrototype as {
+				shutdown(this: typeof context, options: { fromSignal: boolean }): Promise<void>;
+			};
+			try {
+				const result = prototype.shutdown.call(context, { fromSignal: true });
+				if (mode === "private" || mode === "public" || mode === "closed") {
+					await expect(result).rejects.toBe(expectedExit);
+					expect(exit).toHaveBeenCalledWith(0);
+					if (mode === "closed") {
+						expect(close).not.toHaveBeenCalled();
+						expect(stat).not.toHaveBeenCalled();
+					} else {
+						expect(close).toHaveBeenCalledExactlyOnceWith(mode === "public" ? 0 : 42);
+					}
+					expect(events).toEqual(
+						mode === "closed" ? ["dispose", "stop", "exit"] : ["dispose", "stop", "close", "exit"],
+					);
+				} else {
+					await expect(result).rejects.toThrow();
+					expect(close).not.toHaveBeenCalled();
+					expect(exit).not.toHaveBeenCalled();
+				}
+				expect(context.ui.terminal.drainInput).not.toHaveBeenCalled();
+			} finally {
+				Object.defineProperty(process, "stdin", descriptor);
+			}
+		});
+	}
 });

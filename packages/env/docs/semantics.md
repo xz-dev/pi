@@ -70,9 +70,14 @@ tool trees. `fg` resumes them; `setsid` isolation is preserved. Linux uses ident
 descendants (Linux 5.3+); unavailable pidfds disable only freezing with a visible warning. FreeBSD signals the
 kernel reaper subtree, including nested reapers. macOS uses its existing best-effort inventory.
 
-Resume requests received during a freeze pass are reconciled before the pass settles. Teardown resumes stopped
-payloads before TERM and retains bounded KILL escalation; Unix guardians reap adopted zombies without consuming
-the primary child's status. Pi also requests graceful shutdown when its immediate Unix owner disappears.
+Resume requests received during a freeze pass are reconciled before the pass settles. Startup holds a runnable
+native child behind an exec gate; freezing starts only after exec is confirmed. Linux registers a parent-directed
+`SIGCONT` guardian-exit notification, so even a paused outer resumes to finish cleanup. FreeBSD instead arms a
+one-byte socket-AIO read with `SIGEV_SIGNAL`/`SIGCONT`: only the guardian retains the writer, so its exit completes
+the read at EOF. Failure to arm this wake fails session startup; no module or sysctl changes are made.
+Final cleanup queues TERM before resuming stopped payloads and retains bounded KILL escalation; Unix guardians reap
+adopted zombies without consuming the primary child's status. Pi also requests graceful shutdown when its
+immediate Unix owner disappears, without restarting an already-suspended terminal.
 Interactive Ctrl-Z pauses shell timeout budgets; external signals, print/JSON/RPC shell deadlines and MCP request
 deadlines may still count suspended time. Windows job-control behavior is unchanged.
 
@@ -80,16 +85,23 @@ deadlines may still count suspended time. Windows job-control behavior is unchan
 
 The CLI's native `pi-env supervise` owner uses a best-effort sweep on macOS, not kernel-enforced descendant
 containment. Noninteractive tasks have a private process group; the interactive CLI keeps its foreground terminal
-group. Two observers use CLOEXEC liveness pipes and sample descendants with `proc_listchildpids`/`proc_pidinfo` every
-25 ms. Observed identities (PID, start time, UID) survive reparenting in the cache and are checked before every signal.
+group. The outer and guardian use CLOEXEC liveness pipes and sample descendants with
+`proc_listchildpids`/`proc_pidinfo` every 25 ms. Observed identities (PID, start time, UID) survive reparenting in
+the cache and are checked before every signal. Interactive sessions add exactly one wake-only observer as the
+outer's other direct child, in a separate session outside the foreground group and frozen guardian subtree.
+Its lifetime watches must be ready before outer job signals are unblocked, and it acknowledges the primary's
+birth identity before exec permission. Guardian loss or loss of both owners wakes the primary and any surviving
+outer. Observer loss instead makes the guardian wake the outer and fail the session closed. Normal completion
+reaps the observer; per-task owners do not add one.
 Cleanup takes a final snapshot before TERM, rescans for 250 ms, then escalates to KILL with a five-second bound.
 Enumeration errors, denied signals and known live survivors make cleanup fail.
 
 The private protocol's `C` record means **best-effort sweep completed** on Darwin. It does **not** prove that no
 descendant exists. Double-forks retaining a private group and observed `setsid` descendants can be swept. A process
 that calls `setsid` and reparents before a snapshot can escape, as can its unseen children or a final-scan fork.
-PID/PGID check/use races remain; killing both observers also defeats cleanup. Shared foreground groups are never
-swept as a group, to protect the caller and unrelated processes. These limits apply without elevated privileges;
+PID/PGID check/use races remain; killing both owners and the session wake observer can still defeat paused
+teardown. Shared foreground groups are never swept as a group, to protect the caller and unrelated processes.
+These limits apply without elevated privileges;
 libproc availability and permissions depend on the macOS runtime. Darwin does not gain the Linux-only remote
 `ownedExec1` capability from this CLI backend.
 
