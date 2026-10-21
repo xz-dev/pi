@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { bunTarget } from "./lib/bun-targets.mjs";
+import { isUnixOwnerPtyRow } from "./smoke-unix-owner-pty.mjs";
+import { passedUnixIdentity, passedUnixOwnerPtyRow } from "./fixtures/unix-owner-pty.mjs";
 import { assertOwnerLifecycle, ownerLifecycleRows, smokeOwnerLifecycle } from "./smoke-owner-lifecycle.mjs";
 
 // Test-only owner: real detached descendants, deterministic cleanup, no native backend dependency.
@@ -14,6 +17,7 @@ function ownerDriver(root, cleanup) {
 	writeFileSync(driver, `import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const exit = process.exit.bind(process);
+Object.defineProperty(process.versions, "bun", { value: "1.3.14" });
 const kill = process.kill.bind(process);
 // Test-only freeze model; the native guardian has its own Rust regressions.
 const signalLeaf = (signal) => { try { kill(Number(readFileSync(process.env.PI_OWNER_PID_FILE, "utf8")), signal); } catch {} };
@@ -24,6 +28,32 @@ ${cleanup ? 'process.exit = (code) => { cleanup(); exit(code); }; process.on("SI
 await (await import(pathToFileURL(process.argv.at(-1)).href)).default();
 `);
 	return driver;
+}
+
+// Synthetic PTY records exercise the wrapper only; native fixture has its own self-tests.
+function fixtureIdentity() {
+	return { ...passedUnixIdentity(), uid: process.getuid(), euid: process.geteuid() };
+}
+function fixturePty(executable, descriptor, name, _work, identity) {
+	const row = passedUnixOwnerPtyRow(name, descriptor.os, descriptor.id, createHash("sha256").update(readFileSync(executable)).digest("hex"));
+	row.identity = { uid: identity.uid, euid: identity.euid };
+	row.pi.uid = identity.uid;
+	for (const p of [...Object.values(row.processes), ...row.paused, row.peer]) p.uid = identity.uid;
+	return row;
+}
+function fixturePtyExecutable(root) {
+	const script = join(root, "owner-pty.mjs");
+	writeFileSync(script, `#!${process.execPath}
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { passedUnixOwnerPtyRow } from ${JSON.stringify(new URL("./fixtures/unix-owner-pty.mjs", import.meta.url).href)};
+const row = passedUnixOwnerPtyRow(process.argv[6], "linux", ${JSON.stringify(target)}, createHash("sha256").update(readFileSync(process.argv[3])).digest("hex"));
+row.identity = { uid: process.getuid(), euid: process.geteuid() }; row.pi.uid = process.getuid();
+for (const p of [...Object.values(row.processes), ...row.paused, row.peer]) p.uid = process.getuid();
+console.log(JSON.stringify(row));
+`);
+	chmodSync(script, 0o755);
+	return script;
 }
 
 const target = "linux-x64-gnu-baseline";
@@ -273,7 +303,17 @@ case "$1" in
 esac
 `); chmodSync(pi, 0o755);
 		const preload = join(root, "native-fixture.cjs");
-		writeFileSync(preload, "require.extensions['.node'] = (module, filename) => module._compile(require('node:fs').readFileSync(filename, 'utf8'), filename);\n");
+		writeFileSync(preload, `require.extensions['.node'] = (module, filename) => module._compile(require('node:fs').readFileSync(filename, 'utf8'), filename);
+// This test's fake CLI/PTY run on a developer host, possibly in wheel. Identity rejection has separate tests.
+require('node:module').registerHooks({load(url, context, next) {
+	const result = next(url, context);
+	if (url.endsWith('/smoke-owner-lifecycle.mjs')) {
+		const source = typeof result.source === 'string' ? result.source : Buffer.from(result.source).toString();
+		return {...result, source: source.replace('export function ownerIdentity() {', 'export function ownerIdentity() { return ' + ${JSON.stringify(JSON.stringify(fixtureIdentity()))} + ';')};
+	}
+	return result;
+}});
+`);
 		const bin = join(root, "bin"); mkdirSync(bin); const bun = join(bin, "bun");
 		// The in-display paste probe runs `bun smoke-bun-tui.mjs <pi>`; a fixture pi
 		// materializes on any invocation, so run it directly instead of a PTY.
@@ -282,7 +322,7 @@ esac
 		const recordPath = join(root, "record.json");
 		mkdirSync(join(root, "smoke-tmp"));
 		// Fixture smoke runs as this test user; never trigger the CI-only dedicated-account drop here.
-		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { env: { ...process.env, CI: "false", GITHUB_ACTIONS: "false", PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_TUI_EVIDENCE: evidence, TMPDIR: join(root, "smoke-tmp"), RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
+		execFileSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { env: { ...process.env, CI: "false", GITHUB_ACTIONS: "false", PATH: `${bin}:${process.env.PATH}`, PI_OWNER_PTY_HARNESS: fixturePtyExecutable(root), NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, PI_XZ_TUI_EVIDENCE: evidence, TMPDIR: join(root, "smoke-tmp"), RUNNER_OS: "Linux", RUNNER_ARCH: "X64" } });
 		const record = JSON.parse(readFileSync(recordPath, "utf8"));
 		assert.deepEqual(record.commands.map(({ name }) => name), descriptor.requiredCommands);
 		assert.deepEqual(record.commands.at(-2).name, "resource-materialization");
@@ -303,12 +343,12 @@ test("owner lifecycle measures immediate normal/kill containment and same-user p
 		const driver = ownerDriver(root, true);
 		const executable = join(root, "pi");
 		writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${driver}" "$@"\n`); chmodSync(executable, 0o755);
-		const evidence = await smokeOwnerLifecycle(executable, bunTarget(target), { timeoutMs: 10_000 });
+		const evidence = await smokeOwnerLifecycle(executable, bunTarget(target), { timeoutMs: 10_000, runPty: fixturePty, identityProbe: fixtureIdentity });
 		assert.equal(evidence.status, "passed", JSON.stringify(evidence));
 		assert.equal(evidence.identity.elevated, false);
 		assert.ok(evidence.identity.capabilities.CapEff);
 		assertOwnerLifecycle(evidence, "linux");
-		assert.equal(evidence.rows.length, 6);
+		assert.equal(evidence.rows.length, 8);
 		assert.ok(evidence.rows.every((row) => row.aliveBefore && !row.aliveAfter && row.peerAlive && row.immediateChecks === 1));
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -319,9 +359,9 @@ test("owner lifecycle fails leaked descendants without polling or expiry credit"
 		const driver = ownerDriver(root, false);
 		const executable = join(root, "pi");
 		writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${driver}" "$@"\n`); chmodSync(executable, 0o755);
-		const evidence = await smokeOwnerLifecycle(executable, bunTarget(target), { timeoutMs: 10_000 });
+		const evidence = await smokeOwnerLifecycle(executable, bunTarget(target), { timeoutMs: 10_000, runPty: fixturePty, identityProbe: fixtureIdentity });
 		assert.equal(evidence.status, "failed");
-		assert.ok(evidence.rows.filter((row) => row.name !== "ownership-disabled").every((row) => row.aliveAfter && row.peerAlive && row.immediateChecks === 1 && row.status === "failed"), JSON.stringify(evidence));
+		assert.ok(evidence.rows.filter((row) => row.name !== "ownership-disabled" && !isUnixOwnerPtyRow(row.name)).every((row) => row.aliveAfter && row.peerAlive && row.immediateChecks === 1 && row.status === "failed"), JSON.stringify(evidence));
 		assert.equal(evidence.rows.find((row) => row.name === "ownership-disabled").status, "passed");
 		assert.throws(() => assertOwnerLifecycle(evidence, "linux"), /owner lifecycle/);
 	} finally { rmSync(root, { recursive: true, force: true }); }
@@ -343,7 +383,8 @@ test("owner lifecycle acceptance rejects elevated identity, missing rows, peer l
 		const changed = structuredClone(evidence); mutate(changed);
 		assert.throws(() => assertOwnerLifecycle(changed, "windows"), /owner lifecycle/);
 	}
-	assert.throws(() => assertOwnerLifecycle(evidence, "darwin"), /inventory/);
-	evidence.rows = ownerLifecycleRows("darwin").map((name) => ({ ...evidence.rows[0], name, ...(name === "darwin-fast-escape" ? { aliveAfter: true, status: "known-limitation", limitation: "unseen setsid reparent before sweep" } : {}), piStopped: true, stopped: true, resumed: true, peerRunning: true }));
+	assert.throws(() => assertOwnerLifecycle({ ...evidence, identity: passedUnixIdentity() }, "darwin"), /inventory/);
+	evidence.identity = passedUnixIdentity(); evidence.target = "darwin-arm64"; evidence.cliSha256 = "d".repeat(64);
+	evidence.rows = ownerLifecycleRows("darwin").map((name) => isUnixOwnerPtyRow(name) ? passedUnixOwnerPtyRow(name, "darwin", evidence.target, evidence.cliSha256) : ({ ...evidence.rows[0], name, ...(name === "darwin-fast-escape" ? { aliveAfter: true, status: "known-limitation", limitation: "unseen setsid reparent before sweep" } : {}), piStopped: true, stopped: true, resumed: true, peerRunning: true }));
 	assertOwnerLifecycle(evidence, "darwin");
 });

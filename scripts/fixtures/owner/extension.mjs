@@ -4,7 +4,16 @@ import { existsSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-export default async function () {
+export default async function (api) {
+	if (process.env.PI_OWNER_CASE === "pty") {
+		api.on("session_start", () => {
+			// Public owned exec seam; return so interactive startup and raw TTY setup finish.
+			void api.exec(process.env.PI_OWNER_PTY_HARNESS, ["--payload", process.env.PI_OWNER_PTY_WORK]).catch(() => {});
+			writeFileSync(`${process.env.PI_OWNER_READY}.tmp`, JSON.stringify({ pid: process.pid, parent: process.ppid, uid: process.getuid(), bun: process.versions.bun ?? null, owner: process.env.PI_PROCESS_OWNER_BINARY ?? null }));
+			renameSync(`${process.env.PI_OWNER_READY}.tmp`, process.env.PI_OWNER_READY);
+		});
+		return;
+	}
 	if (process.env.PI_OWNER_CASE !== "ownership-disabled") {
 		const child = spawn(process.env.PI_OWNER_RUNTIME, [join(process.env.PI_OWNER_FIXTURES, "descendant.mjs"), "bridge"], { stdio: "ignore" });
 		await new Promise((resolve, reject) => {

@@ -7,6 +7,7 @@ import { basename, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { bunTarget, isMainModulePath } from "./lib/bun-targets.mjs";
+import { assertUnixOwnerPtyRow, isUnixOwnerPtyRow, smokeUnixOwnerPty, unixOwnerFaultRows } from "./smoke-unix-owner-pty.mjs";
 import { assertWindowsOwnerGate, smokeWindowsOwnerGate, stageWindowsOwnerGate } from "./smoke-windows-owner-gate.mjs";
 
 // Absolute System32 paths: Git for Windows puts GNU coreutils (e.g. whoami) on PATH.
@@ -61,7 +62,11 @@ export function ownerProcessAlive(pid) {
 }
 
 export function assertNonadminIdentity(identity, os) {
-	if (identity?.elevated !== false || identity.adminGroup === true || (os === "windows" && identity.mediumIntegrity !== true)) throw new Error("owner lifecycle missing nonadmin identity");
+	if (identity?.elevated !== false || identity.adminGroup === true || identity.rootEquivalentGroup === true || (os === "windows" && identity.mediumIntegrity !== true)) throw new Error("owner lifecycle missing nonadmin identity");
+	if (os !== "windows") {
+		if (![identity.uid, identity.euid, identity.gid, identity.egid].every((n) => Number.isSafeInteger(n) && n > 0) || !Array.isArray(identity.groups) || identity.groups.some((n) => !Number.isSafeInteger(n) || n <= 0) || !Array.isArray(identity.groupNames) || identity.groupNames.some((name) => ["root", "sudo", "wheel", "admin", "operator", "docker", "lxd"].includes(name))) throw new Error("owner lifecycle missing nonadmin identity: Unix credentials/groups");
+		if (os === "linux" && !["CapPrm", "CapEff", "CapAmb"].every((key) => /^[0-9a-f]+$/.test(identity.capabilities?.[key] ?? "") && BigInt(`0x${identity.capabilities[key]}`) === 0n)) throw new Error("owner lifecycle missing nonadmin identity: Linux capabilities");
+	}
 }
 
 export function ownerPrivilegeDropRequired(platform, identity, env) {
@@ -82,10 +87,10 @@ export function artifactBunFromOwnerRows(rows) {
 }
 
 export function ownerLifecycleRows(os) {
-	return ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(os === "darwin" ? ["darwin-fast-escape"] : []), ...(os !== "windows" ? ["suspend-resume"] : []), "ownership-disabled"];
+	return ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(os === "darwin" ? ["darwin-fast-escape"] : []), ...(os !== "windows" ? ["suspend-resume", ...unixOwnerFaultRows(os)] : []), "ownership-disabled"];
 }
 
-export function assertOwnerLifecycle(evidence, os) {
+export function assertOwnerLifecycle(evidence, os, targetId = evidence?.target, cliSha256 = evidence?.cliSha256) {
 	assertNonadminIdentity(evidence?.identity, os);
 	const expected = ownerLifecycleRows(os);
 	if (JSON.stringify(evidence.rows?.map(({ name }) => name)) !== JSON.stringify(expected)) throw new Error("owner lifecycle row inventory mismatch");
@@ -95,19 +100,20 @@ export function assertOwnerLifecycle(evidence, os) {
 			if (row.status !== "known-limitation" || !row.limitation) throw new Error("Darwin fast escape must be labeled known-limitation");
 		} else if (row.status !== "passed" || row.aliveAfter !== false) throw new Error(`owner lifecycle containment failed: ${row.name}`);
 		if (row.name === "suspend-resume" && (row.piStopped !== true || row.stopped !== true || row.resumed !== true || row.peerRunning !== true)) throw new Error("owner lifecycle suspend/resume missing proof");
+		if (os !== "windows" && isUnixOwnerPtyRow(row.name)) assertUnixOwnerPtyRow(row, os, evidence.identity, targetId, cliSha256);
 		if (row.name === "ownership-disabled" && row.ownershipDisabled !== true) throw new Error("owner lifecycle opt-out missing proof");
 	}
-	if (os === "windows") {
+	{
 		const { artifactBunVersion, artifactBunError } = artifactBunFromOwnerRows(evidence.rows);
 		if (!artifactBunVersion || evidence.artifactBunVersion !== artifactBunVersion) throw new Error(`owner lifecycle artifact Bun version invalid: ${artifactBunError ?? "differs from owner rows"}`);
 	}
 	if (evidence.status !== "passed") throw new Error("owner lifecycle did not pass");
 }
 
-export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_000, windowsGateRoot = process.env.PI_WINDOWS_GATE_ROOT } = {}) {
+export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_000, windowsGateRoot = process.env.PI_WINDOWS_GATE_ROOT, runPty = smokeUnixOwnerPty, identityProbe = ownerIdentity } = {}) {
 	const started = performance.now();
-	const evidence = { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), path: "ownCliProcesses + explicit extension factory; no model, prompt or API", peerPid: null };
-	try { evidence.identity = ownerIdentity(); assertNonadminIdentity(evidence.identity, target.os); }
+	const evidence = { status: "failed", target: target.id, cliSha256: createHash("sha256").update(readFileSync(executable)).digest("hex"), identity: null, rows: [], ...artifactBunFromOwnerRows([]), path: "ownCliProcesses + explicit extension factory; no model, prompt or API", peerPid: null };
+	try { evidence.identity = identityProbe(); assertNonadminIdentity(evidence.identity, target.os); }
 	catch (error) { evidence.error = error.message; return evidence; }
 	const work = mkdtempSync(join(tmpdir(), "pi-owner-smoke-"));
 	const fixtures = fileURLToPath(new URL("./fixtures/owner/", import.meta.url));
@@ -117,6 +123,10 @@ export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_0
 		await peerStarted;
 		evidence.peerPid = peer.pid;
 		for (const name of ownerLifecycleRows(target.os)) {
+			if (target.os !== "windows" && isUnixOwnerPtyRow(name)) {
+				evidence.rows.push(runPty(executable, target, name, join(work, name), evidence.identity));
+				continue;
+			}
 			const pidFile = join(work, `${name}.pid`);
 			const ready = join(work, `${name}.ready`);
 			const release = join(work, `${name}.release`);
@@ -125,7 +135,7 @@ export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_0
 			const env = { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: work, HOME: work, USERPROFILE: work, PI_OWNER_RUNTIME: process.execPath, PI_OWNER_FIXTURES: fixtures, PI_OWNER_PID_FILE: pidFile, PI_OWNER_READY: ready, PI_OWNER_RELEASE: release, PI_OWNER_CASE: name === "suspend-resume" ? name : name === "darwin-fast-escape" ? "fast-escape" : name.endsWith("double-fork") ? "double-fork" : "setsid", PI_OWNER_PAUSE: join(work, `${name}.pause`) };
 			for (const key of ["PI_PROCESS_OWNER_PID", "PI_PROCESS_OWNER_PENDING", "PI_PROCESS_OWNER_BINARY", "PI_NO_PROCESS_OWNERSHIP", "PI_STARTUP_BENCHMARK"]) delete env[key];
 			if (name === "ownership-disabled") env.PI_OWNER_CASE = "ownership-disabled";
-			const child = spawn(executable, ["-p", ...(name === "ownership-disabled" ? ["--no-process-ownership"] : []), "--no-session", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "-e", join(fixtures, "extension.mjs")], { cwd: work, env, detached: name === "suspend-resume", stdio: ["ignore", "ignore", "pipe"] });
+			const child = spawn(executable, ["-p", ...(name === "ownership-disabled" ? ["--no-process-ownership"] : []), "--no-session", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "-e", join(fixtures, "extension.mjs")], { cwd: work, env, detached: false, stdio: ["ignore", "ignore", "pipe"] });
 			let stderr = "";
 			child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2048); });
 			let exited = false;
@@ -151,24 +161,6 @@ export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_0
 				if (name === "ownership-disabled") {
 					row.ownershipDisabled = row.pi.pid === child.pid && row.pi.parent === process.pid && row.pi.owner === null;
 					if (!row.ownershipDisabled) throw new Error("opt-out still entered a process owner");
-				}
-				if (name === "suspend-resume") {
-					const state = (pid) => query("ps", ["-p", String(pid), "-o", "stat="]);
-					const stopped = () => state(pid).startsWith("T");
-					// Detached smoke has no foreground tty. Park Pi itself first, emulating
-					// the terminal's stopped payload, then send TSTP to its owners.
-					writeFileSync(env.PI_OWNER_PAUSE, "pause");
-					while (!state(row.pi.pid).startsWith("T")) { if (Date.now() >= deadline) throw new Error("Pi fixture did not stop"); await delay(10); }
-					row.piStopped = true;
-					process.kill(-child.pid, "SIGTSTP");
-					while (!stopped()) { if (Date.now() >= deadline) throw new Error("owned descendant did not stop"); await delay(10); }
-					await delay(50);
-					row.stopped = stopped();
-					row.peerRunning = !state(peer.pid).startsWith("T");
-					if (!row.stopped || !row.peerRunning || !ownerProcessAlive(peer.pid)) throw new Error("suspend observation unstable");
-					process.kill(-child.pid, "SIGCONT");
-					while (stopped()) { if (Date.now() >= deadline) throw new Error("owned descendant did not resume"); await delay(10); }
-					row.resumed = true;
 				}
 				if (name.startsWith("kill-")) {
 					row.termination = process.platform === "win32" ? "SIGTERM (TerminateProcess)" : "SIGTERM";
@@ -273,11 +265,18 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		copyFileSync(fileURLToPath(import.meta.url), join(scripts, "smoke-owner-lifecycle.mjs"));
 		copyFileSync(fileURLToPath(new URL("./lib/bun-targets.mjs", import.meta.url)), join(scripts, "lib", "bun-targets.mjs"));
 		copyFileSync(fileURLToPath(new URL("./smoke-windows-owner-gate.mjs", import.meta.url)), join(scripts, "smoke-windows-owner-gate.mjs"));
+		copyFileSync(fileURLToPath(new URL("./smoke-unix-owner-pty.mjs", import.meta.url)), join(scripts, "smoke-unix-owner-pty.mjs"));
+		if (platform !== "win32") {
+			if (!env.PI_OWNER_PTY_HARNESS) throw new Error("PI_OWNER_PTY_HARNESS missing: stage matching CI-only native fixture");
+			copyFileSync(env.PI_OWNER_PTY_HARNESS, join(work, "owner-pty"));
+			chmodSync(join(work, "owner-pty"), 0o755);
+		}
 		if (platform === "win32") stageWindowsOwnerGate(work, { env, run: traced });
 		cpSync(fileURLToPath(new URL("./fixtures/owner/", import.meta.url)), join(scripts, "fixtures", "owner"), { recursive: true });
 		mkdirSync(join(work, "tmp"));
 		const childEnv = { PATH: platform === "win32" ? `${work};${env.SystemRoot}\\System32;${env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0` : `${work}:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin`, HOME: work, USERPROFILE: work, USER: user, LOGNAME: user, TMPDIR: join(work, "tmp"), TMP: join(work, "tmp"), TEMP: join(work, "tmp"), CI: "true", PI_OFFLINE: "1" };
 		if (platform === "win32") childEnv.PI_WINDOWS_GATE_ROOT = work;
+		else childEnv.PI_OWNER_PTY_HARNESS = join(work, "owner-pty");
 		privilegeDrop.path = childEnv.PATH;
 		const args = [join(scripts, "smoke-owner-lifecycle.mjs"), staged, target.id, join(work, "child-evidence.json")];
 		let result;

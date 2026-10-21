@@ -8,6 +8,8 @@ import test from "node:test";
 import { BUN_TARGETS, binaryArchiveName, releaseArchiveName, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 import { ownerLifecycleRows } from "./smoke-owner-lifecycle.mjs";
+import { isUnixOwnerPtyRow } from "./smoke-unix-owner-pty.mjs";
+import { passedUnixIdentity, passedUnixOwnerPtyRow } from "./fixtures/unix-owner-pty.mjs";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 
 const nativeBytes = Buffer.from("native helper fixture");
@@ -35,11 +37,11 @@ function record(target, assetIdentity) {
 			emulated: target.emulated,
 		},
 		ownerLifecycle: {
-			status: "passed",
+			status: "passed", target: target.id, cliSha256: assetIdentity.sha256,
 			artifactBunVersion: "1.3.14",
-			identity: { name: "host\\pi-owner-smoke", elevated: false, ...(target.os === "windows" ? { mediumIntegrity: true } : {}) },
+			identity: { name: "host\\pi-owner-smoke", elevated: false, ...(target.os === "windows" ? { mediumIntegrity: true } : passedUnixIdentity()) },
 			...(target.os === "windows" ? { windowsRuntimeGate: passedWindowsOwnerGate(target.id, assetIdentity.sha256) } : {}),
-			rows: ownerLifecycleRows(target.os).map((name) => ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", limitation: name === "darwin-fast-escape" ? "unseen setsid escape" : undefined, aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1, piStopped: true, stopped: true, resumed: true, peerRunning: true, ownershipDisabled: true })),
+			rows: ownerLifecycleRows(target.os).map((name) => isUnixOwnerPtyRow(name) ? passedUnixOwnerPtyRow(name, target.os, target.id, assetIdentity.sha256) : ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", limitation: name === "darwin-fast-escape" ? "unseen setsid escape" : undefined, aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1, piStopped: true, stopped: true, resumed: true, peerRunning: true, ownershipDisabled: true })),
 		},
 		commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })),
 		tui: {
@@ -278,4 +280,48 @@ for (const [label, mutate] of [
 		assert.notEqual(result.status, 0);
 		assert.match(result.stderr, /Windows owner runtime gate|owner lifecycle artifact Bun version/);
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
+});
+
+for (const [label, mutate] of [
+	["missing paused row", (owner) => { owner.rows = owner.rows.filter((r) => r.name !== "paused-both-owners-death"); }],
+	["absent full-exit proof", (owner) => { delete owner.rows.find((r) => r.name === "paused-guardian-death").allOwnedExited; }],
+	["stopped survivor", (owner) => { owner.rows.find((r) => r.name === "paused-guardian-death").after[0].state = "T"; }],
+	["timeout", (owner) => { owner.rows.find((r) => r.name === "paused-guardian-death").postDeathMs = 8001; }],
+	["wrong target", (owner) => { owner.rows.find((r) => r.name === "paused-guardian-death").target = "wrong-target"; }],
+	["wrong artifact hash", (owner) => { owner.rows.find((r) => r.name === "paused-guardian-death").cliSha256 = "f".repeat(64); }],
+	["missing embedded Bun", (owner) => { delete owner.rows.find((r) => r.name === "paused-guardian-death").pi.bun; }],
+	["Bun version drift", (owner) => { owner.rows.find((r) => r.name === "paused-guardian-death").pi.bun = "1.4.3"; }],
+	["root", (owner) => { owner.identity.uid = 0; }],
+	["admin", (owner) => { owner.identity.groupNames = ["wheel"]; }],
+	["missing original tty", (owner) => { delete owner.rows.find((r) => r.name === "paused-guardian-death").pty.original; }],
+]) test(`aggregator rejects ${label} Unix paused release proof`, () => {
+	for (const os of ["linux", "freebsd", "darwin"]) {
+		const value = fixture();
+		try {
+			const target = BUN_TARGETS.find((t) => t.os === os);
+			const path = join(value.records, `${target.id}.json`);
+			const changed = JSON.parse(readFileSync(path, "utf8"));
+			mutate(changed.ownerLifecycle);
+			writeFileSync(path, JSON.stringify(changed));
+			const result = runAggregator(value);
+			assert.notEqual(result.status, 0, `${os}: ${label}`);
+			assert.match(result.stderr, /owner lifecycle/);
+		} finally { rmSync(value.root, { recursive: true, force: true }); }
+	}
+});
+
+test("aggregator rejects missing Darwin observer proof on normal and fault teardown", () => {
+	for (const name of ["suspend-resume", "paused-guardian-death", "paused-both-owners-death", "paused-observer-death"]) {
+		const value = fixture();
+		try {
+			const target = BUN_TARGETS.find((t) => t.os === "darwin");
+			const path = join(value.records, `${target.id}.json`);
+			const changed = JSON.parse(readFileSync(path, "utf8"));
+			delete changed.ownerLifecycle.rows.find((r) => r.name === name).observerReaped;
+			writeFileSync(path, JSON.stringify(changed));
+			const result = runAggregator(value);
+			assert.notEqual(result.status, 0);
+			assert.match(result.stderr, /observer\/reaping proof missing/);
+		} finally { rmSync(value.root, { recursive: true, force: true }); }
+	}
 });

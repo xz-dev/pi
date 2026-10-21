@@ -5,13 +5,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { bunTarget } from "./lib/bun-targets.mjs";
+import { isUnixOwnerPtyRow } from "./smoke-unix-owner-pty.mjs";
+import { passedUnixIdentity, passedUnixOwnerPtyRow } from "./fixtures/unix-owner-pty.mjs";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 import { windowsOwnerGateDependencies } from "./smoke-windows-owner-gate.mjs";
 import { artifactBunFromOwnerRows, assertOwnerLifecycle, ownerLifecycleRows, ownerPrivilegeDropRequired, smokeOwnerLifecycleAsNonadmin } from "./smoke-owner-lifecycle.mjs";
 
-const standard = { name: "host\\pi-owner-smoke", uid: 1001, euid: 1001, elevated: false, adminGroup: false, mediumIntegrity: true };
+const standard = { ...passedUnixIdentity(), name: "host\\pi-owner-smoke", mediumIntegrity: true };
 const root = { uid: 0, euid: 0, elevated: true };
-const rowsFor = (os) => ownerLifecycleRows(os).map((name) => ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", ...(name === "darwin-fast-escape" ? { limitation: "25ms sweep" } : {}), aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1, piStopped: true, stopped: true, resumed: true, peerRunning: true, ownershipDisabled: true }));
+const cliSha256 = createHash("sha256").update(readFileSync(process.execPath)).digest("hex");
+const rowsFor = (os, target = "fixture-target") => ownerLifecycleRows(os).map((name) => isUnixOwnerPtyRow(name) ? passedUnixOwnerPtyRow(name, os, target, cliSha256) : ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", ...(name === "darwin-fast-escape" ? { limitation: "25ms sweep" } : {}), aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1, piStopped: true, stopped: true, resumed: true, peerRunning: true, ownershipDisabled: true }));
 
 // Host commands are mocked; copied scripts, runtime and artifact use real temporary files.
 async function dropped(platform, { childIdentity = standard, hostIdentity, childError, failCommand, existing = false, cleanupFailure = false, silentChild = false } = {}) {
@@ -19,13 +22,13 @@ async function dropped(platform, { childIdentity = standard, hostIdentity, child
 	mkdirSync(join(temp, "Temp"));
 	const calls = [];
 	const target = bunTarget(platform === "freebsd" ? "freebsd-x64" : platform === "darwin" ? "darwin-arm64" : platform === "win32" ? "windows-x64-baseline" : "linux-x64-musl-baseline");
-	const childRows = rowsFor(target.os);
+	const childRows = rowsFor(target.os, target.id);
 	if (childError) { childRows[0].aliveAfter = true; childRows[0].status = "failed"; }
-	const child = { status: childError ? "failed" : "passed", identity: childIdentity, rows: childRows, ...artifactBunFromOwnerRows(childRows), ...(childError ? { error: childError } : {}) };
+	const child = { target: target.id, cliSha256, status: childError ? "failed" : "passed", identity: childIdentity, rows: childRows, ...artifactBunFromOwnerRows(childRows), ...(childError ? { error: childError } : {}) };
 	if (platform === "win32") child.windowsRuntimeGate = passedWindowsOwnerGate(target.id, createHash("sha256").update(readFileSync(process.execPath)).digest("hex"), standard);
 	try {
 		const evidence = await smokeOwnerLifecycleAsNonadmin(process.execPath, target, {
-			platform, env: { CI: "true", SystemRoot: temp, SystemDrive: temp, COMPUTERNAME: "host" },
+			platform, env: { CI: "true", PI_OWNER_PTY_HARNESS: process.execPath, SystemRoot: temp, SystemDrive: temp, COMPUTERNAME: "host" },
 			identityProbe: () => hostIdentity ?? (platform === "darwin" ? { ...standard, adminGroup: true } : root),
 			run: (file, args, options) => {
 				calls.push({ file, args, options });
@@ -52,6 +55,8 @@ async function dropped(platform, { childIdentity = standard, hostIdentity, child
 					assert.equal(existsSync(join(stage, target.executable)), true);
 					assert.equal(existsSync(join(stage, "scripts", "fixtures", "owner", "descendant.mjs")), true);
 					assert.equal(existsSync(join(stage, "scripts", "lib", "bun-targets.mjs")), true);
+					assert.equal(existsSync(join(stage, "scripts", "smoke-unix-owner-pty.mjs")), true);
+					if (platform !== "win32") assert.equal(existsSync(join(stage, "owner-pty")), true);
 					if (platform === "win32") {
 						const launcher = readFileSync(join(stage, "launch.ps1"), "utf8");
 						assert.match(launcher, /\$env:HOME=/);
@@ -93,8 +98,8 @@ for (const platform of ["darwin", "win32"]) {
 }
 
 test("Unix suspend and opt-out rows require independent observations", () => {
-	assert.deepEqual(ownerLifecycleRows("linux"), ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", "suspend-resume", "ownership-disabled"]);
-	const make = () => ({ status: "passed", identity: standard, rows: rowsFor("linux") });
+	assert.deepEqual(ownerLifecycleRows("linux"), ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", "suspend-resume", "paused-guardian-death", "paused-both-owners-death", "ownership-disabled"]);
+	const make = () => ({ status: "passed", target: "fixture-target", cliSha256, artifactBunVersion: "1.3.14", identity: standard, rows: rowsFor("linux") });
 	for (const key of ["piStopped", "stopped", "resumed", "peerRunning"]) {
 		const evidence = make();
 		delete evidence.rows.find((row) => row.name === "suspend-resume")[key];
@@ -105,15 +110,15 @@ test("Unix suspend and opt-out rows require independent observations", () => {
 	assert.throws(() => assertOwnerLifecycle(evidence, "linux"), /opt-out missing proof/);
 });
 
-test("missing or disagreeing Bun versions remain informational outside Windows", () => {
+test("missing or disagreeing shipped Bun versions fail on every Unix target", () => {
 	for (const os of ["linux", "freebsd", "darwin"]) {
 		const observations = rowsFor(os);
 		delete observations[0].pi.bun;
 		observations[1].pi.bun = "1.4.2";
 
-		const evidence = { status: "passed", identity: standard, rows: observations, ...artifactBunFromOwnerRows(observations) };
+		const evidence = { status: "passed", target: "fixture-target", cliSha256, identity: standard, rows: observations, ...artifactBunFromOwnerRows(observations) };
 		assert.equal(evidence.artifactBunVersion, null);
-		assert.doesNotThrow(() => assertOwnerLifecycle(evidence, os));
+		assert.throws(() => assertOwnerLifecycle(evidence, os), /artifact Bun version invalid/);
 	}
 });
 
