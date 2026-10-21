@@ -17,6 +17,22 @@ This needs no setup, cgroups or administrator rights. It works as an ordinary us
 
 Each task has its own owner. Cancelling one task never stops another task or an unrelated process of the same user.
 
+## Turning it off
+
+Use `pi --no-process-ownership` when an external sandbox or supervisor already owns Pi's subprocess lifecycle. This skips the session wrapper, per-task native owners, owner-loss watcher and macOS ownership hint. Legacy process-group cancellation remains available, but detached descendants may outlive Pi.
+
+The flag applies to this invocation. Set `PI_NO_PROCESS_OWNERSHIP=1` instead to pass the opt-out to nested Pi invocations through the environment. Pi clears inherited internal `PI_PROCESS_OWNER_*` variables when disabled; it does not change the external sandbox or supervisor.
+
+## Suspending and resuming
+
+On Linux, FreeBSD and macOS, interactive `Ctrl-Z` pauses Pi and its owned local tool trees; `fg` resumes them. Tools keep their separate sessions (`setsid`): they do not gain access to Pi's controlling terminal. This includes shell commands, MCP stdio servers, Chord workers and local environment commands. It does not suspend remote hosts or unrelated processes.
+
+The shell-facing supervisor stops, but the guardian keeps running so owner death, cancellation and resume requests remain observable. A resume received during a freeze pass wins; the guardian never parks itself after a late stop operation. Graceful teardown resumes stopped payloads before sending `SIGTERM`, then escalates after a bounded grace period. Adopted zombies are reaped while Pi continues running, and Pi requests graceful shutdown if its immediate owner disappears.
+
+Linux freezing requires working `pidfd_open` and `pidfd_send_signal` (Linux 5.3+ and a seccomp policy that permits them). If unavailable, Pi still suspends, but prints a warning that owned tools keep running. Ordinary ownership and cleanup do not require pidfds. FreeBSD uses kernel-scoped reaper signals, including nested reapers; macOS retains its identity-checked, best-effort boundary below.
+
+Interactive `Ctrl-Z` excludes suspended time from shell-command timeouts. Externally delivered `SIGTSTP`, print/JSON/RPC shell deadlines and MCP request deadlines may still count suspended wall-clock time. Windows has no Unix job-control suspension and is unchanged.
+
 ## How it works
 
 Pi ships a small native helper, `pi-env supervise`, inside the Release executable. At runtime it is extracted with the other bundled resources.

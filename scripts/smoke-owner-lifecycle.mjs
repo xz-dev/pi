@@ -81,15 +81,21 @@ export function artifactBunFromOwnerRows(rows) {
 	return { artifactBunVersion: reasons.length ? null : versions[0], artifactBunError: reasons.join("; ") || null };
 }
 
+export function ownerLifecycleRows(os) {
+	return ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(os === "darwin" ? ["darwin-fast-escape"] : []), ...(os !== "windows" ? ["suspend-resume"] : []), "ownership-disabled"];
+}
+
 export function assertOwnerLifecycle(evidence, os) {
 	assertNonadminIdentity(evidence?.identity, os);
-	const expected = ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(os === "darwin" ? ["darwin-fast-escape"] : [])];
+	const expected = ownerLifecycleRows(os);
 	if (JSON.stringify(evidence.rows?.map(({ name }) => name)) !== JSON.stringify(expected)) throw new Error("owner lifecycle row inventory mismatch");
 	for (const row of evidence.rows) {
 		if (row.guardExpired === true || row.aliveBefore !== true || row.peerAlive !== true || row.immediateChecks !== 1 || typeof row.aliveAfter !== "boolean") throw new Error(`owner lifecycle invalid observation: ${row.name}`);
 		if (row.name === "darwin-fast-escape") {
 			if (row.status !== "known-limitation" || !row.limitation) throw new Error("Darwin fast escape must be labeled known-limitation");
 		} else if (row.status !== "passed" || row.aliveAfter !== false) throw new Error(`owner lifecycle containment failed: ${row.name}`);
+		if (row.name === "suspend-resume" && (row.piStopped !== true || row.stopped !== true || row.resumed !== true || row.peerRunning !== true)) throw new Error("owner lifecycle suspend/resume missing proof");
+		if (row.name === "ownership-disabled" && row.ownershipDisabled !== true) throw new Error("owner lifecycle opt-out missing proof");
 	}
 	if (os === "windows") {
 		const { artifactBunVersion, artifactBunError } = artifactBunFromOwnerRows(evidence.rows);
@@ -110,15 +116,16 @@ export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_0
 	try {
 		await peerStarted;
 		evidence.peerPid = peer.pid;
-		for (const name of ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(target.os === "darwin" ? ["darwin-fast-escape"] : [])]) {
+		for (const name of ownerLifecycleRows(target.os)) {
 			const pidFile = join(work, `${name}.pid`);
 			const ready = join(work, `${name}.ready`);
 			const release = join(work, `${name}.release`);
 			const row = { name, status: "failed", immediateChecks: 0 };
 			evidence.rows.push(row);
-			const env = { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: work, HOME: work, USERPROFILE: work, PI_OWNER_RUNTIME: process.execPath, PI_OWNER_FIXTURES: fixtures, PI_OWNER_PID_FILE: pidFile, PI_OWNER_READY: ready, PI_OWNER_RELEASE: release, PI_OWNER_CASE: name === "darwin-fast-escape" ? "fast-escape" : name.endsWith("double-fork") ? "double-fork" : "setsid" };
-			for (const key of ["PI_PROCESS_OWNER_PID", "PI_PROCESS_OWNER_PENDING", "PI_PROCESS_OWNER_BINARY", "PI_STARTUP_BENCHMARK"]) delete env[key];
-			const child = spawn(executable, ["-p", "--no-session", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "-e", join(fixtures, "extension.mjs")], { cwd: work, env, stdio: ["ignore", "ignore", "pipe"] });
+			const env = { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: work, HOME: work, USERPROFILE: work, PI_OWNER_RUNTIME: process.execPath, PI_OWNER_FIXTURES: fixtures, PI_OWNER_PID_FILE: pidFile, PI_OWNER_READY: ready, PI_OWNER_RELEASE: release, PI_OWNER_CASE: name === "suspend-resume" ? name : name === "darwin-fast-escape" ? "fast-escape" : name.endsWith("double-fork") ? "double-fork" : "setsid", PI_OWNER_PAUSE: join(work, `${name}.pause`) };
+			for (const key of ["PI_PROCESS_OWNER_PID", "PI_PROCESS_OWNER_PENDING", "PI_PROCESS_OWNER_BINARY", "PI_NO_PROCESS_OWNERSHIP", "PI_STARTUP_BENCHMARK"]) delete env[key];
+			if (name === "ownership-disabled") env.PI_OWNER_CASE = "ownership-disabled";
+			const child = spawn(executable, ["-p", ...(name === "ownership-disabled" ? ["--no-process-ownership"] : []), "--no-session", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "-e", join(fixtures, "extension.mjs")], { cwd: work, env, detached: name === "suspend-resume", stdio: ["ignore", "ignore", "pipe"] });
 			let stderr = "";
 			child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2048); });
 			let exited = false;
@@ -135,19 +142,41 @@ export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_0
 					if (exited || Date.now() >= deadline) throw new Error(`fixture not ready: ${stderr}`);
 					await delay(10);
 				}
-				pid = Number(readFileSync(pidFile, "utf8").trim());
-				row.descendantPid = pid;
 				row.pi = JSON.parse(readFileSync(ready, "utf8"));
-				row.aliveBefore = ownerProcessAlive(pid);
+				pid = name === "ownership-disabled" ? undefined : Number(readFileSync(pidFile, "utf8").trim());
+				row.descendantPid = pid ?? row.pi.pid;
+				row.aliveBefore = name === "ownership-disabled" ? !exited : ownerProcessAlive(pid);
 				if (!row.aliveBefore) throw new Error("fixture expired before owner exit");
 				if (process.platform !== "win32" && row.pi.uid !== evidence.identity.uid) throw new Error("Pi UID differs from identity probe");
+				if (name === "ownership-disabled") {
+					row.ownershipDisabled = row.pi.pid === child.pid && row.pi.parent === process.pid && row.pi.owner === null;
+					if (!row.ownershipDisabled) throw new Error("opt-out still entered a process owner");
+				}
+				if (name === "suspend-resume") {
+					const state = (pid) => query("ps", ["-p", String(pid), "-o", "stat="]);
+					const stopped = () => state(pid).startsWith("T");
+					// Detached smoke has no foreground tty. Park Pi itself first, emulating
+					// the terminal's stopped payload, then send TSTP to its owners.
+					writeFileSync(env.PI_OWNER_PAUSE, "pause");
+					while (!state(row.pi.pid).startsWith("T")) { if (Date.now() >= deadline) throw new Error("Pi fixture did not stop"); await delay(10); }
+					row.piStopped = true;
+					process.kill(-child.pid, "SIGTSTP");
+					while (!stopped()) { if (Date.now() >= deadline) throw new Error("owned descendant did not stop"); await delay(10); }
+					await delay(50);
+					row.stopped = stopped();
+					row.peerRunning = !state(peer.pid).startsWith("T");
+					if (!row.stopped || !row.peerRunning || !ownerProcessAlive(peer.pid)) throw new Error("suspend observation unstable");
+					process.kill(-child.pid, "SIGCONT");
+					while (stopped()) { if (Date.now() >= deadline) throw new Error("owned descendant did not resume"); await delay(10); }
+					row.resumed = true;
+				}
 				if (name.startsWith("kill-")) {
 					row.termination = process.platform === "win32" ? "SIGTERM (TerminateProcess)" : "SIGTERM";
 					child.kill("SIGTERM");
 				} else writeFileSync(release, "exit");
 				row.exit = await completion;
 				row.guardExpired = guardExpired;
-				row.aliveAfter = ownerProcessAlive(pid);
+				row.aliveAfter = name === "ownership-disabled" ? false : ownerProcessAlive(pid);
 				row.immediateChecks = 1;
 				row.peerAlive = ownerProcessAlive(peer.pid);
 				if (name === "darwin-fast-escape") {

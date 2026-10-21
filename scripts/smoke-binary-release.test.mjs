@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { bunTarget } from "./lib/bun-targets.mjs";
-import { assertOwnerLifecycle, smokeOwnerLifecycle } from "./smoke-owner-lifecycle.mjs";
+import { assertOwnerLifecycle, ownerLifecycleRows, smokeOwnerLifecycle } from "./smoke-owner-lifecycle.mjs";
 
 // Test-only owner: real detached descendants, deterministic cleanup, no native backend dependency.
 function ownerDriver(root, cleanup) {
@@ -14,6 +14,11 @@ function ownerDriver(root, cleanup) {
 	writeFileSync(driver, `import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const exit = process.exit.bind(process);
+const kill = process.kill.bind(process);
+// Test-only freeze model; the native guardian has its own Rust regressions.
+const signalLeaf = (signal) => { try { kill(Number(readFileSync(process.env.PI_OWNER_PID_FILE, "utf8")), signal); } catch {} };
+process.kill = (pid, signal) => { if (pid === process.pid && signal === "SIGSTOP") signalLeaf("SIGSTOP"); return kill(pid, signal); };
+process.on("SIGCONT", () => signalLeaf("SIGCONT"));
 const cleanup = () => { try { process.kill(Number(readFileSync(process.env.PI_OWNER_PID_FILE, "utf8")), "SIGKILL"); } catch {} };
 ${cleanup ? 'process.exit = (code) => { cleanup(); exit(code); }; process.on("SIGTERM", () => { cleanup(); exit(143); });' : ""}
 await (await import(pathToFileURL(process.argv.at(-1)).href)).default();
@@ -303,7 +308,7 @@ test("owner lifecycle measures immediate normal/kill containment and same-user p
 		assert.equal(evidence.identity.elevated, false);
 		assert.ok(evidence.identity.capabilities.CapEff);
 		assertOwnerLifecycle(evidence, "linux");
-		assert.equal(evidence.rows.length, 4);
+		assert.equal(evidence.rows.length, 6);
 		assert.ok(evidence.rows.every((row) => row.aliveBefore && !row.aliveAfter && row.peerAlive && row.immediateChecks === 1));
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -316,13 +321,14 @@ test("owner lifecycle fails leaked descendants without polling or expiry credit"
 		writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${driver}" "$@"\n`); chmodSync(executable, 0o755);
 		const evidence = await smokeOwnerLifecycle(executable, bunTarget(target), { timeoutMs: 10_000 });
 		assert.equal(evidence.status, "failed");
-		assert.ok(evidence.rows.every((row) => row.aliveAfter && row.peerAlive && row.immediateChecks === 1 && row.status === "failed"), JSON.stringify(evidence));
+		assert.ok(evidence.rows.filter((row) => row.name !== "ownership-disabled").every((row) => row.aliveAfter && row.peerAlive && row.immediateChecks === 1 && row.status === "failed"), JSON.stringify(evidence));
+		assert.equal(evidence.rows.find((row) => row.name === "ownership-disabled").status, "passed");
 		assert.throws(() => assertOwnerLifecycle(evidence, "linux"), /owner lifecycle/);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("owner lifecycle acceptance rejects elevated identity, missing rows, peer loss, and Windows leaks", () => {
-	const evidence = { status: "passed", artifactBunVersion: "1.3.14", identity: { elevated: false, mediumIntegrity: true }, rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, pi: { bun: "1.3.14" }, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })) };
+	const evidence = { status: "passed", artifactBunVersion: "1.3.14", identity: { elevated: false, mediumIntegrity: true }, rows: ownerLifecycleRows("windows").map((name) => ({ name, pi: { bun: "1.3.14" }, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1, ownershipDisabled: true })) };
 	assertOwnerLifecycle(evidence, "windows");
 	for (const mutate of [
 		(value) => { value.identity.elevated = true; },
@@ -338,6 +344,6 @@ test("owner lifecycle acceptance rejects elevated identity, missing rows, peer l
 		assert.throws(() => assertOwnerLifecycle(changed, "windows"), /owner lifecycle/);
 	}
 	assert.throws(() => assertOwnerLifecycle(evidence, "darwin"), /inventory/);
-	evidence.rows.push({ ...evidence.rows[0], name: "darwin-fast-escape", aliveAfter: true, status: "known-limitation", limitation: "unseen setsid reparent before sweep" });
+	evidence.rows = ownerLifecycleRows("darwin").map((name) => ({ ...evidence.rows[0], name, ...(name === "darwin-fast-escape" ? { aliveAfter: true, status: "known-limitation", limitation: "unseen setsid reparent before sweep" } : {}), piStopped: true, stopped: true, resumed: true, peerRunning: true }));
 	assertOwnerLifecycle(evidence, "darwin");
 });

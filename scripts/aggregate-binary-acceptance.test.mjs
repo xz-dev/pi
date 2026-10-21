@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { BUN_TARGETS, binaryArchiveName, releaseArchiveName, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
+import { ownerLifecycleRows } from "./smoke-owner-lifecycle.mjs";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 
 const nativeBytes = Buffer.from("native helper fixture");
@@ -38,7 +39,7 @@ function record(target, assetIdentity) {
 			artifactBunVersion: "1.3.14",
 			identity: { name: "host\\pi-owner-smoke", elevated: false, ...(target.os === "windows" ? { mediumIntegrity: true } : {}) },
 			...(target.os === "windows" ? { windowsRuntimeGate: passedWindowsOwnerGate(target.id, assetIdentity.sha256) } : {}),
-			rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(target.os === "darwin" ? ["darwin-fast-escape"] : [])].map((name) => ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", limitation: name === "darwin-fast-escape" ? "unseen setsid escape" : undefined, aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })),
+			rows: ownerLifecycleRows(target.os).map((name) => ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", limitation: name === "darwin-fast-escape" ? "unseen setsid escape" : undefined, aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1, piStopped: true, stopped: true, resumed: true, peerRunning: true, ownershipDisabled: true })),
 		},
 		commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })),
 		tui: {
