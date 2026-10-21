@@ -770,6 +770,9 @@ mod platform {
             self.signal(if paused { libc::SIGSTOP } else { libc::SIGCONT })
         }
         pub(crate) fn teardown(&mut self, _: i32) -> io::Result<()> {
+            if !enabled() {
+                return Ok(());
+            }
             self.signal(libc::SIGTERM)?;
             self.signal(libc::SIGCONT)
         }

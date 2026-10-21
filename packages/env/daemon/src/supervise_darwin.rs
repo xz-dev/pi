@@ -668,17 +668,17 @@ pub fn run(args: &[OsString]) -> i32 {
                 .as_ref()
                 .is_some_and(|control| !matches!(control.cancelled(), Ok(false)));
             if cancelled && terminating.is_none() {
-                inventory.signal(guardian, libc::SIGCONT)?;
                 inventory.signal(guardian, libc::SIGTERM)?;
+                inventory.signal(guardian, libc::SIGCONT)?;
                 terminating = Some(Instant::now());
             }
             let signals = SIGNALS.swap(0, Ordering::Relaxed);
             for signal in FORWARDED {
                 if signals & (1 << signal) != 0 {
+                    inventory.signal(guardian, signal)?;
                     if matches!(signal, libc::SIGTERM | libc::SIGHUP) {
                         inventory.signal(guardian, libc::SIGCONT)?;
                     }
-                    inventory.signal(guardian, signal)?;
                     if matches!(signal, libc::SIGTERM | libc::SIGHUP) && terminating.is_none() {
                         terminating = Some(Instant::now());
                     }

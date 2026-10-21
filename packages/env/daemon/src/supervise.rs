@@ -403,17 +403,20 @@ fn pending(
     for signal in FORWARDED {
         if signals & (1u32 << signal) != 0 {
             let terminating = matches!(signal, libc::SIGTERM | libc::SIGHUP);
-            // Session owner loss terminates the cohort, as on Darwin. Legacy task HUP
-            // forwarding is unchanged outside a session.
+            let session = crate::job_control::enabled();
+            // Preserve legacy CONT-then-original-signal forwarding outside a session.
+            if terminating && !session {
+                send(pid, libc::SIGCONT)?;
+            }
             send(
                 pid,
-                if terminating && crate::job_control::enabled() {
+                if terminating && session {
                     libc::SIGTERM
                 } else {
                     signal
                 },
             )?;
-            if terminating {
+            if terminating && session {
                 before_continue()?;
                 send(pid, libc::SIGCONT)?;
             }
@@ -1622,6 +1625,59 @@ pub fn run(args: &[OsString]) -> i32 {
 mod tests {
     use super::*;
     use std::os::fd::{AsRawFd, IntoRawFd};
+
+    #[test]
+    fn non_session_hup_does_not_invoke_cohort_teardown() {
+        const FIXTURE: &str = "PI_TEST_NON_SESSION_HUP";
+        if std::env::var_os(FIXTURE).is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "supervise::tests::non_session_hup_does_not_invoke_cohort_teardown",
+                ])
+                .env(FIXTURE, "1")
+                .env_remove("PI_PROCESS_OWNER_PENDING")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        // Isolate SIGNALS from parallel unit tests. A real HUP-only child preserves its status.
+        assert!(!crate::job_control::enabled());
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "trap 'sleep 0.1; printf hup; exit 23' HUP; printf ready; while :; do sleep 0.02; done"])
+            .stdin(Stdio::null()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut output = child.stdout.take().unwrap();
+        let mut ready = [0; 5];
+        output.read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"ready");
+        SIGNALS.store(1 << libc::SIGHUP, Ordering::Relaxed);
+        let mut cohort_called = false;
+        pending(child.id() as i32, &mut None, Duration::from_secs(5), || {
+            cohort_called = true;
+            Ok(())
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("HUP handler did not exit");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let mut completed = String::new();
+        output.read_to_string(&mut completed).unwrap();
+        assert_eq!(completed, "hup");
+        assert_eq!(status.code(), Some(23));
+        assert!(
+            !cohort_called,
+            "non-session HUP invoked session cohort teardown"
+        );
+    }
 
     #[test]
     fn outer_cancel_peek_does_not_consume_guardian_kill_record() {
