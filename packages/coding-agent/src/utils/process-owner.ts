@@ -223,6 +223,43 @@ export function observeOwnedProcess(child: ChildProcess, onStartup?: () => void)
 	};
 }
 
+// Bootstrap precedes the full parser (which loads settings); skip its value-taking options.
+const VALUE_OPTIONS = new Set([
+	"--provider",
+	"--model",
+	"--api-key",
+	"--system-prompt",
+	"--append-system-prompt",
+	"--name",
+	"-n",
+	"--session",
+	"--session-id",
+	"--fork",
+	"--session-dir",
+	"--models",
+	"--tools",
+	"-t",
+	"--exclude-tools",
+	"-xt",
+	"--thinking",
+	"--export",
+	"--extension",
+	"-e",
+	"--skill",
+	"--prompt-template",
+	"--theme",
+]);
+
+function ownershipDisabled(args: string[]): boolean {
+	if (process.env.PI_NO_PROCESS_OWNERSHIP === "1") return true;
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] === "--") break;
+		if (args[i] === "--no-process-ownership") return true;
+		if (VALUE_OPTIONS.has(args[i])) i++;
+	}
+	return false;
+}
+
 /** Enter the shipped native owner before any CLI task or extension runs. */
 export function ownCliProcesses(): undefined | false {
 	const owner = process.env[OWNER_PID];
@@ -230,13 +267,23 @@ export function ownCliProcesses(): undefined | false {
 	delete process.env[OWNER_PID];
 	delete process.env[OWNER_PENDING];
 	delete process.env[OWNER_BINARY];
+	const cliArgs = process.argv.slice(2);
+	if (ownershipDisabled(cliArgs)) return;
 	if (pending) throw new Error("Process owner did not complete its startup handoff");
 	// Version-only startup cannot load extensions or run tasks.
-	const cliArgs = process.argv.slice(2);
 	if (cliArgs.length === 1 && (cliArgs[0] === "--version" || cliArgs[0] === "-v")) return;
 	// The guardian grants this one-shot handoff only to its immediate child.
 	if (process.ppid > 0 && owner === String(process.ppid)) {
 		process.env[OWNER_BINARY] = processOwnerBinary();
+		if (process.platform !== "win32") {
+			const parent = process.ppid;
+			const ownerWatch = setInterval(() => {
+				if (process.ppid === parent) return;
+				clearInterval(ownerWatch);
+				process.kill(process.pid, "SIGTERM");
+			}, 1_000);
+			ownerWatch.unref();
+		}
 		return;
 	}
 	if (

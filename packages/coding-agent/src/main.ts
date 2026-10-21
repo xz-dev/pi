@@ -965,7 +965,7 @@ export async function main(args: string[], options?: MainOptions) {
 		...startupSettingsDiagnostics,
 		...runtime.diagnostics,
 		// Interactive only: script runs (-p/json/rpc) must not get a per-run stderr line.
-		...(appMode === "interactive"
+		...(appMode === "interactive" && !args.noProcessOwnership && process.env.PI_NO_PROCESS_OWNERSHIP !== "1"
 			? macOSOwnershipDiagnostics({ offlineMode, quietStartup: settingsManager.getQuietStartup() })
 			: []),
 	]);

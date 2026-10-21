@@ -39,6 +39,7 @@ beforeEach(() => {
 	state.resource.mockReset();
 	state.access.mockReset();
 	execute.mockClear();
+	vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "");
 	vi.stubEnv("PI_PROCESS_OWNER_PID", "");
 	vi.stubEnv("PI_PROCESS_OWNER_PENDING", "");
 	vi.stubEnv("PI_PROCESS_OWNER_BINARY", "");
@@ -50,6 +51,7 @@ afterEach(() => {
 	Object.defineProperty(process, "platform", originalPlatform);
 	if (originalBunVersion) Object.defineProperty(process.versions, "bun", originalBunVersion);
 	else Reflect.deleteProperty(process.versions, "bun");
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
 });
@@ -84,6 +86,50 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 			expect(process.env.PI_PROCESS_OWNER_BINARY).toBe("/private/pi/dist/native/process-owner/pi-env");
 			expect(process.env.PI_PROCESS_OWNER_PID).toBeUndefined();
 			expect(process.env.PI_PROCESS_OWNER_PENDING).toBeUndefined();
+		});
+
+		it.each(["flag", "environment"])("disables ownership through %s before handoff validation", (mode) => {
+			process.argv = [process.execPath, "pi", ...(mode === "flag" ? ["--no-process-ownership"] : [])];
+			vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", mode === "environment" ? "1" : "");
+			vi.stubEnv("PI_PROCESS_OWNER_PENDING", "1");
+			vi.stubEnv("PI_PROCESS_OWNER_BINARY", "/inherited/helper");
+			ownCliProcesses();
+			expect(execute).not.toHaveBeenCalled();
+			expect(state.access).not.toHaveBeenCalled();
+			expect(process.env.PI_PROCESS_OWNER_BINARY).toBeUndefined();
+			expect(process.env.PI_PROCESS_OWNER_PENDING).toBeUndefined();
+			expect(ownedCommand("tool", [])).toEqual({ command: "tool", args: [], nativeOwner: false });
+		});
+
+		it.each(["--system-prompt", "--append-system-prompt", "--name", "--provider", "--extension", "-e"])(
+			"does not interpret %s's value as the opt-out switch",
+			(option) => {
+				process.argv = [process.execPath, "pi", option, "--no-process-ownership"];
+				expect(ownCliProcesses).toThrow(handoff);
+			},
+		);
+
+		it("does not interpret positional opt-out text after -- as a switch", () => {
+			process.argv = [process.execPath, "pi", "--", "--no-process-ownership"];
+			expect(ownCliProcesses).toThrow(handoff);
+		});
+
+		it("requests graceful shutdown once when its guardian disappears", () => {
+			vi.useFakeTimers();
+			const parent = process.ppid;
+			const descriptor = Object.getOwnPropertyDescriptor(process, "ppid")!;
+			const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+			vi.stubEnv("PI_PROCESS_OWNER_PID", String(parent));
+			try {
+				ownCliProcesses();
+				vi.advanceTimersByTime(1_000);
+				expect(kill).not.toHaveBeenCalled();
+				Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 });
+				vi.advanceTimersByTime(2_000);
+				expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, "SIGTERM");
+			} finally {
+				Object.defineProperty(process, "ppid", descriptor);
+			}
 		});
 
 		it("does not recursively restart with an incompatible owner binary", () => {

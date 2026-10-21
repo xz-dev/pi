@@ -238,6 +238,8 @@ See [Configuration](configuration.md) for saved configuration, [Security](securi
   Trusts project-local configuration and resources for this process.
 - `-na`, `--no-approve`<br>
   Ignores trust-gated project-local configuration and resources for this process.
+- `--no-process-ownership`<br>
+  Disables Pi's native session and per-task process-tree supervision. Use this only when an external sandbox or supervisor owns the subprocess lifecycle. Legacy cancellation remains available, but detached descendants may outlive Pi. The flag affects this invocation; `PI_NO_PROCESS_OWNERSHIP=1` also applies to nested Pi invocations through environment inheritance.
 - `--offline`<br>
   Disables automatic network activity, including model catalog refreshes. Equivalent to `PI_OFFLINE=1`.
 - `-h`, `--help`<br>
