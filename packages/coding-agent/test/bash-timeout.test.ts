@@ -30,9 +30,9 @@ it.skipIf(process.platform === "win32")("subtracts only running time and resumes
 		pauseBashTimeouts();
 		vi.advanceTimersByTime(30_000);
 		expect(expired).not.toHaveBeenCalled();
-		process.emit("SIGCONT");
+		resumeBashTimeouts();
 		vi.advanceTimersByTime(300);
-		process.emit("SIGCONT");
+		resumeBashTimeouts();
 		vi.advanceTimersByTime(299);
 		expect(expired).not.toHaveBeenCalled();
 		vi.advanceTimersByTime(1);
@@ -55,7 +55,7 @@ it.skipIf(process.platform === "win32")(
 			cancel();
 			vi.advanceTimersByTime(1_000);
 			expect(expired).not.toHaveBeenCalled();
-			process.emit("SIGCONT");
+			resumeBashTimeouts();
 			vi.advanceTimersByTime(100);
 			expect(expired).toHaveBeenCalledOnce();
 			expect(cancelled).not.toHaveBeenCalled();

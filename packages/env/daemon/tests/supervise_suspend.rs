@@ -1,6 +1,8 @@
 #![cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 
 use std::fs;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -57,9 +59,14 @@ fn primary_fixture() {
 struct Fixture {
     child: Child,
     root: PathBuf,
+    lease: Option<UnixStream>,
+    peer: Child,
 }
 impl Fixture {
     fn start() -> Self {
+        Self::start_inner(false)
+    }
+    fn start_inner(with_lease: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "pi-suspend-{}-{}",
             std::process::id(),
@@ -69,8 +76,24 @@ impl Fixture {
                 .as_nanos()
         ));
         fs::create_dir(&root).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_pi-env"))
-            .args(["supervise", "--"])
+        let streams = with_lease.then(|| UnixStream::pair().unwrap());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pi-env"));
+        command.arg("supervise");
+        if let Some((_, passed)) = &streams {
+            let fd = passed.as_raw_fd();
+            command.args(["--control-fd", &fd.to_string()]);
+            unsafe {
+                command.pre_exec(move || {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let child = command
+            .arg("--")
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", "primary_fixture"])
             .env("PI_PROCESS_OWNER_PENDING", "1")
@@ -81,7 +104,17 @@ impl Fixture {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
-        let fixture = Self { child, root };
+        let lease = streams.map(|(lease, passed)| {
+            drop(passed);
+            lease
+        });
+        let peer = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let fixture = Self {
+            child,
+            root,
+            lease,
+            peer,
+        };
         wait_for(|| fixture.root.join("heartbeat-pid").exists() && fixture.tick().is_some());
         fixture
     }
@@ -125,6 +158,8 @@ impl Drop for Fixture {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        let _ = self.peer.kill();
+        let _ = self.peer.wait();
         let _ = fs::remove_dir_all(&self.root);
     }
 }
@@ -155,6 +190,7 @@ fn repeated_suspend_resume_freezes_setsid_grandchild() {
     let fixture = Fixture::start();
     for _ in 0..5 {
         fixture.pause();
+        assert!(!state(fixture.peer.id() as i32).starts_with('T'));
         let stopped = fixture.tick();
         thread::sleep(Duration::from_millis(70));
         assert_eq!(fixture.tick(), stopped);
@@ -167,6 +203,19 @@ fn repeated_suspend_resume_freezes_setsid_grandchild() {
     }
     fixture.resume();
     assert!(!state(fixture.pid("primary-pid")).starts_with('T'));
+}
+
+#[test]
+fn lease_eof_while_paused_cleans_descendants_before_fg() {
+    let mut fixture = Fixture::start_inner(true);
+    fixture.pause();
+    drop(fixture.lease.take());
+    wait_for(|| {
+        let state = state(fixture.pid("heartbeat-pid"));
+        state.is_empty() || state.starts_with('Z')
+    });
+    fixture.group_signal(libc::SIGCONT);
+    wait_for(|| fixture.child.try_wait().unwrap().is_some());
 }
 
 #[test]
