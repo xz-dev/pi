@@ -4,6 +4,7 @@ import { constants as osConstants } from "node:os";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
+import { bashTimeout } from "../../utils/bash-timeout.ts";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { observeOwnedProcess, ownedCommand } from "../../utils/process-owner.ts";
 import {
@@ -138,7 +139,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			let exited = false;
 			let aborted = false;
 			let timedOut = false;
-			let timeoutHandle: NodeJS.Timeout | undefined;
+			let clearTaskTimeout: (() => void) | undefined;
 			const stop = () => {
 				if (exited) return;
 				if (owner) {
@@ -153,7 +154,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			const retire = () => {
 				exited = true;
 				if (child.pid) untrackDetachedChildPid(child.pid);
-				if (timeoutHandle) clearTimeout(timeoutHandle);
+				clearTaskTimeout?.();
 				signal?.removeEventListener("abort", onAbort);
 			};
 			if (child.pid) trackDetachedChildPid(child.pid, stop);
@@ -162,7 +163,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			try {
 				// Set timeout if provided.
 				if (timeoutMs !== undefined) {
-					timeoutHandle = setTimeout(() => {
+					clearTaskTimeout = bashTimeout(() => {
 						if (exited) return;
 						timedOut = true;
 						stop();
