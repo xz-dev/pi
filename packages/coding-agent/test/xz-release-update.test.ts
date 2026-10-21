@@ -31,7 +31,7 @@ const EXECUTABLE_BYTES = new TextEncoder().encode(EXECUTABLE_TEXT);
 const EXECUTABLE_SHA256 = createHash("sha256").update(EXECUTABLE_BYTES).digest("hex");
 
 /** Release ZIP shape produced by scripts/lib/github-release.mjs: one deflated 0755 entry. */
-function releaseZip(entryName: string, body: Uint8Array): Uint8Array {
+function releaseZip(entryName: string, body: Uint8Array): Uint8Array<ArrayBuffer> {
 	const name = Buffer.from(entryName);
 	const data = deflateRawSync(body);
 	const checksum = crc32(body);
@@ -103,7 +103,10 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
 	};
 }
 
-function discoveryFiles(value: Record<string, unknown> = manifest()): { manifestBytes: Uint8Array; sums: string } {
+function discoveryFiles(value: Record<string, unknown> = manifest()): {
+	manifestBytes: Uint8Array<ArrayBuffer>;
+	sums: string;
+} {
 	const manifestBytes = new TextEncoder().encode(JSON.stringify(value));
 	const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
 	return {
@@ -157,7 +160,7 @@ function writeSingleInstall(oldBytes = "old-pi-binary\n"): string {
 	return root;
 }
 
-function fullFetch(assetBody: Uint8Array | string = ASSET_BYTES) {
+function fullFetch(assetBody: Uint8Array<ArrayBuffer> | string = ASSET_BYTES) {
 	const { manifestBytes, sums } = discoveryFiles();
 	return vi.fn(async (input: string | URL, _init?: RequestInit) => {
 		const url = String(input);
