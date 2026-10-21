@@ -188,21 +188,49 @@ fn wait_for(mut predicate: impl FnMut() -> bool) {
 #[test]
 fn repeated_suspend_resume_freezes_setsid_grandchild() {
     let fixture = Fixture::start();
+    let primary = fixture.pid("primary-pid");
+    let guardian = String::from_utf8(
+        Command::new("ps")
+            .args(["-o", "ppid=", "-p", &primary.to_string()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse::<i32>()
+    .unwrap();
+    let processes = [
+        fixture.child.id() as i32,
+        guardian,
+        primary,
+        fixture.pid("heartbeat-pid"),
+    ];
     for _ in 0..5 {
         fixture.pause();
+        wait_for(|| state(fixture.child.id() as i32).starts_with('T'));
+        assert!(!state(guardian).starts_with('T'));
         assert!(!state(fixture.peer.id() as i32).starts_with('T'));
         let stopped = fixture.tick();
         thread::sleep(Duration::from_millis(70));
         assert_eq!(fixture.tick(), stopped);
         fixture.resume();
     }
-    // A quick fg must not leave a delayed guardian STOP after resume.
-    for _ in 0..20 {
+    // The final CONT in these pairs is the only resume in the asserted path.
+    // A repair CONT here would hide a stranded outer even if the heartbeat runs.
+    for _ in 0..100 {
         fixture.group_signal(libc::SIGTSTP);
         fixture.group_signal(libc::SIGCONT);
     }
-    fixture.resume();
-    assert!(!state(fixture.pid("primary-pid")).starts_with('T'));
+    let tick = fixture.tick();
+    wait_for(|| fixture.tick().is_some() && fixture.tick() != tick);
+    wait_for(|| {
+        processes.iter().all(|pid| {
+            let value = state(*pid);
+            !value.is_empty() && !value.starts_with(['T', 't', 'Z', 'X'])
+        })
+    });
+    assert!(!state(fixture.peer.id() as i32).starts_with('T'));
 }
 
 #[test]

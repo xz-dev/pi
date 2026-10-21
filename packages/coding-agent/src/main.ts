@@ -977,7 +977,7 @@ export async function main(args: string[], options?: MainOptions) {
 	startupDiagnostics = deduplicateDiagnostics([
 		...startupDiagnostics,
 		// Interactive only: script runs (-p/json/rpc) must not get a per-run stderr line.
-		...(appMode === "interactive" && !args.noProcessOwnership && process.env.PI_NO_PROCESS_OWNERSHIP !== "1"
+		...(appMode === "interactive" && !parsed.noProcessOwnership && process.env.PI_NO_PROCESS_OWNERSHIP !== "1"
 			? macOSOwnershipDiagnostics({ offlineMode, quietStartup: settingsManager.getQuietStartup() })
 			: []),
 	]);
