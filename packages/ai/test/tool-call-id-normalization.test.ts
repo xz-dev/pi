@@ -35,17 +35,17 @@ const echoTool: Tool<typeof echoToolSchema> = {
 /**
  * Test 1: Live cross-provider handoff
  *
- * 1. Use github-copilot gpt-6-luna to generate a tool call
+ * 1. Use github-copilot gpt-6-luna and gpt-5.6-sol to generate tool calls
  * 2. Switch to openrouter openai/gpt-5.5 and complete
  * 3. Switch to openai-codex gpt-6.1-sol and complete
  *
  * Both should succeed without "call_id too long" errors.
  */
 describe("Tool Call ID Normalization - Live Handoff", () => {
-	it.skipIf(!copilotToken || !openrouterKey)(
-		"github-copilot -> openrouter should normalize pipe-separated IDs",
-		async () => {
-			const copilotModel = getModel("github-copilot", "gpt-6-luna");
+	it.skipIf(!copilotToken || !openrouterKey).each(["gpt-6-luna", "gpt-5.6-sol"] as const)(
+		"github-copilot %s -> openrouter should normalize pipe-separated IDs",
+		async (modelId) => {
+			const copilotModel = getModel("github-copilot", modelId);
 			const openrouterModel = getModel("openrouter", "openai/gpt-5.5");
 
 			// Step 1: Generate tool call with github-copilot
@@ -112,10 +112,10 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 		60000,
 	);
 
-	it.skipIf(!copilotToken || !codexToken)(
-		"github-copilot -> openai-codex should normalize pipe-separated IDs",
-		async () => {
-			const copilotModel = getModel("github-copilot", "gpt-6-luna");
+	it.skipIf(!copilotToken || !codexToken).each(["gpt-6-luna", "gpt-5.6-sol"] as const)(
+		"github-copilot %s -> openai-codex should normalize pipe-separated IDs",
+		async (modelId) => {
+			const copilotModel = getModel("github-copilot", modelId);
 			const codexModel = getModel("openai-codex", "gpt-6.1-sol");
 
 			// Step 1: Generate tool call with github-copilot
