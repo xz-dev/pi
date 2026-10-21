@@ -113,6 +113,42 @@ Every Release candidate is checked on all 14 targets before publication. CI crea
 - **macOS:** the fast `setsid` escape is reported as a separate, labelled known limitation.
 - **Windows:** additionally runs a 39-test owner suite under both Node and the bundled Bun. It covers job cleanup, console and ConPTY `Ctrl+C`, Chord attach checks and failure handling at each startup step.
 
+### Unix paused-owner acceptance
+
+The release gate also runs the actual staged executable interactively in a fresh native PTY, under that same dedicated account. It does not pre-stop print mode or substitute the host Bun for the artifact's runtime.
+
+| Row | Input and required result |
+| --- | --- |
+| `suspend-resume` | Send real `Ctrl-Z`, observe Pi, shell-facing outer, task controllers and payload stopped with an advancing heartbeat now stable. Guardian stays runnable. Simulate shell `fg`, observe resumed work, then `Ctrl-D` and complete cleanup. |
+| `paused-guardian-death` | While paused, kill Pi's verified parent guardian. All owned processes must exit automatically within 8 seconds. No user or harness rescue `CONT`. |
+| `paused-both-owners-death` | While paused, kill both verified session owners: harness child outer and Pi's parent guardian. Same complete teardown bound, with no `fg` fallback. |
+| `paused-observer-death` (macOS) | Kill the verified session wake observer while paused. Same full, automatic teardown requirement; partial supervision is a failure. |
+
+Every fault row keeps an unowned sibling stopped in the *same foreground job group*. That peer must survive without a `CONT` or heartbeat advancement. The harness returns terminal foreground to its shell but never writes terminal modes: `ISIG`, `ICANON` and `ECHO` must match the originally cooked terminal after product teardown. States, PID birth identities, ancestry, fault targets, terminal flags and heartbeat counts are recorded, not inferred from a passed label. A stopped survivor or absent observation fails aggregation. Linux non-direct fault signals require validated pidfds, with no numeric-PID fallback; FreeBSD and macOS use birth-checked identities.
+
+On macOS, startup must show exactly guardian plus one native observer as outer's direct children. The observer must remain runnable outside the frozen job groups, and disappear without an adopted zombie on normal completion and every fault case. This does not change the fast-escape limitation above.
+
+### CI fixture staging and local checks
+
+`packages/env/daemon/examples/owner-pty.rs` only includes the CI source in `scripts/fixtures/owner/pty.rs`. The fixture reuses the locked daemon manifest's libc/JSON dependencies and the official Pi Durable `pty.rs` openpty/setsid mechanism. That module's private PTY interface does not expose terminal modes or a shell-owned same-group peer, so direct reuse of its API cannot supply these assertions. No new dependency, production mode or shipped helper is added.
+
+```bash
+# Use an isolated build directory, outside the source checkout.
+CARGO_TARGET_DIR=/var/tmp/pi-owner-pty-target \
+  node scripts/build-owner-pty.mjs linux-x64-gnu-baseline /var/tmp/pi-owner-pty/owner-pty
+PI_OWNER_PTY_HARNESS=/var/tmp/pi-owner-pty/owner-pty \
+  node scripts/smoke-owner-lifecycle.mjs /absolute/path/to/staged/pi linux-x64-gnu-baseline /var/tmp/owner-evidence.json
+```
+
+The build script selects the existing pinned daemon toolchain and authoritative target triple; local builds never install toolchains. FreeBSD arm64 retains its existing explicitly recorded packaged-Rust exception. Release workflow staging is:
+
+- Linux GNU and macOS: build the matching example, upload private `owner-pty-<commit>-<target>` CI artifact, download in acceptance, then copy it alongside the CLI into the dedicated user's scratch directory.
+- Linux musl: build the matching musl example, download it, mount it read-only at `/owner-pty`, and pass `PI_OWNER_PTY_HARNESS=/owner-pty/owner-pty` into the existing pinned native-musl container. The nonadmin child receives its own copied executable.
+- FreeBSD: build and execute the fixture inside each matching FreeBSD guest. Keep the fixture as a separate private CI artifact. Failure diagnostics remain separate from release acceptance records.
+- Windows: no Unix fixture; existing Node and artifact-matched Bun 39/39 gates and opt-out remain required.
+
+The fixture is not a public release asset or attestation subject. `binary-acceptance.json` binds every PTY row to the target and CLI hash and requires the artifact's reported Bun version to agree across owner rows. Synthetic Node proof fixtures and Cargo self-tests validate the harness/assertions only. They do **not** prove a product candidate passes these cases. Actual GNU/musl, FreeBSD and macOS nonadmin release-artifact runs, plus the unchanged Windows matrix, remain mandatory before release.
+
 ## Limits
 
 - macOS cleanup is best effort, as described above.
