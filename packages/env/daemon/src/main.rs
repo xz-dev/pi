@@ -6,6 +6,8 @@ mod errors;
 mod exec;
 mod frame;
 mod fs;
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+mod job_control;
 mod list;
 mod output;
 mod pty;
