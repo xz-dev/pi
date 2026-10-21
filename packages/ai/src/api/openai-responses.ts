@@ -18,11 +18,17 @@ import type {
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic, createAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
+import {
+	AssistantMessageEventStream,
+	emitTransport,
+	probeTransportLabel,
+	transportLabel,
+} from "../utils/event-stream.ts";
 import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
+import { createRequestCompressionFetch, getRequestCompressionEncoding } from "../utils/request-compression.ts";
 import { getDeclaredTools, normalizeContext, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -294,7 +300,10 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				normalizedContext,
 				apiKey,
 				options?.headers,
-				options?.fetch,
+				options?.fetch ??
+					createRequestCompressionFetch(undefined, (encoding) =>
+						emitTransport(options?.onTransport, probeTransportLabel("SSE", encoding), model),
+					),
 				cacheSessionId,
 			);
 			let params = buildParams(
@@ -647,7 +656,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const reportSseOnce = async () => {
 				if (sseReported) return;
 				sseReported = true;
-				await emitTransport(options?.onTransport, "SSE", model);
+				await emitTransport(
+					options?.onTransport,
+					transportLabel("SSE", getRequestCompressionEncoding(response)),
+					model,
+				);
 			};
 			if (response.body && isSseMediaType(response.headers.get("content-type"))) {
 				await reportSseOnce();
