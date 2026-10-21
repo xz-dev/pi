@@ -6,7 +6,6 @@ let suspended = false;
 export function resumeBashTimeouts(): void {
 	if (!suspended) return;
 	suspended = false;
-	process.removeListener("SIGCONT", resumeBashTimeouts);
 	for (const timer of timeouts) timer.resume();
 }
 
@@ -14,7 +13,6 @@ export function pauseBashTimeouts(): void {
 	if (suspended || process.platform === "win32") return;
 	suspended = true;
 	for (const timer of timeouts) timer.pause();
-	process.once("SIGCONT", resumeBashTimeouts);
 }
 
 export function bashTimeout(callback: () => void, milliseconds: number): () => void {

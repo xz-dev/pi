@@ -69,20 +69,24 @@ impl State {
             self.paused = target;
         }
     }
-    pub(super) fn update(
-        &mut self,
-        mut apply: impl FnMut(bool) -> io::Result<()>,
-    ) -> io::Result<()> {
+    pub(super) fn update(&mut self, apply: impl FnMut(bool) -> io::Result<()>) -> io::Result<()> {
         if !enabled() {
             return Ok(());
         }
-        if !PAUSE.load(Ordering::SeqCst) {
+        self.update_requested(&PAUSE, apply)
+    }
+    fn update_requested(
+        &mut self,
+        wanted: &AtomicBool,
+        mut apply: impl FnMut(bool) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if !wanted.load(Ordering::SeqCst) {
             self.disabled = false;
         }
         if self.disabled {
             return Ok(());
         }
-        if let Err(error) = self.settle(&PAUSE, &mut apply) {
+        if let Err(error) = self.settle(wanted, &mut apply) {
             // A failed freeze may have stopped some processes. Always undo it first.
             apply(false)?;
             self.paused = false;
@@ -114,7 +118,6 @@ mod platform {
         identity: Identity,
         parent: i32,
         group: i32,
-        state: u8,
     }
     fn record(pid: i32) -> io::Result<Record> {
         let text = fs::read_to_string(format!("/proc/{pid}/stat"))?;
@@ -142,10 +145,6 @@ mod platform {
                 .ok_or_else(invalid)?
                 .parse()
                 .map_err(|_| invalid())?,
-            state: *fields
-                .first()
-                .and_then(|s| s.as_bytes().first())
-                .ok_or_else(invalid)?,
         })
     }
     fn gone(error: &io::Error) -> bool {
@@ -187,6 +186,23 @@ mod platform {
         }
         Ok(pid == root)
     }
+    fn stopped(pid: i32) -> io::Result<bool> {
+        for task in fs::read_dir(format!("/proc/{pid}/task"))? {
+            let text = match fs::read_to_string(task?.path().join("stat")) {
+                Ok(text) => text,
+                Err(e) if gone(&e) => continue,
+                Err(e) => return Err(e),
+            };
+            let (_, fields) = text
+                .rsplit_once(") ")
+                .ok_or_else(|| io::Error::other("invalid task stat"))?;
+            if !matches!(fields.as_bytes().first(), Some(b'T' | b't' | b'Z')) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn children(pid: i32) -> io::Result<Vec<i32>> {
         let mut result = Vec::new();
         for task in fs::read_dir(format!("/proc/{pid}/task"))? {
@@ -221,8 +237,8 @@ mod platform {
             // Probe both syscalls before stopping anything (older kernels / seccomp).
             signal(&open(root)?, 0)?;
             let mut visited = HashSet::new();
-            let mut queue = vec![root];
-            while let Some(pid) = queue.pop() {
+            let mut queue: Vec<(i32, Option<Identity>)> = vec![(root, None)];
+            while let Some((pid, parent)) = queue.pop() {
                 if !PAUSE.load(Ordering::SeqCst) {
                     break;
                 }
@@ -234,6 +250,16 @@ mod platform {
                     Err(e) if gone(&e) => continue,
                     Err(e) => return Err(e),
                 };
+                if let Some(parent) = parent {
+                    let held = match record(parent.pid) {
+                        Ok(held) => held.identity == parent,
+                        Err(e) if gone(&e) => false,
+                        Err(e) => return Err(e),
+                    };
+                    if !held || p.parent != parent.pid {
+                        continue;
+                    }
+                }
                 if pid != root && p.group != group {
                     let fd = match open(pid) {
                         Ok(fd) => fd,
@@ -246,7 +272,10 @@ mod platform {
                         Err(e) if gone(&e) => continue,
                         Err(e) => return Err(e),
                     };
-                    if current.identity != p.identity || !owned(pid, root)? {
+                    if current.identity != p.identity
+                        || current.parent != p.parent
+                        || !owned(pid, root)?
+                    {
                         continue;
                     }
                     signal(&fd, libc::SIGSTOP)?;
@@ -258,8 +287,8 @@ mod platform {
                     let deadline =
                         std::time::Instant::now() + std::time::Duration::from_millis(250);
                     while PAUSE.load(Ordering::SeqCst) {
-                        match record(pid) {
-                            Ok(p) if matches!(p.state, b'T' | b't' | b'Z') => break,
+                        match stopped(pid) {
+                            Ok(true) => break,
                             Err(e) if gone(&e) => break,
                             Err(e) => return Err(e),
                             _ => {}
@@ -271,7 +300,9 @@ mod platform {
                     }
                 }
                 match children(pid) {
-                    Ok(pids) => queue.extend(pids),
+                    Ok(pids) => {
+                        queue.extend(pids.into_iter().map(|child| (child, Some(p.identity))))
+                    }
                     Err(e) if gone(&e) => {}
                     Err(e) => return Err(e),
                 }
@@ -299,7 +330,7 @@ mod platform {
 mod platform {
     use super::*;
     #[derive(Default)]
-    pub(crate) struct Targets;
+    pub(crate) struct Targets {}
     impl Targets {
         pub(crate) fn apply(&mut self, paused: bool) -> io::Result<()> {
             #[repr(C)]
@@ -352,6 +383,34 @@ pub(super) use platform::Targets;
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+    #[test]
+    fn unavailable_freeze_rolls_back_partial_work_once_per_pause() {
+        let wanted = AtomicBool::new(true);
+        let mut state = State::default();
+        let mut operations = Vec::new();
+        state
+            .update_requested(&wanted, |paused| {
+                operations.push(paused);
+                if paused {
+                    Err(io::Error::from_raw_os_error(libc::ENOSYS))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+        assert_eq!(operations, [true, false]);
+        assert!(!state.paused);
+        assert!(state.disabled && state.warned);
+        state
+            .update_requested(&wanted, |_| {
+                panic!("must not retry an unsupported freeze in this pause")
+            })
+            .unwrap();
+        wanted.store(false, Ordering::SeqCst);
+        state.update_requested(&wanted, |_| Ok(())).unwrap();
+        assert!(!state.disabled);
+    }
+
     #[test]
     fn resume_received_mid_freeze_settles_to_running() {
         let wanted = Arc::new(AtomicBool::new(true));

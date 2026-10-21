@@ -343,6 +343,8 @@ fn command(
             && (requested || cancelled || !alive(&mut lease.read, &mut unused)?)
         {
             // This tick's final snapshot precedes every parent termination signal.
+            // The outer may die while stopped; wake the payload before its TERM handler.
+            inventory.signal_all(libc::SIGCONT)?;
             inventory.signal_all(libc::SIGTERM)?;
             terminating = Some(Instant::now());
         }

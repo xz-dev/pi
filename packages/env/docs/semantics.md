@@ -59,6 +59,23 @@ env conformance suite and `test/differential.test.ts` check each rule below.
 - Spill: once the output crosses `spill.afterBytes` or `spill.afterLines` (counted over raw chunks in arrival order, as
   Node counts), the complete raw output goes to `pi-output-<uuid>.log` in a fresh `tmp-` directory.
 
+## Local CLI ownership and job control
+
+The CLI uses native session and per-task owners by default. `--no-process-ownership` skips those owners for the
+current invocation; `PI_NO_PROCESS_OWNERSHIP=1` also reaches nested Pi invocations. Legacy cancellation remains,
+but native descendant-containment guarantees no longer apply. The macOS ownership hint is suppressed when disabled.
+
+On Unix, `Ctrl-Z` stops the shell-facing owner and Pi, while the guardian stays runnable and freezes owned local
+tool trees. `fg` resumes them; `setsid` isolation is preserved. Linux uses identity-validated pidfds for non-direct
+descendants (Linux 5.3+); unavailable pidfds disable only freezing with a visible warning. FreeBSD signals the
+kernel reaper subtree, including nested reapers. macOS uses its existing best-effort inventory.
+
+Resume requests received during a freeze pass are reconciled before the pass settles. Teardown resumes stopped
+payloads before TERM and retains bounded KILL escalation; Unix guardians reap adopted zombies without consuming
+the primary child's status. Pi also requests graceful shutdown when its immediate Unix owner disappears.
+Interactive Ctrl-Z pauses shell timeout budgets; external signals, print/JSON/RPC shell deadlines and MCP request
+deadlines may still count suspended time. Windows job-control behavior is unchanged.
+
 ## Local CLI process ownership on macOS
 
 The CLI's native `pi-env supervise` owner uses a best-effort sweep on macOS, not kernel-enforced descendant

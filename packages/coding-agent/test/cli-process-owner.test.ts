@@ -93,11 +93,13 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 			vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", mode === "environment" ? "1" : "");
 			vi.stubEnv("PI_PROCESS_OWNER_PENDING", "1");
 			vi.stubEnv("PI_PROCESS_OWNER_BINARY", "/inherited/helper");
+			vi.stubEnv("PI_PROCESS_OWNER_TEST_FAULT", "inherited");
 			ownCliProcesses();
 			expect(execute).not.toHaveBeenCalled();
 			expect(state.access).not.toHaveBeenCalled();
 			expect(process.env.PI_PROCESS_OWNER_BINARY).toBeUndefined();
 			expect(process.env.PI_PROCESS_OWNER_PENDING).toBeUndefined();
+			expect(process.env.PI_PROCESS_OWNER_TEST_FAULT).toBeUndefined();
 			expect(ownedCommand("tool", [])).toEqual({ command: "tool", args: [], nativeOwner: false });
 		});
 

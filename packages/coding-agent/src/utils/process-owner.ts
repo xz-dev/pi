@@ -268,7 +268,12 @@ export function ownCliProcesses(): undefined | false {
 	delete process.env[OWNER_PENDING];
 	delete process.env[OWNER_BINARY];
 	const cliArgs = process.argv.slice(2);
-	if (ownershipDisabled(cliArgs)) return;
+	if (ownershipDisabled(cliArgs)) {
+		for (const key of Object.keys(process.env)) {
+			if (key.startsWith("PI_PROCESS_OWNER_")) delete process.env[key];
+		}
+		return;
+	}
 	if (pending) throw new Error("Process owner did not complete its startup handoff");
 	// Version-only startup cannot load extensions or run tasks.
 	if (cliArgs.length === 1 && (cliArgs[0] === "--version" || cliArgs[0] === "-v")) return;
