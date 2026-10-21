@@ -270,19 +270,21 @@ export function responseOutputItemsCapturable(
 			if (status !== undefined && status !== "completed") return false;
 			return canonicalJson(content) === canonicalJson(encodedItems[index]);
 		}
-		return canonicalJson(withoutOutputTextLogprobs(record)) === canonicalJson(encodedItems[index]);
+		return canonicalJson(normalizeOutputText(record)) === canonicalJson(normalizeOutputText(encodedItems[index]));
 	});
 }
 
-/** output_text logprobs are response metadata the next-turn input never carries. */
-function withoutOutputTextLogprobs(record: Record<string, unknown>): Record<string, unknown> {
+/** Ignore logprobs metadata and equate omitted annotations with the SDK's empty list. */
+function normalizeOutputText(value: unknown): unknown {
+	if (!value || typeof value !== "object") return value;
+	const record = value as Record<string, unknown>;
 	if (record.type !== "message" || !Array.isArray(record.content)) return record;
 	return {
 		...record,
 		content: record.content.map((part) => {
 			if (!part || typeof part !== "object" || (part as { type?: unknown }).type !== "output_text") return part;
 			const { logprobs: _logprobs, ...rest } = part as Record<string, unknown>;
-			return rest;
+			return rest.annotations === undefined ? { ...rest, annotations: [] } : rest;
 		}),
 	};
 }
