@@ -44,7 +44,7 @@ import {
 } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.ts";
+import { encodeToolCallArguments, parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
@@ -486,7 +486,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 							});
 						}
 					} else {
-						Object.assign(block, parseToolCallArguments(block.partialArgs));
+						Object.assign(block, parseToolCallArguments(block.partialArgs, { keepJson: true }));
 					}
 					// Finalize in-place and strip the scratch buffers so replay only
 					// carries parsed arguments.
@@ -1413,7 +1413,7 @@ export function convertMessages(
 						type: "function",
 						function: {
 							name: tc.name,
-							arguments: JSON.stringify(tc.arguments),
+							arguments: encodeToolCallArguments(tc),
 						},
 					};
 				});
