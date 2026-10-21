@@ -132,6 +132,15 @@ function thinkingBudgetsSettings(options?: TSchemaOptions) {
 
 const ThinkingBudgetsSettingsSchema = thinkingBudgetsSettings();
 
+const ModelCatalogSettingsSchema = Type.Object({
+	refreshTimeoutMs: Type.Optional(
+		Type.Number({
+			description: "Model catalog refresh timeout in milliseconds; negative disables, zero aborts immediately.",
+			default: SETTINGS_DEFAULTS.models.refreshTimeoutMs,
+		}),
+	),
+});
+
 const MarkdownSettingsSchema = Type.Object({
 	codeBlockIndent: Type.Optional(Type.String({ default: SETTINGS_DEFAULTS.markdown.codeBlockIndent })),
 	mermaid: Type.Optional(
@@ -399,6 +408,7 @@ export const SettingsSchema = Type.Object(
 				description: 'HTTP header or body idle timeout in milliseconds; 0 or "disabled" disables it.',
 			}),
 		),
+		models: Type.Optional(ModelCatalogSettingsSchema),
 		cacheWarming: Type.Optional(
 			Type.Union([Type.Literal("off"), Type.Literal("streaming"), Type.Literal("idle")], {
 				description:
@@ -464,6 +474,7 @@ export interface TerminalSettings extends Static<typeof TerminalSettingsSchema> 
 export interface ImageSettings extends Static<typeof ImageSettingsSchema> {}
 export interface ThinkingBudgetsSettings extends Static<typeof ThinkingBudgetsSettingsSchema> {}
 export type MermaidRenderingMode = NonNullable<Static<typeof MarkdownSettingsSchema>["mermaid"]>;
+export interface ModelCatalogSettings extends Static<typeof ModelCatalogSettingsSchema> {}
 export interface MarkdownSettings extends Static<typeof MarkdownSettingsSchema> {}
 export interface WarningSettings extends Static<typeof WarningSettingsSchema> {}
 export type CodemodeMode = Static<typeof CodemodeModeSchema>;
