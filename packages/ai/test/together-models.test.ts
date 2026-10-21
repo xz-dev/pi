@@ -70,6 +70,11 @@ describe("Together models", () => {
 			supportsReasoningEffort: true,
 			thinkingFormat: "together",
 		});
+
+		const minimax = getModel("together", "MiniMaxAI/MiniMax-M3");
+		expect(minimax.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null });
+		expect(minimax.compat?.thinkingFormat).toBe("together");
+		expect(minimax.compat?.supportsReasoningEffort).toBe(false);
 	});
 
 	it("resolves TOGETHER_API_KEY from the environment", () => {
