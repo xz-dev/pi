@@ -102,7 +102,9 @@ async function captureRequest(
 		return completedResponse();
 	});
 
-	const result = await xaiProvider().stream(model, normalizeContext(context), options).result();
+	const result = await xaiProvider()
+		.stream(model, normalizeContext(context), { transport: "sse", ...options })
+		.result();
 	expect(result.stopReason, result.errorMessage).toBe("stop");
 	expect(captured).toBeDefined();
 	return captured!;
@@ -273,7 +275,7 @@ describe("xAI Responses provider", () => {
 		const result = await streamOpenAIResponses(
 			openaiModel,
 			normalizeContext({ messages: [{ role: "user", content: "hello", timestamp: 1 }] }),
-			{ apiKey: "test-token" },
+			{ apiKey: "test-token", transport: "sse" },
 		).result();
 
 		expect(result.stopReason, result.errorMessage).toBe("stop");
