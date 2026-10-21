@@ -364,14 +364,22 @@ for (const [field, mutate] of [
   });
 }
 
-for (const [label, env, pattern] of [
+for (const [label, env, pattern, version = VERSION] of [
   ["a later run attempt (re-run failed jobs)", { ...ENV, GITHUB_RUN_ATTEMPT: "2" }, /GitHub must be called/],
-  ["an earlier run attempt", { ...ENV, GITHUB_RUN_ATTEMPT: "0" }, /does not match this workflow run/],
+  ["an invalid run attempt", { ...ENV, GITHUB_RUN_ATTEMPT: "0" }, /does not match this workflow run/],
   ["another run number", { ...ENV, GITHUB_RUN_NUMBER: "124", GITHUB_RUN_ATTEMPT: "2" }, /does not match this workflow run/],
+  // Versions are attempt-independent; an attempt-specific field means a stale builder.
+  ["a non-fixed attempt field", { ...ENV, GITHUB_RUN_ATTEMPT: "2" }, /does not match this workflow run/, "0.82.1-xz.123.2.gaaaaaaaa"],
 ]) {
-  test(`manifest from attempt 1 checked against ${label}`, async () => {
+  test(`manifest ${version} checked against ${label}`, async () => {
     const candidate = fixture();
     try {
+      if (version !== VERSION) {
+        const manifest = JSON.parse(readFileSync(candidate.manifestPath, "utf8"));
+        manifest.distributionVersion = version;
+        manifest.tag = `xz-v${version}`;
+        writeFileSync(candidate.manifestPath, `${JSON.stringify(manifest)}\n`);
+      }
       await assert.rejects(
         () =>
           withFetch(

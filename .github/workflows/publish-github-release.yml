@@ -97,7 +97,7 @@ jobs:
         env: { NODE_ENV: production }
         run: |
           set -euo pipefail
-          version=$(node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.GITHUB_SHA.slice(0, 8)')
+          version=$(node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + ".1.g" + process.env.GITHUB_SHA.slice(0, 8)')
           args=(--skip-install --skip-deps --skip-build --platform '${{ matrix.id }}' --out "$RUNNER_TEMP/target" --distribution-version "$version")
           if [[ '${{ matrix.id }}' == windows-* ]]; then args+=(--hydrate-target-deps); fi
           if [[ '${{ matrix.id }}' == *-musl* ]]; then args+=(--clipboard-musl-dir "$RUNNER_TEMP/clipboard-musl"); fi

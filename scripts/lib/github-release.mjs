@@ -90,11 +90,15 @@ export function sha256File(path) {
 	return hash.digest("hex");
 }
 
+// The attempt field is fixed at 1: "re-run failed jobs" gives only the rerun jobs a new
+// GITHUB_RUN_ATTEMPT, and every target of one run must embed the same version. The field
+// stays because released clients parse <api>-xz.<run>.<n>.g<sha8>.
+export const DISTRIBUTION_ATTEMPT_FIELD = "1";
+
 export function forkDistributionVersion(baseVersion, env = process.env) {
 	const runNumber = env.GITHUB_RUN_NUMBER ?? "0";
-	const runAttempt = env.GITHUB_RUN_ATTEMPT ?? "1";
-	if (!/^\d+$/.test(runNumber) || !/^\d+$/.test(runAttempt)) {
-		throw new Error("GITHUB_RUN_NUMBER and GITHUB_RUN_ATTEMPT must be decimal integers");
+	if (!/^\d+$/.test(runNumber)) {
+		throw new Error("GITHUB_RUN_NUMBER must be a decimal integer");
 	}
 	let sha = env.GITHUB_SHA;
 	if (!sha) {
@@ -103,7 +107,7 @@ export function forkDistributionVersion(baseVersion, env = process.env) {
 	if (!/^[0-9a-f]{8,40}$/i.test(sha)) {
 		throw new Error("GITHUB_SHA or checked-out HEAD must be a hexadecimal commit SHA");
 	}
-	return `${baseVersion}-xz.${runNumber}.${runAttempt}.g${sha.slice(0, 8).toLowerCase()}`;
+	return `${baseVersion}-xz.${runNumber}.${DISTRIBUTION_ATTEMPT_FIELD}.g${sha.slice(0, 8).toLowerCase()}`;
 }
 
 export function resolveFullCommit(env = process.env) {

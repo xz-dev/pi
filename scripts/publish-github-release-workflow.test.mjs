@@ -474,6 +474,9 @@ test("workflow generates the authoritative matrix and parallel-builds one artifa
     (step) => step.name === "Build one canonical production target",
   );
   assert.equal(buildStep.env.NODE_ENV, "production");
+  // A rerun build job must embed the same version as targets from earlier attempts.
+  assert.match(buildStep.run, /"-xz\." \+ process\.env\.GITHUB_RUN_NUMBER \+ "\.1\.g" \+ process\.env\.GITHUB_SHA\.slice\(0, 8\)/);
+  assert.doesNotMatch(buildStep.run, /RUN_ATTEMPT|run_attempt/);
   assert.match(
     buildStep.run,
     /args=\(--skip-install --skip-deps --skip-build --platform '\$\{\{ matrix\.id \}\}' --out "\$RUNNER_TEMP\/target" --distribution-version "\$version"\)/,
@@ -755,6 +758,8 @@ test("upstream sync smoke packages and executes only the hydrated Linux host tar
   assert.ok(smokeStep, "host packaging smoke step must exist");
   assert.match(smokeStep.run, /rebuilt_sha=\$\(git rev-parse HEAD\)/);
   assert.match(smokeStep.run, /REBUILT_SHA="\$rebuilt_sha"[\s\S]*process\.env\.REBUILT_SHA\.slice\(0, 8\)/);
+  assert.match(smokeStep.run, /"-xz\." \+ process\.env\.GITHUB_RUN_NUMBER \+ "\.1\.g"/);
+  assert.doesNotMatch(smokeStep.run, /RUN_ATTEMPT|run_attempt/);
   assert.doesNotMatch(smokeStep.run, /process\.env\.GITHUB_SHA/);
   assert.match(smokeStep.run, /scripts\/build-binaries\.sh/);
   for (const argument of [

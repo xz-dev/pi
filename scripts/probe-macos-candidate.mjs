@@ -50,7 +50,7 @@ async function main() {
 	validateCandidateRun(run, api("actions/workflows/publish-github-release.yml").id, runId);
 	const packageFile = api(`contents/packages/coding-agent/package.json?ref=${run.head_sha}`);
 	const packageVersion = JSON.parse(Buffer.from(packageFile.content, "base64").toString("utf8")).version;
-	const version = `${packageVersion}-xz.${run.run_number}.${run.run_attempt}.g${run.head_sha.slice(0, 8)}`;
+	const version = `${packageVersion}-xz.${run.run_number}.1.g${run.head_sha.slice(0, 8)}`;
 	const artifactName = `github-release-target-${run.head_sha}-${target}`;
 	const work = mkdtempSync(join(tmpdir(), "pi-macos-candidate-probe-"));
 	const env = { ...process.env, PI_OFFLINE: "1" };

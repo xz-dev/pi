@@ -382,7 +382,7 @@ jobs:
           }
           trap cleanup EXIT
           rebuilt_sha=$(git rev-parse HEAD)
-          version=$(REBUILT_SHA="$rebuilt_sha" node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + "." + process.env.GITHUB_RUN_ATTEMPT + ".g" + process.env.REBUILT_SHA.slice(0, 8)')
+          version=$(REBUILT_SHA="$rebuilt_sha" node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + ".1.g" + process.env.REBUILT_SHA.slice(0, 8)')
           scripts/build-binaries.sh \
             --skip-install \
             --skip-deps \
