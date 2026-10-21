@@ -12,6 +12,9 @@ static SIGNALS: AtomicU32 = AtomicU32::new(0);
 const FORWARDED: [i32; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
 
 extern "C" fn receive(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    if crate::job_control::receive(signal) {
+        return;
+    }
     // Terminal SIGINT already reaches the shared foreground workload. Darwin
     // kernel-originated signals have no sender PID; explicit kill(2) still forwards.
     if signal == libc::SIGINT
@@ -25,13 +28,17 @@ extern "C" fn receive(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_v
 }
 
 fn prepare_signals() -> io::Result<()> {
+    crate::job_control::initialize();
     // SAFETY: this mode starts on the sole thread, before any fork or command.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = receive as *const () as usize;
         action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
         libc::sigemptyset(&mut action.sa_mask);
-        for signal in FORWARDED {
+        for signal in crate::job_control::signals() {
+            libc::sigaddset(&mut action.sa_mask, signal);
+        }
+        for signal in FORWARDED.into_iter().chain(crate::job_control::signals()) {
             if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -45,7 +52,7 @@ fn prepare_signals() -> io::Result<()> {
         let mut mask: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut mask);
         libc::sigaddset(&mut mask, libc::SIGCHLD);
-        for signal in FORWARDED {
+        for signal in FORWARDED.into_iter().chain(crate::job_control::signals()) {
             libc::sigaddset(&mut mask, signal);
         }
         if libc::sigprocmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut()) != 0 {
@@ -310,7 +317,12 @@ fn command(
     }
     let mut terminating = None;
     let mut unused = false;
+    let mut suspend = crate::job_control::State::default();
     loop {
+        suspend.update(|paused| {
+            inventory.snapshot()?;
+            inventory.signal_other_groups(if paused { libc::SIGSTOP } else { libc::SIGCONT })
+        })?;
         // Two passes also discover private-group orphans before reaping a fast leader.
         inventory.snapshot()?;
         inventory.snapshot()?;

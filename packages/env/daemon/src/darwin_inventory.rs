@@ -186,6 +186,18 @@ impl Inventory {
         Ok(())
     }
 
+    pub(super) fn signal_other_groups(&self, signal: i32) -> io::Result<()> {
+        let own_group = unsafe { libc::getpgrp() } as u32;
+        for pid in self.known.keys() {
+            if let Some(record) = info(*pid)?
+                && record.pbi_pgid != own_group
+            {
+                self.signal(*pid, signal)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn signal_all(&self, signal: i32) -> io::Result<()> {
         let mut failure = None;
         for pid in self.known.keys() {
@@ -212,6 +224,9 @@ impl Inventory {
         // Final inventory precedes TERM, including termination of any parent.
         // Keep failures sticky while still attempting the rest of the sweep.
         let mut failure = self.snapshot().err();
+        if let Err(error) = self.signal_all(libc::SIGCONT) {
+            failure = Some(error);
+        }
         if let Err(error) = self.signal_all(libc::SIGTERM) {
             failure = Some(error);
         }

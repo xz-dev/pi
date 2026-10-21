@@ -18,6 +18,9 @@ const KERNEL_SIGNAL_CODE: i32 = libc::SI_KERNEL;
 const KERNEL_SIGNAL_CODE: i32 = 0x10006;
 
 extern "C" fn receive(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    if crate::job_control::receive(signal) {
+        return;
+    }
     // A terminal already delivered Ctrl-C to the inherited foreground group.
     if signal == libc::SIGINT && !info.is_null() {
         // SAFETY: SA_SIGINFO supplies this pointer for the duration of the handler.
@@ -29,13 +32,17 @@ extern "C" fn receive(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_v
 }
 
 fn prepare_signals() -> io::Result<()> {
+    crate::job_control::initialize();
     // SAFETY: this mode starts on the sole thread, before any fork or command.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = receive as *const () as usize;
         action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
         libc::sigemptyset(&mut action.sa_mask);
-        for signal in FORWARDED {
+        for signal in crate::job_control::signals() {
+            libc::sigaddset(&mut action.sa_mask, signal);
+        }
+        for signal in FORWARDED.into_iter().chain(crate::job_control::signals()) {
             if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -49,7 +56,7 @@ fn prepare_signals() -> io::Result<()> {
         let mut mask: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut mask);
         libc::sigaddset(&mut mask, libc::SIGCHLD);
-        for signal in FORWARDED {
+        for signal in FORWARDED.into_iter().chain(crate::job_control::signals()) {
             libc::sigaddset(&mut mask, signal);
         }
         if libc::sigprocmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut()) != 0 {
@@ -145,7 +152,7 @@ fn send(pid: libc::pid_t, signal: i32) -> io::Result<()> {
 }
 
 #[cfg(target_os = "freebsd")]
-fn kill_owned() -> io::Result<()> {
+fn signal_owned(signal: i32) -> io::Result<()> {
     #[repr(C)]
     struct ReaperKill {
         signal: i32,
@@ -156,7 +163,7 @@ fn kill_owned() -> io::Result<()> {
         reserved: [u32; 15],
     }
     let mut request = ReaperKill {
-        signal: libc::SIGKILL,
+        signal,
         flags: 0,
         subtree: 0,
         killed: 0,
@@ -182,10 +189,10 @@ fn kill_owned() -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn kill_owned() -> io::Result<()> {
+fn signal_owned(signal: i32) -> io::Result<()> {
     // No reaping between enumeration and signals. These PIDs cannot be reused in that interval.
     for pid in children()? {
-        send(pid, libc::SIGKILL)?;
+        send(pid, signal)?;
     }
     Ok(())
 }
@@ -268,9 +275,14 @@ fn control_fd(descriptor: i32) -> io::Result<i32> {
 }
 
 fn cleanup() -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(5);
+    signal_owned(libc::SIGCONT)?;
+    signal_owned(libc::SIGTERM)?;
     loop {
-        kill_owned()?;
+        if start.elapsed() >= Duration::from_millis(250) {
+            signal_owned(libc::SIGKILL)?;
+        }
         loop {
             let mut status = 0;
             // SAFETY: valid output word; only our own children are waitable.
@@ -300,10 +312,49 @@ fn cleanup() -> io::Result<()> {
     }
 }
 
+fn reap_non_primary(primary: libc::pid_t) -> io::Result<()> {
+    loop {
+        // WNOWAIT preserves the primary's exit status for Child::try_wait().
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::waitid(
+                libc::P_ALL,
+                0,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                return Ok(());
+            }
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        let pid = unsafe { info.si_pid() };
+        if pid == 0 || pid == primary {
+            return Ok(());
+        }
+        let got = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        if got < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
 fn pending(pid: libc::pid_t, deadline: &mut Option<Instant>, grace: Duration) -> io::Result<()> {
     let signals = SIGNALS.swap(0, Ordering::Relaxed);
     for signal in FORWARDED {
         if signals & (1u32 << signal) != 0 {
+            if matches!(signal, libc::SIGTERM | libc::SIGHUP) {
+                send(pid, libc::SIGCONT)?;
+            }
             send(pid, signal)?;
             if matches!(signal, libc::SIGTERM | libc::SIGHUP) && deadline.is_none() {
                 *deadline = Some(Instant::now() + grace);
@@ -1093,7 +1144,10 @@ fn observe(
     }
     let mut deadline = None;
     let mut forced = false;
+    let mut suspend = crate::job_control::State::default();
+    let mut targets = crate::job_control::Targets::default();
     loop {
+        suspend.update(|paused| targets.apply(paused))?;
         if let Some(status) = child.try_wait()? {
             if let Some(control) = control {
                 use std::os::unix::process::ExitStatusExt;
@@ -1104,6 +1158,7 @@ fn observe(
             }
             return Ok(crate::sys::exit_code(status) as i32);
         }
+        reap_non_primary(child.id() as libc::pid_t)?;
         if !forced && control_pending(control).is_err() {
             send(child.id() as libc::pid_t, libc::SIGKILL)?;
             forced = true;
