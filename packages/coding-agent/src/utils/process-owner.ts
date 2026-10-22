@@ -2,12 +2,32 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { join } from "node:path";
 import type { Duplex } from "node:stream";
+import { Worker } from "node:worker_threads";
 import * as packageConfig from "../config.ts";
 
 const OWNER_PID = "PI_PROCESS_OWNER_PID";
 const OWNER_PENDING = "PI_PROCESS_OWNER_PENDING";
 const OWNER_BINARY = "PI_PROCESS_OWNER_BINARY";
 let cliOwnerPid: number | undefined;
+
+// Embedded module works in source, npm and compiled Bun installs without another asset.
+// Kernel CONT (or Darwin's observer) wakes the whole process; this thread needs no main-loop work.
+const OWNER_WATCHDOG = `
+import { workerData } from "node:worker_threads";
+const ready = new Int32Array(workerData.ready);
+if (process.pid !== workerData.pid || process.ppid !== workerData.parent) {
+    Atomics.store(ready, 0, -1);
+} else {
+    let lostAt;
+    setInterval(() => {
+        if (process.ppid === workerData.parent) return;
+        lostAt ??= performance.now();
+        if (performance.now() - lostAt >= 7000) process.kill(process.pid, "SIGKILL");
+    }, 50);
+    Atomics.store(ready, 0, 1);
+}
+Atomics.notify(ready, 0);
+`;
 
 /** Only the validated immediate native owner can arm owner-loss shutdown. */
 export function hasLostCliProcessOwner(): boolean {
@@ -304,11 +324,42 @@ export function ownCliProcesses(): undefined | false {
 		process.env[OWNER_BINARY] = processOwnerBinary();
 		if (process.platform !== "win32") {
 			cliOwnerPid = parent;
-			const ownerWatch = setInterval(() => {
-				if (!hasLostCliProcessOwner()) return;
+			const ready = new Int32Array(new SharedArrayBuffer(4));
+			let watchdog: Worker;
+			try {
+				watchdog = new Worker(new URL(`data:text/javascript,${encodeURIComponent(OWNER_WATCHDOG)}`), {
+					execArgv: [],
+					workerData: { parent, pid: process.pid, ready: ready.buffer },
+				});
+			} catch (error) {
+				throw new Error("Process owner watchdog unavailable; use --no-process-ownership to opt out", {
+					cause: error,
+				});
+			}
+			let exiting = false;
+			process.once("exit", () => {
+				exiting = true;
+			});
+			const failWatchdog = () => {
+				if (!exiting) process.exit(125);
+			};
+			watchdog.once("error", failWatchdog);
+			watchdog.once("exit", failWatchdog);
+			watchdog.unref();
+			Atomics.wait(ready, 0, 0, 5_000);
+			if (Atomics.load(ready, 0) !== 1 || process.ppid !== parent) {
+				void watchdog.terminate();
+				throw new Error("Process owner watchdog unavailable during startup; use --no-process-ownership to opt out");
+			}
+			let requested = false;
+			const requestOwnerShutdown = () => {
+				if (requested || !hasLostCliProcessOwner()) return;
+				requested = true;
 				clearInterval(ownerWatch);
 				process.kill(process.pid, "SIGTERM");
-			}, 1_000);
+			};
+			const ownerWatch = setInterval(requestOwnerShutdown, 1_000);
+			process.on("SIGCONT", requestOwnerShutdown);
 			ownerWatch.unref();
 		}
 		return;

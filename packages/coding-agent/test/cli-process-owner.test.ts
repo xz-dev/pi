@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
 	materialize: false,
 	resource: vi.fn<(options: { sourceDir: string; relativePath: string; fileMode: number }) => unknown>(),
 	spawn: vi.fn(),
+	worker: vi.fn(),
 }));
 const originalArgv = process.argv;
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
@@ -17,6 +18,13 @@ const originalBunVersion = Object.getOwnPropertyDescriptor(process.versions, "bu
 vi.mock("node:child_process", async (original) => ({
 	...(await original<typeof ChildProcessModule>()),
 	spawn: state.spawn,
+}));
+vi.mock("node:worker_threads", () => ({
+	Worker: class {
+		constructor(url: URL, options: { workerData: { parent: number; pid: number; ready: SharedArrayBuffer } }) {
+			Object.assign(this, state.worker(url, options));
+		}
+	},
 }));
 vi.mock("node:fs", () => ({ accessSync: state.access, constants: { X_OK: 1 } }));
 vi.mock("../src/config.ts", () => ({
@@ -38,6 +46,12 @@ beforeEach(() => {
 	state.materialize = false;
 	state.resource.mockReset();
 	state.access.mockReset();
+	state.worker.mockReset().mockImplementation((_url: URL, options: { workerData: { ready: SharedArrayBuffer } }) => {
+		Atomics.store(new Int32Array(options.workerData.ready), 0, 1);
+		return { once: vi.fn(), unref: vi.fn(), terminate: vi.fn(async () => 0) };
+	});
+	vi.spyOn(process, "on").mockReturnValue(process);
+	vi.spyOn(process, "once").mockReturnValue(process);
 	execute.mockClear();
 	vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "");
 	vi.stubEnv("PI_PROCESS_OWNER_PID", undefined);
@@ -88,6 +102,58 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 			expect(process.env.PI_PROCESS_OWNER_PENDING).toBeUndefined();
 		});
 
+		it("starts a ready unrefed worker only after validated owned handoff", () => {
+			vi.stubEnv("PI_PROCESS_OWNER_PID", String(process.ppid));
+			ownCliProcesses();
+			expect(state.worker).toHaveBeenCalledOnce();
+			const [url, options] = state.worker.mock.calls[0];
+			expect(url.protocol).toBe("data:");
+			expect(options.execArgv).toEqual([]);
+			expect(options.workerData.parent).toBe(process.ppid);
+			expect(options.workerData.pid).toBe(process.pid);
+			expect(state.worker.mock.results[0].value.unref).toHaveBeenCalledOnce();
+		});
+
+		it.each(["constructor", "identity", "timeout"])("fails closed on watchdog %s failure", (failure) => {
+			vi.stubEnv("PI_PROCESS_OWNER_PID", String(process.ppid));
+			if (failure === "constructor") {
+				state.worker.mockImplementation(() => {
+					throw new Error("worker unavailable");
+				});
+			} else {
+				state.worker.mockImplementation((_url: URL, options: { workerData: { ready: SharedArrayBuffer } }) => {
+					Atomics.store(new Int32Array(options.workerData.ready), 0, failure === "identity" ? -1 : 0);
+					return { once: vi.fn(), unref: vi.fn(), terminate: vi.fn(async () => 0) };
+				});
+				vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
+			}
+			expect(ownCliProcesses).toThrow("--no-process-ownership");
+			expect(execute).not.toHaveBeenCalled();
+		});
+
+		it.each(["error", "unexpected-exit", "normal-exit", "normal-error"])(
+			"handles watchdog %s without a late normal-quit kill",
+			(mode) => {
+				vi.stubEnv("PI_PROCESS_OWNER_PID", String(process.ppid));
+				ownCliProcesses();
+				const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+					throw new Error("exit intercepted");
+				});
+				if (mode.startsWith("normal-")) {
+					vi.mocked(process.once).mock.calls.find(([event]) => event === "exit")?.[1](0);
+				}
+				const calls: [string, () => void][] = state.worker.mock.results[0].value.once.mock.calls;
+				const handler = calls.find(([event]) => event === (mode.endsWith("error") ? "error" : "exit"))![1];
+				if (mode.startsWith("normal-")) {
+					handler();
+					expect(exit).not.toHaveBeenCalled();
+				} else {
+					expect(handler).toThrow("exit intercepted");
+					expect(exit).toHaveBeenCalledWith(125);
+				}
+			},
+		);
+
 		it.each(["flag", "environment"])("disables ownership through %s before handoff validation", (mode) => {
 			process.argv = [process.execPath, "pi", ...(mode === "flag" ? ["--no-process-ownership"] : [])];
 			vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", mode === "environment" ? "1" : "");
@@ -98,6 +164,7 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 			ownCliProcesses();
 			expect(execute).not.toHaveBeenCalled();
 			expect(state.access).not.toHaveBeenCalled();
+			expect(state.worker).not.toHaveBeenCalled();
 			expect(process.env.PI_PROCESS_OWNER_BINARY).toBeUndefined();
 			expect(process.env.PI_PROCESS_OWNER_PENDING).toBeUndefined();
 			expect(process.env.PI_PROCESS_OWNER_TEST_FAULT).toBeUndefined();
@@ -167,7 +234,7 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 			}
 		});
 
-		it("keeps validated guardian identity if it dies during helper resolution", () => {
+		it("fails closed if guardian dies during helper resolution", () => {
 			vi.useFakeTimers();
 			const parent = process.ppid;
 			const descriptor = Object.getOwnPropertyDescriptor(process, "ppid")!;
@@ -177,10 +244,10 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 				Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 }),
 			);
 			try {
-				ownCliProcesses();
+				expect(ownCliProcesses).toThrow("Process owner watchdog unavailable");
 				vi.advanceTimersByTime(1_000);
 				expect(execute).not.toHaveBeenCalled();
-				expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, "SIGTERM");
+				expect(kill).not.toHaveBeenCalled();
 			} finally {
 				Object.defineProperty(process, "ppid", descriptor);
 			}

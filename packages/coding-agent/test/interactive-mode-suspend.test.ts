@@ -4,6 +4,19 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { ownCliProcesses } from "../src/utils/process-owner.ts";
 
+vi.mock("node:worker_threads", () => ({
+	Worker: class {
+		constructor(_url: URL, options: { workerData: { ready: SharedArrayBuffer } }) {
+			Atomics.store(new Int32Array(options.workerData.ready), 0, 1);
+		}
+		once() {}
+		unref() {}
+		async terminate() {
+			return 0;
+		}
+	},
+}));
+
 vi.mock("node:fs", async (original) => {
 	const actual = await original<typeof FsModule>();
 	return { ...actual, fstatSync: vi.fn(actual.fstatSync), closeSync: vi.fn(actual.closeSync) };
@@ -200,6 +213,8 @@ describe("owner-loss shutdown deadline", () => {
 				throw exited;
 			});
 			vi.spyOn(process, "kill").mockReturnValue(true);
+			vi.spyOn(process, "on").mockReturnValue(process);
+			vi.spyOn(process, "once").mockReturnValue(process);
 			vi.spyOn(fs, "accessSync").mockImplementation(() => {});
 			Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
 			Object.defineProperty(process, "stdin", {
