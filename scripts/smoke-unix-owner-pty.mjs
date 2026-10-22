@@ -73,6 +73,9 @@ export function assertUnixOwnerPtyRow(row, os, identity, targetId, cliSha256) {
 	}
 	if (row.name === "suspend-resume" && (row.resumed !== true || row.exit?.code !== 0 || row.exit?.signal !== null)) fail("normal fg/Ctrl-D exit was not clean");
 	const blocked = row.name === "paused-both-owners-death-shutdown-blocked";
+	const hook = row.shutdownHook;
+	const hookRequired = blocked || ["paused-guardian-death", "paused-both-owners-death"].includes(row.name);
+	if (typeof hook?.entered !== "boolean" || hook.enteredBeforeFault !== false || (hook.entered ? hook.pid !== p.pi.pid : hook.pid !== null) || hookRequired && !hook.entered) fail("shutdown-hook entry proof missing");
 	const block = row.shutdownBlock;
 	if (block?.armed !== blocked || block.entered !== blocked || block.returned !== false || block.enteredBeforeFault !== false || (blocked ? block.pid !== p.pi.pid || !count(block.waitMs) || block.waitMs < 12000 : block.pid !== null || block.waitMs !== null)) fail("shutdown-hook worker deadline proof missing");
 	const faults = row.name === "suspend-resume" ? [] : row.name === "paused-outer-death" ? ["outer"] : row.name === "paused-anchor-death" ? ["anchor"] : row.name === "paused-both-owners-death" || blocked ? ["outer", "guardian"] : row.name === "paused-observer-death" ? ["observer"] : ["guardian"];

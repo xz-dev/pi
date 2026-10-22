@@ -110,6 +110,15 @@ test("Unix suspend and opt-out rows require independent observations", () => {
 	assert.throws(() => assertOwnerLifecycle(evidence, "linux"), /opt-out missing proof/);
 });
 
+test("lifecycle requires post-fault shutdown hook entry for guardian and both-owner loss", () => {
+	for (const os of ["linux", "freebsd", "darwin"]) for (const name of ["paused-guardian-death", "paused-both-owners-death", "paused-both-owners-death-shutdown-blocked"]) {
+		const rows = rowsFor(os);
+		delete rows.find((row) => row.name === name).shutdownHook;
+		const evidence = { status: "passed", target: "fixture-target", cliSha256, identity: standard, rows, ...artifactBunFromOwnerRows(rows) };
+		assert.throws(() => assertOwnerLifecycle(evidence, os), /shutdown-hook entry/);
+	}
+});
+
 test("missing or disagreeing shipped Bun versions fail on every Unix target", () => {
 	for (const os of ["linux", "freebsd", "darwin"]) {
 		const observations = rowsFor(os);

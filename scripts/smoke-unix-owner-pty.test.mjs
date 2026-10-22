@@ -142,6 +142,30 @@ test("both kernel session reapers may adopt the pinned grandchild", () => {
 		verify(row, os);
 	}
 });
+for (const [label, mutate] of [
+	["missing entry record", (r) => { delete r.shutdownHook; }],
+	["absent entered", (r) => { delete r.shutdownHook.entered; }],
+	["no entry", (r) => { r.shutdownHook.entered = false; r.shutdownHook.pid = null; }],
+	["absent PID", (r) => { delete r.shutdownHook.pid; }],
+	["wrong Pi PID", (r) => { r.shutdownHook.pid++; }],
+	["absent timing proof", (r) => { delete r.shutdownHook.enteredBeforeFault; }],
+	["pre-fault entry", (r) => { r.shutdownHook.enteredBeforeFault = true; }],
+]) test(`required shutdown hook rejects ${label}`, () => {
+	for (const os of ["linux", "freebsd", "darwin"]) for (const name of ["paused-guardian-death", "paused-both-owners-death", "paused-both-owners-death-shutdown-blocked"]) {
+		const row = proof(os, name); mutate(row);
+		assert.throws(() => verify(row, os), /shutdown-hook entry/);
+	}
+});
+test("optional shutdown hook entry is recorded without requiring it", () => {
+	for (const os of ["linux", "freebsd", "darwin"]) for (const name of ["suspend-resume", "paused-outer-death", os === "darwin" ? "paused-observer-death" : "paused-anchor-death"]) {
+		const row = proof(os, name);
+		row.shutdownHook = { entered: false, enteredBeforeFault: false, pid: null }; verify(row, os);
+		row.shutdownHook = { entered: true, enteredBeforeFault: false, pid: row.pi.pid }; verify(row, os);
+		delete row.shutdownHook;
+		assert.throws(() => verify(row, os), /shutdown-hook entry/);
+	}
+});
+
 for (const [key, value] of [["armed", false], ["entered", false], ["returned", true], ["enteredBeforeFault", true], ["pid", 999], ["waitMs", 11999]]) test(`compiled deadline proof rejects shutdown-block ${key}`, () => {
 	const row = proof("linux", "paused-both-owners-death-shutdown-blocked"); row.shutdownBlock[key] = value;
 	assert.throws(() => verify(row), /worker deadline/);
@@ -173,11 +197,14 @@ process.send("ready");
 		assert.equal((await Promise.race([once(child, "message"), ended]))[0], "ready");
 		const off = Promise.race([once(child, "message"), ended]); child.send("shutdown");
 		assert.equal((await off)[0], "returned");
+		assert.deepEqual(JSON.parse(readFileSync(join(root, "shutdown-hook-entered"), "utf8")), { pid: child.pid });
 		assert.equal(existsSync(join(root, "shutdown-entered")), false);
+		rmSync(join(root, "shutdown-hook-entered"));
 		writeFileSync(join(root, "shutdown-arm"), "arm");
 		child.send("shutdown");
 		const deadline = Date.now() + 5000;
 		while (!existsSync(join(root, "shutdown-entered"))) { assert.ok(Date.now() < deadline, "shutdown fixture did not enter"); await delay(10); }
+		assert.deepEqual(JSON.parse(readFileSync(join(root, "shutdown-hook-entered"), "utf8")), { pid: child.pid });
 		const marker = JSON.parse(readFileSync(join(root, "shutdown-entered"), "utf8"));
 		assert.equal(marker.pid, child.pid); assert.ok(marker.waitMs >= 12000);
 		await delay(100);

@@ -803,7 +803,9 @@ fn session(
         fs::write(work.join("shutdown-arm"), "arm").map_err(|e| e.to_string())?;
     }
     require(
-        !work.join("shutdown-entered").exists() && !work.join("shutdown-returned").exists(),
+        !work.join("shutdown-hook-entered").exists()
+            && !work.join("shutdown-entered").exists()
+            && !work.join("shutdown-returned").exists(),
         "shutdown hook ran before fault",
     )?;
     row["pty"]["jobForeground"] = json!(unsafe { libc::tcgetpgrp(0) } == outer_pid);
@@ -893,7 +895,9 @@ fn session(
         )?;
     }
     require(
-        !work.join("shutdown-entered").exists() && !work.join("shutdown-returned").exists(),
+        !work.join("shutdown-hook-entered").exists()
+            && !work.join("shutdown-entered").exists()
+            && !work.join("shutdown-returned").exists(),
         "shutdown hook entered before injected fault",
     )?;
     row["faultTargets"] = json!(faults.iter().map(|(role, held)| json!({"role":role,"pid":held.identity["pid"],"birth":held.identity["birth"],"parent":held.identity["parent"],"method":if cfg!(target_os="linux") {"pidfd"} else {"checked-birth"}})).collect::<Vec<_>>());
@@ -986,6 +990,22 @@ fn session(
         proof["after"] = json!(after);
     }
     row["heartbeats"]["peerAfter"] = json!(ticks(&work.join("peer-heartbeat"))?);
+    let hook = if work.join("shutdown-hook-entered").exists() {
+        load(&work.join("shutdown-hook-entered"))?
+    } else {
+        Value::Null
+    };
+    row["shutdownHook"] = json!({"entered":!hook.is_null(),"enteredBeforeFault":false,"pid":hook["pid"]});
+    require(
+        (hook.is_null() || hook["pid"] == pi_pid)
+            && (!matches!(
+                name.as_str(),
+                "paused-guardian-death"
+                    | "paused-both-owners-death"
+                    | "paused-both-owners-death-shutdown-blocked"
+            ) || !hook.is_null()),
+        "shutdown-hook entry proof missing",
+    )?;
     let entered = if work.join("shutdown-entered").exists() {
         load(&work.join("shutdown-entered"))?
     } else {

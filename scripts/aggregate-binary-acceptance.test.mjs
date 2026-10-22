@@ -351,6 +351,22 @@ for (const [label, systems, mutate] of [
 	}
 });
 
+test("aggregator requires post-fault shutdown hook entry for guardian and both-owner loss", () => {
+	for (const os of ["linux", "freebsd", "darwin"]) for (const name of ["paused-guardian-death", "paused-both-owners-death", "paused-both-owners-death-shutdown-blocked"]) {
+		const value = fixture();
+		try {
+			const target = BUN_TARGETS.find((t) => t.os === os);
+			const path = join(value.records, `${target.id}.json`);
+			const changed = JSON.parse(readFileSync(path, "utf8"));
+			delete changed.ownerLifecycle.rows.find((r) => r.name === name).shutdownHook;
+			writeFileSync(path, JSON.stringify(changed));
+			const result = runAggregator(value);
+			assert.notEqual(result.status, 0);
+			assert.match(result.stderr, /shutdown-hook entry/);
+		} finally { rmSync(value.root, { recursive: true, force: true }); }
+	}
+});
+
 test("aggregator requires actual shutdown hook blockage, not only a fast both-owner exit", () => {
 	for (const os of ["linux", "freebsd", "darwin"]) for (const key of ["armed", "entered", "returned", "enteredBeforeFault", "pid", "waitMs"]) {
 		const value = fixture();

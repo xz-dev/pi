@@ -28,6 +28,7 @@ export function passedUnixOwnerPtyRow(name, os, target, cliSha256, uid = 1001) {
 		peer: { pid: 108, parent: 90, group: 100, sid: 90, uid, state: "S", birth: "birth:108" }, peerPaused: { pid: 108, parent: 90, group: 100, sid: 90, uid, state: "T", birth: "birth:108" }, peerStoppedAfter: faults.length > 0,
 		heartbeats: { ...heartbeat, peerPause: 10, peerAfter: faults.length ? 10 : 12 },
 		descendantHeartbeats: { extensionChild: { ...heartbeat }, adoptedGrandchild: { ...heartbeat } },
+		shutdownHook: { entered: true, enteredBeforeFault: false, pid: 102 },
 		shutdownBlock: { armed: blocked, entered: blocked, returned: false, enteredBeforeFault: false, pid: blocked ? 102 : null, waitMs: blocked ? 12000 : null },
 		postDeathMs: 100, allOwnedExited: true, exit: { code: 0, signal: null },
 		after: Object.values(processes).map((p) => ({ pid: p.pid, birth: p.birth, state: "gone" })),

@@ -12,6 +12,7 @@ export default async function (api) {
 			renameSync(join(work, `${name}.tmp`), join(work, name));
 		};
 		api.on("session_shutdown", () => {
+			publish("shutdown-hook-entered", { pid: process.pid });
 			if (!existsSync(join(work, "shutdown-arm"))) return;
 			const waitMs = 12000;
 			publish("shutdown-entered", { pid: process.pid, waitMs });
