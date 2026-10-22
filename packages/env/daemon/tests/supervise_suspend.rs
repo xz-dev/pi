@@ -47,6 +47,19 @@ fn primary_fixture() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    if std::env::var("PI_SUSPEND_CREATE_ORPHAN").as_deref() == Ok("1") {
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "adopted_fixture"])
+                .env("PI_SUSPEND_ORPHAN", &root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
     fs::write(root.join("primary-pid"), std::process::id().to_string()).unwrap();
     while !EXIT.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(5));
@@ -69,6 +82,9 @@ impl Fixture {
         Self::start_inner(false)
     }
     fn start_inner(with_lease: bool) -> Self {
+        Self::start_config(with_lease, false)
+    }
+    fn start_config(with_lease: bool, orphan: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "pi-suspend-{}-{}",
             std::process::id(),
@@ -100,6 +116,7 @@ impl Fixture {
             .args(["--exact", "primary_fixture"])
             .env("PI_PROCESS_OWNER_PENDING", "1")
             .env("PI_SUSPEND_PRIMARY", &root)
+            .env("PI_SUSPEND_CREATE_ORPHAN", if orphan { "1" } else { "0" })
             .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -117,7 +134,11 @@ impl Fixture {
             lease,
             peer,
         };
-        wait_for(|| fixture.root.join("heartbeat-pid").exists() && fixture.tick().is_some());
+        wait_for(|| {
+            fixture.root.join("primary-pid").exists()
+                && fixture.root.join("heartbeat-pid").exists()
+                && fixture.tick().is_some()
+        });
         fixture
     }
     fn pid(&self, name: &str) -> i32 {
@@ -509,4 +530,182 @@ fn owner_death_while_paused_resumes_primary_for_graceful_teardown() {
         let state = state(fixture.pid("heartbeat-pid"));
         state.is_empty() || state.starts_with('Z')
     });
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn parent_pid(pid: i32) -> i32 {
+    String::from_utf8(
+        Command::new("ps")
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse()
+    .unwrap()
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn ancestor_anchor_stays_runnable_and_its_death_fails_closed() {
+    for paused in [false, true] {
+        let mut fixture = Fixture::start();
+        let primary = fixture.pid("primary-pid");
+        let guardian = parent_pid(primary);
+        let anchor = parent_pid(guardian);
+        assert_eq!(parent_pid(anchor), fixture.child.id() as i32);
+        if paused {
+            fixture.pause();
+        }
+        assert!(!state(anchor).starts_with('T'));
+        let start = Instant::now();
+        assert_eq!(unsafe { libc::kill(anchor, libc::SIGKILL) }, 0);
+        while fixture.child.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(8));
+            thread::sleep(Duration::from_millis(10));
+        }
+        for pid in [anchor, guardian, primary, fixture.pid("heartbeat-pid")] {
+            wait_for(|| state(pid).is_empty());
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn normal_session_reaps_ancestor_anchor_and_preserves_primary_status() {
+    let mut fixture = Fixture::start();
+    let primary = fixture.pid("primary-pid");
+    let guardian = parent_pid(primary);
+    let anchor = parent_pid(guardian);
+    assert_eq!(unsafe { libc::kill(primary, libc::SIGTERM) }, 0);
+    wait_for(|| fixture.child.try_wait().unwrap().is_some());
+    assert_eq!(fixture.child.try_wait().unwrap().unwrap().code(), Some(0));
+    for pid in [anchor, guardian, primary, fixture.pid("heartbeat-pid")] {
+        assert!(state(pid).is_empty(), "native session role not reaped");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn anchor_channel_allocation_failure_refuses_grant_without_half_state() {
+    let root = std::env::temp_dir().join(format!("pi-anchor-failure-{}", std::process::id()));
+    let _ = fs::remove_file(&root);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pi-env"));
+    command
+        .args([
+            "supervise",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf executed > \"$1\"",
+            "sh",
+        ])
+        .arg(&root)
+        .env("PI_PROCESS_OWNER_PENDING", "1");
+    unsafe {
+        command.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: 6,
+                rlim_max: 6,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(125));
+    assert!(!root.exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--no-process-ownership"));
+}
+
+// Same async-signal-safe fork fixture pattern as supervise_darwin.rs.
+#[test]
+fn adopted_fixture() {
+    let Some(root) = std::env::var_os("PI_SUSPEND_ORPHAN") else {
+        return;
+    };
+    let file = fs::File::create(PathBuf::from(root).join("adopted-pid")).unwrap();
+    unsafe {
+        let child = libc::fork();
+        assert!(child >= 0);
+        if child > 0 {
+            // Darwin inventory must have an observation window before reparenting.
+            libc::usleep(400_000);
+            libc::_exit(0);
+        }
+        if libc::setsid() < 0 {
+            libc::_exit(121);
+        }
+        let mut pid = libc::getpid() as u32;
+        let mut bytes = [0u8; 16];
+        let mut at = bytes.len();
+        while pid > 0 {
+            at -= 1;
+            bytes[at] = b'0' + (pid % 10) as u8;
+            pid /= 10;
+        }
+        if libc::write(
+            file.as_raw_fd(),
+            bytes[at..].as_ptr().cast(),
+            bytes.len() - at,
+        ) < 0
+        {
+            libc::_exit(122);
+        }
+        loop {
+            libc::pause();
+        }
+    }
+}
+
+#[test]
+fn observed_adopted_setsid_grandchild_dies_with_both_owners() {
+    for paused in [false, true] {
+        let mut fixture = Fixture::start_config(false, true);
+        wait_for(|| {
+            fs::read_to_string(fixture.root.join("adopted-pid"))
+                .ok()
+                .and_then(|x| x.parse::<i32>().ok())
+                .is_some()
+        });
+        let orphan = fixture.pid("adopted-pid");
+        let primary = fixture.pid("primary-pid");
+        let parent = |pid: i32| -> i32 {
+            String::from_utf8(
+                Command::new("ps")
+                    .args(["-o", "ppid=", "-p", &pid.to_string()])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+        };
+        let guardian = parent(primary);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            assert_eq!(parent(orphan), guardian, "already orphaned before fault");
+        }
+        if paused {
+            fixture.pause();
+            wait_for(|| state(orphan).starts_with('T'));
+        }
+        let start = Instant::now();
+        assert_eq!(unsafe { libc::kill(guardian, libc::SIGKILL) }, 0);
+        fixture.child.kill().unwrap();
+        fixture.child.wait().unwrap();
+        while !state(orphan).is_empty() {
+            assert!(
+                start.elapsed() < Duration::from_secs(8),
+                "observed orphan survived both owners"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }

@@ -1,6 +1,6 @@
 //! Session-only Darwin wake relay. Sibling of guardian, never in its frozen subtree.
-//! This relay only wakes birth-validated controllers; existing owners do all cleanup.
-use super::inventory::Identity;
+//! Retains birth-validated inventory and owns cleanup if either old owner disappears.
+use super::inventory::{Identity, Inventory};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -27,32 +27,8 @@ impl Sockets {
         })
     }
 }
-pub(super) fn live(stream: &UnixStream) -> io::Result<bool> {
-    let mut byte = 0u8;
-    let got = unsafe {
-        libc::recv(
-            stream.as_raw_fd(),
-            (&mut byte as *mut u8).cast(),
-            1,
-            libc::MSG_PEEK | libc::MSG_DONTWAIT,
-        )
-    };
-    if got == 0 {
-        return Ok(false);
-    }
-    if got > 0 {
-        return Err(io::Error::other("unexpected wake-observer lease data"));
-    }
-    let error = io::Error::last_os_error();
-    if matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-    ) {
-        Ok(true)
-    } else {
-        Err(error)
-    }
-}
+pub(super) use crate::job_control::lease_live as live;
+
 fn pause(streams: &[&UnixStream]) -> io::Result<()> {
     let mut fds: Vec<_> = streams
         .iter()
@@ -157,7 +133,9 @@ impl Outer {
             {
                 return Err(io::Error::last_os_error());
             }
-            let force = Instant::now() + Duration::from_millis(250);
+            let force = deadline
+                .checked_sub(Duration::from_millis(250))
+                .unwrap_or(deadline);
             while !self.exited()? {
                 if Instant::now() >= force {
                     unsafe {
@@ -183,6 +161,7 @@ impl Outer {
 
 pub(super) fn observe(mut outer: UnixStream, guardian: UnixStream, outer_id: Identity) -> i32 {
     let mut primary: Option<Identity> = None;
+    let mut inventory = Inventory::observer(outer_id);
     let mut normal = false;
     let result = (|| {
         if unsafe { libc::getpgrp() } != unsafe { libc::getpid() } {
@@ -193,6 +172,7 @@ pub(super) fn observe(mut outer: UnixStream, guardian: UnixStream, outer_id: Ide
         if !live(&guardian)? {
             return Err(io::Error::other("guardian lost before observer ready"));
         }
+        inventory.snapshot()?;
         outer.write_all(b"R")?;
         let mut record = [0; 25];
         let mut length = 0;
@@ -217,6 +197,8 @@ pub(super) fn observe(mut outer: UnixStream, guardian: UnixStream, outer_id: Ide
                         if Identity::current(held.pid())? != held {
                             return Err(io::Error::other("session primary birth identity changed"));
                         }
+                        inventory.seed(held)?;
+                        inventory.snapshot()?;
                         primary = Some(held);
                         outer.write_all(b"P")?;
                         length = 0;
@@ -229,6 +211,7 @@ pub(super) fn observe(mut outer: UnixStream, guardian: UnixStream, outer_id: Ide
                     ) => {}
                 Err(error) => return Err(error),
             }
+            inventory.snapshot()?;
             if !live(&guardian)? {
                 break;
             }
@@ -245,15 +228,28 @@ pub(super) fn observe(mut outer: UnixStream, guardian: UnixStream, outer_id: Ide
         }
         Ok(())
     })();
-    // EOF/failure is a wake-only handoff, not another inventory or termination walk.
+    // Independent inventory retains observed ownership after both old owners die.
+    // Queue TERM for the entire set before any CONT; Pi's worker wakes with Pi.
+    let deadline = Instant::now()
+        + if normal {
+            Duration::from_secs(4)
+        } else {
+            Duration::from_millis(7500)
+        };
+    let clean = inventory.cleanup_after(
+        if normal {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(6)
+        },
+        deadline,
+    );
     let wake = if normal {
         Ok(())
     } else {
-        primary
-            .map_or(Ok(()), |held| held.signal(libc::SIGCONT))
-            .and_then(|()| outer_id.signal(libc::SIGCONT))
+        outer_id.signal(libc::SIGCONT)
     };
-    match result.and(wake) {
+    match result.and(clean).and(wake) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("pi-env wake observer: {error}");

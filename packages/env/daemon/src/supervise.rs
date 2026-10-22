@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::net::UnixStream;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
@@ -320,25 +321,58 @@ fn control_fd(descriptor: i32) -> io::Result<i32> {
 }
 
 fn cleanup() -> io::Result<()> {
+    cleanup_scope(Duration::from_millis(250), Duration::from_secs(5), None)
+}
+
+fn cleanup_scope(
+    grace: Duration,
+    timeout: Duration,
+    mut reserved: Option<(libc::pid_t, &mut Option<i32>)>,
+) -> io::Result<()> {
     let start = Instant::now();
-    let deadline = start + Duration::from_secs(5);
-    signal_owned(libc::SIGTERM)?;
-    signal_owned(libc::SIGCONT)?;
+    let deadline = start + timeout;
+    let mut failure = if crate::job_control::enabled() {
+        match crate::job_control::Targets::default().terminate_tree(deadline) {
+            // Missing/filtered pidfds degrade freezing, not the native init/reaper scope.
+            // Fresh unreaped direct children remain kernel-owned targets throughout reap-all.
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOSYS | libc::EINVAL | libc::EPERM)
+                ) =>
+            {
+                None
+            }
+            result => result.err(),
+        }
+    } else {
+        None
+    };
+    if let Err(error) = signal_owned(libc::SIGTERM).and_then(|()| signal_owned(libc::SIGCONT)) {
+        failure.get_or_insert(error);
+    }
     loop {
-        if start.elapsed() >= Duration::from_millis(250) {
-            signal_owned(libc::SIGKILL)?;
+        if start.elapsed() >= grace
+            && let Err(error) = signal_owned(libc::SIGKILL)
+        {
+            failure.get_or_insert(error);
         }
         loop {
             let mut status = 0;
             // SAFETY: valid output word; only our own children are waitable.
             let got = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | WAIT_ALL) };
             if got > 0 {
+                if let Some((pid, status_slot)) = &mut reserved
+                    && got == *pid
+                {
+                    **status_slot = Some(status);
+                }
                 continue;
             }
             if got < 0 {
                 let error = io::Error::last_os_error();
                 if error.raw_os_error() == Some(libc::ECHILD) {
-                    return Ok(());
+                    return failure.map_or(Ok(()), Err);
                 }
                 if error.kind() == io::ErrorKind::Interrupted {
                     continue;
@@ -1324,6 +1358,91 @@ fn guardian(
     finish(result, cleanup(), None)
 }
 
+// Scoped init: an ancestor reaper retains ownership when either old owner dies.
+fn anchor(
+    args: &[OsString],
+    parent_scope: (libc::pid_t, libc::pid_t, UnixStream),
+    control: &mut Option<Control>,
+    ipc: Option<std::fs::File>,
+    gate: Option<crate::job_control::Startup>,
+    mask: crate::job_control::SignalMask,
+    #[cfg(target_os = "freebsd")] exit_lease: Option<UnixStream>,
+) -> i32 {
+    let (outer, foreground, mut lease) = parent_scope;
+    // No terminal IO from this background role. Outer diagnoses failed readiness.
+    if unsafe { libc::setpgid(0, 0) } != 0 || acquire().is_err() {
+        return 125;
+    }
+    let parent = unsafe { libc::getpid() };
+    let guardian = unsafe { libc::fork() }; // SIGCHLD: anchor never stops.
+    if guardian < 0 {
+        return 125;
+    }
+    if guardian == 0 {
+        drop(lease);
+        #[cfg(target_os = "freebsd")]
+        drop(exit_lease);
+        if unsafe { libc::setpgid(0, foreground) } != 0 || mask.activate(true).is_err() {
+            std::process::exit(125);
+        }
+        std::process::exit(self::guardian(
+            args,
+            parent,
+            control,
+            ipc,
+            gate,
+            #[cfg(target_os = "freebsd")]
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        ));
+    }
+    drop(gate);
+    drop(ipc);
+    drop(control.take());
+    let mut status = None;
+    let observed = (|| {
+        mask.activate(true)?;
+        if unsafe { libc::getppid() } != outer || !crate::job_control::lease_live(&lease)? {
+            return Err(io::Error::other("session outer lost before anchor ready"));
+        }
+        lease.write_all(b"R")?;
+        let mut deadline = None;
+        loop {
+            let mut raw = 0;
+            let got = unsafe { libc::waitpid(guardian, &mut raw, libc::WNOHANG) };
+            if got == guardian {
+                status = Some(raw);
+                return Ok(());
+            }
+            if got < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                return Err(io::Error::last_os_error());
+            }
+            reap_non_primary(guardian)?;
+            if !crate::job_control::lease_live(&lease)? {
+                return Ok(());
+            }
+            // Ordinary forwarded signals retain existing guardian semantics, not a new healthy deadline.
+            pending(guardian, &mut deadline, Duration::from_secs(12), || Ok(()))?;
+            thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    let clean = cleanup_scope(
+        Duration::from_secs(6),
+        Duration::from_millis(7500),
+        Some((guardian, &mut status)),
+    );
+    #[cfg(target_os = "freebsd")]
+    drop(exit_lease);
+    if observed.is_err() || clean.is_err() {
+        return 125;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    status.map_or(125, |raw| {
+        crate::sys::exit_code(ExitStatus::from_raw(raw)) as i32
+    })
+}
+
 fn finish(result: io::Result<i32>, clean: io::Result<()>, control: Option<&mut Control>) -> i32 {
     if clean.is_ok()
         && let Some(control) = control
@@ -1517,6 +1636,18 @@ pub fn run(args: &[OsString]) -> i32 {
     } else {
         (None, None)
     };
+    let (mut anchor_parent, mut anchor_child) = if crate::job_control::enabled() {
+        match UnixStream::pair() {
+            Ok((parent, child)) => (Some(parent), Some(child)),
+            Err(error) => {
+                eprintln!("pi-env: anchor unavailable; use --no-process-ownership: {error}");
+                return 125;
+            }
+        }
+    } else {
+        (None, None)
+    };
+    let foreground = unsafe { libc::getpgrp() };
     let parent = std::process::id() as libc::pid_t;
     // SAFETY: this standalone mode has one thread. Neither branch shares running locks.
     let guardian = fork_guardian();
@@ -1525,6 +1656,22 @@ pub fn run(args: &[OsString]) -> i32 {
         return 125;
     }
     if guardian == 0 {
+        drop(anchor_parent.take());
+        if let Some(lease) = anchor_child.take() {
+            #[cfg(target_os = "freebsd")]
+            drop(exit_wake);
+            drop(startup_owner);
+            std::process::exit(anchor(
+                command_args,
+                (parent, foreground, lease),
+                &mut control,
+                ipc,
+                startup_child,
+                job_mask,
+                #[cfg(target_os = "freebsd")]
+                exit_lease,
+            ));
+        }
         if let Err(error) = job_mask.activate(true) {
             eprintln!("pi-env supervise: {error}");
             return 125;
@@ -1543,6 +1690,48 @@ pub fn run(args: &[OsString]) -> i32 {
             #[cfg(target_os = "linux")]
             spec,
         ));
+    }
+    drop(anchor_child);
+    if let Some(lease) = &mut anchor_parent {
+        let ready = (|| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut byte = [0];
+                let got = unsafe {
+                    libc::recv(
+                        lease.as_raw_fd(),
+                        byte.as_mut_ptr().cast(),
+                        1,
+                        libc::MSG_DONTWAIT,
+                    )
+                };
+                if got == 1 && byte == *b"R" {
+                    return Ok(());
+                }
+                if got >= 0 {
+                    return Err(io::Error::other("anchor readiness lost"));
+                }
+                let error = io::Error::last_os_error();
+                if !matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) {
+                    return Err(error);
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "anchor readiness timeout",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        })();
+        if let Err(error) = ready {
+            let _ = cleanup();
+            eprintln!("pi-env: anchor unavailable; use --no-process-ownership to opt out: {error}");
+            return 125;
+        }
     }
     #[cfg(target_os = "freebsd")]
     {

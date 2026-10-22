@@ -252,6 +252,33 @@ impl Startup {
     }
 }
 
+pub(super) fn lease_live(stream: &UnixStream) -> io::Result<bool> {
+    let mut byte = 0u8;
+    let got = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            (&mut byte as *mut u8).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    if got == 0 {
+        return Ok(false);
+    }
+    if got > 0 {
+        return Err(io::Error::other("unexpected lifetime lease data"));
+    }
+    let error = io::Error::last_os_error();
+    if matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    ) {
+        Ok(true)
+    } else {
+        Err(error)
+    }
+}
+
 pub(super) fn wake_on_parent_death(parent: i32) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGCONT, 0, 0, 0) } != 0 {
@@ -660,6 +687,13 @@ mod platform {
             if !paused {
                 return self.resume();
             }
+            self.collect(true, None)
+        }
+        fn collect(
+            &mut self,
+            freeze: bool,
+            deadline: Option<std::time::Instant>,
+        ) -> io::Result<()> {
             let root = unsafe { libc::getpid() };
             let group = unsafe { libc::getpgrp() };
             // Probe both syscalls before stopping anything (older kernels / seccomp).
@@ -667,7 +701,13 @@ mod platform {
             let mut visited = HashSet::new();
             let mut queue: Vec<(i32, Option<Identity>)> = vec![(root, None)];
             while let Some((pid, parent)) = queue.pop() {
-                if !PAUSE.load(Ordering::SeqCst) {
+                if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "owned snapshot deadline",
+                    ));
+                }
+                if freeze && !PAUSE.load(Ordering::SeqCst) {
                     break;
                 }
                 if !visited.insert(pid) {
@@ -706,14 +746,14 @@ mod platform {
                     {
                         continue;
                     }
-                    if p.group != group {
+                    if freeze && p.group != group {
                         signal(&fd, libc::SIGSTOP)?;
                     }
                     // Hold the kernel-stopped foreground primary too, so error/drop teardown
                     // can terminate it without ever using a reaped numeric PID.
                     self.stopped.push((p.identity, fd, p.group == group));
                 }
-                if pid != root {
+                if freeze && pid != root {
                     // Stop parents before enumerating their children. This also waits for Pi's
                     // foreground-group TSTP, so it cannot fork a new task after we scan it.
                     let deadline =
@@ -740,6 +780,14 @@ mod platform {
                 }
             }
             Ok(())
+        }
+        pub(crate) fn terminate_tree(&mut self, deadline: std::time::Instant) -> io::Result<()> {
+            let captured = self.collect(false, Some(deadline));
+            let stopped = self.teardown(0);
+            // Reaper ownership survives any pidfd/snapshot error; init cleanup finishes it.
+            // Do not let Drop perform background terminal IO from the anchor error path.
+            self.stopped.clear();
+            captured.and(stopped)
         }
         pub(crate) fn teardown(&mut self, primary: i32) -> io::Result<()> {
             // pending() has already queued TERM for its held primary, but has not resumed it.
@@ -790,6 +838,9 @@ mod platform {
                 return self.teardown(0);
             }
             self.signal(if paused { libc::SIGSTOP } else { libc::SIGCONT })
+        }
+        pub(crate) fn terminate_tree(&mut self, _: std::time::Instant) -> io::Result<()> {
+            self.teardown(0)
         }
         pub(crate) fn teardown(&mut self, _: i32) -> io::Result<()> {
             if !enabled() {

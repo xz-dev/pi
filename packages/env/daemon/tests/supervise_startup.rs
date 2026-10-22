@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug)]
 enum Window {
     OuterAcquire,
+    AnchorBorn,
     GuardianBorn,
     GuardianAcquire,
     PrimaryFork,
@@ -32,6 +33,7 @@ struct Fixture {
     child: Child,
     traced: Option<i32>,
     root: PathBuf,
+    anchor: i32,
     guardian: i32,
     primary: i32,
     lease: Option<UnixStream>,
@@ -104,6 +106,7 @@ impl Fixture {
             child,
             traced: Some(pid),
             root,
+            anchor: 0,
             guardian: 0,
             primary: 0,
             lease,
@@ -153,13 +156,18 @@ impl Fixture {
                 gate_fd = None;
                 exec_seen = false;
                 grant_received = false;
-                if self.guardian == 0 {
+                if self.anchor == 0 {
+                    self.anchor = pid;
+                } else if self.guardian == 0 {
                     self.guardian = pid;
                 } else {
                     self.primary = pid;
                 }
                 assert!(libc::WIFSTOPPED(wait_trace(pid)));
-                if (matches!(window, Window::GuardianBorn) && self.primary == 0)
+                if (matches!(window, Window::AnchorBorn) && self.guardian == 0)
+                    || (matches!(window, Window::GuardianBorn)
+                        && self.guardian != 0
+                        && self.primary == 0)
                     || (matches!(window, Window::PrimaryBorn) && self.primary != 0)
                 {
                     self.pause_at(pid, window);
@@ -219,7 +227,7 @@ impl Fixture {
                 && regs.rdi == libc::PR_SET_CHILD_SUBREAPER as u64;
             let selected = entry
                 && match window {
-                    Window::GuardianBorn | Window::PrimaryBorn => false,
+                    Window::AnchorBorn | Window::GuardianBorn | Window::PrimaryBorn => false,
                     Window::OuterAcquire => pid == self.child.id() as i32 && acquire,
                     Window::GuardianAcquire => pid == self.guardian && acquire,
                     Window::PrimaryFork => {
@@ -319,11 +327,13 @@ impl Fixture {
             "payload executed behind stopped outer: {window:?}"
         );
         if matches!(window, Window::OuterAcquire) {
-            for guardian in children(self.child.id() as i32) {
-                assert!(
-                    children(guardian).is_empty(),
-                    "pre-fork stop must precede primary creation"
-                );
+            for anchor in children(self.child.id() as i32) {
+                for guardian in children(anchor) {
+                    assert!(
+                        children(guardian).is_empty(),
+                        "pre-fork stop must precede primary creation"
+                    );
+                }
             }
         }
         for guardian in children(self.child.id() as i32) {
@@ -434,7 +444,7 @@ fn wait_for(mut condition: impl FnMut() -> bool) {
 fn parent_death_fault_seam_is_build_scoped_and_reaps_all_roles() {
     let mut fixture = Fixture::start_config(Window::PrimaryBorn, false, true);
     let mut pid = fixture.traced.unwrap();
-    for level in 0..2 {
+    for level in 0..3 {
         ptrace(libc::PTRACE_CONT, pid, 0);
         let status = wait_trace(pid);
         assert!(libc::WIFSTOPPED(status));
@@ -453,6 +463,8 @@ fn parent_death_fault_seam_is_build_scoped_and_reaps_all_roles() {
         fixture.traced = Some(pid);
         assert!(libc::WIFSTOPPED(wait_trace(pid)));
         if level == 0 {
+            fixture.anchor = pid;
+        } else if level == 1 {
             fixture.guardian = pid;
         } else {
             fixture.primary = pid;
@@ -475,7 +487,11 @@ fn parent_death_fault_seam_is_build_scoped_and_reaps_all_roles() {
         Some(if injected { 125 } else { 128 + libc::SIGTERM })
     );
     fixture.reaped = true;
-    wait_for(|| state(fixture.guardian) == 'X' && state(fixture.primary) == 'X');
+    wait_for(|| {
+        state(fixture.anchor) == 'X'
+            && state(fixture.guardian) == 'X'
+            && state(fixture.primary) == 'X'
+    });
     assert_eq!(fixture.root.join("started").exists(), !injected);
     assert_eq!(
         fs::read_to_string(fixture.root.join("stderr"))
@@ -489,6 +505,7 @@ fn parent_death_fault_seam_is_build_scoped_and_reaps_all_roles() {
 fn pending_startup_pause_prevents_payload_side_effect_until_one_cont() {
     for window in [
         Window::OuterAcquire,
+        Window::AnchorBorn,
         Window::GuardianBorn,
         Window::GuardianAcquire,
         Window::PrimaryFork,
