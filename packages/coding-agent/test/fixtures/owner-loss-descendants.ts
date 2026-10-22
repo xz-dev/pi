@@ -19,7 +19,11 @@ export default function (pi: ExtensionAPI) {
 			spawner.once("error", reject);
 			spawner.once("exit", (code) => (code === 0 ? resolve() : reject(new Error("orphan spawner failed"))));
 		});
-		while (!existsSync(`${root}/adopted-pid`) || !existsSync(`${root}/direct-tick`)) {
+		while (
+			!existsSync(`${root}/adopted-pid`) ||
+			!existsSync(`${root}/direct-tick`) ||
+			!existsSync(`${root}/adopted-tick`)
+		) {
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
 		writeFileSync(`${root}/descendants-ready`, "ready");
