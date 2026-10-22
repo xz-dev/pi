@@ -357,7 +357,23 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			if (checkpointsEnabled) {
 				params.store = true;
 			}
-			const nextParams = await options?.onPayload?.(params, model);
+			// Read mutable per-send options after the caller hook, not when the client was created.
+			const sendOptions = () => ({
+				...(options?.signal ? { signal: options.signal } : {}),
+				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+				maxRetries: 0,
+			});
+			const nextParams = await options?.onPayload?.(params, model, async (payload) => {
+				const { req, url } = await client.buildRequest({
+					method: "post",
+					path: "/responses",
+					body: payload,
+					...sendOptions(),
+					stream: true,
+					__security: { bearerAuth: true },
+				});
+				return new Request(url, req);
+			});
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
@@ -365,11 +381,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			// never override; it also disables durable capture for this request.
 			// The checkpoint-cooldown check below may still strip a policy-requested
 			// store:true; the effective flag is computed there.
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: 0,
-			};
+			const requestOptions = sendOptions();
 
 			const transport = options?.transport || "auto";
 			const sessionId = options?.sessionId;
