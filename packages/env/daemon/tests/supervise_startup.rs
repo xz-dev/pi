@@ -431,7 +431,7 @@ fn wait_for(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
-fn kernel_arm_failure_reaps_both_controllers_and_preexec_primary() {
+fn parent_death_fault_seam_is_build_scoped_and_reaps_all_roles() {
     let mut fixture = Fixture::start_config(Window::PrimaryBorn, false, true);
     let mut pid = fixture.traced.unwrap();
     for level in 0..2 {
@@ -460,15 +460,28 @@ fn kernel_arm_failure_reaps_both_controllers_and_preexec_primary() {
     }
     ptrace(libc::PTRACE_DETACH, pid, 0);
     fixture.traced = None;
+    let injected = cfg!(feature = "test-parent-death-failure");
+    if !injected {
+        wait_for(|| fixture.root.join("started").exists());
+        // Unreaped direct child anchors this PID; default builds must have granted exec.
+        assert_eq!(
+            unsafe { libc::kill(fixture.child.id() as i32, libc::SIGTERM) },
+            0
+        );
+    }
     wait_for(|| fixture.child.try_wait().unwrap().is_some());
-    assert_eq!(fixture.child.try_wait().unwrap().unwrap().code(), Some(125));
+    assert_eq!(
+        fixture.child.try_wait().unwrap().unwrap().code(),
+        Some(if injected { 125 } else { 128 + libc::SIGTERM })
+    );
     fixture.reaped = true;
     wait_for(|| state(fixture.guardian) == 'X' && state(fixture.primary) == 'X');
-    assert!(!fixture.root.join("started").exists());
-    assert!(
+    assert_eq!(fixture.root.join("started").exists(), !injected);
+    assert_eq!(
         fs::read_to_string(fixture.root.join("stderr"))
             .unwrap()
-            .contains("--no-process-ownership")
+            .contains("--no-process-ownership"),
+        injected
     );
 }
 

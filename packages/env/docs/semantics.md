@@ -81,10 +81,16 @@ primary child's status. Pi also requests graceful shutdown when its immediate Un
 restarting an already-suspended terminal. Owned Pi startup requires a kernel `SIGCONT` parent-death wake on
 Linux/FreeBSD, followed by a live-parent recheck before exec permission. Failure refuses startup with an explicit
 `--no-process-ownership` opt-out diagnostic; there is no silent wake fallback. The Linux guardian forks Pi from its
-sole lifetime thread because Linux binds this notification to the creating thread. Darwin retains its existing
-session observer wake instead; Linux/FreeBSD add no native actor. The private
-`PI_PROCESS_OWNER_TEST_PDEATHSIG_FAIL=1` environment variable injects an arm error only for tests; production never
-sets it, and non-session launch ignores it.
+sole lifetime thread because Linux binds this notification to the creating thread. The wake survives ordinary
+nonprivileged exec, not arbitrary privilege transitions: set-ID exec clears PDEATHSIG on Linux/FreeBSD; Linux
+also clears it on file-capability exec and changes to effective or filesystem user/group credentials. The Pi
+runtime executable and Pi's own credentials must retain the armed wake; privileged runtime transitions are not
+covered by the paused owner-loss guarantee. Darwin retains its existing session observer wake instead;
+Linux/FreeBSD add no native actor.
+
+Default builds contain no parent-death fault switch: inherited `PI_PROCESS_OWNER_TEST_PDEATHSIG_FAIL` values,
+including `1`, `0` and empty, have no effect. Only explicit `--features test-parent-death-failure` test artifacts
+contain that injection. Those test artifacts must not ship; non-session launch still ignores the injection.
 
 After the validated Unix handoff, an independent worker must acknowledge its PID and pinned-parent match before
 main starts. It polls live `process.ppid`, not main-thread messages. Once owner loss is observed, responsive Pi

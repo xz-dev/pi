@@ -68,7 +68,7 @@ mod checks {
         fs::remove_file(path).unwrap();
     }
 
-    fn kernel_arm_failure_fails_closed_before_payload_with_opt_out_diagnostic() {
+    fn parent_death_fault_switch_is_build_scoped() {
         for session in [true, false] {
             let path = std::env::temp_dir().join(format!(
                 "pi-kernel-failure-{}-{}-{session}",
@@ -95,15 +95,16 @@ mod checks {
                 command.env("PI_PROCESS_OWNER_PENDING", "1");
             }
             let output = command.output().unwrap();
-            if session {
+            if session && cfg!(feature = "test-parent-death-failure") {
                 assert_eq!(output.status.code(), Some(125));
                 assert!(!path.exists(), "arm failure must not grant exec");
                 assert!(String::from_utf8_lossy(&output.stderr).contains("--no-process-ownership"));
             } else {
                 assert!(
                     output.status.success(),
-                    "non-session must ignore test-only arm injection"
+                    "default build or non-session must ignore test-only arm injection"
                 );
+                assert!(output.stderr.is_empty());
                 assert!(path.exists());
                 fs::remove_file(path).unwrap();
             }
@@ -116,7 +117,7 @@ mod checks {
             return;
         }
         owned_primary_retains_parent_death_cont_across_exec();
-        kernel_arm_failure_fails_closed_before_payload_with_opt_out_diagnostic();
+        parent_death_fault_switch_is_build_scoped();
         println!("2 kernel parent-death checks passed");
     }
 }
