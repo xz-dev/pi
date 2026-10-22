@@ -129,8 +129,9 @@ Its lifetime watches must be ready before outer job signals are unblocked, and i
 birth identity before exec permission. Guardian loss or loss of both owners wakes the primary and any surviving
 outer. Observer loss instead makes the guardian wake the outer and fail the session closed. Normal completion
 reaps the observer; per-task owners do not add one.
-Cleanup takes a final snapshot before TERM, rescans for 250 ms, then escalates to KILL with a five-second bound.
-Enumeration errors, denied signals and known live survivors make cleanup fail.
+Normal guardian/outer cleanup takes a final snapshot before TERM, rescans for 250 ms, then escalates to KILL
+with a five-second bound. The independent observer's abnormal owner-loss sweep allows six seconds for TERM
+within a 7.5-second cleanup budget. Enumeration errors, denied signals and known live survivors make cleanup fail.
 
 The private protocol's `C` record means **best-effort sweep completed** on Darwin. It does **not** prove that no
 descendant exists. Double-forks retaining a private group and observed `setsid` descendants can be swept. A process
