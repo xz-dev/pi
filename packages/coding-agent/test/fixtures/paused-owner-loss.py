@@ -44,11 +44,11 @@ def wait_for(predicate, label):
         time.sleep(.02)
 
 
-def run(runtime, mode="unresolved"):
+def run(runtime, mode="unresolved", fault="both", busy=False):
     root = pathlib.Path(tempfile.mkdtemp(prefix="pi-owner-loss-shutdown-"))
     session = f"pi-owner-loss-shutdown-{os.getpid()}-{runtime}"
     pins = {}
-    result = {"runtime": runtime, "mode": mode, "root": str(root)}
+    result = {"runtime": runtime, "mode": mode, "fault": fault, "busy": busy, "root": str(root)}
     tty_fd = None
     try:
         entry = "bash --noprofile --norc"
@@ -61,13 +61,14 @@ def run(runtime, mode="unresolved"):
             wait_for(lambda: children(shell) and children(children(shell)[0]), "ancestor caller ready")
             shell = children(children(shell)[0])[0]
         tty_fd = os.open(call("tmux", "display-message", "-p", "-t", session, "#{pane_tty}"), os.O_RDONLY | os.O_NOCTTY)
-        args = ["env", "-i", f"PATH={os.environ['PATH']}", f"HOME={root}", f"TMPDIR={tempfile.gettempdir()}", f"PI_CODING_AGENT_DIR={root / 'agent'}", "PI_OFFLINE=1", f"REVIEW_ROOT={root}", runtime, *(["--import", str(REPO / "packages/coding-agent/src/experimental/source-resolver.ts")] if runtime == "node" else []), str(REPO / "packages/coding-agent/src/cli.ts"), "--no-extensions", "-e", str(REPO / "packages/coding-agent/test/fixtures" / ("owner-loss-shutdown.ts" if mode == "unresolved" else "blocking-owner-loss-shutdown.ts")), "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-session", "--offline", "--no-approve"]
+        args = ["env", "-i", f"PATH={os.environ['PATH']}", f"HOME={root}", f"TMPDIR={tempfile.gettempdir()}", f"PI_CODING_AGENT_DIR={root / 'agent'}", "PI_OFFLINE=1", f"REVIEW_ROOT={root}", f"REVIEW_BUSY={int(busy)}", runtime, *(["--import", str(REPO / "packages/coding-agent/src/experimental/source-resolver.ts")] if runtime == "node" else []), str(REPO / "packages/coding-agent/src/cli.ts"), "--no-extensions", "-e", str(REPO / "packages/coding-agent/test/fixtures" / ("owner-loss-shutdown.ts" if mode == "unresolved" else "blocking-owner-loss-shutdown.ts")), "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-session", "--offline", "--no-approve"]
         call("tmux", "send-keys", "-t", session, shlex.join(args), "Enter")
         wait_for(lambda: (root / "extension-ready").exists(), "extension initialization")
         outer = children(shell)[0]
-        guardian = children(outer)[0]
+        anchor = children(outer)[0]
+        guardian = children(anchor)[0]
         primary = children(guardian)[0]
-        pids = {"outer": outer, "guardian": guardian, "pi": primary}
+        pids = {"outer": outer, "anchor": anchor, "guardian": guardian, "pi": primary}
         for role, pid in pids.items():
             pins[role] = os.pidfd_open(pid)
         result["helper_sha256"] = hashlib.sha256(pathlib.Path(f"/proc/{outer}/exe").read_bytes()).hexdigest()
@@ -75,30 +76,56 @@ def run(runtime, mode="unresolved"):
         wait_for(lambda: not termios.tcgetattr(tty_fd)[3] & termios.ICANON, "raw input ready")
         # Initial raw mode precedes interactive key-handler installation.
         time.sleep(.7)
+        wait_for(lambda: (root / "descendants-ready").exists(), "raw extension descendants ready")
+        direct = int((root / "direct-pid").read_text())
+        adopted = int((root / "adopted-pid").read_text())
+        spawner = int((root / "orphan-spawner").read_text())
+        assert not state(spawner), "orphan spawner must already be reaped"
+        assert int(pathlib.Path(f"/proc/{direct}/stat").read_text().rsplit(") ", 1)[1].split()[1]) == primary
+        wait_for(lambda: int(pathlib.Path(f"/proc/{adopted}/stat").read_text().rsplit(") ", 1)[1].split()[1]) == guardian, "grandchild adopted by guardian before fault")
+        for role, pid in (("extension_child", direct), ("adopted_grandchild", adopted)):
+            pids[role] = pid
+            pins[role] = os.pidfd_open(pid)
         tick_file = root / "tick"
         call("tmux", "send-keys", "-t", session, f"!while :; do date +%s%N > {tick_file}; sleep .02; done", "Enter")
-        wait_for(lambda: tick_file.exists() and children(primary), "heartbeat ready")
-        task = children(primary)[0]
+        wait_for(lambda: tick_file.exists() and any(pid != direct for pid in children(primary)), "heartbeat ready")
+        task = next(pid for pid in children(primary) if pid != direct)
         wait_for(lambda: children(task) and children(children(task)[0]), "task controllers ready")
         pids.update(task_outer=task, task_guardian=children(task)[0], payload=children(children(task)[0])[0])
         for role in ("task_outer", "task_guardian", "payload"):
             pins[role] = os.pidfd_open(pids[role])
+        raw_before_pause = {name: (root / name).read_text() for name in ("direct-tick", "adopted-tick")}
+        wait_for(lambda: all((root / name).read_text() != value for name, value in raw_before_pause.items()), "raw descendants advancing before pause")
         if mode == "preblocked":
             signal.pidfd_send_signal(pins["pi"], signal.SIGUSR2)
             wait_for(lambda: (root / "preblocked").exists(), "main JS already blocked before pause")
             os.killpg(outer, signal.SIGTSTP)  # Held, unreaped outer anchors this test-only group.
             wait_for(lambda: all(state(pids[role]) == "T" for role in ("outer", "pi", "payload")), "kernel pause with blocked main")
         elif mode == "running-blocked":
+            # Keep raw descendants stopped while Pi/main/tty remain running; only pinned test targets.
+            for role in ("extension_child", "adopted_grandchild"):
+                signal.pidfd_send_signal(pins[role], signal.SIGSTOP)
+            wait_for(lambda: state(direct) == "T" and state(adopted) == "T", "raw descendants held before running shutdown")
             signal.pidfd_send_signal(pins["pi"], signal.SIGTERM)
             wait_for(lambda: (root / "shutdown-started").exists(), "JS entered blocking shutdown")
             wait_for(lambda: all(state(pids[role]) in ("", "Z") for role in ("task_outer", "task_guardian", "payload")), "running task cancelled before owner loss")
             time.sleep(.1)
-        else:
+        elif mode != "healthy":
             call("tmux", "send-keys", "-t", session, "C-z")
             wait_for(lambda: all(state(pids[role]) == "T" for role in ("outer", "pi", "payload")), "actual paused session")
+        if mode not in ("healthy", "running-blocked"):
+            wait_for(lambda: state(direct) == "T" and state(adopted) == "T", "raw and adopted descendants frozen")
+        assert state(anchor) in ("R", "S"), "anchor must stay runnable"
+        anchor_stat = pathlib.Path(f"/proc/{anchor}/stat").read_text().rsplit(") ", 1)[1].split()
+        outer_stat = pathlib.Path(f"/proc/{outer}/stat").read_text().rsplit(") ", 1)[1].split()
+        assert int(anchor_stat[2]) == anchor and anchor_stat[3] == outer_stat[3], "anchor must own PG in job SID"
+        result["anchor_own_pg_same_sid"] = True
         tick = tick_file.read_text()
+        raw_ticks = {name: (root / name).read_text() for name in ("direct-tick", "adopted-tick")}
         time.sleep(.15)
-        assert tick_file.read_text() == tick, "heartbeat did not freeze"
+        if mode != "healthy":
+            assert tick_file.read_text() == tick, "heartbeat did not freeze"
+            assert all((root / name).read_text() == value for name, value in raw_ticks.items()), "raw descendant heartbeat did not freeze"
         if mode != "unresolved":
             # Keep the surviving ancestor in the same SID: no orphan-group HUP/CONT wake.
             ancestor = int(pathlib.Path(f"/proc/{shell}/stat").read_text().rsplit(") ", 1)[1].split()[1])
@@ -110,10 +137,12 @@ def run(runtime, mode="unresolved"):
             if mode == "running-blocked":
                 result["raw_before_owner_loss"] = not termios.tcgetattr(tty_fd)[3] & termios.ICANON
                 assert result["raw_before_owner_loss"], "running fixture must exercise raw tty hard exit"
-            signal.pidfd_send_signal(pins["guardian"], signal.SIGSTOP)
-            wait_for(lambda: state(guardian) == "T", "guardian held before fault")
+            if fault == "both":
+                signal.pidfd_send_signal(pins["guardian"], signal.SIGSTOP)
+                wait_for(lambda: state(guardian) == "T", "guardian held before fault")
         start = time.monotonic()
-        for role in (("guardian", "outer") if mode == "unresolved" else ("outer", "guardian")):
+        roles = (("guardian", "outer") if mode == "unresolved" else ("outer", "guardian")) if fault == "both" else (fault,)
+        for role in roles:
             signal.pidfd_send_signal(pins[role], signal.SIGKILL)
         deadline = start + 8
         tty_output = root / "tty-state"
@@ -133,15 +162,17 @@ def run(runtime, mode="unresolved"):
         if result["death_wake"]:
             result["ppid_at_death_wake"] = int((root / "death-wake").read_text())
         result["blocked_hook_completed"] = (root / "shutdown-done").exists()
-        if mode == "blocking":
+        if mode == "blocking" and fault in ("both", "guardian"):
             assert result["death_wake"], "kernel CONT did not reach Pi before JS blocked"
-            assert result["ppid_at_death_wake"] == result["surviving_ancestor"]
+            assert result["ppid_at_death_wake"] == anchor
             assert not result["blocked_hook_completed"], "blocked hook completed before hard exit"
         if mode == "running-blocked":
             assert result["shell_restored_while_pi_alive"], "shell must restore cooked tty without Pi cleanup"
             assert not result["blocked_hook_completed"], "main-thread block outlasted enforcement"
         entered = (root / "preblocked").exists() and not result["shutdown_started"] if mode == "preblocked" else result["shutdown_started"]
-        result["pass"] = not any(result["final"].values()) and entered and not result["heartbeat_changed"] and result["cooked"] and time.monotonic() <= deadline
+        result["raw_heartbeat_changed"] = any((root / name).read_text() != value for name, value in raw_ticks.items())
+        # Anchor loss may race Pi's fg handler while its guardian is still alive; native reapers enforce exit even without hook entry.
+        result["pass"] = not any(result["final"].values()) and (entered or fault == "anchor") and (mode == "healthy" or (not result["heartbeat_changed"] and not result["raw_heartbeat_changed"])) and result["cooked"] and time.monotonic() <= deadline
         assert result["pass"], "paused owner loss exceeded 8 seconds or resumed work"
     finally:
         print(json.dumps(result), flush=True)
@@ -161,10 +192,17 @@ if __name__ == "__main__":
     assert sys.platform == "linux", "this regression requires Linux pidfds"
     mode = "unresolved"
     runtimes = []
+    fault = "both"
+    busy = False
     for arg in sys.argv[1:]:
-        if arg in ("--blocking", "--preblocked", "--running-blocked"):
+        if arg in ("--blocking", "--preblocked", "--running-blocked", "--healthy"):
             mode = arg[2:]
+        elif arg.startswith("--fault="):
+            fault = arg.split("=", 1)[1]
+            assert fault in ("both", "guardian", "anchor", "outer")
+        elif arg == "--busy":
+            busy = True
         else:
             runtimes.append(arg)
     for runtime in runtimes or ("node", "bun"):
-        run(runtime, mode)
+        run(runtime, mode, fault, busy)
