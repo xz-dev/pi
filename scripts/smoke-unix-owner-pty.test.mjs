@@ -78,6 +78,7 @@ for (const [label, mutate] of [
 for (const [label, mutate] of [
 	["missing anchor", (r) => { delete r.processes.anchor; }],
 	["foreground anchor", (r) => { r.processes.anchor.group = r.processes.outer.group; }],
+	["shared shell-group anchor", (r) => { r.processes.anchor.group = r.processes.outer.sid; r.paused.find((p) => p.role === "anchor").group = r.processes.anchor.group; }],
 	["different-SID anchor", (r) => { r.processes.anchor.sid++; }],
 	["stopped anchor", (r) => { r.paused.find((p) => p.role === "anchor").state = "T"; }],
 	["anchor not R/S", (r) => { r.paused.find((p) => p.role === "anchor").state = "D"; }],

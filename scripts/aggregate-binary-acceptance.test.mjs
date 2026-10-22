@@ -329,6 +329,7 @@ test("aggregator rejects missing Darwin observer proof on normal and fault teard
 for (const [label, systems, mutate] of [
 	["missing anchor", ["linux", "freebsd"], (r) => { delete r.processes.anchor; }],
 	["foreground anchor", ["linux", "freebsd"], (r) => { r.processes.anchor.group = r.processes.outer.group; }],
+	["shared shell-group anchor", ["linux", "freebsd"], (r) => { r.processes.anchor.group = r.processes.outer.sid; r.paused.find((p) => p.role === "anchor").group = r.processes.anchor.group; }],
 	["stopped anchor", ["linux", "freebsd"], (r) => { r.paused.find((p) => p.role === "anchor").state = "T"; }],
 	["unreaped anchor", ["linux", "freebsd"], (r) => { r.after.find((p) => p.pid === r.processes.anchor.pid).state = "Z"; }],
 	["surviving direct extension child", ["linux", "freebsd", "darwin"], (r) => { r.after.find((p) => p.pid === r.processes.extensionChild.pid).state = "S"; }],

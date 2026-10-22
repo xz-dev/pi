@@ -559,10 +559,11 @@ fn session(
         )?;
         let identity = pin(&table, anchor)?;
         require(
-            identity["group"] != outer_pid
+            identity["group"] == anchor
+                && identity["group"] != outer_pid
                 && identity["sid"] == pin(&table, outer_pid)?["sid"]
                 && matches!(state(&table, &identity)?.chars().next(), Some('R' | 'S')),
-            "anchor not runnable/outside foreground group in same SID",
+            "anchor not runnable/in own group outside foreground group in same SID",
         )?;
         require(
             fs::canonicalize(native_path(anchor)?).map_err(|e| e.to_string())?
