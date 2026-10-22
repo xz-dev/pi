@@ -334,6 +334,9 @@ for (const [label, systems, mutate] of [
 	["surviving direct extension child", ["linux", "freebsd", "darwin"], (r) => { r.after.find((p) => p.pid === r.processes.extensionChild.pid).state = "S"; }],
 	["surviving adopted grandchild", ["linux", "freebsd", "darwin"], (r) => { r.after.find((p) => p.pid === r.processes.adoptedGrandchild.pid).state = "T"; }],
 	["unreaped spawner", ["linux", "freebsd", "darwin"], (r) => { r.adoption.spawnerReaped = false; }],
+	["absent pre-adoption state", ["linux", "freebsd", "darwin"], (r) => { delete r.adoption.grandchildBefore.state; }],
+	["false pre-adoption state", ["linux", "freebsd", "darwin"], (r) => { r.adoption.grandchildBefore.state = false; }],
+	["zombie pre-adoption state", ["linux", "freebsd", "darwin"], (r) => { r.adoption.grandchildBefore.state = "Z"; }],
 	["missing Darwin observation cycle", ["darwin"], (r) => { delete r.adoption.observationCycle; }],
 ]) test(`aggregator rejects ${label} in normal and every paused-fault row`, () => {
 	for (const os of systems) for (const name of ["suspend-resume", ...unixOwnerFaultRows(os)]) {

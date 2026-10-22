@@ -118,6 +118,15 @@ for (const [label, mutate] of [
 		assert.throws(() => verify(row, os), /owner lifecycle PTY/);
 	}
 });
+for (const value of [undefined, false, "Z"]) test(`pre-adoption grandchild rejects ${String(value)} state on every PTY row`, () => {
+	for (const os of ["linux", "freebsd", "darwin"]) for (const name of ["suspend-resume", ...unixOwnerFaultRows(os)]) {
+		const row = proof(os, name);
+		if (value === undefined) delete row.adoption.grandchildBefore.state;
+		else row.adoption.grandchildBefore.state = value;
+		assert.throws(() => verify(row, os), /pinned spawner\/setsid grandchild/);
+	}
+});
+
 for (const key of ["spawner", "grandchildBefore", "spawnerExit", "spawnerState", "spawnerReaped", "postExitParent", "observationCycle"]) test(`adoption proof requires ${key}`, () => {
 	for (const os of ["linux", "freebsd", "darwin"]) {
 		const row = proof(os); delete row.adoption[key];

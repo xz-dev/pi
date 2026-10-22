@@ -119,6 +119,17 @@ test("lifecycle requires post-fault shutdown hook entry for guardian and both-ow
 	}
 });
 
+for (const value of [undefined, false, "Z"]) test(`lifecycle rejects ${String(value)} pre-adoption grandchild state in every PTY row`, () => {
+	for (const os of ["linux", "freebsd", "darwin"]) for (const name of ownerLifecycleRows(os).filter(isUnixOwnerPtyRow)) {
+		const rows = rowsFor(os);
+		const row = rows.find((row) => row.name === name);
+		if (value === undefined) delete row.adoption.grandchildBefore.state;
+		else row.adoption.grandchildBefore.state = value;
+		const evidence = { status: "passed", target: "fixture-target", cliSha256, identity: standard, rows, ...artifactBunFromOwnerRows(rows) };
+		assert.throws(() => assertOwnerLifecycle(evidence, os), /pinned spawner\/setsid grandchild/);
+	}
+});
+
 test("missing or disagreeing shipped Bun versions fail on every Unix target", () => {
 	for (const os of ["linux", "freebsd", "darwin"]) {
 		const observations = rowsFor(os);
