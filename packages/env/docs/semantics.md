@@ -66,14 +66,16 @@ current invocation; `PI_NO_PROCESS_OWNERSHIP=1` also reaches nested Pi invocatio
 but native descendant-containment guarantees no longer apply. The macOS ownership hint is suppressed when disabled.
 
 On Unix, `Ctrl-Z` stops the shell-facing owner and Pi, while the guardian stays runnable and freezes owned local
-tool trees. `fg` resumes them; `setsid` isolation is preserved. Linux uses identity-validated pidfds for non-direct
+tool trees. Linux/FreeBSD sessions also retain an ancestor anchor in its own process group, in the same session;
+it stays runnable and retains the reaper scope if the outer or guardian dies. `fg` resumes owned work; `setsid`
+isolation is preserved. Linux uses identity-validated pidfds for non-direct
 descendants (Linux 5.3+); unavailable pidfds disable only freezing with a visible warning. FreeBSD signals the
 kernel reaper subtree, including nested reapers. macOS uses its existing best-effort inventory.
 
 Resume requests received during a freeze pass are reconciled before the pass settles. Startup holds a runnable
 native child behind an exec gate; freezing starts only after exec is confirmed. Linux registers a parent-directed
-`SIGCONT` guardian-exit notification, so even a paused outer resumes to finish cleanup. FreeBSD instead arms a
-one-byte socket-AIO read with `SIGEV_SIGNAL`/`SIGCONT`: only the guardian retains the writer, so its exit completes
+`SIGCONT` anchor-exit notification, so even a paused outer resumes to finish cleanup. FreeBSD instead arms a
+one-byte socket-AIO read with `SIGEV_SIGNAL`/`SIGCONT`: only the anchor retains the writer, so its exit completes
 the read at EOF. Failure to arm this wake fails session startup; no module or sysctl changes are made.
 Termination bypasses healthy resume reconciliation: frozen primary and detached targets receive TERM before any
 teardown CONT, including rollback/drop paths. Bounded KILL escalation and adopted-zombie reaping preserve the
@@ -85,8 +87,8 @@ sole lifetime thread because Linux binds this notification to the creating threa
 nonprivileged exec, not arbitrary privilege transitions: set-ID exec clears PDEATHSIG on Linux/FreeBSD; Linux
 also clears it on file-capability exec and changes to effective or filesystem user/group credentials. The Pi
 runtime executable and Pi's own credentials must retain the armed wake; privileged runtime transitions are not
-covered by the paused owner-loss guarantee. Darwin retains its existing session observer wake instead;
-Linux/FreeBSD add no native actor.
+covered by the paused owner-loss guarantee. Darwin retains its existing session observer as the cleanup anchor.
+Opt-out and non-session paths add no anchor. Simultaneous loss of the anchor and both owners can defeat teardown.
 
 Default builds contain no parent-death fault switch: inherited `PI_PROCESS_OWNER_TEST_PDEATHSIG_FAIL` values,
 including `1`, `0` and empty, have no effect. Only explicit `--features test-parent-death-failure` test artifacts
@@ -100,6 +102,12 @@ if main JS cannot run. A normal pause stops the worker with Pi; kernel/observer 
 Worker startup/identity failure refuses bootstrap rather than degrading supervision. Unexpected worker error/exit
 fails the responsive main process closed; normal process exit disarms that exit callback. Ordinary interactive
 quit and live-owner signal shutdown still await extension cleanup without the owner-loss deadline.
+
+After outer-only or anchor-only death, the guardian can still be Pi's parent when teardown CONT arrives. Pi may
+mistake it for `fg`, perform background tty IO, and stop again before `session_shutdown` hooks run. Native controllers
+catch and record SIGTTIN/SIGTTOU only during irreversible teardown, so TERM/KILL and reaping still finish within the
+bound; healthy job-control dispositions are unchanged. Pi adds no tty-signal handler. Extension shutdown is not
+guaranteed in this case, and the job-control shell restores the tty.
 
 SIGKILL cannot run Pi's tty cleanup. In an interactive job-control shell, the shell restores its saved cooked tty
 when the shell-facing owner dies; tests check this while blocked Pi is still alive, before the worker kills it.
@@ -115,8 +123,8 @@ The CLI's native `pi-env supervise` owner uses a best-effort sweep on macOS, not
 containment. Noninteractive tasks have a private process group; the interactive CLI keeps its foreground terminal
 group. The outer and guardian use CLOEXEC liveness pipes and sample descendants with
 `proc_listchildpids`/`proc_pidinfo` every 25 ms. Observed identities (PID, start time, UID) survive reparenting in
-the cache and are checked before every signal. Interactive sessions add exactly one wake-only observer as the
-outer's other direct child, in a separate session outside the foreground group and frozen guardian subtree.
+the cache and are checked before every signal. Interactive sessions use the existing observer as a cleanup anchor,
+the outer's other direct child, in a separate session outside the foreground group and frozen guardian subtree.
 Its lifetime watches must be ready before outer job signals are unblocked, and it acknowledges the primary's
 birth identity before exec permission. Guardian loss or loss of both owners wakes the primary and any surviving
 outer. Observer loss instead makes the guardian wake the outer and fail the session closed. Normal completion

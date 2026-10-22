@@ -147,7 +147,7 @@ def run(runtime, mode="unresolved", fault="both", busy=False):
         deadline = start + 8
         tty_output = root / "tty-state"
         # Query in an executing shell command, not during readline's own raw prompt.
-        call("tmux", "send-keys", "-t", session, f"stty -a > {tty_output}", "Enter")
+        call("tmux", "send-keys", "-t", session, f"stty -a > {tty_output}.tmp && mv {tty_output}.tmp {tty_output}", "Enter")
         cooked_observed_while_pi_alive = False
         while time.monotonic() < deadline and (any(state(pid) for pid in pids.values()) or not tty_output.exists()):
             if tty_output.exists() and state(primary) not in ("", "Z"):
@@ -171,8 +171,10 @@ def run(runtime, mode="unresolved", fault="both", busy=False):
             assert not result["blocked_hook_completed"], "main-thread block outlasted enforcement"
         entered = (root / "preblocked").exists() and not result["shutdown_started"] if mode == "preblocked" else result["shutdown_started"]
         result["raw_heartbeat_changed"] = any((root / name).read_text() != value for name, value in raw_ticks.items())
-        # Anchor loss may race Pi's fg handler while its guardian is still alive; native reapers enforce exit even without hook entry.
-        result["pass"] = not any(result["final"].values()) and (entered or fault == "anchor") and (mode == "healthy" or (not result["heartbeat_changed"] and not result["raw_heartbeat_changed"])) and result["cooked"] and time.monotonic() <= deadline
+        # A live guardian can make outer/anchor-loss CONT look like fg; record hook entry without requiring it for these faults.
+        requires_entry = fault not in ("outer", "anchor") or mode in ("preblocked", "running-blocked")
+        result["hook_entered"] = result["shutdown_started"]
+        result["pass"] = not any(result["final"].values()) and (entered or not requires_entry) and (mode == "healthy" or (not result["heartbeat_changed"] and not result["raw_heartbeat_changed"])) and result["cooked"] and time.monotonic() <= deadline
         assert result["pass"], "paused owner loss exceeded 8 seconds or resumed work"
     finally:
         print(json.dumps(result), flush=True)
