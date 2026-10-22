@@ -42,8 +42,10 @@ import {
 	getCheckpointCooldownState,
 	getResponsesWebSocketDebugStats,
 	getWebSocketSseFallbackState,
+	invalidateResponsesWebSocketContinuation,
 	isCheckpointReferenceError,
 	isResponsesNonTransportError,
+	isStoredContinuationReferenceError,
 	isWebSocketConnectionLimitReachedError,
 	normalizeWebSocketTimeoutMs,
 	OPENAI_BETA_RESPONSES_WEBSOCKETS,
@@ -246,6 +248,23 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	toolChoice?: ResponseCreateParamsStreaming["tool_choice"];
 }
 
+/** Resolve before encoding/filtering; only structured projection can adopt preceding history as local. */
+function getResponseAncestry(
+	messages: TranscriptContext["messages"],
+): "local" | "legacy" | "server-dependent" | "unknown" {
+	let ancestry: "local" | "legacy" | "server-dependent" | "unknown" = "local";
+	for (const message of messages) {
+		if (message.role !== "assistant" && message.role !== "user") continue;
+		if (!("responseAncestry" in message)) {
+			if (message.role === "assistant" && ancestry === "local") ancestry = "legacy";
+			continue;
+		}
+		if (message.responseAncestry === "server-dependent") ancestry = "server-dependent";
+		else if (message.responseAncestry !== "local" && ancestry !== "server-dependent") ancestry = "unknown";
+	}
+	return ancestry;
+}
+
 /**
  * Generate function for OpenAI Responses API
  */
@@ -256,6 +275,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages);
+	const responseAncestry = getResponseAncestry(normalizedContext.messages);
+	let lastResponseId: string | undefined;
+	for (const message of normalizedContext.messages) {
+		if (message.role === "assistant") lastResponseId = message.responseId;
+	}
 
 	// Start async processing
 	(async () => {
@@ -278,6 +302,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			},
 			stopReason: "pending",
 			timestamp: Date.now(),
+			...(responseAncestry === "local" || responseAncestry === "server-dependent" ? { responseAncestry } : {}),
 		};
 
 		let recoveryState = undefined as ReturnType<typeof getWebSocketSseFallbackState> | undefined;
@@ -312,17 +337,14 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			// state BEFORE the payload hook so an explicit caller store:false still
 			// disables capture below.
 			const requestTransport = options?.transport || "auto";
-			const { headers: websocketHeaders, scopeHeaders } =
-				requestTransport === "sse"
-					? { headers: new Headers(), scopeHeaders: {} }
-					: buildWebSocketHeaders(
-							model,
-							normalizedContext,
-							apiKey,
-							options?.headers,
-							cacheSessionId,
-							options?.identity,
-						);
+			const { headers: websocketHeaders, scopeHeaders } = buildWebSocketHeaders(
+				model,
+				normalizedContext,
+				apiKey,
+				options?.headers,
+				cacheSessionId,
+				options?.identity,
+			);
 			// Header overrides, not the unused API-key option, determine the WS credential.
 			const authorization = websocketHeaders.get("authorization");
 			const checkpointsEnabled =
@@ -351,10 +373,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 
 			const transport = options?.transport || "auto";
 			const sessionId = options?.sessionId;
-			const identityKey = transport === "sse" ? "" : websocketIdentityKey(model, websocketHeaders);
-			const fallbackState = sessionId
-				? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
-				: undefined;
+			const identityKey = websocketIdentityKey(model, websocketHeaders);
+			const fallbackState =
+				sessionId && transport !== "sse"
+					? getWebSocketSseFallbackState(OPENAI_RESPONSES_WEBSOCKET_SCOPE, sessionId, identityKey)
+					: undefined;
 			const recoveryProbe = (fallbackState?.retryAt ?? 0) > 0;
 			let startEmitted = false;
 			const websocketDisabledForSession =
@@ -411,6 +434,9 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
 				let retriedMissingWebSocketContinuation = false;
+				let referenceRepairConsumed = false;
+				// A replacement socket must not erase this logical request's stored-reference fence.
+				let storedReference = false;
 				// The checkpoint probe re-verifies with store:true on a full body; a
 				// stale delta would not prove the store path works.
 				let suppressDurablePlanning = checkpointProbe !== undefined;
@@ -418,7 +444,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				while (true) {
 					websocketStarted = false;
 					let websocketSent = false;
-					let fullHistory = !(checkpointsActive && params.previous_response_id !== undefined);
+					let fullHistory =
+						!callerOwnedParent && responseAncestry !== "server-dependent" && responseAncestry !== "unknown";
 					try {
 						await processResponsesWebSocket({
 							scope: OPENAI_RESPONSES_WEBSOCKET_SCOPE,
@@ -428,6 +455,12 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							output,
 							stream,
 							model,
+							responseAncestry,
+							lastResponseId,
+							onPlanned: (completeHistory, stored) => {
+								fullHistory = completeHistory;
+								storedReference ||= stored;
+							},
 							onSent: (completeHistory) => {
 								websocketSent = true;
 								if (checkpointProbe && params.store === true) checkpointProbe.attempted = true;
@@ -554,7 +587,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 						const aborted = options?.signal?.aborted;
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const checkpointReferenceError =
-							websocketSent && !startEmitted && output.content.length === 0 && isCheckpointReferenceError(error);
+							websocketSent &&
+							!startEmitted &&
+							output.content.length === 0 &&
+							(isCheckpointReferenceError(error) ||
+								(storedReference && isStoredContinuationReferenceError(error)));
 						// A verified checkpoint rejection proves a failed store/delta before
 						// execution: repair the turn once with the preserved full body minus
 						// store/previous_response_id, then cool this endpoint down for the
@@ -567,40 +604,58 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 							retriedMissingWebSocketContinuation = true;
 							// Never repair a caller-owned parent or a lineage whose complete
 							// history is not locally held: fullHistory is the provenance guard.
-							if (checkpointOwned && !callerOwnedParent && fullHistory) {
-								recordCheckpointCooldown(
-									OPENAI_RESPONSES_WEBSOCKET_SCOPE,
-									sessionId,
-									identityKey,
-									checkpointProbe,
-								);
+							if ((checkpointOwned || storedReference) && !callerOwnedParent && fullHistory) {
+								if (checkpointOwned)
+									recordCheckpointCooldown(
+										OPENAI_RESPONSES_WEBSOCKET_SCOPE,
+										sessionId,
+										identityKey,
+										checkpointProbe,
+									);
 								// Repair drops the checkpoint request: re-planning the same
 								// stale reference or resending store would repeat the failure.
-								delete (params as { store?: boolean; previous_response_id?: string }).store;
+								if (params.store !== false) delete (params as { store?: boolean }).store;
 								delete (params as { previous_response_id?: string }).previous_response_id;
 								suppressDurablePlanning = true;
 								forceFullContext = true;
+								referenceRepairConsumed = true;
 								continue;
 							}
 							if (!checkpointOwned && !callerOwnedParent && fullHistory) {
 								// Base-branch connection-local recovery, unchanged.
 								suppressDurablePlanning = true;
+								referenceRepairConsumed = true;
 								continue;
 							}
+						}
+						// An explicit pre-output connection limit permits one fresh socket, not replay after repair.
+						if (
+							!aborted &&
+							connectionLimitBeforeStart &&
+							!startEmitted &&
+							!retriedMissingWebSocketContinuation &&
+							!retriedWebSocketConnectionLimit
+						) {
+							retriedWebSocketConnectionLimit = true;
+							continue;
+						}
+						// A started repair is terminal across the outer retry owner, not just this stream.
+						if (output.api === "openai-responses" && referenceRepairConsumed && startEmitted && !aborted) {
+							// Classification only: raw errors can carry credentials outside top-level redaction.
+							appendAssistantMessageDiagnostic(output, {
+								type: "provider_reference_repair_terminal",
+								timestamp: Date.now(),
+							});
 						}
 						// A consumed full-history repair is the final attempt. A sent
 						// request without an explicit rejection has unknown execution.
 						if (
-							checkpointsActive &&
-							(!fullHistory ||
-								retriedMissingWebSocketContinuation ||
-								(websocketSent && !connectionLimitBeforeStart))
+							retriedMissingWebSocketContinuation ||
+							storedReference ||
+							!fullHistory ||
+							(checkpointsActive && websocketSent && !connectionLimitBeforeStart)
 						) {
 							throw error;
-						}
-						if (!aborted && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
-							retriedWebSocketConnectionLimit = true;
-							continue;
 						}
 						if (aborted || (isResponsesNonTransportError(error) && !connectionLimitBeforeStart)) {
 							throw error;
@@ -641,6 +696,13 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			// The SSE/HTTP path is a hard gate for checkpoints: it must never carry
 			// a store:true request. An explicit hook store:false and a caller-owned
 			// previous_response_id pass through unchanged.
+			if (!callerOwnedParent && (responseAncestry === "server-dependent" || responseAncestry === "unknown")) {
+				throw new ResponsesApiError("Cannot continue conversation without its server-owned ancestry", {
+					code: "checkpoint_lineage_unavailable",
+				});
+			}
+			if (callerOwnedParent) output.responseAncestry = "server-dependent";
+			invalidateResponsesWebSocketContinuation(OPENAI_RESPONSES_WEBSOCKET_SCOPE, cacheSessionId, identityKey);
 			const { store: _store, ...sseRest } = params;
 			const sseParams =
 				checkpointsEnabled && params.store === true ? (sseRest as ResponseCreateParamsStreaming) : params;

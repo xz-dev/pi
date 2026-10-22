@@ -632,6 +632,8 @@ export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
 	timestamp: number; // Unix timestamp in milliseconds
+	/** Structured summary projection adopts this user input as a new local baseline; never sent upstream. */
+	responseAncestry?: "local" | "server-dependent";
 }
 
 export interface AssistantMessage {
@@ -649,6 +651,8 @@ export interface AssistantMessage {
 	 * legacy messages and uncheckpointed responses. See utils/response-checkpoints.ts.
 	 */
 	responseCheckpoint?: ResponseCheckpoint;
+	/** Local input or server-owned ancestry, independent of checkpoint policy. Absence is legacy trust, not proof. Never sent upstream. */
+	responseAncestry?: "local" | "server-dependent";
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;
 	/** Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses. */

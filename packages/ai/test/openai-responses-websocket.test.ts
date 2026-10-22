@@ -151,6 +151,39 @@ describe("openai-responses WebSocket transport", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
+	it.each(["sse", "websocket"] as const)(
+		"preserves identity and caller header precedence over %s",
+		async (transport) => {
+			const { connectHeaders, fetchMock } = mockTransport();
+			const httpHeaders: Headers[] = [];
+			const fetch: typeof globalThis.fetch = async (_input, init) => {
+				httpHeaders.push(new Headers(init?.headers));
+				return fetchMock();
+			};
+			const target = { ...model, provider: "openrouter" };
+			const identity = {
+				userAgent: { custom: "identity-agent" },
+				attribution: { name: "identity-app", url: "https://app.example" },
+			};
+			for (const headers of [
+				undefined,
+				{ "user-agent": "caller-agent", "x-openrouter-title": "caller-app" },
+				{ "user-agent": null, "x-openrouter-title": null },
+			]) {
+				const result = await stream(target, context, { apiKey, transport, identity, headers, fetch }).result();
+				expect(result.stopReason).toBe("stop");
+			}
+			const observed = transport === "sse" ? httpHeaders : connectHeaders.map((headers) => new Headers(headers));
+			expect(observed.map((headers) => headers.get("user-agent"))).toEqual(["identity-agent", "caller-agent", null]);
+			expect(observed.map((headers) => headers.get("x-openrouter-title"))).toEqual([
+				"identity-app",
+				"caller-app",
+				null,
+			]);
+			expect(observed.every((headers) => headers.get("http-referer") === "https://app.example")).toBe(true);
+		},
+	);
+
 	it("reuses the connection and sends only the delta with previous_response_id", async () => {
 		const { run, sent, sockets } = mockTransport();
 		const first = await run();

@@ -339,6 +339,12 @@ function matchesNonRetryableErrorPatterns(errorMessage: string, patterns: readon
 
 export function isRetryableAssistantError(message: AssistantMessage, options?: RetryClassificationOptions): boolean {
 	if (message.stopReason !== "error" || !message.errorMessage) return false;
+	if (
+		message.api === "openai-responses" &&
+		message.diagnostics?.some((diagnostic) => diagnostic.type === "provider_reference_repair_terminal")
+	) {
+		return false;
+	}
 	const errorMessage = message.errorMessage;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
 	if (matchesNonRetryableErrorPatterns(errorMessage, options?.nonRetryableErrorPatterns)) return false;
