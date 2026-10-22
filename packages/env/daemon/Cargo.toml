@@ -5,6 +5,10 @@ edition = "2024"
 description = "Remote execution environment daemon for Pi Durable"
 publish = false
 
+[features]
+# Fault injection exists only in explicitly enabled test artifacts, never default builds.
+test-parent-death-failure = []
+
 [dependencies]
 encoding_rs = "=0.8.42"
 ignore = "=0.4.33"

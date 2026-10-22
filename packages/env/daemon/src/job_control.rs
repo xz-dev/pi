@@ -327,7 +327,7 @@ impl Primary {
                 }
                 // Only the owned session primary takes this branch. Guardian forks on its
                 // sole lifetime thread, so Linux's creating-thread death is guardian death.
-                // Test-only injection; production never sets this environment variable.
+                #[cfg(feature = "test-parent-death-failure")]
                 let armed = if cfg!(any(target_os = "linux", target_os = "freebsd"))
                     && std::env::var_os("PI_PROCESS_OWNER_TEST_PDEATHSIG_FAIL").is_some()
                 {
@@ -335,6 +335,8 @@ impl Primary {
                 } else {
                     wake_on_parent_death(parent)
                 };
+                #[cfg(not(feature = "test-parent-death-failure"))]
+                let armed = wake_on_parent_death(parent);
                 let wake_error = b"pi-env: cannot establish owned Pi parent-death wake; use --no-process-ownership to opt out\n";
                 if let Err(error) = armed {
                     unsafe {
