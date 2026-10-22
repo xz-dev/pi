@@ -186,9 +186,14 @@ export interface ProviderRequestOptions<TModel = Model<Api>> {
 	env?: ProviderEnv;
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
-	 * Return undefined to keep the payload unchanged.
+	 * Return undefined to keep the payload unchanged. OpenAI Responses supplies an optional
+	 * request preparer using the active client, without transport I/O.
 	 */
-	onPayload?: (payload: unknown, model: TModel) => unknown | undefined | Promise<unknown | undefined>;
+	onPayload?: (
+		payload: unknown,
+		model: TModel,
+		prepareRequest?: (payload: unknown) => Promise<Request>,
+	) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback invoked after each HTTP response is received, including error responses and
 	 * responses to retried attempts. Coverage depends on provider and transport: some report empty headers or
