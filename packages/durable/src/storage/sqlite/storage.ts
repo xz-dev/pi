@@ -1,5 +1,6 @@
 import type { Context, JsonValue } from "@earendil-works/chord";
 import { apply, type Op } from "@earendil-works/chord/delta";
+import type { SqliteDatabase, SqliteExecutor, SqliteValue } from "@earendil-works/chord/sqlite";
 import { StorageRequestError } from "../../errors.ts";
 import { idFromNumber, seqFromNumber } from "../../ids.ts";
 import type {
@@ -33,7 +34,6 @@ import type {
 	TaskRecord,
 } from "../../types.ts";
 import { nextCursor, type ScanStart, scanStart } from "../scan.ts";
-import type { SqliteDatabase, SqliteExecutor, SqliteValue } from "./database.ts";
 import { applySqliteMigrationsForSchema } from "./migrations.ts";
 import { createSqliteSchema, type SqliteSchema } from "./schema.ts";
 
@@ -184,7 +184,7 @@ export class SqliteStorage implements Storage {
 		}
 	}
 
-	async commit(writes: readonly StorageWrite[], _context: Context): Promise<Seq> {
+	async commit(writes: readonly StorageWrite[], adopt: (seq: Seq) => void, _context: Context): Promise<Seq> {
 		this.assertOpen();
 		const documentActions = this.prepareDocumentActions(writes);
 		const candidateNextId = this.candidateNextId(writes);
@@ -206,6 +206,8 @@ export class SqliteStorage implements Storage {
 			return committedSeq;
 		});
 		this.nextId = Math.max(this.nextId, candidateNextId);
+		// `COMMIT` returned: the batch is durable.
+		adopt(seq);
 		return seq;
 	}
 
