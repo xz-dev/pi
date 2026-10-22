@@ -170,12 +170,14 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 				case "branchSummary":
 					return {
 						role: "user",
+						responseAncestry: "local",
 						content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
 						timestamp: m.timestamp,
 					};
 				case "compactionSummary":
 					return {
 						role: "user",
+						responseAncestry: "local",
 						content: [
 							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
 						],
