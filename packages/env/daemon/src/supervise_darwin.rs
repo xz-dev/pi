@@ -12,6 +12,9 @@ static SIGNALS: AtomicU32 = AtomicU32::new(0);
 const FORWARDED: [i32; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
 
 extern "C" fn receive(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    if matches!(signal, libc::SIGTERM | libc::SIGHUP) {
+        crate::job_control::begin_cleanup(receive);
+    }
     if crate::job_control::receive(signal) {
         return;
     }
@@ -432,6 +435,7 @@ fn command(
         if terminating.is_none()
             && (requested || cancelled || !alive(&mut lease.read, &mut unused)?)
         {
+            crate::job_control::begin_cleanup(receive);
             // This tick's final snapshot precedes every parent termination signal.
             // The outer may die while stopped; wake the payload before its TERM handler.
             if !started {
@@ -548,7 +552,10 @@ pub fn run(args: &[OsString]) -> i32 {
             private_group,
             (startup_child, watch.as_ref()),
         );
-        let clean = inventory.cleanup();
+        crate::job_control::begin_cleanup(receive);
+        let clean = inventory
+            .cleanup()
+            .and(crate::job_control::cleanup_tty_result());
         if clean.is_ok() && result.is_ok() {
             let _ = lease.write.write_all(b"C");
         }
@@ -564,6 +571,7 @@ pub fn run(args: &[OsString]) -> i32 {
             drop(sockets.observer_guardian);
             drop(startup_owner);
             drop(startup_child);
+            crate::job_control::begin_cleanup(receive);
             let _ = Inventory::new(false).cleanup();
             eprintln!("pi-env supervise: {error}");
             return 125;
@@ -597,6 +605,7 @@ pub fn run(args: &[OsString]) -> i32 {
         drop(sockets.observer_guardian);
         let mut watch = wake::Outer::new(sockets.outer, observer);
         if let Err(error) = watch.reply(b'R') {
+            crate::job_control::begin_cleanup(receive);
             let deadline = Instant::now() + Duration::from_secs(5);
             let _ = watch.finish(deadline);
             let _ = Inventory::new(false).cleanup_until(deadline);
@@ -668,6 +677,7 @@ pub fn run(args: &[OsString]) -> i32 {
                 .as_ref()
                 .is_some_and(|control| !matches!(control.cancelled(), Ok(false)));
             if cancelled && terminating.is_none() {
+                crate::job_control::begin_cleanup(receive);
                 inventory.signal(guardian, libc::SIGTERM)?;
                 inventory.signal(guardian, libc::SIGCONT)?;
                 terminating = Some(Instant::now());
@@ -693,6 +703,7 @@ pub fn run(args: &[OsString]) -> i32 {
             thread::sleep(Duration::from_millis(25));
         }
     });
+    crate::job_control::begin_cleanup(receive);
     // Reap the extra direct child before the existing inventory can reap it. Both share
     // the original five-second cleanup budget, not sequential new timeout windows.
     let deadline = Instant::now()
@@ -704,7 +715,10 @@ pub fn run(args: &[OsString]) -> i32 {
     let watch_clean = watch
         .as_mut()
         .map_or(Ok(()), |watch| watch.finish(deadline));
-    let mut clean = inventory.cleanup_until(deadline).and(watch_clean);
+    let mut clean = inventory
+        .cleanup_until(deadline)
+        .and(watch_clean)
+        .and(crate::job_control::cleanup_tty_result());
     if !completed && clean.is_ok() {
         clean = Err(io::Error::other(
             "Darwin guardian did not confirm its sweep",

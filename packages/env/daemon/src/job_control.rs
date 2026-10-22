@@ -5,11 +5,44 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitStatus};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 static SESSION: AtomicBool = AtomicBool::new(false);
 static PAUSE: AtomicBool = AtomicBool::new(false);
 static TERMINATING: AtomicBool = AtomicBool::new(false);
+static CLEANUP_SIGNAL_ERROR: AtomicI32 = AtomicI32::new(0);
+
+/// Irreversible teardown only, through process exit. Victims' background tty IO
+/// must not stop the native controllers that retain the kill/reap deadline.
+pub(super) fn begin_cleanup(handler: extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void)) {
+    if !enabled() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    let errno = unsafe { libc::__errno_location() };
+    #[cfg(any(target_os = "freebsd", target_os = "macos"))]
+    let errno = unsafe { libc::__error() };
+    let saved = unsafe { *errno };
+    // sigaction/sigemptyset are async-signal-safe: TERM can arrive while Pi is stopped.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = handler as *const () as usize;
+    action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+    unsafe { libc::sigemptyset(&mut action.sa_mask) };
+    for signal in [libc::SIGTTIN, libc::SIGTTOU] {
+        if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } != 0 {
+            CLEANUP_SIGNAL_ERROR.store(unsafe { *errno }, Ordering::Relaxed);
+            break;
+        }
+    }
+    unsafe { *errno = saved };
+}
+
+pub(super) fn cleanup_tty_result() -> io::Result<()> {
+    match CLEANUP_SIGNAL_ERROR.load(Ordering::Relaxed) {
+        0 => Ok(()),
+        error => Err(io::Error::from_raw_os_error(error)),
+    }
+}
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(super) fn terminating() -> bool {
