@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { buildOwnerPty } from "./build-owner-pty.mjs";
 import { bunTarget } from "./lib/bun-targets.mjs";
@@ -18,7 +21,7 @@ const verify = (row, os = "linux") => assertUnixOwnerPtyRow(row, os, identity, d
 for (const os of ["linux", "freebsd", "darwin"]) {
 	test(`${os} exact PTY row inventory and positive proof accepted`, () => {
 		for (const name of ["suspend-resume", ...unixOwnerFaultRows(os)]) verify(proof(os, name), os);
-		assert.equal(ownerLifecycleRows(os).length, os === "darwin" ? 10 : 8);
+		assert.equal(ownerLifecycleRows(os).length, os === "darwin" ? 12 : 11);
 	});
 }
 
@@ -69,6 +72,121 @@ for (const [label, mutate] of [
 	for (const name of ["suspend-resume", ...unixOwnerFaultRows("darwin")]) {
 		const row = proof("darwin", name); mutate(row);
 		assert.throws(() => verify(row, "darwin"), /owner lifecycle PTY/);
+	}
+});
+
+for (const [label, mutate] of [
+	["missing anchor", (r) => { delete r.processes.anchor; }],
+	["foreground anchor", (r) => { r.processes.anchor.group = r.processes.outer.group; }],
+	["different-SID anchor", (r) => { r.processes.anchor.sid++; }],
+	["stopped anchor", (r) => { r.paused.find((p) => p.role === "anchor").state = "T"; }],
+	["anchor not R/S", (r) => { r.paused.find((p) => p.role === "anchor").state = "D"; }],
+	["unreaped anchor", (r) => { r.after.find((p) => p.pid === r.processes.anchor.pid).state = "Z"; }],
+	["absent anchor reap", (r) => { delete r.anchorReaped; }],
+	["non-native anchor", (r) => { delete r.anchorNative; }],
+	["extra outer child", (r) => { r.sessionChildren.outer.push(999); }],
+	["missing anchor child inventory", (r) => { delete r.sessionChildren.anchor; }],
+	["wrong guardian chain", (r) => { r.processes.guardian.parent = r.processes.outer.pid; }],
+	["init-adopted grandchild", (r) => { r.adoption.postExitParent = r.processes.adoptedGrandchild.parent = 1; }],
+	["unknown adopter", (r) => { r.adoption.postExitParent = r.processes.adoptedGrandchild.parent = 999; }],
+]) test(`kernel-reaper assertion rejects ${label} on every normal/fault row`, () => {
+	for (const os of ["linux", "freebsd"]) for (const name of ["suspend-resume", ...unixOwnerFaultRows(os)]) {
+		const row = proof(os, name); mutate(row);
+		assert.throws(() => verify(row, os), /owner lifecycle PTY/);
+	}
+});
+for (const [label, mutate] of [
+	["missing direct child", (r) => { delete r.processes.extensionChild; }],
+	["surviving direct child", (r) => { r.after.find((p) => p.pid === r.processes.extensionChild.pid).state = "S"; }],
+	["surviving adopted grandchild", (r) => { r.after.find((p) => p.pid === r.processes.adoptedGrandchild.pid).state = "T"; }],
+	["unreaped direct child", (r) => { r.after.find((p) => p.pid === r.processes.extensionChild.pid).state = "Z"; }],
+	["unreaped adopted grandchild", (r) => { r.after.find((p) => p.pid === r.processes.adoptedGrandchild.pid).state = "Z"; }],
+	["missing adopted grandchild", (r) => { delete r.processes.adoptedGrandchild; }],
+	["missing SID", (r) => { delete r.processes.adoptedGrandchild.sid; }],
+	["grandchild not setsid", (r) => { r.adoption.grandchildBefore.sid = r.processes.pi.sid; }],
+	["missing spawner birth", (r) => { delete r.adoption.spawner.birth; }],
+	["unreaped spawner", (r) => { r.adoption.spawnerReaped = false; }],
+	["zombie spawner", (r) => { r.adoption.spawnerState = "Z"; }],
+	["missing spawner exit", (r) => { delete r.adoption.spawnerExit; }],
+	["wrong spawner exit birth", (r) => { r.adoption.spawnerExit.birth = "reused"; }],
+	["wrong pre-adoption ancestry", (r) => { r.adoption.grandchildBefore.parent++; }],
+	["missing descendant heartbeat", (r) => { delete r.descendantHeartbeats.extensionChild; }],
+	["continued grandchild heartbeat", (r) => { r.descendantHeartbeats.adoptedGrandchild.after++; }],
+]) test(`extension-descendant assertion rejects ${label}`, () => {
+	for (const os of ["linux", "freebsd", "darwin"]) {
+		const row = proof(os); mutate(row);
+		assert.throws(() => verify(row, os), /owner lifecycle PTY/);
+	}
+});
+for (const key of ["spawner", "grandchildBefore", "spawnerExit", "spawnerState", "spawnerReaped", "postExitParent", "observationCycle"]) test(`adoption proof requires ${key}`, () => {
+	for (const os of ["linux", "freebsd", "darwin"]) {
+		const row = proof(os); delete row.adoption[key];
+		assert.throws(() => verify(row, os), /owner lifecycle PTY/);
+	}
+});
+for (const key of ["pid", "birth", "code", "signal"]) test(`reaped spawner exit proof requires ${key}`, () => {
+	const row = proof("linux"); delete row.adoption.spawnerExit[key];
+	assert.throws(() => verify(row), /spawner not reaped/);
+});
+for (const key of ["input", "grandchildPaused", "spawnerPaused", "grandchildResumed", "spawnerResumed", "heartbeatPauseStart", "heartbeatPauseEnd", "heartbeatResumed", "stableMs"]) test(`Darwin adoption requires observation-cycle ${key}`, () => {
+	const row = proof("darwin"); delete row.adoption.observationCycle[key];
+	assert.throws(() => verify(row, "darwin"), /observed-before-adoption/);
+});
+test("both kernel session reapers may adopt the pinned grandchild", () => {
+	for (const os of ["linux", "freebsd"]) {
+		const row = proof(os);
+		row.adoption.postExitParent = row.processes.adoptedGrandchild.parent = row.processes.anchor.pid;
+		row.paused.find((p) => p.role === "adoptedGrandchild").parent = row.processes.anchor.pid;
+		row.sessionChildren.anchor.push(row.processes.adoptedGrandchild.pid);
+		row.sessionChildren.anchor.sort((a, b) => a - b);
+		verify(row, os);
+	}
+});
+for (const [key, value] of [["armed", false], ["entered", false], ["returned", true], ["enteredBeforeFault", true], ["pid", 999], ["waitMs", 11999]]) test(`compiled deadline proof rejects shutdown-block ${key}`, () => {
+	const row = proof("linux", "paused-both-owners-death-shutdown-blocked"); row.shutdownBlock[key] = value;
+	assert.throws(() => verify(row), /worker deadline/);
+});
+for (const key of ["armed", "entered", "returned", "enteredBeforeFault", "pid", "waitMs"]) test(`compiled deadline proof requires shutdown-block ${key}`, () => {
+	const row = proof("linux", "paused-both-owners-death-shutdown-blocked"); delete row.shutdownBlock[key];
+	assert.throws(() => verify(row), /worker deadline/);
+});
+test("shutdown hook trigger must be off outside dedicated blocked row", () => {
+	for (const name of ["suspend-resume", ...unixOwnerFaultRows("linux")].filter((n) => !n.endsWith("shutdown-blocked"))) {
+		const row = proof("linux", name); row.shutdownBlock.armed = true;
+		assert.throws(() => verify(row), /worker deadline/);
+	}
+});
+
+test("shutdown fixture leaves normal quit unblocked and enters real main-thread Atomics.wait only when armed", async () => {
+	const root = mkdtempSync(join(tmpdir(), "owner-shutdown-block-"));
+	const script = join(root, "hook.mjs");
+	writeFileSync(script, `import extension from ${JSON.stringify(new URL("./fixtures/owner/extension.mjs", import.meta.url).href)};
+const handlers = new Map();
+await extension({ on: (name, handler) => handlers.set(name, handler) });
+process.on("message", () => { handlers.get("session_shutdown")(); process.send("returned"); });
+process.send("ready");
+`);
+	const child = spawn(process.execPath, [script], { env: { ...process.env, PI_OWNER_CASE: "pty", PI_OWNER_PTY_WORK: root }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+	const ended = once(child, "exit").then(() => { throw new Error("shutdown fixture exited before message"); });
+	const guard = setTimeout(() => child.kill("SIGKILL"), 8000);
+	try {
+		assert.equal((await Promise.race([once(child, "message"), ended]))[0], "ready");
+		const off = Promise.race([once(child, "message"), ended]); child.send("shutdown");
+		assert.equal((await off)[0], "returned");
+		assert.equal(existsSync(join(root, "shutdown-entered")), false);
+		writeFileSync(join(root, "shutdown-arm"), "arm");
+		child.send("shutdown");
+		const deadline = Date.now() + 5000;
+		while (!existsSync(join(root, "shutdown-entered"))) { assert.ok(Date.now() < deadline, "shutdown fixture did not enter"); await delay(10); }
+		const marker = JSON.parse(readFileSync(join(root, "shutdown-entered"), "utf8"));
+		assert.equal(marker.pid, child.pid); assert.ok(marker.waitMs >= 12000);
+		await delay(100);
+		assert.equal(child.exitCode, null);
+		assert.equal(existsSync(join(root, "shutdown-returned")), false);
+	} finally {
+		clearTimeout(guard);
+		if (child.exitCode === null && child.signalCode === null) { const exit = once(child, "exit"); child.kill("SIGKILL"); await exit; }
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 

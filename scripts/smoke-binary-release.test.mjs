@@ -35,7 +35,7 @@ function fixtureIdentity() {
 	return { ...passedUnixIdentity(), uid: process.getuid(), euid: process.geteuid() };
 }
 function fixturePty(executable, descriptor, name, _work, identity) {
-	const row = passedUnixOwnerPtyRow(name, descriptor.os, descriptor.id, createHash("sha256").update(readFileSync(executable)).digest("hex"));
+	const row = passedUnixOwnerPtyRow(name, descriptor.os, descriptor.id, createHash("sha256").update(readFileSync(executable)).digest("hex"), identity.uid);
 	row.identity = { uid: identity.uid, euid: identity.euid };
 	row.pi.uid = identity.uid;
 	for (const p of [...Object.values(row.processes), ...row.paused, row.peer, row.peerPaused]) p.uid = identity.uid;
@@ -47,7 +47,7 @@ function fixturePtyExecutable(root) {
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { passedUnixOwnerPtyRow } from ${JSON.stringify(new URL("./fixtures/unix-owner-pty.mjs", import.meta.url).href)};
-const row = passedUnixOwnerPtyRow(process.argv[6], "linux", ${JSON.stringify(target)}, createHash("sha256").update(readFileSync(process.argv[3])).digest("hex"));
+const row = passedUnixOwnerPtyRow(process.argv[6], "linux", ${JSON.stringify(target)}, createHash("sha256").update(readFileSync(process.argv[3])).digest("hex"), process.getuid());
 row.identity = { uid: process.getuid(), euid: process.geteuid() }; row.pi.uid = process.getuid();
 for (const p of [...Object.values(row.processes), ...row.paused, row.peer, row.peerPaused]) p.uid = process.getuid();
 console.log(JSON.stringify(row));
@@ -348,7 +348,7 @@ test("owner lifecycle measures immediate normal/kill containment and same-user p
 		assert.equal(evidence.identity.elevated, false);
 		assert.ok(evidence.identity.capabilities.CapEff);
 		assertOwnerLifecycle(evidence, "linux");
-		assert.equal(evidence.rows.length, 8);
+		assert.equal(evidence.rows.length, 11);
 		assert.ok(evidence.rows.every((row) => row.aliveBefore && !row.aliveAfter && row.peerAlive && row.immediateChecks === 1));
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });

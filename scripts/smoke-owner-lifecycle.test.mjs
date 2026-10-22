@@ -98,7 +98,7 @@ for (const platform of ["darwin", "win32"]) {
 }
 
 test("Unix suspend and opt-out rows require independent observations", () => {
-	assert.deepEqual(ownerLifecycleRows("linux"), ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", "suspend-resume", "paused-guardian-death", "paused-both-owners-death", "ownership-disabled"]);
+	assert.deepEqual(ownerLifecycleRows("linux"), ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", "suspend-resume", "paused-outer-death", "paused-anchor-death", "paused-guardian-death", "paused-both-owners-death", "paused-both-owners-death-shutdown-blocked", "ownership-disabled"]);
 	const make = () => ({ status: "passed", target: "fixture-target", cliSha256, artifactBunVersion: "1.3.14", identity: standard, rows: rowsFor("linux") });
 	for (const key of ["piStopped", "stopped", "resumed", "peerRunning"]) {
 		const evidence = make();

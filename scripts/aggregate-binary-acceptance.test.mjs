@@ -8,7 +8,7 @@ import test from "node:test";
 import { BUN_TARGETS, binaryArchiveName, releaseArchiveName, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 import { ownerLifecycleRows } from "./smoke-owner-lifecycle.mjs";
-import { isUnixOwnerPtyRow } from "./smoke-unix-owner-pty.mjs";
+import { isUnixOwnerPtyRow, unixOwnerFaultRows } from "./smoke-unix-owner-pty.mjs";
 import { passedUnixIdentity, passedUnixOwnerPtyRow } from "./fixtures/unix-owner-pty.mjs";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 
@@ -311,7 +311,7 @@ for (const [label, mutate] of [
 });
 
 test("aggregator rejects missing Darwin observer proof on normal and fault teardown", () => {
-	for (const name of ["suspend-resume", "paused-guardian-death", "paused-both-owners-death", "paused-observer-death"]) {
+	for (const name of ["suspend-resume", ...unixOwnerFaultRows("darwin")]) {
 		const value = fixture();
 		try {
 			const target = BUN_TARGETS.find((t) => t.os === "darwin");
@@ -322,6 +322,47 @@ test("aggregator rejects missing Darwin observer proof on normal and fault teard
 			const result = runAggregator(value);
 			assert.notEqual(result.status, 0);
 			assert.match(result.stderr, /observer\/reaping proof missing/);
+		} finally { rmSync(value.root, { recursive: true, force: true }); }
+	}
+});
+
+for (const [label, systems, mutate] of [
+	["missing anchor", ["linux", "freebsd"], (r) => { delete r.processes.anchor; }],
+	["foreground anchor", ["linux", "freebsd"], (r) => { r.processes.anchor.group = r.processes.outer.group; }],
+	["stopped anchor", ["linux", "freebsd"], (r) => { r.paused.find((p) => p.role === "anchor").state = "T"; }],
+	["unreaped anchor", ["linux", "freebsd"], (r) => { r.after.find((p) => p.pid === r.processes.anchor.pid).state = "Z"; }],
+	["surviving direct extension child", ["linux", "freebsd", "darwin"], (r) => { r.after.find((p) => p.pid === r.processes.extensionChild.pid).state = "S"; }],
+	["surviving adopted grandchild", ["linux", "freebsd", "darwin"], (r) => { r.after.find((p) => p.pid === r.processes.adoptedGrandchild.pid).state = "T"; }],
+	["unreaped spawner", ["linux", "freebsd", "darwin"], (r) => { r.adoption.spawnerReaped = false; }],
+	["missing Darwin observation cycle", ["darwin"], (r) => { delete r.adoption.observationCycle; }],
+]) test(`aggregator rejects ${label} in normal and every paused-fault row`, () => {
+	for (const os of systems) for (const name of ["suspend-resume", ...unixOwnerFaultRows(os)]) {
+		const value = fixture();
+		try {
+			const target = BUN_TARGETS.find((t) => t.os === os);
+			const path = join(value.records, `${target.id}.json`);
+			const changed = JSON.parse(readFileSync(path, "utf8"));
+			mutate(changed.ownerLifecycle.rows.find((r) => r.name === name));
+			writeFileSync(path, JSON.stringify(changed));
+			const result = runAggregator(value);
+			assert.notEqual(result.status, 0, `${os}: ${name}: ${label}`);
+			assert.match(result.stderr, /owner lifecycle/);
+		} finally { rmSync(value.root, { recursive: true, force: true }); }
+	}
+});
+
+test("aggregator requires actual shutdown hook blockage, not only a fast both-owner exit", () => {
+	for (const os of ["linux", "freebsd", "darwin"]) for (const key of ["armed", "entered", "returned", "enteredBeforeFault", "pid", "waitMs"]) {
+		const value = fixture();
+		try {
+			const target = BUN_TARGETS.find((t) => t.os === os);
+			const path = join(value.records, `${target.id}.json`);
+			const changed = JSON.parse(readFileSync(path, "utf8"));
+			delete changed.ownerLifecycle.rows.find((r) => r.name === "paused-both-owners-death-shutdown-blocked").shutdownBlock[key];
+			writeFileSync(path, JSON.stringify(changed));
+			const result = runAggregator(value);
+			assert.notEqual(result.status, 0);
+			assert.match(result.stderr, /worker deadline proof missing/);
 		} finally { rmSync(value.root, { recursive: true, force: true }); }
 	}
 });

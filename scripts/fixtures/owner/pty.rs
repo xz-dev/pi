@@ -135,13 +135,15 @@ fn pin(table: &BTreeMap<i32, Value>, pid: i32) -> Result<Value> {
         .cloned()
         .ok_or_else(|| format!("PID absent: {pid}"))?;
     value["birth"] = json!(birth(pid)?);
+    value["sid"] = json!(check(unsafe { libc::getsid(pid) })?);
     let after = snapshot()?;
     require(
         after.get(&pid).is_some_and(|p| {
             ["pid", "parent", "group", "uid"]
                 .iter()
                 .all(|key| p[key] == value[key])
-        }) && birth(pid)? == value["birth"].as_str().ok_or("missing birth")?,
+        }) && birth(pid)? == value["birth"].as_str().ok_or("missing birth")?
+            && unsafe { libc::getsid(pid) } == number(&value, "sid")?,
         "process changed during pin",
     )?;
     Ok(value)
@@ -182,6 +184,53 @@ fn descendants(table: &BTreeMap<i32, Value>, root: i32) -> BTreeSet<i32> {
             return ids;
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn native_path(pid: i32) -> Result<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe")).map_err(|e| e.to_string())
+}
+#[cfg(target_os = "macos")]
+fn native_path(pid: i32) -> Result<PathBuf> {
+    let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    require(
+        unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) } > 0,
+        "native path unavailable",
+    )?;
+    Ok(PathBuf::from(
+        std::ffi::CStr::from_bytes_until_nul(&path)
+            .map_err(|e| e.to_string())?
+            .to_str()
+            .map_err(|e| e.to_string())?,
+    ))
+}
+#[cfg(target_os = "freebsd")]
+fn native_path(pid: i32) -> Result<PathBuf> {
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PATHNAME,
+        pid,
+    ];
+    let mut path = [0u8; 4096];
+    let mut size = path.len();
+    check(unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            path.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    })?;
+    require(size > 0 && size <= path.len(), "native path unavailable")?;
+    Ok(PathBuf::from(
+        std::ffi::CStr::from_bytes_until_nul(&path[..size])
+            .map_err(|e| e.to_string())?
+            .to_str()
+            .map_err(|e| e.to_string())?,
+    ))
 }
 
 struct Held {
@@ -297,6 +346,63 @@ fn spawn_group(command: &mut Command, group: i32) -> Result<Child> {
     command.spawn().map_err(|e| e.to_string())
 }
 
+fn paused_inventory(
+    table: &BTreeMap<i32, Value>,
+    processes: &BTreeMap<&str, Value>,
+    peer: &Value,
+) -> Result<bool> {
+    for (role, p) in processes {
+        let pid = number(p, "pid")?;
+        require(
+            birth(pid)? == p["birth"].as_str().ok_or("missing paused birth")?
+                && unsafe { libc::getsid(pid) } == number(p, "sid")?,
+            "paused identity changed",
+        )?;
+        if ["guardian", "observer", "anchor"].contains(role) {
+            if !runnable(table, p)?
+                || *role == "anchor" && !matches!(state(table, p)?.chars().next(), Some('R' | 'S'))
+            {
+                return Ok(false);
+            }
+        } else if !stopped(table, p)? {
+            return Ok(false);
+        }
+    }
+    require(same(peer)?, "paused peer identity changed")?;
+    stopped(table, peer)
+}
+fn pause_job(
+    master: &mut File,
+    output: &mut Vec<u8>,
+    group: i32,
+    processes: &BTreeMap<&str, Value>,
+    peer: &Value,
+    deadline: Instant,
+) -> Result<BTreeMap<i32, Value>> {
+    require(
+        unsafe { libc::tcgetpgrp(0) } == group,
+        "Pi job is not PTY foreground",
+    )?;
+    master.write_all(&[26]).map_err(|e| e.to_string())?;
+    wait_for(
+        || paused_inventory(&snapshot()?, processes, peer),
+        deadline,
+        master,
+        output,
+        "Pi/outer/tool/extension tree did not stop with runnable session reapers",
+    )?;
+    let table = snapshot()?;
+    require(paused_inventory(&table, processes, peer)?, "pause unstable")?;
+    Ok(table)
+}
+fn children_of(table: &BTreeMap<i32, Value>, parent: i32) -> Vec<i32> {
+    table
+        .iter()
+        .filter(|(_, p)| p["parent"] == parent)
+        .map(|(&pid, _)| pid)
+        .collect()
+}
+
 fn session(
     args: &[String],
     master: &mut File,
@@ -376,7 +482,12 @@ fn session(
             Ok(work.join("ready").exists()
                 && work.join("payload").exists()
                 && work.join("heartbeat").exists()
-                && work.join("peer-heartbeat").exists())
+                && work.join("peer-heartbeat").exists()
+                && work.join("extension-child").exists()
+                && work.join("extension-heartbeat").exists()
+                && work.join("spawner").exists()
+                && work.join("grandchild").exists()
+                && work.join("grandchild-heartbeat").exists())
         },
         deadline,
         master,
@@ -390,15 +501,17 @@ fn session(
     let payload_pid = number(&payload, "pid")?;
     let leaf_pid = number(&payload, "leaf")?;
     let table = snapshot()?;
-    let task_guardian = table
-        .get(&payload_pid)
-        .and_then(|p| p["parent"].as_i64())
-        .ok_or("missing task guardian")? as i32;
-    let task_outer = table
-        .get(&task_guardian)
-        .and_then(|p| p["parent"].as_i64())
-        .ok_or("missing task outer")? as i32;
-    let roles = BTreeMap::from([
+    let task_guardian = number(table.get(&payload_pid).ok_or("missing payload")?, "parent")?;
+    let task_outer = number(
+        table.get(&task_guardian).ok_or("missing task guardian")?,
+        "parent",
+    )?;
+    let extension_pid = number(&load(&work.join("extension-child"))?, "pid")?;
+    let grandchild_record = load(&work.join("grandchild"))?;
+    let grandchild_pid = number(&grandchild_record, "pid")?;
+    let spawner_record = load(&work.join("spawner"))?;
+    let spawner_pid = number(&spawner_record, "pid")?;
+    let mut roles = BTreeMap::from([
         ("outer", outer_pid),
         ("guardian", guardian_pid),
         ("pi", pi_pid),
@@ -406,15 +519,9 @@ fn session(
         ("taskGuardian", task_guardian),
         ("payload", payload_pid),
         ("leaf", leaf_pid),
+        ("extensionChild", extension_pid),
+        ("adoptedGrandchild", grandchild_pid),
     ]);
-    #[cfg(target_os = "macos")]
-    let mut roles = roles;
-    require(
-        table
-            .get(&guardian_pid)
-            .is_some_and(|v| v["parent"] == outer_pid),
-        "Pi parent not outer's guardian",
-    )?;
     require(
         table
             .get(&task_outer)
@@ -422,56 +529,89 @@ fn session(
         "task outer not Pi child",
     )?;
     require(
+        table
+            .get(&extension_pid)
+            .is_some_and(|v| v["parent"] == pi_pid),
+        "extension child not Pi child",
+    )?;
+    require(
         table.get(&pi_pid).is_some_and(|v| v["group"] == outer_pid),
         "Pi not in foreground job group",
     )?;
-    #[cfg(target_os = "macos")]
+    require(
+        table
+            .get(&pi_pid)
+            .is_some_and(|v| v["parent"] == guardian_pid),
+        "Pi parent does not match pinned guardian",
+    )?;
+    let outer_children = children_of(&table, outer_pid);
+    #[cfg(not(target_os = "macos"))]
     {
-        let observers: Vec<_> = table
-            .iter()
-            .filter(|(pid, p)| **pid != guardian_pid && p["parent"] == outer_pid)
-            .map(|(&pid, _)| pid)
-            .collect();
-        require(
-            observers.len() == 1,
-            "expected guardian + exactly one observer under outer",
+        let anchor = number(
+            table.get(&guardian_pid).ok_or("missing guardian")?,
+            "parent",
         )?;
-        roles.insert("observer", observers[0]);
         require(
-            table[&observers[0]]["group"] != outer_pid
-                && table[&observers[0]]["group"] != table[&task_outer]["group"],
-            "observer in frozen job group",
+            outer_children == [anchor]
+                && children_of(&table, anchor) == [guardian_pid]
+                && table[&anchor]["parent"] == outer_pid,
+            "expected outer -> sole anchor -> sole guardian -> Pi",
         )?;
-        let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        let length = unsafe {
-            libc::proc_pidpath(observers[0], path.as_mut_ptr().cast(), path.len() as u32)
-        };
-        require(length > 0, "observer native path unavailable")?;
-        let path = std::ffi::CStr::from_bytes_until_nul(&path)
-            .map_err(|e| e.to_string())?
-            .to_str()
-            .map_err(|e| e.to_string())?;
+        let identity = pin(&table, anchor)?;
         require(
-            fs::canonicalize(path).map_err(|e| e.to_string())?
+            identity["group"] != outer_pid
+                && identity["sid"] == pin(&table, outer_pid)?["sid"]
+                && matches!(state(&table, &identity)?.chars().next(), Some('R' | 'S')),
+            "anchor not runnable/outside foreground group in same SID",
+        )?;
+        require(
+            fs::canonicalize(native_path(anchor)?).map_err(|e| e.to_string())?
                 == fs::canonicalize(
                     row["pi"]["owner"]
                         .as_str()
-                        .ok_or("native owner path absent")?,
+                        .ok_or("native owner path missing")?,
+                )
+                .map_err(|e| e.to_string())?,
+            "anchor not shipped native owner",
+        )?;
+        roles.insert("anchor", anchor);
+        row["anchorNative"] = json!(true);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        require(
+            table[&guardian_pid]["parent"] == outer_pid && outer_children.len() == 2,
+            "expected guardian + exactly one observer under outer",
+        )?;
+        let observer = *outer_children
+            .iter()
+            .find(|&&pid| pid != guardian_pid)
+            .ok_or("observer missing")?;
+        roles.insert("observer", observer);
+        require(
+            table[&observer]["group"] != outer_pid
+                && table[&observer]["group"] != table[&task_outer]["group"],
+            "observer in frozen job group",
+        )?;
+        require(
+            fs::canonicalize(native_path(observer)?).map_err(|e| e.to_string())?
+                == fs::canonicalize(
+                    row["pi"]["owner"]
+                        .as_str()
+                        .ok_or("native owner path missing")?,
                 )
                 .map_err(|e| e.to_string())?,
             "observer not shipped native owner",
         )?;
         row["observerNative"] = json!(true);
     }
-    row["processes"] = json!({});
-    let ids = descendants(&table, outer_pid);
+    let mut expected_ids: BTreeSet<i32> = roles.values().copied().collect();
+    expected_ids.insert(spawner_pid);
     require(
-        ids.contains(&leaf_pid)
-            && !ids.contains(&peer_pid)
-            && ids == roles.values().copied().collect(),
+        descendants(&table, outer_pid) == expected_ids && !expected_ids.contains(&peer_pid),
         "owned inventory/peer ancestry invalid",
     )?;
-    for &pid in &ids {
+    for &pid in &expected_ids {
         let identity = pin(&table, pid)?;
         require(
             identity["uid"] == unsafe { libc::getuid() },
@@ -481,18 +621,49 @@ fn session(
             owned.push(Held::open(&identity)?);
         }
     }
-    for (role, pid) in &roles {
-        row["processes"][role] = pin(&table, *pid)?;
-    }
-    row["peer"] = pin(&table, peer_pid)?;
-    require(same(&row["peer"])?, "peer changed during readiness")?;
-    let before = ticks(&work.join("heartbeat"))?;
-    sleep(Duration::from_millis(250));
-    let advancing = ticks(&work.join("heartbeat"))?;
+    let mut processes: BTreeMap<&str, Value> = roles
+        .iter()
+        .map(|(&role, &pid)| Ok((role, pin(&table, pid)?)))
+        .collect::<Result<_>>()?;
+    let spawner = pin(&table, spawner_pid)?;
+    let grandchild_before = processes["adoptedGrandchild"].clone();
     require(
-        advancing > before,
-        "task heartbeat not advancing before pause",
+        spawner["birth"] == spawner_record["birth"]
+            && spawner["parent"] == pi_pid
+            && grandchild_before["birth"] == grandchild_record["birth"]
+            && grandchild_before["parent"] == spawner_pid
+            && grandchild_before["group"] == grandchild_pid
+            && grandchild_before["sid"] == grandchild_pid,
+        "pinned spawner/setsid grandchild ancestry invalid",
     )?;
+    row["adoption"] =
+        json!({"spawner":spawner,"grandchildBefore":grandchild_before,"observationCycle":null});
+    row["peer"] = pin(&table, peer_pid)?;
+    let peer_identity = row["peer"].clone();
+    let heartbeat_paths = [
+        ("task", "heartbeat"),
+        ("extensionChild", "extension-heartbeat"),
+        ("adoptedGrandchild", "grandchild-heartbeat"),
+    ];
+    let before: BTreeMap<_, _> = heartbeat_paths
+        .iter()
+        .map(|(role, path)| Ok((*role, ticks(&work.join(path))?)))
+        .collect::<Result<_>>()?;
+    sleep(Duration::from_millis(250));
+    row["descendantHeartbeats"] = json!({});
+    for (role, path) in heartbeat_paths {
+        let advancing = ticks(&work.join(path))?;
+        require(
+            advancing > before[role],
+            "owned heartbeat not advancing before pause",
+        )?;
+        let proof = json!({"before":before[role],"advancing":advancing,"stableMs":250});
+        if role == "task" {
+            row["heartbeats"] = proof;
+        } else {
+            row["descendantHeartbeats"][role] = proof;
+        }
+    }
     wait_for(
         || Ok(terminal()?["icanon"] == false && terminal()?["echo"] == false),
         deadline,
@@ -502,65 +673,189 @@ fn session(
     )?;
     row["pty"]["rawObserved"] = json!(true);
     sleep(Duration::from_millis(500));
-    drain(master, output)?;
-    row["pty"]["jobForeground"] = json!(unsafe { libc::tcgetpgrp(0) } == outer_pid);
-    require(
-        row["pty"]["jobForeground"] == true,
-        "Pi job is not PTY foreground",
-    )?;
-    master.write_all(&[26]).map_err(|e| e.to_string())?;
-    let processes = row["processes"].clone();
-    let peer_identity = row["peer"].clone();
-    let is_paused = |table: &BTreeMap<i32, Value>| -> Result<bool> {
-        for role in roles.keys() {
-            let p = &processes[role];
-            require(
-                birth(number(p, "pid")?)? == p["birth"].as_str().ok_or("missing paused birth")?,
-                "paused identity changed",
-            )?;
-            if *role == "guardian" || *role == "observer" {
-                if !runnable(table, p)? {
-                    return Ok(false);
-                }
-            } else if !stopped(table, p)? {
-                return Ok(false);
-            }
-        }
-        require(same(&peer_identity)?, "paused peer identity changed")?;
-        stopped(table, &peer_identity)
-    };
+    #[cfg(target_os = "macos")]
+    {
+        // Observe the descendant through a complete freeze/thaw before it can be adopted by launchd.
+        let mut observed_processes = processes.clone();
+        observed_processes.insert("spawner", spawner.clone());
+        let first = pause_job(
+            master,
+            output,
+            outer_pid,
+            &observed_processes,
+            &peer_identity,
+            deadline,
+        )?;
+        let pause_start = ticks(&work.join("grandchild-heartbeat"))?;
+        sleep(Duration::from_millis(250));
+        require(
+            paused_inventory(&snapshot()?, &observed_processes, &peer_identity)?,
+            "Darwin observation cycle unstable",
+        )?;
+        let pause_end = ticks(&work.join("grandchild-heartbeat"))?;
+        require(
+            pause_start == pause_end,
+            "Darwin observed grandchild still advancing while stopped",
+        )?;
+        let grandchild_paused = pin(&first, grandchild_pid)?;
+        let spawner_paused = pin(&first, spawner_pid)?;
+        foreground(me)?;
+        foreground(outer_pid)?;
+        check(unsafe { libc::kill(-outer_pid, libc::SIGCONT) })?;
+        wait_for(
+            || {
+                let t = snapshot()?;
+                Ok(runnable(&t, &grandchild_before)?
+                    && runnable(&t, &spawner)?
+                    && ticks(&work.join("grandchild-heartbeat"))? > pause_end)
+            },
+            deadline,
+            master,
+            output,
+            "Darwin observed grandchild did not resume before adoption",
+        )?;
+        let resumed = snapshot()?;
+        row["adoption"]["observationCycle"] = json!({"input":"ctrl-z,fg","grandchildPaused":grandchild_paused,"spawnerPaused":spawner_paused,"grandchildResumed":pin(&resumed,grandchild_pid)?,"spawnerResumed":pin(&resumed,spawner_pid)?,"heartbeatPauseStart":pause_start,"heartbeatPauseEnd":pause_end,"heartbeatResumed":ticks(&work.join("grandchild-heartbeat"))?,"stableMs":250});
+        wait_for(
+            || Ok(terminal()?["icanon"] == false && terminal()?["echo"] == false),
+            deadline,
+            master,
+            output,
+            "Darwin raw terminal did not resume",
+        )?;
+        sleep(Duration::from_millis(500));
+    }
+    fs::write(work.join("spawner-release"), "exit").map_err(|e| e.to_string())?;
     wait_for(
-        || is_paused(&snapshot()?),
+        || Ok(work.join("spawner-exit").exists() && !snapshot()?.contains_key(&spawner_pid)),
         deadline,
         master,
         output,
-        "Pi/outer/task tree did not stop with live guardian",
+        "extension spawner was not reaped before fault pause",
     )?;
-    let paused = snapshot()?;
-    require(is_paused(&paused)?, "pause unstable")?;
-    row["paused"] = json!(
-        roles
+    let spawner_exit = load(&work.join("spawner-exit"))?;
+    require(
+        spawner_exit["pid"] == spawner_pid
+            && spawner_exit["birth"] == spawner["birth"]
+            && spawner_exit["code"] == 0
+            && spawner_exit["signal"].is_null(),
+        "spawner did not exit cleanly with pinned birth",
+    )?;
+    let adopted_table = snapshot()?;
+    let remaining: BTreeSet<i32> = roles
+        .values()
+        .copied()
+        .filter(|pid| !cfg!(target_os = "macos") || *pid != grandchild_pid)
+        .collect();
+    require(
+        descendants(&adopted_table, outer_pid) == remaining,
+        "owned inventory changed before final pause",
+    )?;
+    let adopted = pin(&adopted_table, grandchild_pid)?;
+    require(
+        adopted["birth"] == grandchild_before["birth"],
+        "adopted grandchild birth changed",
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    require(
+        [roles["anchor"], guardian_pid]
             .iter()
-            .map(|(role, pid)| {
-                let mut p = paused[pid].clone();
+            .any(|pid| adopted["parent"] == *pid),
+        "grandchild not adopted by pinned session reaper",
+    )?;
+    #[cfg(target_os = "macos")]
+    require(
+        adopted["parent"] == 1,
+        "observed Darwin grandchild not adopted by launchd",
+    )?;
+    row["adoption"]["spawnerExit"] = spawner_exit;
+    row["adoption"]["spawnerReaped"] = json!(true);
+    row["adoption"]["spawnerState"] = json!("gone");
+    row["adoption"]["postExitParent"] = adopted["parent"].clone();
+    // Refresh live ancestry before final pause, preserving each already held birth identity.
+    for (&role, &pid) in &roles {
+        let current = pin(&adopted_table, pid)?;
+        require(
+            current["birth"] == processes[role]["birth"],
+            "owned birth changed before final pause",
+        )?;
+        processes.insert(role, current);
+    }
+    row["processes"] = json!(processes);
+    row["sessionChildren"] = json!({"outer":children_of(&adopted_table,outer_pid)});
+    #[cfg(not(target_os = "macos"))]
+    {
+        let anchor = roles["anchor"];
+        let mut expected_anchor_children = vec![guardian_pid];
+        if adopted["parent"] == anchor {
+            expected_anchor_children.push(grandchild_pid);
+        }
+        expected_anchor_children.sort_unstable();
+        require(
+            children_of(&adopted_table, outer_pid) == [anchor]
+                && children_of(&adopted_table, anchor) == expected_anchor_children,
+            "session reaper topology changed before final pause",
+        )?;
+        row["sessionChildren"]["anchor"] = json!(expected_anchor_children);
+    }
+    let blocked = name == "paused-both-owners-death-shutdown-blocked";
+    if blocked {
+        fs::write(work.join("shutdown-arm"), "arm").map_err(|e| e.to_string())?;
+    }
+    require(
+        !work.join("shutdown-entered").exists() && !work.join("shutdown-returned").exists(),
+        "shutdown hook ran before fault",
+    )?;
+    row["pty"]["jobForeground"] = json!(unsafe { libc::tcgetpgrp(0) } == outer_pid);
+    let paused = pause_job(
+        master,
+        output,
+        outer_pid,
+        &processes,
+        &peer_identity,
+        deadline,
+    )?;
+    row["paused"] = json!(
+        processes
+            .iter()
+            .map(|(role, identity)| {
+                let mut p = paused[&(identity["pid"].as_i64().unwrap() as i32)].clone();
                 p["role"] = json!(role);
-                p["birth"] = row["processes"][role]["birth"].clone();
+                p["birth"] = identity["birth"].clone();
+                p["sid"] = identity["sid"].clone();
                 p
             })
             .collect::<Vec<_>>()
     );
     row["peerPaused"] = paused[&peer_pid].clone();
-    row["peerPaused"]["birth"] = row["peer"]["birth"].clone();
-    let pause_start = ticks(&work.join("heartbeat"))?;
+    row["peerPaused"]["birth"] = peer_identity["birth"].clone();
+    row["peerPaused"]["sid"] = peer_identity["sid"].clone();
+    let pause_counts: BTreeMap<_, _> = heartbeat_paths
+        .iter()
+        .map(|(role, path)| Ok((*role, ticks(&work.join(path))?)))
+        .collect::<Result<_>>()?;
+    let pause_start = pause_counts["task"];
     let peer_start = ticks(&work.join("peer-heartbeat"))?;
     sleep(Duration::from_millis(250));
-    require(is_paused(&snapshot()?)?, "pause not stable for 250ms")?;
-    let pause_end = ticks(&work.join("heartbeat"))?;
     require(
-        pause_start == pause_end && ticks(&work.join("peer-heartbeat"))? == peer_start,
-        "paused heartbeat continued",
+        paused_inventory(&snapshot()?, &processes, &peer_identity)?,
+        "pause not stable for 250ms",
     )?;
-    row["heartbeats"] = json!({"before":before,"advancing":advancing,"pauseStart":pause_start,"pauseEnd":pause_end,"stableMs":250,"peerPause":peer_start});
+    for (role, path) in heartbeat_paths {
+        let end = ticks(&work.join(path))?;
+        require(
+            end == pause_counts[role],
+            "paused owned heartbeat continued",
+        )?;
+        let proof = if role == "task" {
+            &mut row["heartbeats"]
+        } else {
+            &mut row["descendantHeartbeats"][role]
+        };
+        proof["pauseStart"] = json!(pause_counts[role]);
+        proof["pauseEnd"] = json!(end);
+    }
+    row["heartbeats"]["peerPause"] = json!(peer_start);
     row["piStopped"] = json!(true);
     row["stopped"] = json!(true);
     row["aliveBefore"] = json!(true);
@@ -569,8 +864,12 @@ fn session(
     foreground(me)?;
     let roles_to_kill: Vec<&str> = match name.as_str() {
         "suspend-resume" => vec![],
+        "paused-outer-death" => vec!["outer"],
+        "paused-anchor-death" => vec!["anchor"],
         "paused-guardian-death" => vec!["guardian"],
-        "paused-both-owners-death" => vec!["outer", "guardian"],
+        "paused-both-owners-death" | "paused-both-owners-death-shutdown-blocked" => {
+            vec!["outer", "guardian"]
+        }
         "paused-observer-death" => vec!["observer"],
         _ => return Err("unknown PTY scenario".into()),
     };
@@ -593,6 +892,10 @@ fn session(
             "fault ancestry changed",
         )?;
     }
+    require(
+        !work.join("shutdown-entered").exists() && !work.join("shutdown-returned").exists(),
+        "shutdown hook entered before injected fault",
+    )?;
     row["faultTargets"] = json!(faults.iter().map(|(role, held)| json!({"role":role,"pid":held.identity["pid"],"birth":held.identity["birth"],"parent":held.identity["parent"],"method":if cfg!(target_os="linux") {"pidfd"} else {"checked-birth"}})).collect::<Vec<_>>());
     let death_start = Instant::now();
     if name == "suspend-resume" {
@@ -601,7 +904,7 @@ fn session(
         wait_for(
             || {
                 Ok(!stopped(&snapshot()?, &row["processes"]["pi"])?
-                    && ticks(&work.join("heartbeat"))? > pause_end)
+                    && ticks(&work.join("heartbeat"))? > pause_start)
             },
             deadline,
             master,
@@ -625,7 +928,10 @@ fn session(
                 }
             }
             let table = snapshot()?;
-            for held in owned.iter().filter(|h| h.identity["pid"] != peer_pid) {
+            for held in owned
+                .iter()
+                .filter(|h| roles.values().any(|pid| h.identity["pid"] == *pid))
+            {
                 let pid = number(&held.identity, "pid")?;
                 if let Some(p) = table.get(&pid) {
                     if birth(pid)? == held.identity["birth"].as_str().ok_or("birth missing")?
@@ -633,7 +939,10 @@ fn session(
                     {
                         return Ok(false);
                     }
-                    if roles.get("observer") == Some(&pid) {
+                    if ["observer", "anchor", "extensionChild", "adoptedGrandchild"]
+                        .iter()
+                        .any(|role| roles.get(role) == Some(&pid))
+                    {
                         return Ok(false);
                     }
                 }
@@ -653,18 +962,44 @@ fn session(
     }
     row["postDeathMs"] = json!(death_start.elapsed().as_millis() as u64);
     let table = snapshot()?;
-    row["after"] = json!(owned.iter().filter(|h| h.identity["pid"] != peer_pid).map(|h| {
+    row["after"] = json!(owned.iter().filter(|h| roles.values().any(|pid| h.identity["pid"] == *pid)).map(|h| {
         let pid = h.identity["pid"].as_i64().unwrap() as i32;
         json!({"pid":pid,"birth":h.identity["birth"],"state":table.get(&pid).map(|p| p["state"].clone()).unwrap_or(json!("gone"))})
     }).collect::<Vec<_>>());
-    let last = ticks(&work.join("heartbeat"))?;
+    let mut exit_counts = BTreeMap::new();
+    for (role, path) in heartbeat_paths {
+        exit_counts.insert(role, ticks(&work.join(path))?);
+    }
     sleep(Duration::from_millis(250));
-    row["heartbeats"]["after"] = json!(ticks(&work.join("heartbeat"))?);
-    row["heartbeats"]["exit"] = json!(last);
+    for (role, path) in heartbeat_paths {
+        let after = ticks(&work.join(path))?;
+        require(
+            exit_counts[role] == after,
+            "owned heartbeat continued after teardown",
+        )?;
+        let proof = if role == "task" {
+            &mut row["heartbeats"]
+        } else {
+            &mut row["descendantHeartbeats"][role]
+        };
+        proof["exit"] = json!(exit_counts[role]);
+        proof["after"] = json!(after);
+    }
     row["heartbeats"]["peerAfter"] = json!(ticks(&work.join("peer-heartbeat"))?);
+    let entered = if work.join("shutdown-entered").exists() {
+        load(&work.join("shutdown-entered"))?
+    } else {
+        Value::Null
+    };
+    row["shutdownBlock"] = json!({"armed":work.join("shutdown-arm").exists(),"entered":!entered.is_null(),"returned":work.join("shutdown-returned").exists(),"enteredBeforeFault":false,"pid":entered["pid"],"waitMs":entered["waitMs"]});
     require(
-        last == ticks(&work.join("heartbeat"))?,
-        "heartbeat continued after teardown",
+        row["shutdownBlock"]["armed"] == blocked
+            && row["shutdownBlock"]["entered"] == blocked
+            && row["shutdownBlock"]["returned"] == false
+            && (!blocked
+                || entered["pid"] == pi_pid
+                    && entered["waitMs"].as_u64().is_some_and(|ms| ms >= 12000)),
+        "shutdown-hook worker deadline not exercised",
     )?;
     require(same(&row["peer"])?, "unowned peer lost")?;
     if name != "suspend-resume" {
@@ -689,6 +1024,10 @@ fn session(
     {
         row["observerReaped"] = json!(!snapshot()?.contains_key(&roles["observer"]));
     }
+    #[cfg(not(target_os = "macos"))]
+    {
+        row["anchorReaped"] = json!(!snapshot()?.contains_key(&roles["anchor"]));
+    }
     row["guardExpired"] = json!(false);
     row["aliveAfter"] = json!(false);
     row["peerAlive"] = json!(true);
@@ -702,6 +1041,59 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--peer") | Some("--leaf") => beat(Path::new(&args[1])),
+        Some("--extension-child") | Some("--adopted-grandchild") => {
+            let work = Path::new(&args[1]);
+            let direct = args[0] == "--extension-child";
+            let name = if direct {
+                "extension-child"
+            } else {
+                "grandchild"
+            };
+            let identity = pin(
+                &snapshot().expect("child inventory"),
+                std::process::id() as i32,
+            )
+            .expect("child identity");
+            publish(&work.join(name), &identity).expect("child record");
+            beat(&work.join(if direct {
+                "extension-heartbeat"
+            } else {
+                "grandchild-heartbeat"
+            }));
+        }
+        Some("--adoption-spawner") => {
+            let work = Path::new(&args[1]);
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.arg("--adopted-grandchild").arg(work);
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            #[expect(
+                clippy::zombie_processes,
+                reason = "Deliberate orphan fixture: spawner exits before child; session reaper or launchd must reap it"
+            )]
+            let _grandchild = command.spawn().expect("setsid grandchild");
+            publish(
+                &work.join("spawner"),
+                &pin(
+                    &snapshot().expect("spawner inventory"),
+                    std::process::id() as i32,
+                )
+                .expect("spawner identity"),
+            )
+            .expect("spawner record");
+            let deadline = Instant::now() + Duration::from_secs(240);
+            while !work.join("spawner-release").exists() {
+                assert!(Instant::now() < deadline, "spawner gate expired");
+                sleep(Duration::from_millis(5));
+            }
+            // Deliberate orphan: Pi reaps this direct child; session ownership must retain its setsid child.
+        }
         Some("--payload") => {
             let work = Path::new(&args[1]);
             let mut leaf = Command::new(std::env::current_exe().unwrap())
@@ -861,9 +1253,22 @@ mod tests {
         assert!(stopped(&table, &json!({"pid":11})).is_err());
     }
     #[test]
+    fn exact_direct_children_distinguish_anchor_from_guardian_descendants() {
+        let table = BTreeMap::from([
+            (10, json!({"parent":1})),
+            (11, json!({"parent":10})),
+            (12, json!({"parent":11})),
+            (13, json!({"parent":12})),
+        ]);
+        assert_eq!(children_of(&table, 10), vec![11]);
+        assert_eq!(children_of(&table, 11), vec![12]);
+        assert_ne!(children_of(&table, 10), vec![12]);
+    }
+    #[test]
     fn held_target_rejects_wrong_birth_before_signaling() {
         let table = snapshot().unwrap();
         let mut identity = pin(&table, std::process::id() as i32).unwrap();
+        assert_eq!(identity["sid"], unsafe { libc::getsid(0) });
         identity["birth"] = json!("not-this-process");
         assert!(Held::open(&identity).is_err());
     }
