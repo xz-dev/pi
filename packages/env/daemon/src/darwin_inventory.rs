@@ -138,6 +138,7 @@ fn list(root: libc::pid_t, group: bool) -> io::Result<Vec<libc::pid_t>> {
 
 pub(super) struct Inventory {
     root: libc::pid_t,
+    origin: Option<Identity>,
     known: HashMap<libc::pid_t, Identity>,
     private_groups: bool,
     groups: HashSet<libc::pid_t>,
@@ -147,10 +148,18 @@ impl Inventory {
     pub(super) fn new(private_groups: bool) -> Self {
         Self {
             root: std::process::id() as libc::pid_t,
+            origin: None,
             known: HashMap::new(),
             private_groups,
             groups: HashSet::new(),
         }
+    }
+
+    pub(super) fn observer(root: Identity) -> Self {
+        let mut inventory = Self::new(false);
+        inventory.root = root.pid();
+        inventory.origin = Some(root);
+        inventory
     }
 
     pub(super) fn seed(&mut self, held: Identity) -> io::Result<()> {
@@ -166,7 +175,12 @@ impl Inventory {
     }
 
     pub(super) fn snapshot(&mut self) -> io::Result<()> {
-        let mut roots = VecDeque::from([self.root]);
+        let mut roots = VecDeque::new();
+        if self.origin.is_none()
+            || info(self.root)?.is_some_and(|record| Some(identity(&record)) == self.origin)
+        {
+            roots.push_back(self.root);
+        }
         let mut groups = HashSet::new();
         // Retain identities across reparenting, but never across PID reuse.
         for held in self.known.clone().values() {
@@ -190,6 +204,7 @@ impl Inventory {
                 if let Some(record) = info(pid)?
                     && record.pbi_pgid == group as u32
                     && pid != self.root
+                    && pid != std::process::id() as libc::pid_t
                 {
                     self.remember(&record);
                     roots.push_back(pid);
@@ -212,6 +227,7 @@ impl Inventory {
                 if let Some(record) = info(pid)?
                     && record.pbi_ppid == root as u32
                     && pid != self.root
+                    && pid != std::process::id() as libc::pid_t
                 {
                     self.remember(&record);
                     roots.push_back(pid);
@@ -284,6 +300,9 @@ impl Inventory {
         self.cleanup_until(Instant::now() + Duration::from_secs(5))
     }
     pub(super) fn cleanup_until(&mut self, deadline: Instant) -> io::Result<()> {
+        self.cleanup_after(Duration::from_millis(250), deadline)
+    }
+    pub(super) fn cleanup_after(&mut self, grace: Duration, deadline: Instant) -> io::Result<()> {
         // Final inventory precedes TERM, including termination of any parent.
         // Keep failures sticky while still attempting the rest of the sweep.
         let mut failure = self.snapshot().err();
@@ -298,7 +317,7 @@ impl Inventory {
             if let Err(error) = self.snapshot() {
                 failure = Some(error);
             }
-            let signal = if start.elapsed() >= Duration::from_millis(250) {
+            let signal = if start.elapsed() >= grace {
                 libc::SIGKILL
             } else {
                 libc::SIGTERM

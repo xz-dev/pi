@@ -695,7 +695,12 @@ pub fn run(args: &[OsString]) -> i32 {
     });
     // Reap the extra direct child before the existing inventory can reap it. Both share
     // the original five-second cleanup budget, not sequential new timeout windows.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now()
+        + if completed {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(7500)
+        };
     let watch_clean = watch
         .as_mut()
         .map_or(Ok(()), |watch| watch.finish(deadline));
