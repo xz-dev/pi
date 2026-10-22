@@ -28,6 +28,10 @@ windows-sys = { version = "=0.61.2", features = [
 	"Win32_System_Threading",
 ] }
 
+[[test]]
+name = "supervise_parent_death"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1

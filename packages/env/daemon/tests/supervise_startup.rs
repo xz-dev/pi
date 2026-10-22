@@ -44,6 +44,9 @@ impl Fixture {
         Self::start_inner(window, false)
     }
     fn start_inner(window: Window, control: bool) -> Self {
+        Self::start_config(window, control, false)
+    }
+    fn start_config(window: Window, control: bool, fail_arm: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "pi-startup-{}-{}-{window:?}",
             std::process::id(),
@@ -58,6 +61,9 @@ impl Fixture {
         };
         let fd = inherited.as_ref().map(AsRawFd::as_raw_fd);
         let mut command = Command::new(env!("CARGO_BIN_EXE_pi-env"));
+        if fail_arm {
+            command.env("PI_PROCESS_OWNER_TEST_PDEATHSIG_FAIL", "1");
+        }
         command.arg("supervise");
         if let Some(fd) = fd {
             command.args(["--control-fd", &fd.to_string()]);
@@ -422,6 +428,48 @@ fn wait_for(mut condition: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "startup condition timed out");
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn kernel_arm_failure_reaps_both_controllers_and_preexec_primary() {
+    let mut fixture = Fixture::start_config(Window::PrimaryBorn, false, true);
+    let mut pid = fixture.traced.unwrap();
+    for level in 0..2 {
+        ptrace(libc::PTRACE_CONT, pid, 0);
+        let status = wait_trace(pid);
+        assert!(libc::WIFSTOPPED(status));
+        assert!(matches!(
+            status >> 16,
+            libc::PTRACE_EVENT_FORK | libc::PTRACE_EVENT_CLONE
+        ));
+        let mut child = 0usize;
+        ptrace(
+            libc::PTRACE_GETEVENTMSG,
+            pid,
+            (&mut child as *mut usize) as usize,
+        );
+        ptrace(libc::PTRACE_DETACH, pid, 0);
+        pid = child as i32;
+        fixture.traced = Some(pid);
+        assert!(libc::WIFSTOPPED(wait_trace(pid)));
+        if level == 0 {
+            fixture.guardian = pid;
+        } else {
+            fixture.primary = pid;
+        }
+    }
+    ptrace(libc::PTRACE_DETACH, pid, 0);
+    fixture.traced = None;
+    wait_for(|| fixture.child.try_wait().unwrap().is_some());
+    assert_eq!(fixture.child.try_wait().unwrap().unwrap().code(), Some(125));
+    fixture.reaped = true;
+    wait_for(|| state(fixture.guardian) == 'X' && state(fixture.primary) == 'X');
+    assert!(!fixture.root.join("started").exists());
+    assert!(
+        fs::read_to_string(fixture.root.join("stderr"))
+            .unwrap()
+            .contains("--no-process-ownership")
+    );
 }
 
 #[test]

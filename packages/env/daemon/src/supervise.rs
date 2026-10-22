@@ -1483,6 +1483,11 @@ pub fn run(args: &[OsString]) -> i32 {
     };
     if let Err(error) = crate::job_control::wake_on_parent_death(caller) {
         eprintln!("pi-env supervise: {error}");
+        if crate::job_control::enabled() {
+            eprintln!(
+                "pi-env: parent-death wake unavailable; use --no-process-ownership to opt out"
+            );
+        }
         return 125;
     }
     #[cfg(target_os = "linux")]

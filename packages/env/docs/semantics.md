@@ -78,9 +78,28 @@ the read at EOF. Failure to arm this wake fails session startup; no module or sy
 Termination bypasses healthy resume reconciliation: frozen primary and detached targets receive TERM before any
 teardown CONT, including rollback/drop paths. Bounded KILL escalation and adopted-zombie reaping preserve the
 primary child's status. Pi also requests graceful shutdown when its immediate Unix owner disappears, without
-restarting an already-suspended terminal. Once validated owner loss is observed, Pi allows five seconds for
-asynchronous extension shutdown before final tty release and exit, even if shutdown was already in progress.
-Ordinary interactive quit still waits for extension cleanup without this deadline.
+restarting an already-suspended terminal. Owned Pi startup requires a kernel `SIGCONT` parent-death wake on
+Linux/FreeBSD, followed by a live-parent recheck before exec permission. Failure refuses startup with an explicit
+`--no-process-ownership` opt-out diagnostic; there is no silent wake fallback. The Linux guardian forks Pi from its
+sole lifetime thread because Linux binds this notification to the creating thread. Darwin retains its existing
+session observer wake instead; Linux/FreeBSD add no native actor. The private
+`PI_PROCESS_OWNER_TEST_PDEATHSIG_FAIL=1` environment variable injects an arm error only for tests; production never
+sets it, and non-session launch ignores it.
+
+After the validated Unix handoff, an independent worker must acknowledge its PID and pinned-parent match before
+main starts. It polls live `process.ppid`, not main-thread messages. Once owner loss is observed, responsive Pi
+allows five seconds for asynchronous extension shutdown before final validated tty release and exit, even if
+shutdown was already in progress. The worker independently sends self `SIGKILL` after seven seconds of owner loss
+if main JS cannot run. A normal pause stops the worker with Pi; kernel/observer CONT is therefore mandatory.
+Worker startup/identity failure refuses bootstrap rather than degrading supervision. Unexpected worker error/exit
+fails the responsive main process closed; normal process exit disarms that exit callback. Ordinary interactive
+quit and live-owner signal shutdown still await extension cleanup without the owner-loss deadline.
+
+SIGKILL cannot run Pi's tty cleanup. In an interactive job-control shell, the shell restores its saved cooked tty
+when the shell-facing owner dies; tests check this while blocked Pi is still alive, before the worker kills it.
+No tty restoration by a killed owner or blocked JS is assumed. A caller without a job-control shell must restore
+its own terminal after catastrophic owner loss.
+
 Interactive Ctrl-Z pauses shell timeout budgets; external signals, print/JSON/RPC shell deadlines and MCP request
 deadlines may still count suspended time. Windows job-control behavior is unchanged.
 
