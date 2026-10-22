@@ -37,8 +37,11 @@ const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
+const MESSAGE_ID_REJECTION = "previous_response_id must be a response.id (resp_*), not a message id";
 // Checkpoint and transport cooldowns independently step from two to five minutes.
 const CHECKPOINT_COOLDOWN_MS = AUTO_SSE_COOLDOWN_MS;
+const MEMORY_CONTINUATION_TTL_MS = 10 * 60 * 1000;
+const MEMORY_CONTINUATION_LIMIT = 32;
 
 // ============================================================================
 // Types
@@ -269,6 +272,23 @@ export function isCheckpointReferenceError(error: unknown): boolean {
 	);
 }
 
+export function isStoredContinuationReferenceError(error: unknown): boolean {
+	if (isCheckpointReferenceError(error)) return true;
+	if (error instanceof ResponsesTransportError) {
+		const close = error.cause as { code?: unknown; reason?: unknown } | undefined;
+		return close?.code === 1008 && close.reason === MESSAGE_ID_REJECTION;
+	}
+	if (!(error instanceof ResponsesApiError)) return false;
+	const types = errorValues(error, "type", "string");
+	const codes = new Set([...errorValues(error, "code", "string"), ...(error.code ? [error.code] : [])]);
+	if (errorValues(error, "status", "number").some((status) => status !== 400)) return false;
+	if (types.length === 0 || types.some((type) => type !== "invalid_request_error")) return false;
+	if (codes.size > 1 || [...codes].some((code) => code !== "invalid_request" && code !== "invalid_request_error"))
+		return false;
+	if (errorValues(error, "param", "string").some((param) => param !== "previous_response_id")) return false;
+	return errorEnvelopes(error).some((envelope) => envelope.message === MESSAGE_ID_REJECTION);
+}
+
 export function extractEventError(event: Record<string, unknown>): { code?: string; message?: string } {
 	const nested = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>) : undefined;
 	return {
@@ -286,6 +306,13 @@ export function extractEventError(event: Record<string, unknown>): { code?: stri
 // Per-scope connection pools, debug stats and SSE fallback state
 // ============================================================================
 
+interface MemoryContinuation {
+	sessionId: string;
+	createdAt: number;
+	continuation?: CachedWebSocketContinuationState;
+	rejected?: boolean;
+}
+
 interface WebSocketPoolScope {
 	// sessionId -> identityKey -> connection
 	connections: Map<string, Map<string, CachedWebSocketConnection>>;
@@ -295,6 +322,8 @@ interface WebSocketPoolScope {
 	sseFallbackSessions: Map<string, Map<string, WebSocketRecoveryState>>;
 	// Durable-checkpoint failure cooldown, same partitioning as sseFallbackSessions.
 	checkpointCooldownSessions: Map<string, Map<string, CheckpointCooldownState>>;
+	// Ordinary Responses only; entries expire from capture, not from lookup/use.
+	continuations: Map<string, MemoryContinuation>;
 }
 
 const poolScopes = new Map<string, WebSocketPoolScope>();
@@ -307,6 +336,7 @@ function getScope(scope: string): WebSocketPoolScope {
 			debugStats: new Map(),
 			sseFallbackSessions: new Map(),
 			checkpointCooldownSessions: new Map(),
+			continuations: new Map(),
 		};
 		poolScopes.set(scope, entry);
 	}
@@ -395,12 +425,16 @@ function closeScopeSessions(scope: string, sessionId?: string): void {
 		entry.connections.delete(sessionId);
 		entry.sseFallbackSessions.delete(sessionId);
 		entry.checkpointCooldownSessions.delete(sessionId);
+		for (const [key, memory] of entry.continuations) {
+			if (memory.sessionId === sessionId) entry.continuations.delete(key);
+		}
 		return;
 	}
 	for (const sessionEntries of entry.connections.values()) {
 		for (const conn of sessionEntries.values()) closeEntry(conn);
 	}
 	entry.connections.clear();
+	entry.continuations.clear();
 	entry.sseFallbackSessions.clear();
 	entry.checkpointCooldownSessions.clear();
 }
@@ -411,6 +445,18 @@ registerSessionResourceCleanup((sessionId?: string) => {
 
 export function closeResponsesWebSocketSessions(scope: string, sessionId?: string): void {
 	closeScopeSessions(scope, sessionId);
+}
+
+export function invalidateResponsesWebSocketContinuation(
+	scope: string,
+	sessionId: string | undefined,
+	identityKey: string,
+): void {
+	if (!sessionId) return;
+	const entry = poolScopes.get(scope);
+	entry?.continuations.delete(JSON.stringify([sessionId, identityKey]));
+	const connection = entry?.connections.get(sessionId)?.get(identityKey);
+	if (connection) connection.continuation = undefined;
 }
 
 export function getWebSocketSseFallbackState(
@@ -1123,6 +1169,12 @@ export interface ProcessResponsesWebSocketOptions<TApi extends Api> {
 	output: AssistantMessage;
 	stream: AssistantMessageEventStream;
 	model: Model<TApi>;
+	/** Ordinary Responses provenance resolved before encoding; omitted by Codex. */
+	responseAncestry?: "local" | "legacy" | "server-dependent" | "unknown";
+	/** Latest active-branch assistant, including empty messages. */
+	lastResponseId?: string;
+	/** Plan known before acquiring a replacement socket, so failed acquisition cannot escape to HTTP. */
+	onPlanned?: (fullHistory: boolean, storedReference: boolean) => void;
 	/** Invoked when the first provider stream event arrives (before push of start). */
 	onStart: () => void;
 	/** Successful send, independent of whether any provider output has arrived. */
@@ -1147,9 +1199,9 @@ export interface ProcessResponsesWebSocketOptions<TApi extends Api> {
 	/** Response items produced by this turn, appended to the continuation baseline. */
 	getResponseItems: () => ResponseInput;
 	/**
-	 * Durable-checkpoint hooks. All are optional; when `durableCheckpoints` is
-	 * absent or returns undefined the driver keeps its connection-local cache
-	 * only. See utils/response-checkpoints.ts + CONTRACT-v1.md.
+	 * Durable-checkpoint hooks. Without them, connection-local continuation and
+	 * ordinary Responses' explicitly stored, bounded memory remain independent.
+	 * See utils/response-checkpoints.ts + CONTRACT-v1.md.
 	 */
 	durableCheckpoints?: {
 		/**
@@ -1207,6 +1259,71 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		forceFresh,
 		options,
 	} = config;
+	const transport = options?.transport ?? "auto";
+	const useCachedContext = transport === "websocket-cached" || transport === "auto";
+	const durable = config.durableCheckpoints;
+	const callerOwned =
+		(durable !== undefined || config.forceFullContext === true) && body.previous_response_id !== undefined;
+	// Keep ordinary Responses' exact encoded baseline independent of caller-held payload objects.
+	const fullBody =
+		config.responseAncestry === undefined ? { ...body } : (JSON.parse(JSON.stringify(body)) as WebSocketRequestBody);
+	// Preserve the pre-existing opt-out wire behavior: only the checkpoint/cooldown owner retains injected parents.
+	if (!callerOwned) delete fullBody.previous_response_id;
+	const dependent = config.responseAncestry === "server-dependent" || config.responseAncestry === "unknown";
+	const pool = getScope(scope);
+	const memoryKey =
+		config.responseAncestry !== undefined && model.provider !== "openai-codex" && cacheSessionId
+			? JSON.stringify([cacheSessionId, identityKey])
+			: undefined;
+	let memory: MemoryContinuation | undefined;
+	let remembered: CachedWebSocketContinuationState | undefined;
+	if (memoryKey && cacheSessionId) {
+		for (const [key, value] of pool.continuations) {
+			if (Date.now() - value.createdAt >= MEMORY_CONTINUATION_TTL_MS) pool.continuations.delete(key);
+		}
+		const previous = pool.continuations.get(memoryKey);
+		remembered = previous?.continuation;
+		// Replacing this bounded record also revokes older in-flight publication rights.
+		memory = {
+			sessionId: cacheSessionId,
+			createdAt: previous?.createdAt ?? Date.now(),
+			continuation: callerOwned ? undefined : remembered,
+			rejected: previous?.rejected,
+		};
+		pool.continuations.set(memoryKey, memory);
+		while (pool.continuations.size > MEMORY_CONTINUATION_LIMIT)
+			pool.continuations.delete(pool.continuations.keys().next().value!);
+	}
+	const deltaFor = (continuation: CachedWebSocketContinuationState | undefined): ResponseInput | undefined => {
+		if (
+			memory?.rejected ||
+			!continuation ||
+			(config.responseAncestry !== undefined && continuation.lastResponseId !== config.lastResponseId)
+		)
+			return undefined;
+		if (!dependent) return getCachedWebSocketInputDelta(fullBody, continuation);
+		// A cooldown/probe changes only storage policy, never caller-owned ancestry.
+		const { store: _store, ...unstored } = fullBody;
+		const { store: _lastStore, ...lastUnstored } = continuation.lastRequestBody;
+		return getCachedWebSocketInputDelta(unstored, { ...continuation, lastRequestBody: lastUnstored });
+	};
+	let requestBody = fullBody;
+	let fullHistory = !callerOwned && !dependent;
+	let storedReference = false;
+	if (
+		!callerOwned &&
+		useCachedContext &&
+		(!config.suppressDurablePlanning || dependent) &&
+		(!config.forceFullContext || dependent)
+	) {
+		const delta = deltaFor(remembered);
+		if (delta?.length && remembered) {
+			requestBody = { ...fullBody, previous_response_id: remembered.lastResponseId, input: delta };
+			fullHistory &&= remembered.fullHistory;
+			storedReference = true;
+		}
+	}
+	config.onPlanned?.(fullHistory, storedReference);
 	const { socket, entry, reused, release } = await acquireWebSocket({
 		scope,
 		url,
@@ -1225,57 +1342,30 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		transportCleared = true;
 		await emitTransport(onTransport, undefined, model);
 	};
-	const transport = options?.transport ?? "auto";
-	const useCachedContext = transport === "websocket-cached" || transport === "auto";
-	const durable = config.durableCheckpoints;
-	// Under a checkpoint cooldown (forceFullContext) the caller's parent still owns its lineage.
-	const callerOwned =
-		(durable !== undefined || config.forceFullContext === true) && body.previous_response_id !== undefined;
-	const fullBody = { ...body };
-	// Preserve legacy non-checkpoint behavior; the checkpoint owner must not
-	// discard a caller's parent or certify its unknown server-side lineage.
-	if (!callerOwned) delete fullBody.previous_response_id;
-	// A caller-rooted continuation (fullHistory:false) depends on server history
-	// we do not hold: forced full context must keep chaining it, never replace it,
-	// and a request that cannot chain it is never certified (or captured) as complete.
-	// Scoped to cooldown: elsewhere the base-branch provenance rules are unchanged.
-	const inheritsUnknownLineage =
-		!callerOwned && config.forceFullContext === true && entry?.continuation?.fullHistory === false;
-	let requestBody: WebSocketRequestBody;
-	if (inheritsUnknownLineage && entry) {
-		// Cooldown omits store and a probe adds it: match the baseline without store,
-		// then keep this request's own store value on the chained delta.
-		const { store: _bodyStore, ...unstored } = fullBody as WebSocketRequestBody & { store?: boolean };
-		const continuation = entry.continuation!;
-		const { store: _lastStore, ...lastUnstored } = continuation.lastRequestBody as WebSocketRequestBody & {
-			store?: boolean;
-		};
-		const delta = getCachedWebSocketInputDelta(unstored, { ...continuation, lastRequestBody: lastUnstored });
-		if (!delta || delta.length === 0 || !continuation.lastResponseId) {
-			// shortcut: fail closed rather than replace caller-owned server history with partial local input.
-			// Nothing was sent: return the lease and keep the entry so its caller-rooted provenance survives.
-			release({ keep: true });
-			throw new ResponsesApiError("Cannot continue a caller-rooted conversation during checkpoint cooldown", {
-				code: "checkpoint_lineage_unavailable",
-			});
-		}
-		requestBody = { ...fullBody, previous_response_id: continuation.lastResponseId, input: delta };
-	} else {
-		requestBody =
-			!callerOwned && !config.forceFullContext && useCachedContext && entry
-				? buildCachedWebSocketRequestBody(entry, fullBody)
-				: fullBody;
-	}
-	let fullHistory =
+	// Prefer the existing socket-local chain. Non-stored Responses may still chain on their own socket.
+	if (
 		!callerOwned &&
-		!inheritsUnknownLineage &&
-		(requestBody === fullBody || entry?.continuation?.fullHistory === true);
+		(!config.suppressDurablePlanning || dependent) &&
+		useCachedContext &&
+		entry &&
+		(!config.forceFullContext || dependent)
+	) {
+		const continuation = entry.continuation;
+		const delta = deltaFor(continuation);
+		if (delta?.length && continuation) {
+			requestBody = { ...fullBody, previous_response_id: continuation.lastResponseId, input: delta };
+			fullHistory = !dependent && continuation.fullHistory;
+		} else if (config.responseAncestry === undefined && !config.forceFullContext) {
+			requestBody = buildCachedWebSocketRequestBody(entry, fullBody);
+			fullHistory = requestBody === fullBody || entry.continuation?.fullHistory === true;
+		}
+	}
 
-	// Durable planning is independent of connection-local state, but never
-	// layers over a caller-owned parent.
+	// Durable planning never overrides known dependence or a caller-owned parent.
 	if (
 		durable &&
 		!callerOwned &&
+		config.responseAncestry !== "server-dependent" &&
 		!config.forceFullContext &&
 		!config.suppressDurablePlanning &&
 		requestBody === fullBody
@@ -1292,10 +1382,17 @@ export async function processResponsesWebSocket<TApi extends Api>(
 			});
 			if (plan) {
 				requestBody = plan.request as WebSocketRequestBody;
-				fullHistory = true;
+				fullHistory = !dependent;
 			}
 		}
 	}
+	if (config.responseAncestry !== undefined && !requestBody.previous_response_id && dependent) {
+		release({ keep: true });
+		throw new ResponsesApiError("Cannot continue conversation without its server-owned ancestry", {
+			code: "checkpoint_lineage_unavailable",
+		});
+	}
+	config.onPlanned?.(fullHistory, storedReference);
 	await emitTransport(onTransport, requestBody.previous_response_id ? "WS/continuation" : "WS/full", model);
 	transportCleared = false;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(getScope(scope), cacheSessionId) : undefined;
@@ -1326,6 +1423,8 @@ export async function processResponsesWebSocket<TApi extends Api>(
 		} catch (error) {
 			throw new ResponsesTransportError(formatThrownValue(error), { cause: error });
 		}
+		if (config.responseAncestry !== undefined && (callerOwned || (dependent && requestBody.previous_response_id)))
+			output.responseAncestry = "server-dependent";
 		config.onSent?.(fullHistory);
 		let started = false;
 		const events = mapEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs));
@@ -1351,6 +1450,7 @@ export async function processResponsesWebSocket<TApi extends Api>(
 			}
 		})();
 		await processStream(captureEvents, output, stream, model);
+		if (memoryKey && pool.continuations.get(memoryKey) === memory) memory!.continuation = undefined;
 		if (options?.signal?.aborted) {
 			keepConnection = false;
 			await clearTransport();
@@ -1361,17 +1461,35 @@ export async function processResponsesWebSocket<TApi extends Api>(
 				if (entry) entry.continuation = undefined;
 				keepConnection = false;
 				await clearTransport();
-			} else if (useCachedContext && entry) {
+			} else if (useCachedContext) {
 				const responseItems = getResponseItems();
 				const completed = responseEventOutput(completionEvent ?? {});
 				// Validate even while disabled: a later opt-in may inherit this cache.
 				fullHistory &&= completed !== undefined && responseOutputItemsCapturable(completed.output, responseItems);
-				entry.continuation = {
+				const continuation = {
 					lastRequestBody: fullBody,
 					lastResponseId: output.responseId,
 					lastResponseItems: responseItems,
 					fullHistory,
 				};
+				if (entry)
+					entry.continuation =
+						memoryKey && pool.continuations.get(memoryKey) !== memory ? undefined : continuation;
+				if (
+					memoryKey &&
+					pool.continuations.get(memoryKey) === memory &&
+					!memory!.rejected &&
+					(output.stopReason === "stop" || output.stopReason === "toolUse") &&
+					requestBody.store === true &&
+					completed?.store === true &&
+					completed.id === output.responseId &&
+					responseOutputItemsCapturable(completed.output, responseItems)
+				) {
+					memory!.continuation = continuation;
+					memory!.createdAt = Date.now();
+					pool.continuations.delete(memoryKey);
+					pool.continuations.set(memoryKey, memory!);
+				}
 				if (fullHistory) {
 					await captureDurableCheckpoint(config, output, fullBody, requestBody, responseItems, completionEvent);
 				}
@@ -1380,6 +1498,18 @@ export async function processResponsesWebSocket<TApi extends Api>(
 			}
 		}
 	} catch (error) {
+		if (memoryKey && pool.continuations.get(memoryKey) === memory) {
+			memory!.continuation = undefined;
+			if (
+				!callerOwned &&
+				requestBody.previous_response_id &&
+				isStoredContinuationReferenceError(error) &&
+				!isCheckpointReferenceError(error)
+			) {
+				memory!.rejected = true;
+				memory!.createdAt = Date.now();
+			}
+		}
 		if (entry) {
 			entry.continuation = undefined;
 		}

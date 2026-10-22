@@ -1752,11 +1752,14 @@ carried checkpoint artifacts triggers it:
 - a rejection of the `store` parameter;
 - a `previous_response_id`-is-unsupported rejection.
 
-The first signal repairs the current turn once with full history and no
-`store`/`previous_response_id`, then marks the endpoint for the session: for
-two minutes native requests go without store or deltas, still safe (full history
-is canonical). The first request after the deadline is a single probe that sends
-`store: true` with full history — concurrent requests stay checkpoint-free.
+The first signal repairs the current turn once when full local history is
+available, with no `previous_response_id` or storage request (`store: false`
+stays false). It then marks the endpoint for the session: for two minutes
+native requests with local or legacy-compatible history go without store or
+deltas. Known server-dependent history must still chain its latest validated
+response, or fail before sending. The first request after the deadline is a
+single probe that sends `store: true` with full local history — concurrent
+requests stay checkpoint-free.
 Failed probes increase the next cooldown to three, four, then five minutes,
 capped at five; a completed probe that captures no usable checkpoint is still
 a failure. Only a valid captured checkpoint resets storage progression to two
@@ -1783,6 +1786,49 @@ guarantee is implied. The official protocol's
 [persisted continuation documentation](https://developers.openai.com/api/docs/guides/websocket-mode)
 is not a live-service test.
 
+### Ancestry and cross-socket memory
+
+Ordinary Responses output carries optional `responseAncestry`, independently of
+checkpoint policy or storage success:
+
+- `"local"`: the request used independently local input, not caller-owned server
+  ancestry. Losing a reusable anchor permits full-input fallback. Reconstruction
+  and storage checks still govern checkpoint capture and repair.
+- `"server-dependent"`: the request actually used a caller-owned parent, or
+  continued dependent history. Only its latest validated chain may continue;
+  losing that chain causes refusal before an unsafe parent-free WS or SSE send.
+  Older local anchors cannot replace it, and rejection cannot trigger full-input
+  repair or complete-history attestation.
+- Genuine absence preserves legacy eligibility and full-input fallback. This is
+  compatibility trust, not proof of completeness; descendants remain unmarked
+  until a real new local baseline. Old unmarked caller-rooted histories can be
+  indistinguishable from ordinary history and can lose server-only ancestry.
+- A present malformed value is unknown, not legacy absence. An independently
+  validated chain may work; otherwise the request fails before sending.
+
+Session JSONL, branch exports and plain forks preserve these facts. Actual
+compaction and branch summaries adopt summary plus retained messages as new
+local input. Projection normalizes only pre-boundary copies and discards their
+old checkpoint eligibility; stored history stays unchanged. Summary conversion
+uses the same non-wire fact on its projected user message. Later caller takeover
+makes subsequent history dependent again, even while that summary remains.
+Ordinary edits, omitted/empty assistant content, plain forks, identity changes,
+socket loss, expiry and eviction are not rebases. Preserve facts when adapting
+message contexts; do not infer a rebase from summary text.
+
+For cached WS modes, native also keeps up to **32 identity records for ten
+minutes** in memory, separate from persisted checkpoints. Only matching latest
+active-branch responses with an actual `store: true` request, explicit stored
+completion and faithfully encoded output become cross-socket anchors. Endpoint,
+effective credentials/headers, session, envelope and exact prefix must match.
+Lookup does not extend age. Newer request ownership, SSE transitions and session
+cleanup revoke stale publication; a rejected legacy message-ID class stays
+suppressed within the same bounded record. Expiry/eviction removes reuse
+permission, not persisted ancestry. This is an entry-count bound, not a byte
+budget or a server-retention guarantee. Codex transport policy is unchanged.
+Neither ancestry nor checkpoint bookkeeping is sent in provider JSON, headers
+or conversation text. Explicit SSE does not open WS for bookkeeping.
+
 ### History, validation, and repair
 
 The full canonical conversation remains in session JSONL. Completed, stored,
@@ -1799,17 +1845,28 @@ On restore or branch rollback, only the latest assistant on the effective active
 branch is considered. An exact match sends that response ID plus the remaining
 input. Invalid, expired, foreign-scope or unknown-version metadata, edited history,
 changed envelope, incomplete reconstruction, or an empty/unsafe suffix uses the
-full request. Checkpoints never make an otherwise valid local session unusable.
-Caller-supplied `previous_response_id` owns its lineage; a parent-only history is
-not treated as complete local history.
+full request when ancestry is local or genuinely unmarked legacy history.
+Known-dependent or malformed history requires a separately validated chain or
+fails before sending. Caller-supplied `previous_response_id` owns its lineage;
+a parent-only history is not treated as complete local history.
 
 A proven pre-execution missing-reference rejection may trigger at most one WS
-repair from genuine saved full history. The plugin's independently retained
-strict message-ID rejection repair (including its exact WS 1008 signature) has
-the same no-output/full-history boundary; arbitrary 1008 closes are not proof.
-No transparent replay follows output, authentication failure, unknown execution,
-or caller-dependent ancestry. A failed repair is terminal: no hidden provider
-retry or extra SSE attempt. Existing ordinary transport recovery is separate.
+repair from genuine saved full history. Native and plugin also recognize the
+exact legacy message-ID rejection (including its exact WS 1008 signature) at the
+same no-output/full-history boundary; arbitrary 1008 closes are not proof.
+The adapter does not transparently replay after output, authentication failure,
+unknown execution, or caller-dependent ancestry. A failed repair has no hidden
+provider retry or extra SSE attempt. A started repair also carries a terminal
+marker that vetoes ordinary shared retries on hosts with the upgraded retry
+planner; older hosts do not enforce that shared retry veto.
+
+The coding agent's separately enabled overflow compact-and-retry recovery is
+unchanged and is not blocked by that ordinary retry veto. It can compact the
+active context and resend a smaller request. Partial output remains in raw
+session JSONL but may be omitted from active model context after compaction.
+A `response.created` event or overflow error text alone does not prove that no
+generation occurred or that execution was exactly once. Existing ordinary
+transport recovery is separate.
 
 ### Implementation and ownership
 
