@@ -17,6 +17,7 @@ import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts"
 import { recordCheckpointCooldown, resolveCheckpointCooldown } from "../src/api/openai-responses-websocket.ts";
 import { buildBaseOptions } from "../src/api/simple-options.ts";
 import type { AssistantMessage, Model, ProviderHeaders } from "../src/types.ts";
+import { getAssistantRetryPlan, retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const OFFICIAL_URL = "https://api.openai.com/v1";
@@ -72,7 +73,11 @@ function checkpointServer(opts?: {
 	expireIds?: boolean;
 	connectError?: () => boolean;
 	onRequest?: (
-		socket: { emit: (event: Record<string, unknown>) => void; fail: () => void },
+		socket: {
+			emit: (event: Record<string, unknown>) => void;
+			fail: () => void;
+			closeWithError: (code: number, reason: string) => void;
+		},
 		frame: SentFrame,
 	) => boolean;
 	events?: (events: Record<string, unknown>[]) => Record<string, unknown>[];
@@ -157,6 +162,10 @@ function checkpointServer(opts?: {
 		fail(): void {
 			this.dispatchEvent(Object.assign(new Event("error"), { message: "socket dropped" }));
 		}
+		closeWithError(code: number, reason: string): void {
+			this.readyState = 3;
+			this.dispatchEvent(Object.assign(new Event("close"), { code, reason }));
+		}
 		close(): void {
 			this.readyState = 3;
 		}
@@ -172,6 +181,1059 @@ const userMsg = (text: string, timestamp: number) => ({ role: "user" as const, c
 const ctx1 = normalizeContext({ messages: [userMsg("Hello", 1)] });
 
 const OPTS = { apiKey, sessionId, responseCheckpointExclude: [] as string[] };
+
+describe("R3 terminal reference repair retry admission", () => {
+	it.each(["created-only", "before-start", "aborted", "connection-local"] as const)(
+		"marks only a consumed non-aborted repair after its first mapped event: %s",
+		async (mode) => {
+			const controller = new AbortController();
+			const { sent, sockets, fetchMock } = checkpointServer({
+				expireIds: true,
+				onRequest: (socket) => {
+					if (sent.length !== 3) return false;
+					if (mode !== "before-start") socket.emit({ type: "response.created", response: { id: "repair" } });
+					socket.emit({ type: "error", error: { code: "server_error", message: "server_error: repair failed" } });
+					return true;
+				},
+			});
+			const model = makeModel(OFFICIAL_URL);
+			const options = { ...OPTS, responseCheckpointExclude: mode === "connection-local" ? ["*"] : [] };
+			const anchor = await stream(model, ctx1, options).result();
+			if (mode !== "connection-local") sockets[0].close();
+			const response = stream(
+				model,
+				normalizeContext({ messages: [...ctx1.messages, anchor, userMsg("Next", 2)] }),
+				{
+					...options,
+					signal: controller.signal,
+					onProviderStreamEvent: (event) => {
+						if (
+							mode === "aborted" &&
+							typeof event === "object" &&
+							event !== null &&
+							"type" in event &&
+							event.type === "response.created"
+						) {
+							controller.abort();
+						}
+					},
+				},
+			);
+			let started = false;
+			for await (const event of response) if (event.type === "start") started = true;
+			const out = await response.result();
+			expect(sent).toHaveLength(3);
+			expect(sent[1].previous_response_id).toBe(anchor.responseId);
+			expect(out.stopReason).toBe(mode === "aborted" ? "aborted" : "error");
+			expect(started).toBe(mode !== "before-start");
+			expect(out.content).toEqual([]);
+			if (mode === "created-only" || mode === "connection-local") {
+				expect(out.diagnostics).toEqual([
+					expect.objectContaining({ type: "provider_reference_repair_terminal", timestamp: expect.any(Number) }),
+				]);
+				expect(Object.keys(out.diagnostics?.[0] ?? {}).sort()).toEqual(["timestamp", "type"]);
+			} else expect(out.diagnostics).toBeUndefined();
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	for (const [entryName, entry] of [
+		["stream", stream],
+		["streamSimple", streamSimple],
+	] as const) {
+		for (const checkpoints of [false, true]) {
+			// #61: same shared retry owner as AgentSession must not reinvoke a started repair.
+			it.each(["error", "response.failed"])(
+				`${entryName} checkpoints=${checkpoints}: no outer replay after %s`,
+				async (terminal) => {
+					const { sent, sockets, fetchMock } = checkpointServer({
+						expireIds: true,
+						onRequest: (socket) => {
+							if (sent.length !== 3) return false;
+							socket.emit({ type: "response.created", response: { id: "repair" } });
+							socket.emit({
+								type: "response.output_item.added",
+								output_index: 0,
+								item: { type: "message", id: "msg_repair", role: "assistant", content: [] },
+							});
+							socket.emit({ type: "response.output_text.delta", output_index: 0, delta: "partial repair" });
+							const error = { code: "server_error", message: "server_error: repair failed", status: 500 };
+							socket.emit(
+								terminal === "error" ? { type: terminal, error } : { type: terminal, response: { error } },
+							);
+							return true;
+						},
+					});
+					const model = makeModel(OFFICIAL_URL);
+					const options = {
+						...OPTS,
+						responseCheckpointExclude: checkpoints ? [] : ["*"],
+						onPayload: (payload: unknown) => ({ ...(payload as Record<string, unknown>), store: true }),
+					};
+					const anchor = await entry(model, ctx1, options).result();
+					expect(anchor.stopReason).toBe("stop");
+					expect(!!anchor.responseCheckpoint).toBe(checkpoints);
+					sockets[0].close();
+					const next = normalizeContext({ messages: [...ctx1.messages, anchor, userMsg("Next", 2)] });
+					let emittedError: AssistantMessage | undefined;
+					const produce = vi.fn(async () => {
+						const response = entry(model, next, options);
+						for await (const event of response) if (event.type === "error") emittedError = event.error;
+						return response.result();
+					});
+					const onRetryScheduled = vi.fn();
+					const policy = { enabled: true, maxRetries: 2, baseDelayMs: 0 };
+					const out = await retryAssistantCall(produce, policy, undefined, { onRetryScheduled });
+					expect(sent).toHaveLength(3); // Anchor, rejected stored reference, accepted full repair. No fourth frame.
+					expect(produce).toHaveBeenCalledTimes(1);
+					expect(onRetryScheduled).not.toHaveBeenCalled();
+					expect(sent[1].previous_response_id).toBe(anchor.responseId);
+					expect(sent[2].previous_response_id).toBeUndefined();
+					expect(sent[2].store).toBeUndefined();
+					expect(sent[2].input).toHaveLength(3);
+					expect(out).toBe(emittedError);
+					expect(out.stopReason).toBe("error");
+					expect(out.errorMessage).toContain("repair failed");
+					expect(out.content).toContainEqual(expect.objectContaining({ type: "text", text: "partial repair" }));
+					expect(out.responseCheckpoint).toBeUndefined();
+					const marker = out.diagnostics?.find((d) => d.type === "provider_reference_repair_terminal");
+					expect(Object.keys(marker ?? {}).sort()).toEqual(["timestamp", "type"]);
+					expect(getAssistantRetryPlan(out, policy, 0)).toBeUndefined();
+					const later = await entry(
+						model,
+						normalizeContext({ messages: [...next.messages, out, userMsg("Separate later prompt", 3)] }),
+						options,
+					).result();
+					expect(later.stopReason).toBe("stop");
+					expect(later.diagnostics).toBeUndefined();
+					expect(sent).toHaveLength(4);
+					expect(fetchMock).not.toHaveBeenCalled();
+				},
+			);
+		}
+	}
+});
+
+describe("review R1 ordinary user ancestry", () => {
+	it.each([stream, streamSimple])("ordinary user/local cannot erase a real caller-rooted response", async (entry) => {
+		const { sent, stored, fetchMock } = checkpointServer();
+		const model = makeModel(OFFICIAL_URL);
+		await entry(model, ctx1, OPTS).result();
+		for (const account of stored.values()) account.set("external", { id: "external", output: [] });
+		const caller = await entry(model, ctx1, {
+			...OPTS,
+			onPayload: (payload) => ({ ...(payload as Record<string, unknown>), previous_response_id: "external" }),
+		}).result();
+		expect(caller.responseAncestry).toBe("server-dependent");
+		closeOpenAIResponsesWebSocketSessions();
+		const next = normalizeContext({
+			messages: [
+				...ctx1.messages,
+				caller,
+				{ ...userMsg("ordinary follow-up, not summary", 3), responseAncestry: "local" },
+			],
+		});
+		const out = await entry(model, next, OPTS).result();
+		expect(out.stopReason).toBe("error");
+		expect(out.responseAncestry).not.toBe("local");
+		expect(out.responseCheckpoint).toBeUndefined();
+		expect(sent).toHaveLength(2);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(caller.responseAncestry).toBe("server-dependent");
+	});
+
+	for (const entry of [stream, streamSimple]) {
+		it.each([null, "invalid"])("ordinary user/local cannot clear present malformed ancestry %j", async (fact) => {
+			const { sent, fetchMock } = checkpointServer();
+			const model = makeModel(OFFICIAL_URL);
+			const first = await entry(model, ctx1, OPTS).result();
+			const malformed = { ...first, responseAncestry: fact } as unknown as AssistantMessage;
+			delete malformed.responseCheckpoint;
+			closeOpenAIResponsesWebSocketSessions();
+			const out = await entry(
+				model,
+				normalizeContext({
+					messages: [...ctx1.messages, malformed, { ...userMsg("ordinary input", 2), responseAncestry: "local" }],
+				}),
+				OPTS,
+			).result();
+			expect(out.stopReason).toBe("error");
+			expect(out.responseAncestry).not.toBe("local");
+			expect(out.responseCheckpoint).toBeUndefined();
+			expect(sent).toHaveLength(1);
+			expect(fetchMock).not.toHaveBeenCalled();
+		});
+	}
+
+	it.each([stream, streamSimple])(
+		"ordinary user/local keeps legacy fallback but cannot establish local proof",
+		async (entry) => {
+			const { sent, fetchMock } = checkpointServer();
+			const model = makeModel(OFFICIAL_URL);
+			const legacy = await entry(model, ctx1, OPTS).result();
+			delete legacy.responseAncestry;
+			delete legacy.responseCheckpoint;
+			closeOpenAIResponsesWebSocketSessions();
+			const out = await entry(
+				model,
+				normalizeContext({
+					messages: [...ctx1.messages, legacy, { ...userMsg("ordinary input", 2), responseAncestry: "local" }],
+				}),
+				OPTS,
+			).result();
+			expect(out.stopReason).toBe("stop");
+			expect(out).not.toHaveProperty("responseAncestry");
+			expect(sent).toHaveLength(2);
+			expect(sent[1].previous_response_id).toBeUndefined();
+			expect(sent[1].input).toHaveLength(3);
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([stream, streamSimple])(
+		"ordinary user/local preserves the latest validated dependent memory chain",
+		async (entry) => {
+			const { sent, sockets, stored, fetchMock } = checkpointServer();
+			const model = makeModel(OFFICIAL_URL);
+			await entry(model, ctx1, OPTS).result();
+			for (const account of stored.values()) account.set("external", { id: "external", output: [] });
+			const caller = await entry(model, ctx1, {
+				...OPTS,
+				onPayload: (payload) => ({ ...(payload as Record<string, unknown>), previous_response_id: "external" }),
+			}).result();
+			sockets.at(-1)!.close();
+			const out = await entry(
+				model,
+				normalizeContext({
+					messages: [...ctx1.messages, caller, { ...userMsg("ordinary input", 2), responseAncestry: "local" }],
+				}),
+				OPTS,
+			).result();
+			expect(out.stopReason).toBe("stop");
+			expect(out.responseAncestry).toBe("server-dependent");
+			expect(out.responseCheckpoint).toBeUndefined();
+			expect(sent).toHaveLength(3);
+			expect(sent[2].previous_response_id).toBe(caller.responseId);
+			expect(sent[2].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "ordinary input" }] }]);
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	for (const entry of [stream, streamSimple]) {
+		it.each(["malformed", "legacy"])(
+			"ordinary user/local does not suppress an independently valid %s durable chain",
+			async (classification) => {
+				const { sent, fetchMock } = checkpointServer();
+				const model = makeModel(OFFICIAL_URL);
+				const first = await entry(model, ctx1, OPTS).result();
+				const restored = JSON.parse(JSON.stringify(first)) as AssistantMessage;
+				if (classification === "malformed") Object.assign(restored, { responseAncestry: null });
+				else delete restored.responseAncestry;
+				closeOpenAIResponsesWebSocketSessions();
+				const out = await entry(
+					model,
+					normalizeContext({
+						messages: [
+							...ctx1.messages,
+							restored,
+							{ ...userMsg("ordinary input", 2), responseAncestry: "local" },
+						],
+					}),
+					OPTS,
+				).result();
+				expect(out.stopReason).toBe("stop");
+				expect(sent[1].previous_response_id).toBe(first.responseId);
+				if (classification === "malformed") {
+					expect(out.responseAncestry).toBe("server-dependent");
+					expect(out.responseCheckpoint).toBeUndefined();
+				} else expect(out).not.toHaveProperty("responseAncestry");
+				expect(fetchMock).not.toHaveBeenCalled();
+			},
+		);
+	}
+});
+
+describe("review R2 acknowledged memory connection limit", () => {
+	for (const checkpoints of [false, true]) {
+		it.each(["success", "repeated-limit", "handshake", "unknown-execution", "started"])(
+			`checkpoints=${checkpoints}: one pre-output fresh-socket retry, then %s`,
+			async (terminal) => {
+				let attempts = 0;
+				const { sent, sockets, fetchMock } = checkpointServer({
+					connectError: () => terminal === "handshake" && sent.length === 2,
+					onRequest: (socket) => {
+						attempts++;
+						if (attempts === 2 || (attempts === 3 && terminal === "repeated-limit")) {
+							socket.emit({ type: "error", code: "websocket_connection_limit_reached" });
+							return true;
+						}
+						if (attempts === 3 && terminal === "unknown-execution") {
+							socket.fail();
+							return true;
+						}
+						if (attempts === 3 && terminal === "started") {
+							socket.emit({ type: "response.created", response: { id: "partial" } });
+							socket.emit({
+								type: "response.output_item.added",
+								output_index: 0,
+								item: { type: "message", id: "msg_partial", role: "assistant", content: [] },
+							});
+							socket.emit({ type: "response.output_text.delta", output_index: 0, delta: "partial retry" });
+							socket.emit({ type: "error", code: "websocket_connection_limit_reached" });
+							return true;
+						}
+						return false;
+					},
+				});
+				const model = makeModel(OFFICIAL_URL);
+				const options = {
+					...OPTS,
+					responseCheckpointExclude: checkpoints ? [] : ["*"],
+					onPayload: (payload: unknown) => ({ ...(payload as Record<string, unknown>), store: true }),
+				};
+				const first = await stream(model, ctx1, options).result();
+				expect(!!first.responseCheckpoint).toBe(checkpoints);
+				sockets[0].close();
+				// All limit/replacement frames below belong to this one logical stream, not new calls.
+				const out = await stream(
+					model,
+					normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+					options,
+				).result();
+				expect(out.stopReason).toBe(terminal === "success" ? "stop" : "error");
+				expect(sent).toHaveLength(terminal === "handshake" ? 2 : 3);
+				expect(sent[1].previous_response_id).toBe(first.responseId);
+				expect(sockets).toHaveLength(3);
+				if (terminal !== "handshake") expect(sent[2].connection).not.toBe(sent[1].connection);
+				if (terminal === "started")
+					expect(out.content).toContainEqual(expect.objectContaining({ type: "text", text: "partial retry" }));
+				expect(out.diagnostics).toBeUndefined();
+				expect(fetchMock).not.toHaveBeenCalled();
+			},
+		);
+	}
+
+	it("valid durable checkpoint without eligible memory keeps its connection-limit recovery", async () => {
+		let attempts = 0;
+		const { sent, sockets, fetchMock } = checkpointServer({
+			onRequest: (socket) => {
+				if (++attempts !== 2) return false;
+				socket.emit({ type: "error", code: "websocket_connection_limit_reached" });
+				return true;
+			},
+			events: (events) => {
+				if (attempts === 1) delete (events.at(-1)!.response as Record<string, unknown>).store;
+				return events;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, OPTS).result();
+		expect(first.responseCheckpoint).toBeDefined();
+		sockets[0].close();
+		const out = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+			OPTS,
+		).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent).toHaveLength(3);
+		expect(sent[1].previous_response_id).toBe(first.responseId);
+		expect(sent[2].previous_response_id).toBe(first.responseId);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("persisted Responses ancestry", () => {
+	it.each([stream, streamSimple])(
+		"records local ancestry independently of storage through either entry point",
+		async (entry) => {
+			const { sent, fetchMock } = checkpointServer();
+			const model = makeModel(OFFICIAL_URL);
+			const first = await entry(model, ctx1, { ...OPTS, responseCheckpointExclude: ["*"] }).result();
+			expect(first).toHaveProperty("responseAncestry", "local");
+			expect(first.responseCheckpoint).toBeUndefined();
+			const restored = JSON.parse(JSON.stringify(first)) as AssistantMessage;
+			closeOpenAIResponsesWebSocketSessions();
+			const next = normalizeContext({ messages: [...ctx1.messages, restored, userMsg("Next", 2)] });
+			const out = await entry(model, next, { ...OPTS, responseCheckpointExclude: ["*"] }).result();
+			expect(out.stopReason).toBe("stop");
+			expect(sent[1].previous_response_id).toBeUndefined();
+			expect(sent[1].input).toHaveLength(3);
+			expect(JSON.stringify(sent)).not.toContain("responseAncestry");
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([stream, streamSimple])(
+		"explicit SSE preserves facts without WS and refuses cold dependent or malformed input",
+		async (entry) => {
+			const { sent, sockets, fetchMock } = checkpointServer();
+			const bodies: unknown[] = [];
+			fetchMock.mockImplementation(async (_input, init) => {
+				bodies.push(JSON.parse(String(init?.body)));
+				return new Response(
+					'data: {"type":"response.completed","response":{"id":"sse","status":"completed"}}\n\n',
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			});
+			const model = makeModel(OFFICIAL_URL);
+			const options = { ...OPTS, transport: "sse" as const };
+			const local = await entry(model, ctx1, options).result();
+			expect(local.responseAncestry).toBe("local");
+			const dependent = await entry(model, ctx1, {
+				...options,
+				onPayload: (payload) => ({
+					...(payload as Record<string, unknown>),
+					previous_response_id: "external",
+					store: false,
+				}),
+			}).result();
+			expect(dependent.responseAncestry).toBe("server-dependent");
+			const next = normalizeContext({ messages: [...ctx1.messages, dependent, userMsg("Next", 2)] });
+			expect((await entry(model, next, options).result()).stopReason).toBe("error");
+			expect((await entry(model, next, OPTS).result()).stopReason).toBe("error");
+			const invalid = { ...local, responseAncestry: null } as unknown as AssistantMessage;
+			expect(
+				(await entry(model, normalizeContext({ messages: [...ctx1.messages, invalid] }), options).result())
+					.stopReason,
+			).toBe("error");
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(sent).toHaveLength(0);
+			// Only the refused WS call acquired a socket; explicit SSE never opens one for bookkeeping.
+			expect(sockets).toHaveLength(1);
+			expect(JSON.stringify(bodies)).not.toContain("responseAncestry");
+			expect(bodies[1]).toMatchObject({ previous_response_id: "external", store: false });
+		},
+	);
+
+	it.each(["auto", "websocket-cached", "websocket"] as const)(
+		"%s stamps actual wire ownership, not an opt-out hook parent that was stripped",
+		async (transport) => {
+			const { sent, stored } = checkpointServer();
+			const model = makeModel(OFFICIAL_URL);
+			const first = await stream(model, ctx1, { ...OPTS, transport }).result();
+			for (const account of stored.values()) account.set("external", { id: "external", output: [] });
+			const next = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
+			const out = await stream(model, next, {
+				...OPTS,
+				transport,
+				onPayload: (payload) => ({ ...(payload as Record<string, unknown>), previous_response_id: "external" }),
+			}).result();
+			expect(out.stopReason).toBe("stop");
+			expect(sent[1].previous_response_id).toBe(transport === "websocket" ? undefined : "external");
+			expect(out.responseAncestry).toBe(transport === "websocket" ? "local" : "server-dependent");
+			expect(out.responseCheckpoint).toBeUndefined();
+			expect(JSON.stringify(sent)).not.toContain("responseAncestry");
+		},
+	);
+
+	it("auto transport cooldown cannot turn persisted dependence into an SSE full-input escape", async () => {
+		let failConnect = false;
+		const { sent, sockets, stored, fetchMock } = checkpointServer({ connectError: () => failConnect });
+		const model = makeModel(OFFICIAL_URL);
+		await stream(model, ctx1, OPTS).result();
+		for (const account of stored.values()) account.set("external", { id: "external", output: [] });
+		const caller = await stream(model, ctx1, {
+			...OPTS,
+			onPayload: (payload) => ({ ...(payload as Record<string, unknown>), previous_response_id: "external" }),
+		}).result();
+		sockets.at(-1)!.close();
+		failConnect = true;
+		fetchMock.mockImplementation(
+			async () =>
+				new Response('data: {"type":"response.completed","response":{"id":"sse","status":"completed"}}\n\n', {
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		for (let attempt = 0; attempt < 4; attempt++) await stream(model, ctx1, { ...OPTS, maxRetries: 0 }).result();
+		expect(fetchMock).toHaveBeenCalledOnce();
+		const count = sockets.length;
+		const out = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, caller, userMsg("Next", 2)] }),
+			OPTS,
+		).result();
+		expect(out.stopReason).toBe("error");
+		expect(sockets).toHaveLength(count);
+		expect(sent).toHaveLength(2);
+		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
+	it("legacy absence permits cold full input without laundering descendants into proven local ancestry", async () => {
+		const { sent } = checkpointServer();
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, OPTS).result();
+		const legacy = JSON.parse(JSON.stringify(first)) as AssistantMessage & { responseAncestry?: unknown };
+		delete legacy.responseAncestry;
+		delete legacy.responseCheckpoint;
+		closeOpenAIResponsesWebSocketSessions();
+		const out = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, legacy, userMsg("Next", 2)] }),
+			OPTS,
+		).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input).toHaveLength(3);
+		expect(out).not.toHaveProperty("responseAncestry");
+	});
+
+	it.each(["server-dependent", null, "", "invalid", 1, {}, undefined])(
+		"present ancestry %j survives cold JSONL and cannot authorize parent-free send",
+		async (fact) => {
+			const { sent, fetchMock } = checkpointServer();
+			const model = makeModel(OFFICIAL_URL);
+			const first = await stream(model, ctx1, OPTS).result();
+			const restored = JSON.parse(JSON.stringify({ type: "message", message: { ...first, responseAncestry: fact } }))
+				.message as AssistantMessage;
+			// JSON cannot retain undefined; present undefined is still malformed at the runtime seam.
+			if (fact === undefined) Object.assign(restored, { responseAncestry: undefined });
+			delete restored.responseCheckpoint;
+			closeOpenAIResponsesWebSocketSessions();
+			const out = await stream(
+				model,
+				normalizeContext({ messages: [...ctx1.messages, restored, userMsg("Next", 2)] }),
+				OPTS,
+			).result();
+			expect(out.stopReason).toBe("error");
+			expect(sent).toHaveLength(1);
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(out.responseCheckpoint).toBeUndefined();
+		},
+	);
+});
+
+describe("bounded cross-socket Responses continuation", () => {
+	const memoryOptions = {
+		...OPTS,
+		responseCheckpointExclude: ["*"],
+		onPayload: (payload: unknown) => ({ ...(payload as Record<string, unknown>), store: true }),
+	};
+
+	it("reconnect reuses explicitly acknowledged storage without durable checkpoints", async () => {
+		const { sent, sockets, fetchMock } = checkpointServer();
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, memoryOptions).result();
+		expect(first.responseCheckpoint).toBeUndefined();
+		sockets[0].close();
+		const labels: (string | undefined)[] = [];
+		const second = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+			{
+				...memoryOptions,
+				onTransport: (label) => {
+					labels.push(label);
+				},
+			},
+		).result();
+		expect(second.stopReason).toBe("stop");
+		expect(sent[1].previous_response_id).toBe(first.responseId);
+		expect(sent[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Next" }] }]);
+		expect(labels).toEqual(["WS/continuation"]);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it.each(["missing-store", "store:false", "unrepresented-output"])(
+		"cross-socket memory requires request and completion storage plus faithful output: %s",
+		async (mode) => {
+			const { sent, sockets } = checkpointServer({
+				failStore: mode === "store:false",
+				events: (events) => {
+					const completed = events.at(-1)!.response as Record<string, unknown>;
+					if (mode === "missing-store") delete completed.store;
+					if (mode === "unrepresented-output")
+						completed.output = [{ type: "reasoning", id: "hidden", encrypted_content: "server-only" }];
+					return events;
+				},
+			});
+			const model = makeModel(OFFICIAL_URL);
+			const first = await stream(model, ctx1, memoryOptions).result();
+			sockets[0].close();
+			const out = await stream(
+				model,
+				normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+				memoryOptions,
+			).result();
+			expect(out.stopReason).toBe("stop");
+			expect(sent[1].previous_response_id).toBeUndefined();
+			expect(sent[1].input).toHaveLength(3);
+		},
+	);
+
+	it("payload references cannot rewrite the sent prefix used by cross-socket memory", async () => {
+		const { sent, sockets } = checkpointServer();
+		const model = makeModel(OFFICIAL_URL);
+		let encodedInput: Array<{ content: Array<{ text: string }> }> | undefined;
+		const first = await stream(model, ctx1, {
+			...memoryOptions,
+			onPayload: (payload) => {
+				const params = payload as Record<string, unknown>;
+				encodedInput = params.input as typeof encodedInput;
+				return { ...params, store: true };
+			},
+		}).result();
+		encodedInput![0].content[0].text = "Edited";
+		sockets[0].close();
+		const next = normalizeContext({ messages: [userMsg("Edited", 1), first, userMsg("Next", 2)] });
+		const out = await stream(model, next, memoryOptions).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input).toHaveLength(3);
+	});
+
+	it("successful successor without a response ID still retires older memory", async () => {
+		let turns = 0;
+		const { sent, sockets } = checkpointServer({
+			events: (events) => {
+				if (++turns === 2) {
+					for (const event of events) {
+						if (event.response) delete (event.response as Record<string, unknown>).id;
+					}
+				}
+				return events;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, memoryOptions).result();
+		const next = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
+		const successor = await stream(model, next, memoryOptions).result();
+		expect(successor.stopReason).toBe("stop");
+		expect(successor.responseId).toBeUndefined();
+		sockets.at(-1)!.close();
+		const rollback = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, first, userMsg("Selected older branch", 3)] }),
+			memoryOptions,
+		).result();
+		expect(rollback.stopReason).toBe("stop");
+		expect(sent[2].previous_response_id).toBeUndefined();
+		expect(sent[2].input).toHaveLength(3);
+	});
+
+	it("a non-stored successor supersedes older stored memory", async () => {
+		const { sent, sockets } = checkpointServer();
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, memoryOptions).result();
+		const next = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
+		const nonStored = await stream(model, next, {
+			...memoryOptions,
+			onPayload: (payload) => ({ ...(payload as Record<string, unknown>), store: false }),
+		}).result();
+		sockets.at(-1)!.close();
+		const out = await stream(
+			model,
+			normalizeContext({ messages: [...next.messages, nonStored, userMsg("Cold", 3)] }),
+			memoryOptions,
+		).result();
+		expect(out.stopReason).toBe("stop");
+		expect(sent[2].previous_response_id).toBeUndefined();
+		expect(sent[2].input).toHaveLength(5);
+	});
+
+	it.each(["memory", "durable"])(
+		"malformed ancestry can use independently validated %s chain but cannot certify descendants",
+		async (source) => {
+			const { sent, sockets } = checkpointServer();
+			const model = makeModel(OFFICIAL_URL);
+			const first = await stream(model, ctx1, OPTS).result();
+			const malformed = { ...first, responseAncestry: null } as unknown as AssistantMessage;
+			if (source === "memory") {
+				delete malformed.responseCheckpoint;
+				sockets[0].close();
+			} else closeOpenAIResponsesWebSocketSessions();
+			const out = await stream(
+				model,
+				normalizeContext({ messages: [...ctx1.messages, malformed, userMsg("Next", 2)] }),
+				OPTS,
+			).result();
+			expect(out.stopReason).toBe("stop");
+			expect(sent[1].previous_response_id).toBe(first.responseId);
+			expect(out.responseAncestry).toBe("server-dependent");
+			expect(out.responseCheckpoint).toBeUndefined();
+		},
+	);
+
+	it.each(["credential", "headers", "session", "endpoint", "edit", "empty", "store-veto"])(
+		"dependent input cannot reset ancestry after %s; original safe chain remains isolated",
+		async (change) => {
+			const { sent, sockets, stored, fetchMock } = checkpointServer();
+			const model = makeModel(OFFICIAL_URL);
+			await stream(model, ctx1, OPTS).result();
+			for (const account of stored.values()) account.set("external", { id: "external", output: [] });
+			const caller = await stream(model, ctx1, {
+				...OPTS,
+				onPayload: (payload) => ({ ...(payload as Record<string, unknown>), previous_response_id: "external" }),
+			}).result();
+			expect(caller.responseAncestry).toBe("server-dependent");
+			sockets.at(-1)!.close();
+			const next = normalizeContext({ messages: [...ctx1.messages, caller, userMsg("Next", 2)] });
+			const changedContext =
+				change === "edit"
+					? normalizeContext({ messages: [userMsg("edited", 1), caller, userMsg("Next", 2)] })
+					: change === "empty"
+						? normalizeContext({ messages: [...ctx1.messages, { ...caller, content: [] }, userMsg("Next", 2)] })
+						: next;
+			const changedModel = change === "endpoint" ? makeModel(CUSTOM_URL) : model;
+			const options = {
+				...OPTS,
+				...(change === "credential" ? { apiKey: "sk-other" } : {}),
+				...(change === "headers" ? { headers: { "x-tenant": "other" } } : {}),
+				...(change === "session" ? { sessionId: "other" } : {}),
+				...(change === "store-veto"
+					? { onPayload: (payload: unknown) => ({ ...(payload as Record<string, unknown>), store: false }) }
+					: {}),
+			};
+			const out = await stream(changedModel, changedContext, options).result();
+			if (change === "store-veto") {
+				expect(out.stopReason).toBe("stop");
+				expect(sent[2].previous_response_id).toBe(caller.responseId);
+				expect(sent[2].store).toBe(false);
+				expect(out.responseCheckpoint).toBeUndefined();
+				sockets.at(-1)!.close();
+				const cold = await stream(
+					model,
+					normalizeContext({ messages: [...next.messages, out, userMsg("Cold", 3)] }),
+					OPTS,
+				).result();
+				expect(cold.stopReason).toBe("error");
+				expect(sent).toHaveLength(3);
+			} else {
+				expect(out.stopReason).toBe("error");
+				expect(sent).toHaveLength(2);
+				const safe = await stream(model, next, OPTS).result();
+				expect(safe.stopReason).toBe("stop");
+				expect(sent[2].previous_response_id).toBe(caller.responseId);
+			}
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it("ten-minute expiry removes reuse, not dependent ancestry; refused lookup never renews age", async () => {
+		let now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { sent, sockets, stored, fetchMock } = checkpointServer();
+		const model = makeModel(OFFICIAL_URL);
+		await stream(model, ctx1, OPTS).result();
+		for (const account of stored.values()) account.set("external", { id: "external", output: [] });
+		const caller = await stream(model, ctx1, {
+			...OPTS,
+			onPayload: (payload) => ({ ...(payload as Record<string, unknown>), previous_response_id: "external" }),
+		}).result();
+		const next = normalizeContext({ messages: [...ctx1.messages, caller, userMsg("Next", 2)] });
+		sockets.at(-1)!.close();
+		now += 599_999;
+		expect((await stream(model, next, { ...OPTS, maxTokens: 64 }).result()).stopReason).toBe("error");
+		expect(sent).toHaveLength(2);
+		now++;
+		const expired = await stream(model, next, OPTS).result();
+		expect(expired.stopReason).toBe("error");
+		expect(sent).toHaveLength(2);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("known-local input falls back full after ten-minute memory expiry", async () => {
+		let now = 1000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { sent, sockets } = checkpointServer();
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, memoryOptions).result();
+		sockets[0].close();
+		now += 600_000;
+		const out = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+			memoryOptions,
+		).result();
+		expect(out.responseAncestry).toBe("local");
+		expect(out.stopReason).toBe("stop");
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input).toHaveLength(3);
+	});
+
+	it("33rd identity evicts oldest memory; dependence survives and newest identity still chains", async () => {
+		const { sent, sockets, fetchMock } = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (frame.previous_response_id !== "external") return false;
+				(socket as unknown as { respond: (request: SentFrame) => void }).respond({
+					...frame,
+					previous_response_id: undefined,
+				});
+				return true;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const outputs: AssistantMessage[] = [];
+		for (let index = 0; index < 33; index++) {
+			outputs.push(
+				await stream(model, ctx1, {
+					...OPTS,
+					sessionId: `bounded-${index}`,
+					onPayload: (payload) => ({ ...(payload as Record<string, unknown>), previous_response_id: "external" }),
+				}).result(),
+			);
+			sockets.at(-1)!.close();
+		}
+		const next = (index: number) =>
+			normalizeContext({ messages: [...ctx1.messages, outputs[index], userMsg("Next", 2)] });
+		const lost = await stream(model, next(0), { ...OPTS, sessionId: "bounded-0" }).result();
+		expect(lost.stopReason).toBe("error");
+		expect(sent).toHaveLength(33);
+		const latest = await stream(model, next(32), { ...OPTS, sessionId: "bounded-32" }).result();
+		expect(latest.stopReason).toBe("stop");
+		expect(latest.responseAncestry).toBe("server-dependent");
+		expect(latest.responseCheckpoint).toBeUndefined();
+		expect(sent[33].previous_response_id).toBe(outputs[32].responseId);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("a selected memory reference cannot escape to HTTP after replacement handshake failure", async () => {
+		let failConnect = false;
+		const { sent, sockets, fetchMock } = checkpointServer({ connectError: () => failConnect });
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, memoryOptions).result();
+		sockets[0].close();
+		failConnect = true;
+		const out = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+			memoryOptions,
+		).result();
+		expect(out.stopReason).toBe("error");
+		expect(sent).toHaveLength(1);
+		expect(sockets).toHaveLength(2);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(out.diagnostics).toBeUndefined();
+	});
+
+	it("newer SSE caller ownership revokes delayed WS memory publication without opening a bookkeeping socket", async () => {
+		let held: (() => void) | undefined;
+		let arrived!: () => void;
+		const waiting = new Promise<void>((resolve) => {
+			arrived = resolve;
+		});
+		const { sent, sockets, fetchMock } = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (held || sent.length !== 1) return false;
+				held = () => (socket as unknown as { respond: (request: SentFrame) => void }).respond(frame);
+				arrived();
+				return true;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const older = stream(model, ctx1, memoryOptions).result();
+		await waiting;
+		fetchMock.mockImplementation(
+			async () =>
+				new Response(
+					'data: {"type":"response.completed","response":{"id":"sse_takeover","status":"completed"}}\n\n',
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+		);
+		const takeover = await stream(model, ctx1, {
+			...memoryOptions,
+			transport: "sse",
+			onPayload: (payload) => ({
+				...(payload as Record<string, unknown>),
+				previous_response_id: "external",
+				store: false,
+			}),
+		}).result();
+		expect(takeover.responseAncestry).toBe("server-dependent");
+		expect(sockets).toHaveLength(1);
+		held!();
+		const completed = await older;
+		sockets[0].close();
+		const next = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, completed, userMsg("Selected older branch", 2)] }),
+			memoryOptions,
+		).result();
+		expect(next.stopReason).toBe("stop");
+		expect(sent).toHaveLength(2);
+		expect(sent[1].previous_response_id).toBeUndefined();
+		expect(sent[1].input).toHaveLength(3);
+		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		["error", { type: "invalid_request_error", status: 500 }],
+		["response.failed", { type: "server_error", status: 400 }],
+		["error", { type: "invalid_request_error", code: "invalid_api_key" }],
+		["response.failed", { type: "invalid_request_error", param: "model" }],
+		["close", {}],
+	])("ambiguous legacy message-ID rejection %s %j never repairs stored memory", async (kind, patch) => {
+		const message = "previous_response_id must be a response.id (resp_*), not a message id";
+		const { sent, sockets, fetchMock } = checkpointServer({
+			onRequest: (socket, frame) => {
+				if (!frame.previous_response_id) return false;
+				if (kind === "close") socket.closeWithError(1008, `${message}.`);
+				else {
+					const error = { message, ...patch };
+					socket.emit(kind === "error" ? { type: kind, status: 400, error } : { type: kind, response: { error } });
+				}
+				return true;
+			},
+		});
+		const model = makeModel(OFFICIAL_URL);
+		const first = await stream(model, ctx1, memoryOptions).result();
+		sockets[0].close();
+		const out = await stream(
+			model,
+			normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+			memoryOptions,
+		).result();
+		expect(out.stopReason).toBe("error");
+		expect(sent).toHaveLength(2);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it.each(["error", "response.failed", "ws1008"])(
+		"exact legacy reference rejection %s repairs once and suppresses the rejected class",
+		async (kind) => {
+			const message = "previous_response_id must be a response.id (resp_*), not a message id";
+			const { sent, sockets, fetchMock } = checkpointServer({
+				onRequest: (socket, frame) => {
+					if (!frame.previous_response_id) return false;
+					if (kind === "ws1008") socket.closeWithError(1008, message);
+					else {
+						const error = { type: "invalid_request_error", message };
+						socket.emit(kind === "error" ? { type: kind, error } : { type: kind, response: { error } });
+					}
+					return true;
+				},
+			});
+			const model = makeModel(OFFICIAL_URL);
+			const first = await stream(model, ctx1, memoryOptions).result();
+			sockets[0].close();
+			const next = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] });
+			const repaired = await stream(model, next, memoryOptions).result();
+			expect(repaired.stopReason).toBe("stop");
+			expect(sent).toHaveLength(3);
+			expect(sent[2].previous_response_id).toBeUndefined();
+			const thirdContext = normalizeContext({ messages: [...next.messages, repaired, userMsg("Again", 3)] });
+			const third = await stream(model, thirdContext, memoryOptions).result();
+			expect(third.stopReason).toBe("stop");
+			expect(sent).toHaveLength(4);
+			expect(sent[3].previous_response_id).toBeUndefined();
+			sockets.at(-1)!.close();
+			await stream(
+				model,
+				normalizeContext({ messages: [...thirdContext.messages, third, userMsg("Cold", 4)] }),
+				memoryOptions,
+			).result();
+			expect(sent).toHaveLength(5);
+			expect(sent[4].previous_response_id).toBeUndefined();
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["error", "response.failed", "connection-limit", "drop", "handshake"])(
+		"non-durable repair owns entire logical request after %s",
+		async (terminal) => {
+			const { sent, sockets, fetchMock } = checkpointServer({
+				expireIds: true,
+				connectError: () => terminal === "handshake" && sent.length === 2,
+				onRequest: (socket) => {
+					if (sent.length !== 3) return false;
+					if (terminal === "drop") socket.fail();
+					else if (terminal === "connection-limit")
+						socket.emit({ type: "error", code: "websocket_connection_limit_reached" });
+					else {
+						socket.emit({ type: "response.created", response: { id: "repair" } });
+						socket.emit({
+							type: "response.output_item.added",
+							output_index: 0,
+							item: { type: "message", id: "msg_repair", role: "assistant", content: [] },
+						});
+						socket.emit({ type: "response.output_text.delta", output_index: 0, delta: "partial repair" });
+						const error = { type: "server_error", message: "repair failed", status: 500 };
+						socket.emit(
+							terminal === "response.failed"
+								? { type: terminal, response: { error } }
+								: { type: "error", error },
+						);
+					}
+					return true;
+				},
+			});
+			const model = makeModel(OFFICIAL_URL);
+			const first = await stream(model, ctx1, memoryOptions).result();
+			sockets[0].close();
+			// One new logical stream: all rejection/repair/retry frames belong to this call.
+			const out = await stream(
+				model,
+				normalizeContext({ messages: [...ctx1.messages, first, userMsg("Next", 2)] }),
+				memoryOptions,
+			).result();
+			expect(out.stopReason).toBe("error");
+			expect(sent).toHaveLength(terminal === "handshake" ? 2 : 3);
+			expect(sent[1].previous_response_id).toBe(first.responseId);
+			if (terminal !== "handshake") {
+				expect(sent[2].previous_response_id).toBeUndefined();
+				expect(sent[2].store).toBeUndefined();
+				expect(sent[2].input).toHaveLength(3);
+			}
+			if (terminal === "error" || terminal === "response.failed")
+				expect(out.content).toContainEqual(expect.objectContaining({ type: "text", text: "partial repair" }));
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["error", "response.failed"])(
+		"P2-2 latest dependent supersedes local anchor; %s rejection cannot repair",
+		async (terminal) => {
+			let reject = false;
+			const { sent, sockets, stored, fetchMock } = checkpointServer({
+				onRequest: (socket, frame) => {
+					if (!reject || !frame.previous_response_id) return false;
+					const error = { code: "previous_response_not_found", message: "gone" };
+					socket.emit(terminal === "error" ? { type: terminal, error } : { type: terminal, response: { error } });
+					return true;
+				},
+			});
+			const model = makeModel(OFFICIAL_URL);
+			const first = await stream(model, ctx1, OPTS).result();
+			for (const account of stored.values()) account.set("external", { id: "external", output: [] });
+			const callerContext = normalizeContext({ messages: [...ctx1.messages, first, userMsg("Caller", 2)] });
+			const caller = await stream(model, callerContext, {
+				...OPTS,
+				onPayload: (payload) => ({ ...(payload as Record<string, unknown>), previous_response_id: "external" }),
+			}).result();
+			expect(caller).toHaveProperty("responseAncestry", "server-dependent");
+			expect(caller.responseCheckpoint).toBeUndefined();
+			sockets.at(-1)!.close();
+			const next = normalizeContext({ messages: [...callerContext.messages, caller, userMsg("Next", 3)] });
+			const descendant = await stream(model, next, OPTS).result();
+			expect(descendant.stopReason).toBe("stop");
+			expect(sent[2].previous_response_id).toBe(caller.responseId);
+			expect(descendant).toHaveProperty("responseAncestry", "server-dependent");
+			expect(descendant.responseCheckpoint).toBeUndefined();
+			sockets.at(-1)!.close();
+			reject = true;
+			const failed = await stream(
+				model,
+				normalizeContext({ messages: [...next.messages, descendant, userMsg("Reject", 4)] }),
+				OPTS,
+			).result();
+			expect(failed.stopReason).toBe("error");
+			expect(sent).toHaveLength(4);
+			expect(sent[3].previous_response_id).toBe(descendant.responseId);
+			const reloaded = JSON.parse(JSON.stringify({ type: "message", message: descendant }))
+				.message as AssistantMessage;
+			expect(reloaded.responseAncestry).toBe("server-dependent");
+			closeOpenAIResponsesWebSocketSessions();
+			const cold = await stream(
+				model,
+				normalizeContext({ messages: [...next.messages, reloaded, userMsg("Cold reload", 5)] }),
+				OPTS,
+			).result();
+			expect(cold.stopReason).toBe("error");
+			expect(sent).toHaveLength(4);
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+});
 
 describe("durable response checkpoint entry policy", () => {
 	it.each([
