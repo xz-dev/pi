@@ -55,6 +55,9 @@ impl Guardian {
         match live(&self.stream) {
             Ok(true) => Ok(()),
             result => {
+                crate::job_control::begin_cleanup(super::receive);
+                // Arm the outer's cleanup protection before waking it into this failure.
+                self.outer.signal(libc::SIGTERM)?;
                 self.outer.signal(libc::SIGCONT)?;
                 result.and(Err(io::Error::other("session wake observer lost")))
             }

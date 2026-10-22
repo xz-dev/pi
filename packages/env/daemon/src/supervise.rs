@@ -6,12 +6,11 @@ use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 static SIGNALS: AtomicU32 = AtomicU32::new(0);
-static CLEANUP_SIGNAL_ERROR: AtomicI32 = AtomicI32::new(0);
 #[cfg(target_os = "freebsd")]
 #[path = "freebsd_exit_wake.rs"]
 mod exit_wake;
@@ -40,37 +39,9 @@ const KERNEL_SIGNAL_CODE: i32 = libc::SI_KERNEL;
 #[cfg(target_os = "freebsd")]
 const KERNEL_SIGNAL_CODE: i32 = 0x10006;
 
-// Irreversible teardown only, through process exit. A victim's background tty IO can
-// send TTIN/TTOU to the whole job; its native reapers must keep their kill/reap deadlines.
-fn protect_cleanup_tty() -> i32 {
-    // sigaction/sigemptyset are async-signal-safe: TERM can arrive while Pi is stopped.
-    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-    action.sa_sigaction = receive as *const () as usize;
-    action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
-    unsafe { libc::sigemptyset(&mut action.sa_mask) };
-    for signal in [libc::SIGTTIN, libc::SIGTTOU] {
-        if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } != 0 {
-            #[cfg(target_os = "linux")]
-            return unsafe { *libc::__errno_location() };
-            #[cfg(target_os = "freebsd")]
-            return unsafe { *libc::__error() };
-        }
-    }
-    0
-}
-
 extern "C" fn receive(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
-    if crate::job_control::enabled() && matches!(signal, libc::SIGTERM | libc::SIGHUP) {
-        #[cfg(target_os = "linux")]
-        let errno = unsafe { libc::__errno_location() };
-        #[cfg(target_os = "freebsd")]
-        let errno = unsafe { libc::__error() };
-        let saved = unsafe { *errno };
-        let error = protect_cleanup_tty();
-        if error != 0 {
-            CLEANUP_SIGNAL_ERROR.store(error, Ordering::Relaxed);
-        }
-        unsafe { *errno = saved };
+    if matches!(signal, libc::SIGTERM | libc::SIGHUP) {
+        crate::job_control::begin_cleanup(receive);
     }
     if crate::job_control::receive(signal) {
         return;
@@ -363,12 +334,7 @@ fn cleanup_scope(
 ) -> io::Result<()> {
     let start = Instant::now();
     let deadline = start + timeout;
-    if crate::job_control::enabled() {
-        let error = protect_cleanup_tty();
-        if error != 0 {
-            CLEANUP_SIGNAL_ERROR.store(error, Ordering::Relaxed);
-        }
-    }
+    crate::job_control::begin_cleanup(receive);
     let mut failure = if crate::job_control::enabled() {
         match crate::job_control::Targets::default().terminate_tree(deadline) {
             // Missing/filtered pidfds degrade freezing, not the native init/reaper scope.
@@ -386,10 +352,8 @@ fn cleanup_scope(
     } else {
         None
     };
-    if let error = CLEANUP_SIGNAL_ERROR.load(Ordering::Relaxed)
-        && error != 0
-    {
-        failure.get_or_insert_with(|| io::Error::from_raw_os_error(error));
+    if let Err(error) = crate::job_control::cleanup_tty_result() {
+        failure.get_or_insert(error);
     }
     if let Err(error) = signal_owned(libc::SIGTERM).and_then(|()| signal_owned(libc::SIGCONT)) {
         failure.get_or_insert(error);
