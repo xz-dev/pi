@@ -313,7 +313,8 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 				: traced("su", ["-m", user, "-c", `exec ${invocation.map((value) => `'${value.replaceAll("'", "'\\''")}'`).join(" ")}`], { encoding: "utf8", timeout, cwd: work });
 		}
 		privilegeDrop.diagnostics.child = { status: result.status ?? null, signal: result.signal ?? null, error: result.error?.message ?? null, stdout: tail(result.stdout), stderr: tail(result.stderr), script: args[0], scriptRealpath: (() => { try { return realpathSync(args[0]); } catch (error) { return `realpath failed: ${error.message}`; } })() };
-		try { evidence = { ...JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)), privilegeDrop }; }
+		// The child file survives stdout truncation; read it before deleting the dedicated user's scratch.
+		try { evidence = { ...JSON.parse(existsSync(args.at(-1)) ? readFileSync(args.at(-1), "utf8") : result.stdout.trim().split(/\r?\n/).at(-1)), privilegeDrop }; }
 		catch { throw new Error(`child produced no identity evidence: ${JSON.stringify(privilegeDrop.diagnostics.child)}`); }
 		assertNonadminIdentity(evidence.identity, target.os);
 		// The dedicated account must be least-privilege, not merely non-root.
@@ -350,7 +351,7 @@ if (process.argv[1] && isMainModulePath(fileURLToPath(import.meta.url), process.
 	const [executable, targetId, output] = process.argv.slice(2);
 	if (!executable || !targetId || !output) throw new Error("Usage: smoke-owner-lifecycle.mjs <staged-pi> <target> <evidence.json>");
 	const evidence = await smokeOwnerLifecycleAsNonadmin(resolve(executable), bunTarget(targetId));
-	// Only this parent writes its output path; dropped children report through stdout.
+	// Parent and dropped child each write their own output path.
 	writeFileSync(output, `${JSON.stringify(evidence, null, 2)}\n`);
 	console.log(JSON.stringify(evidence));
 	process.exitCode = evidence.status === "passed" ? 0 : 1;

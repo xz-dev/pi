@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
 import { satisfies } from "semver";
 import { parse } from "yaml";
@@ -801,4 +801,81 @@ test("FreeBSD guest verifies the exact checked-out commit with Git", () => {
   // Release tooling runs git rev-parse HEAD inside the guest; it needs Git and must trust the runner-owned checkout.
   assert.match(vmStep.with.prepare, /\bgit-lite\b/);
   assert.match(vmStep.with.run, /git config --global --add safe\.directory "\$PWD" && .*bash scripts\/freebsd-release\.sh/);
+});
+
+test("FreeBSD VM exports failure evidence before restoring the original guest exit code", () => {
+  const steps = workflow.jobs["build-freebsd"].steps;
+  const vm = steps.find((step) => step.name === "Build and accept FreeBSD");
+  const gate = steps.find((step) => step.name === "Restore FreeBSD acceptance status");
+  assert.ok(gate, "host gate must restore the guest result after copyback");
+  assert.equal(gate.if, "always()");
+  assert.ok(steps.indexOf(gate) > steps.indexOf(vm));
+  assert.ok(steps.every((step) => !step["continue-on-error"]));
+  for (const kind of ["target", "smoke"]) {
+    const upload = steps.find((step) => step.with?.name === `github-release-${kind}-\${{ github.sha }}-\${{ matrix.target }}`);
+    assert.ok(steps.indexOf(upload) > steps.indexOf(gate));
+    assert.equal(upload.if, undefined, "release artifacts remain success-only");
+  }
+  const diagnosticsUpload = steps.find((step) => step.with?.name?.startsWith("smoke-diagnostics-"));
+  assert.equal(diagnosticsUpload.if, "always()");
+  assert.match(diagnosticsUpload.with.path, /\.json\.diagnostics/);
+  assert.match(diagnosticsUpload.with.path, /exit-code/);
+  const ptyUpload = steps.find((step) => step.with?.name?.startsWith("owner-pty-"));
+  assert.equal(ptyUpload.if, "always()");
+  const root = mkdtempSync(join(tmpdir(), "pi-freebsd-export-"));
+  const failedRows = { ownerLifecycle: { status: "failed", rows: [{ name: "suspend-resume", status: "failed", outputTail: `pty-start-${"test stdout\n".repeat(1024)}-pty-end` }] } };
+  const json = `${JSON.stringify(failedRows, null, 2)}\n`;
+  try {
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "git"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, "git"), 0o755);
+    for (const status of [0, 1, 37, 255]) {
+      const guest = join(root, `guest-${status}`);
+      const host = join(root, `host-${status}`);
+      mkdirSync(join(guest, "scripts"), { recursive: true });
+      mkdirSync(host);
+      writeFileSync(join(guest, "scripts", "freebsd-release.sh"), `#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .artifacts/freebsd-release
+printf 'CI-only PTY fixture\\n' > .artifacts/freebsd-release/owner-pty
+if [[ "$TEST_GUEST_STATUS" != 0 ]]; then
+  printf '%s' "$TEST_FAILURE_JSON" > .artifacts/freebsd-release/freebsd-x64.json.diagnostics
+fi
+node -e 'process.exit(Number(process.env.TEST_GUEST_STATUS))'
+printf 'accepted executable\\n' > .artifacts/freebsd-release/pi-freebsd-x64
+printf '{}\\n' > .artifacts/freebsd-release/freebsd-x64.json
+`);
+      const env = { ...process.env, PATH: [dirname(process.execPath), bin, process.env.PATH].join(delimiter), TEST_GUEST_STATUS: String(status), TEST_FAILURE_JSON: json };
+      // The pinned action sends run through sh with set -eu, then copies back only on zero.
+      const transport = spawnSync("sh", ["-eu", "-c", vm.with.run], { cwd: guest, env, encoding: "utf8" });
+      assert.equal(transport.status, 0, transport.stderr);
+      cpSync(join(guest, ".artifacts"), join(host, ".artifacts"), { recursive: true });
+      assert.equal(readFileSync(join(host, ".artifacts/freebsd-release/exit-code"), "utf8"), `${status}\n`);
+      assert.equal(readFileSync(join(host, ".artifacts/freebsd-release/owner-pty"), "utf8"), "CI-only PTY fixture\n");
+      const restored = spawnSync("bash", ["-e", "-o", "pipefail", "-c", gate.run], { cwd: host, env, encoding: "utf8" });
+      assert.equal(restored.status, status, restored.stderr);
+      if (status !== 0) {
+        assert.equal(readFileSync(join(host, ".artifacts/freebsd-release/freebsd-x64.json.diagnostics"), "utf8"), json);
+        assert.equal(existsSync(join(host, ".artifacts/freebsd-release/pi-freebsd-x64")), false);
+        assert.equal(existsSync(join(host, ".artifacts/freebsd-release/freebsd-x64.json")), false);
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("FreeBSD host gate fails closed on missing or malformed guest status", () => {
+  const gate = workflow.jobs["build-freebsd"].steps.find((step) => step.name === "Restore FreeBSD acceptance status");
+  assert.ok(gate, "missing status must never accept a guest");
+  const root = mkdtempSync(join(tmpdir(), "pi-freebsd-status-"));
+  const statusFile = join(root, ".artifacts/freebsd-release/exit-code");
+  try {
+    mkdirSync(join(root, ".artifacts/freebsd-release"), { recursive: true });
+    for (const status of [null, "", "0", "0\n\n", "abc\n", "-1\n", "256\n", "00\n", "0\0\n", "0\nextra\n"]) {
+      rmSync(statusFile, { force: true });
+      if (status !== null) writeFileSync(statusFile, status);
+      const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", gate.run], { cwd: root, encoding: "utf8", env: { ...process.env, PATH: [dirname(process.execPath), process.env.PATH].join(delimiter) } });
+      assert.equal(result.status, 1, `invalid guest status accepted: ${JSON.stringify(status)}`);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

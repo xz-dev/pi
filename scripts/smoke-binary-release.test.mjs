@@ -239,6 +239,52 @@ test("smoke failure writes .diagnostics outside the deleted work directory", () 
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("failed lifecycle exports every complete row to diagnostics before smoke scratch cleanup", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-smoke-owner-diagnostics-"));
+	try {
+		const targetId = "freebsd-x64";
+		const pi = join(root, `pi-${targetId}`);
+		writeFileSync(pi, `#!/bin/sh
+if [ -n "$BUN_JSC_verboseDiskCache" ]; then echo '[Disk Cache] Cache hit for sourceCode' >&2; fi
+case "$1" in
+  --version) echo 1.2.3;;
+  --help) echo 'Usage: pi';;
+  --list-models) echo model;;
+esac
+`); chmodSync(pi, 0o755);
+		const sha256 = createHash("sha256").update(readFileSync(pi)).digest("hex");
+		const rows = ownerLifecycleRows("freebsd").map((name) => isUnixOwnerPtyRow(name) ? passedUnixOwnerPtyRow(name, "freebsd", targetId, sha256) : { name, status: "passed" });
+		for (const name of ["suspend-resume", "paused-both-owners-death-shutdown-blocked"]) Object.assign(rows.find((row) => row.name === name), { status: "failed", error: "wrong foreground/task groups/session", outputTail: `pty-start-${"complete fixture stdout\n".repeat(1024)}-pty-end` });
+		const owner = { status: "failed", target: targetId, cliSha256: sha256, identity: passedUnixIdentity(), rows, error: "owner lifecycle containment failed: suspend-resume" };
+		const evidencePath = join(root, "child.json");
+		writeFileSync(evidencePath, `${JSON.stringify(owner, null, 2)}\n`);
+		const preload = join(root, "failed-owner.cjs");
+		// Model a failed child with a complete evidence file but an unusable stdout pipe.
+		writeFileSync(preload, `const cp = require("node:child_process");
+const fs = require("node:fs");
+const original = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  if (args?.[0]?.endsWith("/smoke-owner-lifecycle.mjs")) {
+    fs.copyFileSync(${JSON.stringify(evidencePath)}, args[3]);
+    fs.writeFileSync(${JSON.stringify(join(root, "owner-path.txt"))}, args[3]);
+    return { status: 1, signal: null, stdout: "truncated stdout", stderr: "owner lifecycle containment failed: suspend-resume" };
+  }
+  return original(command, args, options);
+};
+require("node:module").syncBuiltinESMExports();
+`);
+		const recordPath = join(root, "record.json");
+		const result = spawnSync(process.execPath, ["--require", preload, join(import.meta.dirname, "smoke-binary-release.mjs"), pi, targetId, "1.2.3", recordPath], { encoding: "utf8" });
+		assert.equal(result.status, 1);
+		assert.match(result.stderr, /owner lifecycle failed: owner lifecycle containment failed: suspend-resume/);
+		const diagnostics = JSON.parse(readFileSync(`${recordPath}.diagnostics`, "utf8"));
+		assert.deepEqual(diagnostics.ownerLifecycle, owner);
+		assert.equal(diagnostics.commands.find(({ name }) => name === "owner-lifecycle").status, 1);
+		assert.equal(existsSync(readFileSync(join(root, "owner-path.txt"), "utf8")), false);
+		assert.equal(existsSync(recordPath), false);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("smoke diagnostics context failure cannot replace the original acceptance error", () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-smoke-context-fault-"));
 	try {

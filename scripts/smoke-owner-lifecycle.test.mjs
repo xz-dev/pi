@@ -17,13 +17,14 @@ const cliSha256 = createHash("sha256").update(readFileSync(process.execPath)).di
 const rowsFor = (os, target = "fixture-target") => ownerLifecycleRows(os).map((name) => isUnixOwnerPtyRow(name) ? passedUnixOwnerPtyRow(name, os, target, cliSha256) : ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", ...(name === "darwin-fast-escape" ? { limitation: "25ms sweep" } : {}), aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1, piStopped: true, stopped: true, resumed: true, peerRunning: true, ownershipDisabled: true }));
 
 // Host commands are mocked; copied scripts, runtime and artifact use real temporary files.
-async function dropped(platform, { childIdentity = standard, hostIdentity, childError, failCommand, existing = false, cleanupFailure = false, silentChild = false } = {}) {
+async function dropped(platform, { childIdentity = standard, hostIdentity, childError, failCommand, existing = false, cleanupFailure = false, silentChild = false, fileChild = false } = {}) {
 	const temp = mkdtempSync(join(tmpdir(), "pi-owner-drop-test-"));
 	mkdirSync(join(temp, "Temp"));
 	const calls = [];
 	const target = bunTarget(platform === "freebsd" ? "freebsd-x64" : platform === "darwin" ? "darwin-arm64" : platform === "win32" ? "windows-x64-baseline" : "linux-x64-musl-baseline");
 	const childRows = rowsFor(target.os, target.id);
 	if (childError) { childRows[0].aliveAfter = true; childRows[0].status = "failed"; }
+	if (fileChild) Object.assign(childRows.find(({ name }) => name === "suspend-resume"), { status: "failed", error: childError, outputTail: `pty-start-${"native PTY output\n".repeat(1024)}-pty-end` });
 	const child = { target: target.id, cliSha256, status: childError ? "failed" : "passed", identity: childIdentity, rows: childRows, ...artifactBunFromOwnerRows(childRows), ...(childError ? { error: childError } : {}) };
 	if (platform === "win32") child.windowsRuntimeGate = passedWindowsOwnerGate(target.id, createHash("sha256").update(readFileSync(process.execPath)).digest("hex"), standard);
 	try {
@@ -71,14 +72,30 @@ async function dropped(platform, { childIdentity = standard, hostIdentity, child
 						assert.equal(options.timeout, 1_200_000);
 					}
 					if (silentChild) return { status: 0, stdout: "", stderr: "child stderr tail" };
-					return { status: childError ? 1 : 0, stdout: JSON.stringify(child), stderr: "" };
+					const stdout = JSON.stringify(child);
+					if (fileChild) writeFileSync(join(stage, "child-evidence.json"), `${JSON.stringify(child, null, 2)}\n`);
+					return { status: childError ? 1 : 0, stdout: fileChild ? stdout.slice(-4096) : stdout, stderr: "" };
 				}
 				return { status: 0, stdout: "", stderr: "" };
 			},
 		});
-		return { evidence, calls };
+		return { evidence, calls, child };
 	} finally { rmSync(temp, { recursive: true, force: true }); }
 }
+
+test("FreeBSD failed child retains complete row JSON from its file before scratch cleanup", async () => {
+	const { evidence, calls, child } = await dropped("freebsd", { childError: "owner lifecycle containment failed: suspend-resume", fileChild: true });
+	assert.equal(evidence.status, "failed");
+	assert.equal(evidence.privilegeDrop.verifiedNonadmin, true);
+	assert.match(evidence.error, /child failed: owner lifecycle containment failed: suspend-resume/);
+	assert.deepEqual(evidence.rows, child.rows);
+	const row = evidence.rows.find(({ name }) => name === "suspend-resume");
+	assert.equal(row.status, "failed");
+	assert.ok(row.outputTail.length > 4096);
+	assert.equal(evidence.privilegeDrop.diagnostics.child.stdout.length, 4096);
+	const launch = calls.find(({ file }) => file === "su");
+	assert.equal(existsSync(join(launch.options.cwd, "child-evidence.json")), false);
+});
 
 for (const platform of ["darwin", "win32"]) {
 	test(`${platform} silent child failure carries child tails and a step trail without passwords`, async () => {
