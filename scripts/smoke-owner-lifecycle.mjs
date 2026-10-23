@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -221,6 +221,10 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 	const sudo = (file, args) => (viaSudo ? ["sudo", ["-n", file, ...args]] : [file, args]);
 	const privilegeDrop = { method: platform === "win32" ? "Start-Process -Credential" : viaSudo ? "sudo -u" : "su -m", user, verifiedNonadmin: false };
 	let work;
+	let redirectWork;
+	let workIdentity;
+	let evidenceFd;
+	let childEvidence;
 	let created = false;
 	let evidence = { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), privilegeDrop };
 	// Bounded per-step trail so one CI round exposes every failing layer, not just the first symptom.
@@ -241,6 +245,8 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 	};
 	const ps = (value) => `'${value.replaceAll("'", "''")}'`;
 	try {
+		const runnerGid = viaSudo ? process.getgid() : null;
+		if (viaSudo && (!Number.isSafeInteger(runnerGid) || runnerGid < 0)) throw new Error("invalid runner GID for evidence metadata");
 		// Never reuse or delete a pre-existing account, including on self-hosted CI.
 		const lookup = run(platform === "win32" ? "net.exe" : "id", platform === "win32" ? ["user", user] : ["-u", user], { encoding: "utf8", timeout: 10_000 });
 		if (lookup.status !== (platform === "win32" ? 2 : 1)) throw new Error(`cannot create dedicated user: account exists or lookup failed (${lookup.status ?? lookup.error?.message})`);
@@ -248,6 +254,14 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 		// carries only the explicit ACEs granted below.
 		if (platform === "win32" && !env.SystemDrive) throw new Error("SystemDrive is not set");
 		work = mkdtempSync(join(platform === "win32" ? `${env.SystemDrive}${sep}` : "/tmp", "pi-owner-nonadmin-"));
+		workIdentity = lstatSync(work, { bigint: true });
+		// Open before provisioning: child-controlled paths can never redirect this payload-read capability.
+		evidenceFd = openSync(join(work, "child-evidence.json"), "wx+", 0o600);
+		if (platform === "win32") {
+			redirectWork = mkdtempSync(join(`${env.SystemDrive}${sep}`, "pi-owner-output-"));
+			// Start-Process opens these handles as the parent, never through child-owned paths.
+			command("icacls.exe", [redirectWork, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"]);
+		}
 		// net user otherwise prompts for confirmation for passwords longer than 14 characters.
 		const password = `Pi!9${randomBytes(8).toString("base64url").slice(0, 10)}`;
 		secrets.push(password);
@@ -297,8 +311,8 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 			const preflight = [[`${env.SystemRoot}\\System32\\cmd.exe`, "/d", "/c", "ver"], [runtime, "--version"], [runtime, "--experimental-strip-types", "-e", "0"], ...(existsSync(join(work, "bun.exe")) ? [[join(work, "bun.exe"), "--version"]] : []), [`${env.SystemRoot}\\System32\\whoami.exe`, "/groups"]];
 			const probes = preflight.map((probe) => `try { $o = & ${probe.map(ps).join(" ")} 2>&1 | Out-String; [Console]::Error.WriteLine("preflight ${probe.slice(1).join(" ").replaceAll("\"", "")}: exit $LASTEXITCODE $o") } catch { [Console]::Error.WriteLine("preflight ${probe.slice(1).join(" ").replaceAll("\"", "")}: $($_.Exception.Message)") }`).join("\n");
 			writeFileSync(launcher, `${Object.entries(childEnv).map(([key, value]) => `$env:${key}=${ps(value)}`).join("\n")}\nRemove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue\n${probes}\n$ErrorActionPreference='Stop'\n& ${[runtime, ...args].map(ps).join(" ")}\nexit $LASTEXITCODE\n`);
-			const stdout = join(work, "stdout.txt");
-			const stderr = join(work, "stderr.txt");
+			const stdout = join(redirectWork, "stdout.txt");
+			const stderr = join(redirectWork, "stderr.txt");
 			result = traced("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; $c=New-Object System.Management.Automation.PSCredential(${ps(account)}, (ConvertTo-SecureString ${ps(password)} -AsPlainText -Force)); $p=Start-Process -FilePath "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Credential $c -LoadUserProfile -WorkingDirectory ${ps(work)} -ArgumentList ${ps(`-NoProfile -NonInteractive -File "${launcher}"`)} -RedirectStandardOutput ${ps(stdout)} -RedirectStandardError ${ps(stderr)} -Wait -PassThru; exit $p.ExitCode`], { encoding: "utf8", timeout, cwd: work });
 			if (existsSync(stdout)) result.stdout = readFileSync(stdout, "utf8").replace(/^\uFEFF/, "");
 			if (existsSync(stderr)) result.stderr = `${result.stderr ?? ""}${readFileSync(stderr, "utf8")}`;
@@ -306,28 +320,53 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 			chmodSync(runtime, 0o755);
 			chmodSync(staged, 0o755);
 			command(...sudo("chown", ["-R", user, work]));
+			if (viaSudo) {
+				// Runner gets directory traversal only; the held evidence file remains child-owned mode 0600.
+				command(...sudo("chown", [`${user}:${runnerGid}`, work]));
+				command(...sudo("chmod", ["710", work]));
+			}
 			const invocation = ["env", "-i", ...Object.entries(childEnv).map(([key, value]) => `${key}=${value}`), runtime, ...args];
 			result = viaSudo
-				// The non-root runner cannot chdir into scratch once it is chowned 0700 to the dropped user.
+				// Keep the launch cwd independent of the dropped user's scratch permissions.
 				? traced("sudo", ["-n", "-u", user, "-H", ...invocation], { encoding: "utf8", timeout, cwd: "/" })
 				: traced("su", ["-m", user, "-c", `exec ${invocation.map((value) => `'${value.replaceAll("'", "'\\''")}'`).join(" ")}`], { encoding: "utf8", timeout, cwd: work });
 		}
 		privilegeDrop.diagnostics.child = { status: result.status ?? null, signal: result.signal ?? null, error: result.error?.message ?? null, stdout: tail(result.stdout), stderr: tail(result.stderr), script: args[0], scriptRealpath: (() => { try { return realpathSync(args[0]); } catch (error) { return `realpath failed: ${error.message}`; } })() };
-		// The child file survives stdout truncation; read it before deleting the dedicated user's scratch.
-		try { evidence = { ...JSON.parse(existsSync(args.at(-1)) ? readFileSync(args.at(-1), "utf8") : result.stdout.trim().split(/\r?\n/).at(-1)), privilegeDrop }; }
+		const held = fstatSync(evidenceFd, { bigint: true });
+		if (!held.isFile()) throw new Error("child evidence descriptor is not a regular file");
+		const checkEvidencePath = () => {
+			let entry;
+			try { entry = lstatSync(args.at(-1), { bigint: true }); }
+			catch (error) { if (error.code !== "ENOENT") throw error; }
+			const directory = lstatSync(work, { bigint: true });
+			if (!directory.isDirectory() || directory.dev !== workIdentity.dev || directory.ino !== workIdentity.ino || viaSudo && (directory.gid !== BigInt(runnerGid) || (directory.mode & 0o7777n) !== 0o710n)) throw new Error("child evidence directory replaced or inaccessible");
+			if (entry && (!entry.isFile() || entry.dev !== held.dev || entry.ino !== held.ino)) throw new Error("child evidence path replaced or not a regular file");
+			return entry !== undefined;
+		};
+		const present = checkEvidencePath();
+		const source = present ? readFileSync(evidenceFd, "utf8") : result.stdout?.trim().split(/\r?\n/).at(-1);
+		if (checkEvidencePath() !== present) throw new Error("child evidence path replaced during read");
+		try { childEvidence = JSON.parse(source); }
 		catch { throw new Error(`child produced no identity evidence: ${JSON.stringify(privilegeDrop.diagnostics.child)}`); }
-		assertNonadminIdentity(evidence.identity, target.os);
+		assertNonadminIdentity(childEvidence.identity, target.os);
 		// The dedicated account must be least-privilege, not merely non-root.
-		if (evidence.identity.rootEquivalentGroup === true) throw new Error("owner lifecycle missing nonadmin identity: dropped user is in a root-equivalent group");
+		if (childEvidence.identity.rootEquivalentGroup === true) throw new Error("owner lifecycle missing nonadmin identity: dropped user is in a root-equivalent group");
 		privilegeDrop.verifiedNonadmin = true;
-		if (result.status !== 0 || evidence.status !== "passed") throw new Error(evidence.error || `child failed (${result.status ?? result.error?.message}): ${result.stderr}`);
-		assertOwnerLifecycle(evidence, target.os);
-		if (target.os === "windows") assertWindowsOwnerGate(evidence.windowsRuntimeGate, target.id, createHash("sha256").update(readFileSync(executable)).digest("hex"), evidence.identity, evidence.artifactBunVersion);
+		if (result.status !== 0 || childEvidence.status !== "passed") throw new Error(childEvidence.error || `child failed (${result.status ?? result.error?.message}): ${result.stderr}`);
+		assertOwnerLifecycle(childEvidence, target.os);
+		if (target.os === "windows") assertWindowsOwnerGate(childEvidence.windowsRuntimeGate, target.id, createHash("sha256").update(readFileSync(executable)).digest("hex"), childEvidence.identity, childEvidence.artifactBunVersion);
+		evidence = { ...childEvidence, privilegeDrop };
 	} catch (error) {
+		// Preserve complete failed rows, never arbitrary envelope keys from rejected input.
+		if (privilegeDrop.verifiedNonadmin && childEvidence) for (const key of ["target", "cliSha256", "identity", "rows", "artifactBunVersion", "artifactBunError", "path", "peerPid", "windowsRuntimeGate", "elapsedMs"]) if (Object.hasOwn(childEvidence, key)) evidence[key] = childEvidence[key];
 		evidence.status = "failed";
 		evidence.error = `owner privilege drop${privilegeDrop.verifiedNonadmin ? " child" : " identity/setup"} failed: ${error.message}`;
 	} finally {
 		const warnings = [];
+		if (evidenceFd !== undefined) {
+			try { closeSync(evidenceFd); }
+			catch (error) { warnings.push(`evidence descriptor cleanup: ${error.message}`); }
+		}
 		if (created) {
 			try {
 				if (platform === "freebsd") command(...sudo("pw", ["userdel", user]));
@@ -341,6 +380,10 @@ export async function smokeOwnerLifecycleAsNonadmin(executable, target, { platfo
 				if (viaSudo) command("sudo", ["-n", "rm", "-rf", work]);
 				else rmSync(work, { recursive: true, force: true });
 			} catch (error) { warnings.push(`scratch cleanup: ${error.message}`); }
+		}
+		if (redirectWork) {
+			try { rmSync(redirectWork, { recursive: true, force: true }); }
+			catch (error) { warnings.push(`redirect cleanup: ${error.message}`); }
 		}
 		if (warnings.length) privilegeDrop.cleanupWarnings = warnings;
 	}

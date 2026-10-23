@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -17,7 +19,7 @@ const cliSha256 = createHash("sha256").update(readFileSync(process.execPath)).di
 const rowsFor = (os, target = "fixture-target") => ownerLifecycleRows(os).map((name) => isUnixOwnerPtyRow(name) ? passedUnixOwnerPtyRow(name, os, target, cliSha256) : ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", ...(name === "darwin-fast-escape" ? { limitation: "25ms sweep" } : {}), aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1, piStopped: true, stopped: true, resumed: true, peerRunning: true, ownershipDisabled: true }));
 
 // Host commands are mocked; copied scripts, runtime and artifact use real temporary files.
-async function dropped(platform, { childIdentity = standard, hostIdentity, childError, failCommand, existing = false, cleanupFailure = false, silentChild = false, fileChild = false } = {}) {
+async function dropped(platform, { childIdentity = standard, hostIdentity, childError, childStatus, fileMutation, onCommand, failCommand, existing = false, cleanupFailure = false, silentChild = false, fileChild = false } = {}) {
 	const temp = mkdtempSync(join(tmpdir(), "pi-owner-drop-test-"));
 	mkdirSync(join(temp, "Temp"));
 	const calls = [];
@@ -33,6 +35,7 @@ async function dropped(platform, { childIdentity = standard, hostIdentity, child
 			identityProbe: () => hostIdentity ?? (platform === "darwin" ? { ...standard, adminGroup: true } : root),
 			run: (file, args, options) => {
 				calls.push({ file, args, options });
+				onCommand?.(file, args, options);
 				if (file === process.execPath && args.includes("install")) {
 					const work = args[args.indexOf("--prefix") + 1];
 					const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
@@ -45,7 +48,11 @@ async function dropped(platform, { childIdentity = standard, hostIdentity, child
 					return { status: 0, stdout: JSON.stringify({ dependencies: Object.fromEntries(dependencies.map((entry) => [entry.name, entry])) }), stderr: "" };
 				}
 				if (file === "bun") return { status: 0, stdout: args[0] === "--version" ? "1.3.14\n" : `${process.execPath}\n`, stderr: "" };
-				if (file === "sudo" && args.includes("rm")) rmSync(args.at(-1), { recursive: true, force: true });
+				if (file === "sudo" && args.includes("rm")) {
+					if (lstatSync(args.at(-1)).isDirectory()) chmodSync(args.at(-1), 0o700);
+					rmSync(args.at(-1), { recursive: true, force: true });
+				}
+				if (file === "sudo" && args.includes("chmod")) chmodSync(args.at(-1), 0o710);
 				if (file === "id" || (file === "net.exe" && args.length === 2)) return { status: existing ? 0 : platform === "win32" ? 2 : 1, stdout: "", stderr: "" };
 				if (file === failCommand) return { status: 1, stderr: "provision denied" };
 				if (cleanupFailure && (args.includes("userdel") || args.includes("-deleteUser") || args.includes("/delete"))) return { status: 1, stderr: "cleanup denied" };
@@ -58,6 +65,7 @@ async function dropped(platform, { childIdentity = standard, hostIdentity, child
 					assert.equal(existsSync(join(stage, "scripts", "lib", "bun-targets.mjs")), true);
 					assert.equal(existsSync(join(stage, "scripts", "smoke-unix-owner-pty.mjs")), true);
 					if (platform !== "win32") assert.equal(existsSync(join(stage, "owner-pty")), true);
+					let protectedStdout, protectedStderr;
 					if (platform === "win32") {
 						const launcher = readFileSync(join(stage, "launch.ps1"), "utf8");
 						assert.match(launcher, /\$env:HOME=/);
@@ -70,16 +78,34 @@ async function dropped(platform, { childIdentity = standard, hostIdentity, child
 						assert.equal(existsSync(join(stage, "packages", "coding-agent", "test", "windows-owner-runtime.mjs")), true);
 						assert.equal(existsSync(join(stage, "packages", "chord", "src", "manager.ts")), true);
 						assert.equal(options.timeout, 1_200_000);
+						protectedStdout = args.at(-1).match(/-RedirectStandardOutput '([^']+)'/)[1];
+						protectedStderr = args.at(-1).match(/-RedirectStandardError '([^']+)'/)[1];
+						const redirect = dirname(protectedStdout);
+						assert.notEqual(redirect, stage);
+						assert.equal(dirname(protectedStderr), redirect);
+						const acl = calls.findIndex((entry) => entry.file === "icacls.exe" && entry.args[0] === redirect);
+						assert.ok(acl >= 0 && acl < calls.length - 1, "parent protects output directory before launch");
+						assert.deepEqual(calls[acl].args, [redirect, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"]);
+						assert.doesNotMatch(launcher, /pi-owner-output-/, "child launcher never receives output path access");
 					}
-					if (silentChild) return { status: 0, stdout: "", stderr: "child stderr tail" };
+					const output = join(stage, "child-evidence.json");
+					if (silentChild) { rmSync(output, { force: true }); return { status: 0, stdout: "", stderr: "child stderr tail" }; }
 					const stdout = JSON.stringify(child);
-					if (fileChild) writeFileSync(join(stage, "child-evidence.json"), `${JSON.stringify(child, null, 2)}\n`);
-					return { status: childError ? 1 : 0, stdout: fileChild ? stdout.slice(-4096) : stdout, stderr: "" };
+					// Match the real CLI writer: truncate the pre-existing output file, never rename it.
+					writeFileSync(output, `${JSON.stringify(child, null, 2)}\n`);
+					fileMutation?.({ output, stage, child, temp });
+					if (platform === "win32") {
+						// Model trusted Start-Process opening output files before passing handles to the child.
+						writeFileSync(protectedStdout, `\uFEFF${stdout}\n`);
+						writeFileSync(protectedStderr, "protected parent capture");
+					}
+					return { status: childStatus ?? (childError ? 1 : 0), stdout: fileChild ? stdout.slice(-4096) : stdout, stderr: "" };
 				}
 				return { status: 0, stdout: "", stderr: "" };
 			},
 		});
-		return { evidence, calls, child };
+		const remainingRedirects = calls.filter(({ file, args }) => file === "icacls.exe" && args[0].includes("pi-owner-output-")).map(({ args }) => args[0]).filter((path) => existsSync(path));
+		return { evidence, calls, child, remainingRedirects };
 	} finally { rmSync(temp, { recursive: true, force: true }); }
 }
 
@@ -95,6 +121,245 @@ test("FreeBSD failed child retains complete row JSON from its file before scratc
 	assert.equal(evidence.privilegeDrop.diagnostics.child.stdout.length, 4096);
 	const launch = calls.find(({ file }) => file === "su");
 	assert.equal(existsSync(join(launch.options.cwd, "child-evidence.json")), false);
+});
+
+const PRIVATE_SENTINEL = "synthetic-parent-private-json-must-not-export";
+function privateJson(temp) {
+	const directory = join(temp, "parent-private");
+	mkdirSync(directory, { mode: 0o700 });
+	const file = join(directory, "child-evidence.json");
+	writeFileSync(file, JSON.stringify({ privateMarker: PRIVATE_SENTINEL }), { mode: 0o600 });
+	return file;
+}
+
+for (const kind of ["symlink", "replacement", "directory", "intermediate-symlink", ...(process.platform === "win32" ? [] : ["fifo"])]) {
+	test(`collector rejects ${kind} evidence without copying parent-private JSON`, async () => {
+		const { evidence } = await dropped("freebsd", { fileMutation: ({ output, stage, temp }) => {
+			const secret = privateJson(temp);
+			if (kind === "intermediate-symlink") {
+				renameSync(stage, join(temp, "moved-work"));
+				symlinkSync(dirname(secret), stage, "dir");
+				return;
+			}
+			rmSync(output);
+			if (kind === "symlink") symlinkSync(secret, output);
+			else if (kind === "replacement") writeFileSync(output, readFileSync(secret));
+			else if (kind === "directory") mkdirSync(output);
+			else execFileSync("mkfifo", [output], { timeout: 5000 });
+		} });
+		assert.equal(evidence.status, "failed");
+		assert.equal(evidence.privilegeDrop.verifiedNonadmin, false);
+		assert.doesNotMatch(JSON.stringify(evidence), new RegExp(PRIVATE_SENTINEL));
+		assert.match(evidence.error, /child evidence.*(?:replaced|regular|directory)/);
+	});
+}
+
+for (const kind of ["symlink", "intermediate-symlink"]) {
+	test(`held evidence descriptor cannot be redirected by ${kind} swap during read`, async () => {
+		const originalRead = fs.readFileSync;
+		let swap;
+		let descriptorReads = 0;
+		fs.readFileSync = (path, ...args) => {
+			if (swap && (typeof path === "number" || String(path).endsWith("/child-evidence.json"))) {
+				assert.equal(typeof path, "number", "payload read must use pre-opened descriptor");
+				descriptorReads++;
+				const action = swap; swap = null; action();
+			}
+			return originalRead(path, ...args);
+		};
+		syncBuiltinESMExports();
+		try {
+			const { evidence } = await dropped("freebsd", { fileMutation: ({ output, stage, temp }) => {
+				const secret = privateJson(temp);
+				swap = () => {
+					if (kind === "symlink") { rmSync(output); symlinkSync(secret, output); }
+					else { renameSync(stage, join(temp, "moved-work")); symlinkSync(dirname(secret), stage, "dir"); }
+				};
+			} });
+			assert.equal(descriptorReads, 1);
+			assert.equal(evidence.status, "failed");
+			assert.doesNotMatch(JSON.stringify(evidence), new RegExp(PRIVATE_SENTINEL));
+			assert.match(evidence.error, /child evidence.*(?:replaced|directory)/);
+		} finally { fs.readFileSync = originalRead; syncBuiltinESMExports(); }
+	});
+}
+
+for (const kind of ["absent", "malformed", "identity", "child-status", "file-status", "rows"]) {
+	test(`held evidence preserves ${kind} failure/fallback contract without unrelated keys`, async () => {
+		const { evidence } = await dropped("freebsd", { childStatus: kind === "child-status" ? 37 : 0, fileMutation: ({ output, child }) => {
+			if (kind === "absent") { rmSync(output); return; }
+			if (kind === "malformed") { writeFileSync(output, `{"privateMarker":"${PRIVATE_SENTINEL}"`); return; }
+			const value = { ...child, privateMarker: PRIVATE_SENTINEL };
+			if (kind === "identity") value.identity = root;
+			if (kind === "file-status") { value.status = "failed"; value.error = "original child failure"; }
+			if (kind === "rows") value.rows = child.rows.map((row, index) => index === 0 ? { ...row, status: "failed", aliveAfter: true } : row);
+			writeFileSync(output, JSON.stringify(value));
+		} });
+		assert.equal(evidence.status, kind === "absent" ? "passed" : "failed");
+		assert.doesNotMatch(JSON.stringify(evidence), new RegExp(PRIVATE_SENTINEL));
+		assert.equal(evidence.privilegeDrop.verifiedNonadmin, !["malformed", "identity"].includes(kind));
+		if (kind === "child-status") assert.equal(evidence.privilegeDrop.diagnostics.child.status, 37);
+		if (kind === "file-status") assert.match(evidence.error, /original child failure/);
+		if (kind === "rows") assert.equal(evidence.rows[0].aliveAfter, true);
+	});
+}
+
+test("pre-opened evidence descriptor is closed before cleanup on every exit path", async () => {
+	const originalOpen = fs.openSync, originalClose = fs.closeSync, originalRemove = fs.rmSync;
+	const records = [];
+	const active = new Map();
+	fs.openSync = (path, flags, ...args) => {
+		const fd = originalOpen(path, flags, ...args);
+		if (String(path).endsWith("/child-evidence.json") && flags === "wx+") {
+			const stat = fstatSync(fd, { bigint: true });
+			assert.equal(stat.isFile(), true);
+			assert.equal(stat.mode & 0o777n, 0o600n);
+			assert.equal(typeof stat.ino, "bigint");
+			const record = { fd, work: dirname(path), closed: false, removed: false };
+			records.push(record); active.set(fd, record);
+		}
+		return fd;
+	};
+	fs.closeSync = (fd) => { if (active.has(fd)) { active.get(fd).closed = true; active.delete(fd); } return originalClose(fd); };
+	fs.rmSync = (path, ...args) => {
+		if (String(path).includes("pi-owner-output-")) assert.equal(active.size, 0, "close held evidence before protected-output cleanup");
+		for (const record of records) if (path === record.work) { assert.equal(record.closed, true, "close before scratch removal"); record.removed = true; }
+		return originalRemove(path, ...args);
+	};
+	syncBuiltinESMExports();
+	try {
+		const cases = [["freebsd", {}], ["freebsd", { failCommand: "pw" }], ["freebsd", { onCommand: (file) => { if (file === "su") throw new Error("spawn failure"); } }], ["freebsd", { fileMutation: ({ output }) => writeFileSync(output, "{malformed") }], ["freebsd", { childIdentity: root }], ["freebsd", { childStatus: 37 }], ["freebsd", { cleanupFailure: true }], ["darwin", {}], ["win32", {}]];
+		for (const [platform, options] of cases) {
+			await dropped(platform, { ...options, onCommand: (file, args, settings) => {
+				if (args.includes("useradd") || args.includes("-addUser") || args.includes("/add")) assert.equal(active.size, 1, "descriptor exists before provisioning");
+				options.onCommand?.(file, args, settings);
+			} });
+			assert.equal(active.size, 0);
+		}
+		assert.equal(records.length, cases.length);
+		for (const record of records) { assert.equal(record.closed, true); assert.equal(record.removed, true); assert.throws(() => fstatSync(record.fd), { code: "EBADF" }); }
+	} finally { fs.openSync = originalOpen; fs.closeSync = originalClose; fs.rmSync = originalRemove; syncBuiltinESMExports(); }
+});
+
+test("viaSudo metadata traversal changes only scratch-root group and mode 0710, not identity or evidence mode 0600", async () => {
+	for (const platform of ["darwin", "linux", "freebsd"]) {
+		const viaSudo = platform !== "freebsd";
+		const { evidence, calls } = await dropped(platform, { ...(platform === "linux" ? { hostIdentity: { ...standard, rootEquivalentGroup: true } } : {}), fileMutation: ({ output, stage }) => {
+			assert.equal(lstatSync(output).mode & 0o777, 0o600);
+			assert.equal(lstatSync(stage).mode & 0o777, viaSudo ? 0o710 : 0o700);
+			assert.equal(lstatSync(stage).gid, process.getgid());
+		} });
+		assert.equal(evidence.status, "passed", evidence.error);
+		assert.deepEqual(evidence.identity, standard);
+		const rootGroup = calls.filter(({ file, args }) => file === "sudo" && args[1] === "chown" && !args.includes("-R"));
+		const rootMode = calls.filter(({ file, args }) => file === "sudo" && args[1] === "chmod");
+		assert.equal(rootGroup.length, viaSudo ? 1 : 0);
+		assert.equal(rootMode.length, viaSudo ? 1 : 0);
+		if (viaSudo) {
+			assert.deepEqual(rootGroup[0].args.slice(0, 3), ["-n", "chown", `pi-owner-smoke:${process.getgid()}`]);
+			assert.deepEqual(rootMode[0].args, ["-n", "chmod", "710", rootGroup[0].args.at(-1)]);
+		}
+	}
+});
+
+test("dropped child cannot remove metadata traversal and receive stdout fallback", async () => {
+	const { evidence } = await dropped("darwin", { fileMutation: ({ stage }) => chmodSync(stage, 0o000) });
+	assert.equal(evidence.status, "failed");
+	assert.equal(evidence.privilegeDrop.verifiedNonadmin, false);
+	assert.match(evidence.error, /EACCES|child evidence directory/);
+});
+
+test("real lifecycle CLI writer truncates the existing held file without replacing its identity", () => {
+	const temp = mkdtempSync(join(tmpdir(), "pi-owner-held-writer-"));
+	const output = join(temp, "evidence.json");
+	const fd = openSync(output, "wx+", 0o600);
+	try {
+		const expected = { status: "failed", error: "writer fixture" };
+		writeFileSync(output, "old output must be truncated\n".repeat(100));
+		const preload = join(temp, "writer.cjs");
+		const assignment = "const evidence = await smokeOwnerLifecycleAsNonadmin(resolve(executable), bunTarget(targetId));";
+		writeFileSync(preload, `require("node:module").registerHooks({load(url, context, next) {
+  const result = next(url, context);
+  if (url.endsWith("/smoke-owner-lifecycle.mjs")) {
+    const source = typeof result.source === "string" ? result.source : Buffer.from(result.source).toString();
+    if (!source.includes(${JSON.stringify(assignment)})) throw new Error("writer seam changed");
+    return {...result, source: source.replace(${JSON.stringify(assignment)}, ${JSON.stringify(`const evidence = ${JSON.stringify(expected)};`)})};
+  }
+  return result;
+}});
+`);
+		const result = spawnSync(process.execPath, ["--require", preload, join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), process.execPath, "freebsd-x64", output], { encoding: "utf8", timeout: 10_000 });
+		assert.equal(result.status, 1, result.stderr);
+		assert.equal(readFileSync(fd, "utf8"), `${JSON.stringify(expected, null, 2)}\n`);
+		assert.equal(fstatSync(fd, { bigint: true }).ino, lstatSync(output, { bigint: true }).ino);
+		assert.equal(fstatSync(fd, { bigint: true }).dev, lstatSync(output, { bigint: true }).dev);
+	} finally { closeSync(fd); rmSync(temp, { recursive: true, force: true }); }
+});
+
+function assertFailedSmokeDiagnostics(evidence) {
+	assert.equal(evidence.status, "failed");
+	assert.doesNotMatch(JSON.stringify(evidence), new RegExp(PRIVATE_SENTINEL));
+	const temp = mkdtempSync(join(tmpdir(), "pi-owner-safe-diagnostics-"));
+	try {
+		const asset = join(temp, "pi-freebsd-x64"), record = join(temp, "record.json");
+		writeFileSync(asset, '#!/bin/sh\nif [ -n "$BUN_JSC_verboseDiskCache" ]; then echo "[Disk Cache] Cache hit for sourceCode" >&2; fi\ncase "$1" in --version) echo 1.2.3;; --help) echo Usage: pi;; --list-models) echo model;; esac\n'); chmodSync(asset, 0o755);
+		const fixture = join(temp, "collector.json"); writeFileSync(fixture, JSON.stringify(evidence));
+		const preload = join(temp, "owner.cjs");
+		writeFileSync(preload, `const cp = require("node:child_process"), fs = require("node:fs");
+const original = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  if (args?.[0]?.endsWith("/smoke-owner-lifecycle.mjs")) {
+    const text = fs.readFileSync(${JSON.stringify(fixture)}, "utf8");
+    fs.writeFileSync(args[3], text);
+    return {status:1, signal:null, stdout:text, stderr:""};
+  }
+  return original(command, args, options);
+};
+require("node:module").syncBuiltinESMExports();
+`);
+		const result = spawnSync(process.execPath, ["--require", preload, join(import.meta.dirname, "smoke-binary-release.mjs"), asset, "freebsd-x64", "1.2.3", record], { encoding: "utf8", timeout: 15_000 });
+		assert.equal(result.status, 1, result.stderr);
+		assert.equal(existsSync(record), false);
+		const diagnostics = readFileSync(`${record}.diagnostics`, "utf8");
+		assert.doesNotMatch(diagnostics, new RegExp(PRIVATE_SENTINEL));
+		assert.deepEqual(JSON.parse(diagnostics).ownerLifecycle, evidence);
+	} finally { rmSync(temp, { recursive: true, force: true }); }
+}
+
+test("unsafe collector evidence cannot leak synthetic private JSON through final smoke diagnostics", async () => {
+	const { evidence } = await dropped("freebsd", { fileMutation: ({ output, temp }) => { rmSync(output); symlinkSync(privateJson(temp), output); } });
+	assertFailedSmokeDiagnostics(evidence);
+});
+
+test("Windows redirection is parent-protected before launch and cleaned on every outcome", async () => {
+	const cases = [
+		["acl", { failCommand: "icacls.exe" }],
+		["provision", { failCommand: "net.exe" }],
+		["spawn", { onCommand: (file) => { if (file === "powershell.exe") throw new Error("spawn failure"); } }],
+		["identity", { childIdentity: root }],
+		["child-status", { childError: "original Windows failure", childStatus: 37 }],
+		["success", {}],
+		["cleanup-warning", { cleanupFailure: true }],
+	];
+	for (const [name, options] of cases) {
+		const { evidence, calls, remainingRedirects } = await dropped("win32", { ...options, fileMutation: ({ stage, temp }) => {
+			const secret = privateJson(temp);
+			symlinkSync(secret, join(stage, "stdout.txt"));
+			symlinkSync(secret, join(stage, "stderr.txt"));
+		} });
+		assert.equal(evidence.status, ["success", "cleanup-warning"].includes(name) ? "passed" : "failed", `${name}: ${evidence.error}`);
+		assert.doesNotMatch(JSON.stringify(evidence), new RegExp(PRIVATE_SENTINEL));
+		assert.deepEqual(remainingRedirects, [], `${name}: protected output cleanup before helper cleanup`);
+		const acl = calls.findIndex(({ file, args }) => file === "icacls.exe" && args[0].includes("pi-owner-output-"));
+		assert.ok(acl >= 0);
+		assert.deepEqual(calls[acl].args.slice(1), ["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"]);
+		const create = calls.findIndex(({ file, args }) => file === "net.exe" && args.includes("/add"));
+		if (name === "acl") { assert.equal(create, -1); assert.equal(calls.some(({ file }) => file === "powershell.exe"), false); }
+		else assert.ok(create > acl);
+		if (!["acl", "provision"].includes(name)) assert.equal(calls.some(({ file }) => file === "powershell.exe"), true, `${name}: reached launcher (${evidence.error ?? "no error"})`);
+		if (["identity", "child-status", "success", "cleanup-warning"].includes(name)) assert.equal(evidence.privilegeDrop.diagnostics.child.stderr, "protected parent capture");
+		if (name === "child-status") { assert.equal(evidence.privilegeDrop.diagnostics.child.status, 37); assertFailedSmokeDiagnostics(evidence); }
+	}
 });
 
 for (const platform of ["darwin", "win32"]) {
