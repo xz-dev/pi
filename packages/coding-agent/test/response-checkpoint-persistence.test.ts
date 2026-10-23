@@ -12,7 +12,13 @@ import { closeOpenAIResponsesWebSocketSessions, stream } from "@earendil-works/p
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { convertToLlm } from "../src/core/messages.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import {
+	buildSessionProjection,
+	type CompactionEntry,
+	type SessionEntry,
+	SessionManager,
+	type SessionMessageEntry,
+} from "../src/core/session-manager.ts";
 
 function assistantWithCheckpoint(): AssistantMessage {
 	return {
@@ -70,6 +76,244 @@ describe("response ancestry projection and persistence", () => {
 				);
 				expect(readFileSync(session.getSessionFile()!, "utf8")).toBe(original);
 			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.each(["before", "after"] as const)(
+		"adopts retained history when compaction is %s kept entries, without adopting later takeovers",
+		(position) => {
+			const retained: SessionMessageEntry = {
+				type: "message",
+				id: "retained",
+				parentId: position === "before" ? "summary" : null,
+				timestamp: "2026-10-23T00:00:00.000Z",
+				message: { ...assistantWithCheckpoint(), responseAncestry: "server-dependent" },
+			};
+			const summary: CompactionEntry = {
+				type: "compaction",
+				id: "summary",
+				parentId: position === "before" ? null : retained.id,
+				timestamp: "2026-10-23T00:00:00.001Z",
+				summary: "adopted summary",
+				firstKeptEntryId: retained.id,
+				tokensBefore: 100,
+			};
+			const concurrent: SessionMessageEntry = {
+				...retained,
+				id: "concurrent-takeover",
+				parentId: position === "before" ? retained.id : summary.id,
+				timestamp: summary.timestamp,
+			};
+			const later: SessionMessageEntry = {
+				...retained,
+				id: "later-takeover",
+				parentId: concurrent.id,
+				timestamp: "2026-10-23T00:00:00.002Z",
+			};
+			const entries =
+				position === "before" ? [summary, retained, concurrent, later] : [retained, summary, concurrent, later];
+			const original = JSON.stringify(entries);
+			const assistants = buildSessionProjection(entries).messages.filter((message) => message.role === "assistant");
+			expect(assistants).toHaveLength(3);
+			expect(assistants[0]).toMatchObject({ responseAncestry: "local" });
+			expect(assistants[0].responseCheckpoint).toBeUndefined();
+			expect(assistants[0].responseId).toBeUndefined();
+			expect(assistants.slice(1)).toEqual([concurrent.message, later.message]);
+			expect(JSON.stringify(entries)).toBe(original);
+		},
+	);
+
+	it.each(["2026-10-23T00:00:00.001Z", undefined, "not-a-timestamp", "2026-10-23T00:00:00.002Z"])(
+		"stops retained adoption at timestamp %s, including any older entries after it",
+		(timestamp) => {
+			const summary: CompactionEntry = {
+				type: "compaction",
+				id: "summary",
+				parentId: null,
+				timestamp: "2026-10-23T00:00:00.001Z",
+				summary: "adopted summary",
+				firstKeptEntryId: "stop",
+				tokensBefore: 100,
+			};
+			const stop: SessionMessageEntry = {
+				type: "message",
+				id: "stop",
+				parentId: summary.id,
+				timestamp: timestamp ?? "",
+				message: { ...assistantWithCheckpoint(), responseAncestry: "server-dependent" },
+			};
+			if (timestamp === undefined) Reflect.deleteProperty(stop, "timestamp");
+			const older: SessionMessageEntry = {
+				...stop,
+				id: "older-after-stop",
+				parentId: stop.id,
+				timestamp: "2026-10-23T00:00:00.000Z",
+			};
+			const entries = [summary, stop, older];
+			const original = JSON.stringify(entries);
+			const assistants = buildSessionProjection(entries).messages.filter((message) => message.role === "assistant");
+			expect(assistants).toEqual([stop.message, older.message]);
+			expect(JSON.stringify(entries)).toBe(original);
+		},
+	);
+
+	it("keeps a newly appended takeover dependent after wall clock rolls back", () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date("2026-10-23T00:00:10.000Z"));
+			const session = SessionManager.inMemory();
+			const retainedId = session.appendMessage({ role: "user", content: "retained", timestamp: 0 });
+			session.appendCompaction("summary only of retained history", retainedId, 100);
+			vi.setSystemTime(new Date("2026-10-23T00:00:09.000Z"));
+			const takeover = {
+				...assistantWithCheckpoint(),
+				responseAncestry: "server-dependent" as const,
+				responseId: "external-dependent",
+			};
+			session.appendMessage(takeover);
+			const projected = session.buildSessionProjection().messages.find((message) => message.role === "assistant");
+			expect(projected).toMatchObject({ responseAncestry: "server-dependent", responseId: "external-dependent" });
+			expect(projected).toEqual(takeover);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not adopt a cold-loaded legacy post-summary takeover whose clock went backwards", () => {
+		const takeover: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "new server-dependent takeover" }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "test",
+			responseId: "external-dependent",
+			responseAncestry: "server-dependent",
+			stopReason: "stop",
+			timestamp: 0,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "kept",
+				parentId: null,
+				timestamp: "2026-10-23T00:00:10.000Z",
+				message: { role: "user", content: "retained", timestamp: 0 },
+			},
+			{
+				type: "compaction",
+				id: "summary",
+				parentId: "kept",
+				timestamp: "2026-10-23T00:00:10.000Z",
+				firstKeptEntryId: "kept",
+				summary: "summary only of retained history",
+				tokensBefore: 100,
+			},
+			{
+				type: "message",
+				id: "takeover",
+				parentId: "summary",
+				timestamp: "2026-10-23T00:00:09.000Z",
+				message: takeover,
+			},
+		];
+		const original = JSON.stringify(entries);
+		const projected = buildSessionProjection(JSON.parse(original)).messages.find(
+			(message) => message.role === "assistant",
+		);
+		expect(projected).toMatchObject({ responseAncestry: "server-dependent", responseId: "external-dependent" });
+		expect(JSON.stringify(entries)).toBe(original);
+	});
+
+	it.each(["retained", "later", "off-path", "missing"])(
+		"adopts a post-summary run only when firstKept %s matches its start on the selected path",
+		(firstKeptEntryId) => {
+			const summary: CompactionEntry = {
+				type: "compaction",
+				id: "summary",
+				parentId: null,
+				timestamp: "2026-10-23T00:00:10.000Z",
+				firstKeptEntryId,
+				summary: "adopted summary",
+				tokensBefore: 100,
+			};
+			const retained: SessionMessageEntry = {
+				type: "message",
+				id: "retained",
+				parentId: summary.id,
+				timestamp: "2026-10-23T00:00:09.000Z",
+				message: { ...assistantWithCheckpoint(), responseAncestry: "server-dependent" },
+			};
+			const later: SessionMessageEntry = {
+				...retained,
+				id: "later",
+				parentId: retained.id,
+				timestamp: summary.timestamp,
+			};
+			const offPath: SessionMessageEntry = { ...retained, id: "off-path", parentId: null };
+			const entries = [summary, retained, later, offPath];
+			const original = JSON.stringify(entries);
+			const projection = buildSessionProjection(entries, later.id);
+			const assistants = projection.messages.filter((message) => message.role === "assistant");
+			expect(assistants).toHaveLength(2);
+			if (firstKeptEntryId === retained.id) {
+				expect(assistants[0]).toMatchObject({ responseAncestry: "local" });
+				expect(assistants[0].responseCheckpoint).toBeUndefined();
+				expect(assistants[0].responseId).toBeUndefined();
+			} else {
+				expect(assistants[0]).toEqual(retained.message);
+			}
+			expect(assistants[1]).toEqual(later.message);
+			expect(projection.entries.find((entry) => entry.sourceEntry.id === retained.id)?.sourceEntry).toBe(retained);
+			expect(JSON.stringify(entries)).toBe(original);
+		},
+	);
+
+	it.each(["writer", "reopen"] as const)(
+		"keeps a later takeover dependent after compaction and clock rollback through %s",
+		(mode) => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-ancestry-clock-"));
+			vi.useFakeTimers();
+			try {
+				vi.setSystemTime(new Date("2026-10-23T00:00:10.000Z"));
+				let session = SessionManager.create(dir, dir);
+				const retainedId = session.appendMessage({
+					...assistantWithCheckpoint(),
+					responseAncestry: "server-dependent",
+				});
+				session.appendCompaction("summary only of retained history", retainedId, 100);
+				if (mode === "reopen") session = SessionManager.open(session.getSessionFile()!, dir);
+				vi.setSystemTime(new Date("2026-10-23T00:00:09.000Z"));
+				const takeover = {
+					...assistantWithCheckpoint(),
+					responseAncestry: "server-dependent" as const,
+					responseId: "external-dependent",
+				};
+				session.appendMessage(takeover);
+				const original = readFileSync(session.getSessionFile()!, "utf8");
+				const assistants = session
+					.buildSessionProjection()
+					.messages.filter((message) => message.role === "assistant");
+				expect(assistants).toHaveLength(2);
+				expect(assistants[0]).toMatchObject({ responseAncestry: "local" });
+				expect(assistants[0].responseId).toBeUndefined();
+				expect(assistants[1]).toMatchObject({
+					responseAncestry: "server-dependent",
+					responseId: "external-dependent",
+				});
+				expect(assistants[1]).toEqual(takeover);
+				expect(readFileSync(session.getSessionFile()!, "utf8")).toBe(original);
+			} finally {
+				vi.useRealTimers();
 				rmSync(dir, { recursive: true, force: true });
 			}
 		},
