@@ -1583,7 +1583,7 @@ export class SessionManager {
 		};
 		if (!kept) {
 			this._appendEntry(entry);
-			this.latestCompactionTime = time;
+			this.latestCompactionTime = Math.max(this.latestCompactionTime, time);
 			return entry.id;
 		}
 
@@ -1605,7 +1605,7 @@ export class SessionManager {
 		}
 		// Re-parent in place only after the write succeeded; existing references stay valid.
 		kept.parentId = id;
-		this.latestCompactionTime = time;
+		this.latestCompactionTime = Math.max(this.latestCompactionTime, time);
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.generation++;
