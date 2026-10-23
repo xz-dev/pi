@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type CustomEntry, SessionManager } from "../../src/core/session-manager.ts";
 import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.ts";
 
@@ -97,6 +97,35 @@ describe("SessionManager append and tree traversal", () => {
 				expect(compactionEntry.usage).toEqual(usage);
 			}
 		});
+
+		it.each(["inserted", "tail"] as const)(
+			"keeps the compaction clock floor monotonic after a %s compaction on another branch",
+			(position) => {
+				vi.useFakeTimers();
+				try {
+					vi.setSystemTime(new Date("2026-10-23T00:00:09.000Z"));
+					const session = SessionManager.inMemory();
+					const rootId = session.appendMessage(userMsg("root"));
+					vi.setSystemTime(new Date("2026-10-23T00:00:10.000Z"));
+					const keptId = session.appendMessage(userMsg("branch A kept"));
+					session.appendCompaction("branch A summary", keptId, 100);
+					session.branch(rootId);
+					vi.setSystemTime(new Date("2026-10-23T00:00:09.000Z"));
+					session.appendCompaction("branch B summary", position === "inserted" ? rootId : null, 100);
+					session.branch(keptId);
+					const laterId = session.appendMessage(userMsg("later branch A work"));
+					const latestCompaction = Math.max(
+						...session
+							.getEntries()
+							.filter((entry) => entry.type === "compaction")
+							.map((entry) => Date.parse(entry.timestamp)),
+					);
+					expect(Date.parse(session.getEntry(laterId)!.timestamp)).toBeGreaterThanOrEqual(latestCompaction);
+				} finally {
+					vi.useRealTimers();
+				}
+			},
+		);
 
 		it("appendCompaction inserts at the kept boundary so rollback to kept entries keeps the summary", () => {
 			const session = SessionManager.inMemory();
