@@ -1190,7 +1190,7 @@ fn main() {
             assert_eq!(args.len(), 6, "--run artifact fixtures work row startup-ms");
             let mut master = -1;
             let mut slave = -1;
-            let size = libc::winsize {
+            let mut size = libc::winsize {
                 ws_row: 40,
                 ws_col: 120,
                 ws_xpixel: 0,
@@ -1201,8 +1201,8 @@ fn main() {
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
+                    std::ptr::null_mut(),
+                    &mut size,
                 )
             })
             .expect("openpty");
