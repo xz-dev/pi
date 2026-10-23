@@ -561,6 +561,16 @@ export function buildSessionProjection(
 		if (entry.type === "compaction" || (entry.type === "branch_summary" && entry.summary)) boundary = i;
 	}
 	const adopted = new Set(path.slice(0, Math.max(0, boundary)).map((entry) => entry.id));
+	const boundaryEntry = path[boundary];
+	if (boundaryEntry?.type === "compaction" && path[boundary + 1]?.id === boundaryEntry.firstKeptEntryId) {
+		const compactedAt = Date.parse(boundaryEntry.timestamp);
+		// Summary-before-kept: firstKept starts a contiguous run strictly older than the summary; later entries are at/after it.
+		for (let i = boundary + 1; i < path.length; i++) {
+			const entry = path[i];
+			if (!(Date.parse(entry.timestamp) < compactedAt)) break;
+			adopted.add(entry.id);
+		}
+	}
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
