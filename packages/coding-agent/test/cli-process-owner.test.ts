@@ -194,7 +194,7 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 				ownCliProcesses();
 				vi.advanceTimersByTime(1_000);
 				expect(kill).not.toHaveBeenCalled();
-				Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 });
+				Object.defineProperty(process, "ppid", { configurable: true, get: () => parent + 1 });
 				vi.advanceTimersByTime(2_000);
 				expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, "SIGTERM");
 			} finally {
@@ -222,10 +222,11 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 		);
 
 		it("fails closed if guardian dies between handoff creation and bootstrap", () => {
+			const parent = process.ppid;
 			const descriptor = Object.getOwnPropertyDescriptor(process, "ppid")!;
 			vi.stubEnv("PI_PROCESS_OWNER_PID", String(process.ppid));
 			try {
-				Object.defineProperty(process, "ppid", { configurable: true, value: process.ppid + 1 });
+				Object.defineProperty(process, "ppid", { configurable: true, get: () => parent + 1 });
 				expect(ownCliProcesses).toThrow("Process owner exited before its startup handoff completed");
 				expect(execute).not.toHaveBeenCalled();
 				expect(state.access).not.toHaveBeenCalled();
@@ -241,7 +242,7 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "freebsd" &
 			const kill = vi.spyOn(process, "kill").mockReturnValue(true);
 			vi.stubEnv("PI_PROCESS_OWNER_PID", String(parent));
 			state.access.mockImplementation(() =>
-				Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 }),
+				Object.defineProperty(process, "ppid", { configurable: true, get: () => parent + 1 }),
 			);
 			try {
 				expect(ownCliProcesses).toThrow("Process owner watchdog unavailable");
