@@ -107,14 +107,23 @@ fn birth(pid: i32) -> Result<String> {
     ))
 }
 
+fn ps_command() -> Command {
+    let mut command = Command::new("ps");
+    // FreeBSD consumes the rest of each -o argument after '=' as one header.
+    command.args([
+        "-ax", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "uid=", "-o", "stat=",
+    ]);
+    command
+}
+
 // ps absence is established by a successful complete inventory, never by a failed PID query.
 fn snapshot() -> Result<BTreeMap<i32, Value>> {
-    let out = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,pgid=,uid=,stat="])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = ps_command().output().map_err(|e| e.to_string())?;
     require(out.status.success(), "ps inventory failed")?;
     let text = String::from_utf8(out.stdout).map_err(|e| e.to_string())?;
+    parse_inventory(&text)
+}
+fn parse_inventory(text: &str) -> Result<BTreeMap<i32, Value>> {
     let mut result = BTreeMap::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let f: Vec<_> = line.split_whitespace().collect();
@@ -1257,6 +1266,47 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ps_columns_have_separate_empty_headers() {
+        let command = ps_command();
+        let mut columns = Vec::new();
+        for argument in command.get_args() {
+            if let Some((keyword, header)) = argument.to_str().unwrap().split_once('=') {
+                assert_eq!(header, "", "nonempty ps header for {keyword}");
+                columns.push(keyword);
+            }
+        }
+        assert_eq!(columns, ["pid", "ppid", "pgid", "uid", "stat"]);
+    }
+    #[test]
+    fn inventory_preserves_numeric_identities_and_state_modifiers() {
+        let table = parse_inventory("\n 123 1 123 1001 Ts+\n 124 123 123 1001 S<+\n").unwrap();
+        assert_eq!(table.len(), 2);
+        assert_eq!(
+            table[&123],
+            json!({"pid":123,"parent":1,"group":123,"uid":1001,"state":"Ts+"})
+        );
+        assert_eq!(table[&124]["state"], "S<+");
+    }
+    #[test]
+    fn inventory_rejects_malformed_rows_and_every_nonnumeric_identity() {
+        for malformed in [
+            ",ppid=,pgid=,uid=,stat=",
+            "123",
+            "123 1 123 1001",
+            "123 1 123 1001 T extra",
+        ] {
+            assert!(parse_inventory(&format!("124 1 124 1001 S\n{malformed}\n")).is_err());
+        }
+        for index in 0..4 {
+            for invalid in ["12x", "2147483648"] {
+                let mut fields = ["123", "1", "123", "1001", "T"];
+                fields[index] = invalid;
+                assert!(parse_inventory(&fields.join(" ")).is_err());
+            }
+        }
+        assert!(parse_inventory("\n").is_err());
+    }
     #[test]
     fn ancestry_is_transitive_and_excludes_same_group_peer() {
         let table = BTreeMap::from([
