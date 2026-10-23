@@ -233,7 +233,10 @@ describe("owner-loss shutdown deadline", () => {
 			const context = {
 				isShuttingDown: false,
 				isSuspended: true,
-				runtimeHost: { dispose: vi.fn(() => new Promise<void>(() => {})) },
+				runtimeHost: {
+					session: { extensionRunner: { setShutdownProgressListener: vi.fn() } },
+					dispose: vi.fn(() => new Promise<void>(() => {})),
+				},
 				themeController: { disableAutoSync: vi.fn() },
 				ui: { terminal: { drainInput: vi.fn(async () => {}) } },
 				stop: stopped,
@@ -344,6 +347,7 @@ describe("suspended final-exit descriptor boundary", () => {
 				isShuttingDown: false,
 				isSuspended: true,
 				runtimeHost: {
+					session: { extensionRunner: { setShutdownProgressListener: vi.fn() } },
 					dispose: async () => {
 						events.push("dispose");
 					},
