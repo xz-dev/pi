@@ -152,7 +152,7 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
 		try {
 			callHandleCtrlZ({ ui });
-			Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 });
+			Object.defineProperty(process, "ppid", { configurable: true, get: () => parent + 1 });
 			resume?.();
 			expect(kill).toHaveBeenLastCalledWith(process.pid, "SIGTERM");
 			expect(ui.start).not.toHaveBeenCalled();
@@ -246,10 +246,10 @@ describe("owner-loss shutdown deadline", () => {
 			};
 			try {
 				if (mode === "owner-loss")
-					Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 });
+					Object.defineProperty(process, "ppid", { configurable: true, get: () => parent + 1 });
 				void prototype.shutdown.call(context, mode === "interactive-quit" ? undefined : { fromSignal: true });
 				if (mode === "loss-during-shutdown") {
-					Object.defineProperty(process, "ppid", { configurable: true, value: parent + 1 });
+					Object.defineProperty(process, "ppid", { configurable: true, get: () => parent + 1 });
 					await prototype.shutdown.call(context, { fromSignal: true });
 				}
 				if (mode === "owner-loss" || mode === "loss-during-shutdown") {
