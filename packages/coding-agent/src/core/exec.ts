@@ -4,6 +4,7 @@
 
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
+import { getSystemErrorName } from "node:util";
 import { waitForChildProcess } from "../utils/child-process.ts";
 import { observeOwnedProcess, ownedCommand } from "../utils/process-owner.ts";
 
@@ -129,7 +130,10 @@ export async function execCommand(
 		// Wait for process termination without hanging on inherited stdio handles
 		// held open by detached descendants.
 		const completion = owner
-			? owner.completion.then(({ code, errno }) => (errno === undefined ? code : 1))
+			? owner.completion.then(({ code, errno }) => {
+					if (errno !== undefined && !stderr) stderr = `spawn ${command} ${getSystemErrorName(-errno)}`;
+					return errno === undefined ? code : 1;
+				})
 			: waitForChildProcess(proc);
 		completion
 			.then((code) => {
