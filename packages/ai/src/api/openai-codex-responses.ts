@@ -745,7 +745,13 @@ async function processStream(
 	options?: OpenAICodexResponsesOptions,
 	onFirstEvent?: () => Promise<void>,
 ): Promise<void> {
-	const events = mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent);
+	const events = mapCodexEvents(
+		parseSSE(response, options?.signal),
+		output,
+		model,
+		options?.onProviderStreamEvent,
+		options?.signal,
+	);
 	const proofedEvents = (async function* () {
 		for await (const event of events) {
 			await onFirstEvent?.();
@@ -753,6 +759,7 @@ async function processStream(
 		}
 	})();
 	await processResponsesStream(proofedEvents, output, stream, model, {
+		signal: options?.signal,
 		serviceTier: options?.serviceTier,
 		grammarToolInputProperties,
 		resolveServiceTier: resolveCodexServiceTier,
@@ -783,13 +790,20 @@ async function* mapCodexEvents(
 	output: AssistantMessage,
 	model: Model<"openai-codex-responses">,
 	onProviderStreamEvent: StreamOptions["onProviderStreamEvent"] | undefined,
+	signal?: AbortSignal,
 ): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
+		if (signal?.aborted) {
+			throw new Error("Request was aborted");
+		}
 		try {
 			await onProviderStreamEvent?.(event, model);
 		} catch (error) {
 			// Keep callback failures out of Codex's WebSocket retry and SSE fallback path.
 			throw new ProviderStreamEventCallbackError(error);
+		}
+		if (signal?.aborted) {
+			throw new Error("Request was aborted");
 		}
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
