@@ -1,4 +1,3 @@
-import type * as NodeZlib from "node:zlib";
 import type {
 	Tool as OpenAITool,
 	ResponseCreateParamsStreaming,
@@ -24,9 +23,15 @@ import {
 	formatThrownValue,
 } from "../utils/diagnostics.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
+import {
+	AssistantMessageEventStream,
+	emitTransport,
+	probeTransportLabel,
+	transportLabel,
+} from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
+import { createRequestCompressionFetch, getRequestCompressionEncoding } from "../utils/request-compression.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
 	getDeclaredTools,
@@ -76,9 +81,6 @@ const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const DEFAULT_MAX_RETRIES = 0;
 const BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
-// The Codex backend accepts zstd-compressed request bodies on the SSE responses
-// endpoint (the same endpoint the official Codex client compresses against).
-const REQUEST_COMPRESSION_ZSTD_LEVEL = 3;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const CODEX_WEBSOCKET_SCOPE = "openai-codex-responses";
 
@@ -206,40 +208,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 			reject(new Error("Request was aborted"));
 		});
 	});
-}
-
-// ============================================================================
-// Request Compression
-// ============================================================================
-
-type ProcessWithBuiltinModule = typeof process & {
-	getBuiltinModule?: (id: "node:zlib") => typeof NodeZlib;
-};
-
-function loadNodeZlib(): typeof NodeZlib | null {
-	if (typeof process === "undefined" || !(process.versions?.node || process.versions?.bun)) {
-		return null;
-	}
-	return (process as ProcessWithBuiltinModule).getBuiltinModule?.("node:zlib") ?? null;
-}
-
-// Returns the zstd-compressed body bytes, or null when compression is
-// unavailable (browser/Vite builds). Callers fall back to sending the
-// uncompressed JSON when this returns null.
-function compressRequestBodyZstd(bodyJson: string): Uint8Array<ArrayBuffer> | null {
-	const zlib = loadNodeZlib();
-	if (!zlib || typeof zlib.zstdCompressSync !== "function") {
-		return null;
-	}
-	try {
-		const compressed = zlib.zstdCompressSync(bodyJson, {
-			params: { [zlib.constants.ZSTD_c_compressionLevel]: REQUEST_COMPRESSION_ZSTD_LEVEL },
-		});
-		// A copy owns a plain ArrayBuffer, which fetch accepts as a body under every lib.
-		return new Uint8Array(compressed);
-	} catch {
-		return null;
-	}
 }
 
 // ============================================================================
@@ -462,14 +430,10 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				}
 			}
 
-			// Compress the request body once for the SSE path. The Codex backend
-			// decodes Content-Encoding: zstd; the WebSocket transport above sends the
-			// uncompressed JSON frame, matching the official Codex client.
-			const compressedBody = compressRequestBodyZstd(bodyJson);
-			if (compressedBody) {
-				sseHeaders.set("content-encoding", "zstd");
-			}
-			const sseBody: Uint8Array<ArrayBuffer> | string = compressedBody ?? bodyJson;
+			// Preserve Codex's encoded custom-fetch contract while sharing bounded codec downgrade.
+			const fetchRequest = createRequestCompressionFetch(options?.fetch, (encoding) =>
+				emitTransport(options?.onTransport, probeTransportLabel("SSE", encoding), model),
+			);
 
 			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;
@@ -486,10 +450,10 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						httpTimeoutMs !== undefined && httpTimeoutMs > 0 ? AbortSignal.timeout(httpTimeoutMs) : undefined;
 					const combinedSignal = combineAbortSignals([options?.signal, headerTimeoutSignal]);
 					try {
-						response = await (options?.fetch ?? globalThis.fetch)(resolveCodexUrl(model.baseUrl), {
+						response = await fetchRequest(resolveCodexUrl(model.baseUrl), {
 							method: "POST",
 							headers: sseHeaders,
-							body: sseBody,
+							body: bodyJson,
 							signal: combinedSignal.signal,
 						});
 					} catch (error) {
@@ -561,7 +525,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			const reportSseOnce = async () => {
 				if (sseReported) return;
 				sseReported = true;
-				await emitTransport(options?.onTransport, "SSE", model);
+				await emitTransport(
+					options?.onTransport,
+					transportLabel("SSE", getRequestCompressionEncoding(response!)),
+					model,
+				);
 			};
 			if (isSseMediaType(response.headers.get("content-type"))) {
 				await reportSseOnce();
@@ -778,7 +746,13 @@ async function processStream(
 	options?: OpenAICodexResponsesOptions,
 	onFirstEvent?: () => Promise<void>,
 ): Promise<void> {
-	const events = mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent);
+	const events = mapCodexEvents(
+		parseSSE(response, options?.signal),
+		output,
+		model,
+		options?.onProviderStreamEvent,
+		options?.signal,
+	);
 	const proofedEvents = (async function* () {
 		for await (const event of events) {
 			await onFirstEvent?.();
@@ -786,6 +760,7 @@ async function processStream(
 		}
 	})();
 	await processResponsesStream(proofedEvents, output, stream, model, {
+		signal: options?.signal,
 		serviceTier: options?.serviceTier,
 		grammarToolInputProperties,
 		resolveServiceTier: resolveCodexServiceTier,
@@ -816,13 +791,20 @@ async function* mapCodexEvents(
 	output: AssistantMessage,
 	model: Model<"openai-codex-responses">,
 	onProviderStreamEvent: StreamOptions["onProviderStreamEvent"] | undefined,
+	signal?: AbortSignal,
 ): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
+		if (signal?.aborted) {
+			throw new Error("Request was aborted");
+		}
 		try {
 			await onProviderStreamEvent?.(event, model);
 		} catch (error) {
 			// Keep callback failures out of Codex's WebSocket retry and SSE fallback path.
 			throw new ProviderStreamEventCallbackError(error);
+		}
+		if (signal?.aborted) {
+			throw new Error("Request was aborted");
 		}
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
