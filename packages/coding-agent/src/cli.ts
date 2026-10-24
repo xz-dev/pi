@@ -2,6 +2,7 @@
 import { setupCli } from "./cli/setup.ts";
 import { runMain } from "./cli-entry.ts";
 import { main } from "./main.ts";
+import { ownCliProcesses } from "./utils/process-owner.ts";
 
 setupCli();
-void runMain(() => main(process.argv.slice(2)));
+if (ownCliProcesses() !== false) void runMain(() => main(process.argv.slice(2)));
