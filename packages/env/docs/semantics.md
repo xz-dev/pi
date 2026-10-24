@@ -59,6 +59,110 @@ env conformance suite and `test/differential.test.ts` check each rule below.
 - Spill: once the output crosses `spill.afterBytes` or `spill.afterLines` (counted over raw chunks in arrival order, as
   Node counts), the complete raw output goes to `pi-output-<uuid>.log` in a fresh `tmp-` directory.
 
+## Local CLI ownership and job control
+
+The CLI uses native session and per-task owners by default. `--no-process-ownership` skips those owners for the
+current invocation; `PI_NO_PROCESS_OWNERSHIP=1` also reaches nested Pi invocations. Legacy cancellation remains,
+but native descendant-containment guarantees no longer apply. The macOS ownership hint is suppressed when disabled.
+
+When CLI stdin and stdout refer to the same controlling Unix terminal, a native carrier remains in the caller's
+session and relays physical input/output. Redirected stderr keeps its destination. The physical guardian stays in
+that caller session and job group. Before becoming the private session leader, the existing anchor forks one
+physical TTY backup, also in the caller session/job group; the private anchor holds and reaps that child.
+Only these three physical roles retain physical terminal descriptors. The private guardian and Node/Bun use a
+separate foreground group in the anchor's private session. Node/Bun inherits neither the physical descriptor nor
+native control channels. Non-terminal stdin/stdout, opt-outs and Windows retain their existing paths.
+
+Private Ctrl-Z sends a typed pause update through the native startup and duplex grant edges. The carrier restores
+cooked mode, then sends normal TSTP to its own current job group, stopping itself and physical job peers. Carrier
+TSTP and CONT dispositions remain default; physical guardian and backup catch TSTP and stay runnable. The private
+guardian freezes owned local tool trees. A subsequent `bg` resumes private work without granting physical IO;
+background output is drained, keeping the primary runnable for TERM. `fg` grants physical IO and sends another
+private CONT. Owned interactive UI keeps a lifecycle-scoped CONT listener to force a full redraw without starting
+input again; suspended restart, owner-loss and shutdown retain their existing paths. Opt-out/unowned UI adds no
+such listener. Ordered grants coalesce; malformed records or EOF start irreversible cleanup. Linux/FreeBSD sessions also retain an ancestor anchor in its own process group, in the same session;
+it stays runnable and retains the reaper scope if the outer or guardian dies. `fg` resumes owned work; `setsid`
+isolation is preserved. Linux uses identity-validated pidfds for non-direct
+descendants (Linux 5.3+); unavailable pidfds disable only freezing with a visible warning. FreeBSD signals the
+kernel reaper subtree, including nested reapers. macOS uses its existing best-effort inventory.
+
+Resume requests received during a freeze pass are reconciled before the pass settles. Startup holds a runnable
+native child behind an exec gate; freezing starts only after exec is confirmed. Linux registers a parent-directed
+`SIGCONT` anchor-exit notification, so even a paused outer resumes to finish cleanup. FreeBSD instead arms a
+one-byte socket-AIO read with `SIGEV_SIGNAL`/`SIGCONT`: only the anchor retains the writer, so its exit completes
+the read at EOF. Failure to arm this wake fails session startup; no module or sysctl changes are made.
+Termination bypasses healthy resume reconciliation: frozen primary and detached targets receive TERM before any
+teardown CONT, including rollback/drop paths. Bounded KILL escalation and adopted-zombie reaping preserve the
+primary child's status. Pi also requests graceful shutdown when its immediate Unix owner disappears, without
+restarting an already-suspended terminal. Owned Pi startup requires a kernel `SIGCONT` parent-death wake on
+Linux/FreeBSD, followed by a live-parent recheck before exec permission. Failure refuses startup with an explicit
+`--no-process-ownership` opt-out diagnostic; there is no silent wake fallback. The Linux guardian forks Pi from its
+sole lifetime thread because Linux binds this notification to the creating thread. The wake survives ordinary
+nonprivileged exec, not arbitrary privilege transitions: set-ID exec clears PDEATHSIG on Linux/FreeBSD; Linux
+also clears it on file-capability exec and changes to effective or filesystem user/group credentials. The Pi
+runtime executable and Pi's own credentials must retain the armed wake; privileged runtime transitions are not
+covered by the paused owner-loss guarantee. Darwin retains its existing session observer as the cleanup anchor.
+Opt-out and non-session paths add no anchor. Simultaneous loss of the anchor and both owners can defeat teardown.
+
+Default builds contain no parent-death fault switch: inherited `PI_PROCESS_OWNER_TEST_PDEATHSIG_FAIL` values,
+including `1`, `0` and empty, have no effect. Only explicit `--features test-parent-death-failure` test artifacts
+contain that injection. Those test artifacts must not ship; non-session launch still ignores the injection.
+
+After the validated Unix handoff, an independent worker must acknowledge its PID and pinned-parent match before
+main starts. It polls live `process.ppid`, not main-thread messages. Once owner loss is observed, responsive Pi
+allows five seconds for asynchronous extension shutdown before final validated tty release and exit, even if
+shutdown was already in progress. The worker independently sends self `SIGKILL` after seven seconds of owner loss
+if main JS cannot run. A normal pause stops the worker with Pi; kernel/observer CONT is therefore mandatory.
+Worker startup/identity failure refuses bootstrap rather than degrading supervision. Unexpected worker error/exit
+fails the responsive main process closed; normal process exit disarms that exit callback. Interactive signal shutdown
+notifies its still-immediate validated native guardian before extension hooks run, so native teardown can drain
+private output and retain its existing TERM/KILL deadline even if main JS blocks. Ordinary interactive quit retains
+normal output and awaits extension cleanup.
+
+A physical shell reclaim cannot job-control-stop Node/Bun's private terminal syscalls. Runnable native roles retain
+the private master and drain/discard output during fatal cleanup independently of a stopped or dead carrier.
+Normal completion instead flushes final output and preserves the actual child exit status. TERM/HUP interrupts
+that final-tail wait; only fatal cleanup may abandon pending output. Fatal native owners propagate a terminal wait
+status after cleanup, never a fresh healthy grant. Carrier reaping has one synchronous owner and never signals a
+reaped child. Native physical roles catch unblocked TTIN/TTOU without SA_RESTART, so a background tty syscall
+returns to cleanup rather than consuming a one-shot wake in another job-control stop. Primary exec does not
+inherit those native dispositions or a new tty-signal mask.
+
+After owner loss, a surviving physical role restores saved termios through the kernel's modifying syscall. There
+is no mode-equality authorization or private-SID physical write. If unrelated work owns the physical foreground,
+SIGTTOU/EINTR (or orphan-background EIO) denies modification; it is not permission to mask signals and retry.
+The extra backup retains physical authority after carrier plus physical guardian loss. Its own death fails the
+session closed. Normal private cleanup excludes the held backup, then explicitly releases and reaps it. SIGKILL
+cannot run Pi's own tty cleanup; a job-control shell may also restore its saved terminal state.
+
+Interactive Ctrl-Z pauses shell timeout budgets; external signals, print/JSON/RPC shell deadlines and MCP request
+deadlines may still count suspended time. Windows job-control behavior is unchanged.
+
+## Local CLI process ownership on macOS
+
+The CLI's native `pi-env supervise` owner uses a best-effort sweep on macOS, not kernel-enforced descendant
+containment. Noninteractive tasks have a private process group; isolated interactive primaries have a private
+foreground group with their guardian as same-session outside-group parent. The outer and guardian use CLOEXEC liveness pipes and sample descendants with
+`proc_listchildpids`/`proc_pidinfo` every 25 ms. Observed identities (PID, start time, UID) survive reparenting in
+the cache and are checked before every signal. Interactive sessions use the existing observer as a cleanup anchor,
+the outer's other direct child, in a separate session outside the foreground group and frozen guardian subtree.
+Its lifetime watches must be ready before outer job signals are unblocked, and it acknowledges the primary's
+birth identity before exec permission. Guardian loss or loss of both owners wakes the primary and any surviving
+outer. Observer loss instead makes the guardian wake the outer and fail the session closed. Normal completion
+reaps the observer; per-task owners do not add one.
+Normal guardian/outer cleanup takes a final snapshot before TERM, rescans for 250 ms, then escalates to KILL
+with a five-second bound. The independent observer's abnormal owner-loss sweep allows six seconds for TERM
+within a 7.5-second cleanup budget. Enumeration errors, denied signals and known live survivors make cleanup fail.
+
+The private protocol's `C` record means **best-effort sweep completed** on Darwin. It does **not** prove that no
+descendant exists. Double-forks retaining a private group and observed `setsid` descendants can be swept. A process
+that calls `setsid` and reparents before a snapshot can escape, as can its unseen children or a final-scan fork.
+PID/PGID check/use races remain; killing both owners and the session wake observer can still defeat paused
+teardown. Shared foreground groups are never swept as a group, to protect the caller and unrelated processes.
+These limits apply without elevated privileges;
+libproc availability and permissions depend on the macOS runtime. Darwin does not gain the Linux-only remote
+`ownedExec1` capability from this CLI backend.
+
 ## Watching
 
 - The daemon runs Durable's `NodeFileWatcher` next to the files: native events (inotify, FSEvents) only trigger a

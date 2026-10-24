@@ -4,7 +4,9 @@ import { constants as osConstants } from "node:os";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
+import { bashTimeout } from "../../utils/bash-timeout.ts";
 import { waitForChildProcess } from "../../utils/child-process.ts";
+import { observeOwnedProcess, ownedCommand } from "../../utils/process-owner.ts";
 import {
 	getShellConfig,
 	getShellEnv,
@@ -102,42 +104,80 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				throw new Error("aborted");
 			}
 			const shellConfig = resolveShellConfig();
+			const commandFromStdin = shellConfig.commandTransport === "stdin";
+			const shellArgs = [...shellConfig.args, ...(commandFromStdin ? [] : [command])];
+			// Snapshot host ownership before filesystem access yields to other invocations.
+			const execution = ownedCommand(shellConfig.shell, shellArgs, 3);
 			try {
 				await fsAccess(cwd, constants.F_OK);
 			} catch {
 				throw new Error(`Working directory does not exist: ${cwd}\nCannot execute ${shellName} commands.`);
 			}
 
-			const commandFromStdin = shellConfig.commandTransport === "stdin";
-			const child = spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
+			const child = spawn(execution.command, execution.args, {
 				cwd,
-				detached: process.platform !== "win32",
+				detached:
+					process.platform !== "win32" &&
+					!(execution.nativeOwner && (process.platform === "linux" || process.platform === "freebsd")),
 				env: env ?? getShellEnv(),
-				stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
+				stdio: [
+					commandFromStdin ? "pipe" : "ignore",
+					"pipe",
+					"pipe",
+					...(execution.nativeOwner ? ["pipe" as const] : []),
+				],
 				windowsHide: true,
 			});
 			if (commandFromStdin) {
 				child.stdin?.on("error", () => {});
 				child.stdin?.end(command);
 			}
-			if (child.pid) trackDetachedChildPid(child.pid);
+			const setupStderr: Buffer[] = [];
+			const owner = execution.nativeOwner
+				? observeOwnedProcess(child, () => {
+						for (const chunk of setupStderr.splice(0)) onData(chunk);
+					})
+				: undefined;
+			let exited = false;
+			let aborted = false;
 			let timedOut = false;
-			let timeoutHandle: NodeJS.Timeout | undefined;
-			const onAbort = () => {
-				if (child.pid) killProcessTree(child.pid);
+			let clearTaskTimeout: (() => void) | undefined;
+			const stop = () => {
+				if (exited) return;
+				if (owner) {
+					owner.cancel();
+				} else if (child.pid) killProcessTree(child.pid);
 			};
+			const onAbort = () => {
+				if (exited) return;
+				aborted = true;
+				stop();
+			};
+			const retire = () => {
+				exited = true;
+				if (child.pid) untrackDetachedChildPid(child.pid);
+				clearTaskTimeout?.();
+				signal?.removeEventListener("abort", onAbort);
+			};
+			if (child.pid) trackDetachedChildPid(child.pid, stop);
+			child.once("exit", retire);
 
 			try {
 				// Set timeout if provided.
 				if (timeoutMs !== undefined) {
-					timeoutHandle = setTimeout(() => {
+					clearTaskTimeout = bashTimeout(() => {
+						if (exited) return;
 						timedOut = true;
-						if (child.pid) killProcessTree(child.pid);
+						stop();
 					}, timeoutMs);
 				}
 				// Stream stdout and stderr.
 				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
+				child.stderr?.on("data", (data: Buffer) => {
+					// S identifies real child output; E is setup failure, never command stderr.
+					if (!owner || owner.started) onData(data);
+					else setupStderr.push(data);
+				});
 				// Handle abort signal by killing the entire process tree.
 				if (signal) {
 					if (signal.aborted) onAbort();
@@ -145,8 +185,22 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child);
-				if (signal?.aborted) {
+				const completed = owner
+					? await owner.completion
+					: { code: await waitForChildProcess(child), errno: undefined };
+				const exitCode = completed.code;
+				if (completed.errno !== undefined) {
+					const errno = completed.errno;
+					const code = Object.entries(osConstants.errno).find(([, value]) => value === errno)?.[0] ?? "UNKNOWN";
+					throw Object.assign(new Error(`spawn ${shellConfig.shell} ${code}`), {
+						code,
+						errno: -errno,
+						syscall: `spawn ${shellConfig.shell}`,
+						path: shellConfig.shell,
+						spawnargs: shellArgs,
+					});
+				}
+				if (aborted) {
 					throw new Error("aborted");
 				}
 				if (timedOut) {
@@ -157,9 +211,9 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				const signalCode = child.signalCode;
 				return { exitCode: exitCode ?? (signalCode ? 128 + (osConstants.signals[signalCode] ?? 0) : 1) };
 			} finally {
-				if (child.pid) untrackDetachedChildPid(child.pid);
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				if (signal) signal.removeEventListener("abort", onAbort);
+				retire();
+				child.removeListener("exit", retire);
+				if (owner) child.stdio[3]?.destroy();
 			}
 		},
 	};
