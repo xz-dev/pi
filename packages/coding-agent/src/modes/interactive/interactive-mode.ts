@@ -1299,7 +1299,13 @@ export class InteractiveMode {
 				settingsManager: this.settingsManager,
 			});
 			const updates = await packageManager.checkForAvailableUpdates();
-			return updates.map((update) => update.displayName);
+			return updates.map((update) =>
+				update.reason === "dependencies"
+					? `${update.displayName} (dependencies)`
+					: update.reason === "both"
+						? `${update.displayName} (package and dependencies)`
+						: update.displayName,
+			);
 		} catch {
 			return [];
 		}
