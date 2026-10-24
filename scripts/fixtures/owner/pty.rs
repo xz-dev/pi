@@ -1118,8 +1118,16 @@ fn session(
     Ok(())
 }
 
+fn pty_entry_allowed(mode: Option<&str>, uid: libc::uid_t, euid: libc::uid_t) -> bool {
+    !matches!(mode, Some("--run" | "--session")) || uid != 0 && euid != 0
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if !pty_entry_allowed(args.first().map(String::as_str), unsafe { libc::getuid() }, unsafe { libc::geteuid() }) {
+        eprintln!("PTY probe requires nonroot");
+        std::process::exit(1);
+    }
     match args.first().map(String::as_str) {
         Some("--peer") | Some("--leaf") => beat(Path::new(&args[1])),
         Some("--extension-child") | Some("--adopted-grandchild") => {
@@ -1328,6 +1336,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pty_entry_rejects_either_root_identity_before_dispatch() {
+        for mode in ["--run", "--session"] {
+            for (uid, euid, allowed) in [(0, 0, false), (0, 1000, false), (1000, 0, false), (1000, 1000, true)] {
+                assert_eq!(pty_entry_allowed(Some(mode), uid, euid), allowed, "{mode} {uid}/{euid}");
+            }
+        }
+    }
+    #[test]
+    fn other_fixture_modes_keep_existing_identity_policy() {
+        for mode in [None, Some("--peer"), Some("--leaf"), Some("--extension-child"), Some("--adopted-grandchild"), Some("--adoption-spawner"), Some("--payload"), Some("--launch"), Some("unknown")] {
+            assert!(pty_entry_allowed(mode, 0, 0), "{mode:?}");
+        }
+    }
     #[test]
     fn ps_columns_have_separate_empty_headers() {
         let command = ps_command();
