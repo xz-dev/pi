@@ -42,9 +42,9 @@ test("manual diagnostics preserve the default Windows probe and cannot publish",
 	const workflow = parse(readFileSync(new URL("../.github/workflows/probe-windows-rename.yml", import.meta.url), "utf8"));
 	assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
 	assert.equal(workflow.on.workflow_dispatch.inputs.macos_candidate_run.default, "");
-	assert.equal(workflow.jobs["probe-windows-rename"].if, "inputs.macos_candidate_run == ''");
+	assert.equal(workflow.jobs["probe-windows-rename"].if, "inputs.macos_candidate_run == '' && !inputs.darwin_libproc_fact");
 	const job = workflow.jobs["diagnose-macos-candidate"];
-	assert.equal(job.if, "inputs.macos_candidate_run != ''");
+	assert.equal(job.if, "inputs.macos_candidate_run != '' && !inputs.darwin_libproc_fact");
 	assert.equal(job["runs-on"], "macos-15-intel");
 	assert.deepEqual(job.permissions, { contents: "read", actions: "read" });
 	const upload = job.steps.at(-1);

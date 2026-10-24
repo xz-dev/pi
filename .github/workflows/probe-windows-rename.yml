@@ -21,13 +21,18 @@ on:
         required: false
         default: ""
         type: string
+      darwin_libproc_fact:
+        description: "Scratch-only nonadmin libproc credential fact (no product execution)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
   probe-windows-rename:
-    if: inputs.macos_candidate_run == ''
+    if: inputs.macos_candidate_run == '' && !inputs.darwin_libproc_fact
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -112,7 +117,7 @@ jobs:
           if ($node -and -not $node.HasExited) { Stop-Process -Id $node.Id -Force -ErrorAction SilentlyContinue }
 
   diagnose-macos-candidate:
-    if: inputs.macos_candidate_run != ''
+    if: inputs.macos_candidate_run != '' && !inputs.darwin_libproc_fact
     runs-on: macos-15-intel
     timeout-minutes: 10
     permissions:
@@ -140,4 +145,30 @@ jobs:
           name: "native-candidate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}"
           path: "${{ runner.temp }}/native-candidate-diagnostics"
           if-no-files-found: warn
+          retention-days: 14
+
+  fact-darwin-libproc:
+    if: inputs.darwin_libproc_fact && inputs.macos_candidate_run == '' && inputs.macos_candidate_sha256 == '' && github.repository == 'xz-dev/pi' && startsWith(github.ref, 'refs/heads/diagnostic/')
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22.23.2" }
+      - name: Compile system-libproc fact only
+        run: |
+          set -euo pipefail
+          sw_vers -productVersion
+          xcrun --show-sdk-version
+          cc -std=c11 -D_DARWIN_C_SOURCE -Wall -Wextra -Werror scripts/fixtures/darwin-libproc-fact.c -lproc -o "$RUNNER_TEMP/darwin-libproc-fact"
+      - name: Capture only held-child credential and permission facts
+        run: node scripts/probe-darwin-libproc.mjs "$RUNNER_TEMP/darwin-libproc-fact" "$RUNNER_TEMP/DIAGNOSTIC-darwin-libproc.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: "DIAGNOSTIC-libproc-fact-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/DIAGNOSTIC-darwin-libproc.json"
+          if-no-files-found: error
           retention-days: 14
