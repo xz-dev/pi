@@ -3139,6 +3139,146 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 		});
 	});
 
+	describe("npm runtime dependency updates", () => {
+		let installRoot: string;
+		let modules: string;
+		let internals: PackageManagerInternals;
+		const source = "npm:plugin@1.0.0";
+
+		function writeManifest(directory: string, manifest: Record<string, unknown>): void {
+			mkdirSync(directory, { recursive: true });
+			writeFileSync(join(directory, "package.json"), JSON.stringify(manifest));
+		}
+
+		beforeEach(() => {
+			installRoot = join(agentDir, "npm");
+			modules = join(installRoot, "node_modules");
+			internals = packageManager as unknown as PackageManagerInternals;
+			writeManifest(installRoot, { dependencies: { plugin: "^1.0.0", other: "^1.0.0" } });
+			writeManifest(join(modules, "plugin"), {
+				name: "plugin",
+				version: "1.0.0",
+				dependencies: { bridge: "1.0.0", fixed: "1.0.0" },
+				devDependencies: { dev: "*" },
+				peerDependencies: { peer: "*" },
+			});
+			writeManifest(join(modules, "bridge"), {
+				name: "bridge",
+				version: "1.0.0",
+				optionalDependencies: { leaf: "^2.0.0" },
+			});
+			writeManifest(join(modules, "other"), { name: "other", version: "1.0.0", dependencies: { leaf: "^2.0.0" } });
+			for (const name of ["leaf", "fixed", "dev", "peer"]) {
+				writeManifest(join(modules, name), { name, version: name === "leaf" ? "2.0.0" : "1.0.0" });
+			}
+			settingsManager.setPackages([source, "npm:other@1.0.0"]);
+			vi.spyOn(internals, "runCommandCapture").mockImplementation(async (_command, args) =>
+				args.includes("versions")
+					? JSON.stringify({ versions: ["2.0.0", "2.1.0", "3.0.0"], "dist-tags": { latest: "3.0.0" } })
+					: JSON.stringify({ version: "2.1.0" }),
+			);
+		});
+
+		it("checks floating runtime edges read-only, excluding exact, development and peer dependencies", async () => {
+			writeFileSync(join(installRoot, "package-lock.json"), "Pi-generated installation lock");
+			const runCommand = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([
+				expect.objectContaining({ source, type: "npm" }),
+				expect.objectContaining({ source: "npm:other@1.0.0", type: "npm" }),
+			]);
+			expect(internals.runCommandCapture).toHaveBeenCalledTimes(2);
+			expect(internals.runCommandCapture).toHaveBeenCalledWith(
+				"npm",
+				["view", "leaf", "versions", "dist-tags", "--json"],
+				expect.objectContaining({ timeoutMs: expect.any(Number) }),
+			);
+			expect(internals.runCommandCapture).toHaveBeenCalledWith(
+				"npm",
+				["view", "leaf@2.1.0", "version", "os", "cpu", "engines", "--json"],
+				expect.objectContaining({ timeoutMs: expect.any(Number) }),
+			);
+			expect(runCommand).not.toHaveBeenCalled();
+		});
+
+		it.each(["2.0.0", "<2.1.0"])(
+			"does not repeatedly offer an update blocked by shared constraint %s",
+			async (range) => {
+				writeManifest(join(modules, "other"), { name: "other", version: "1.0.0", dependencies: { leaf: range } });
+				const runCommand = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+				expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+				await packageManager.update(source);
+				expect(runCommand).not.toHaveBeenCalled();
+				expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+			},
+		);
+
+		it.each(["plugin", "root"])(
+			"preserves %s author shrinkwraps, including shared dependencies",
+			async (location) => {
+				const directory = location === "root" ? installRoot : join(modules, "plugin");
+				writeFileSync(join(directory, "npm-shrinkwrap.json"), JSON.stringify({ lockfileVersion: 3 }));
+				const runCommand = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+				expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+				await packageManager.update();
+				expect(runCommand).not.toHaveBeenCalled();
+				expect(internals.runCommandCapture).not.toHaveBeenCalled();
+			},
+		);
+
+		it.each([
+			{ overrides: { leaf: "2.0.0" } },
+			{ resolutions: { leaf: "2.0.0" } },
+			{ pnpm: { overrides: { leaf: "2.0.0" } } },
+		])("skips constrained installation roots with %j", async (constraint) => {
+			writeManifest(installRoot, { dependencies: { plugin: "^1.0.0", other: "^1.0.0" }, ...constraint });
+			const runCommand = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+			await packageManager.update(source);
+			expect(runCommand).not.toHaveBeenCalled();
+			expect(internals.runCommandCapture).not.toHaveBeenCalled();
+		});
+
+		it("does not offer updates to bundled runtime dependencies", async () => {
+			writeManifest(join(modules, "plugin"), {
+				name: "plugin",
+				version: "1.0.0",
+				dependencies: { leaf: "^2.0.0" },
+				bundleDependencies: ["leaf"],
+			});
+
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+			expect(internals.runCommandCapture).not.toHaveBeenCalled();
+		});
+
+		it("resolves isolated package links and their private runtime dependencies", async () => {
+			const plugin = join(modules, ".store", "plugin", "node_modules", "plugin");
+			const leaf = join(modules, ".store", "leaf", "node_modules", "leaf");
+			writeManifest(plugin, { name: "plugin", version: "1.0.0", dependencies: { leaf: "^2.0.0" } });
+			writeManifest(leaf, { name: "leaf", version: "2.0.0" });
+			const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
+			symlinkSync(leaf, join(modules, ".store", "plugin", "node_modules", "leaf"), directoryLinkType);
+			rmSync(join(modules, "plugin"), { recursive: true });
+			symlinkSync(plugin, join(modules, "plugin"), directoryLinkType);
+
+			expect(await packageManager.checkForAvailableUpdates()).toEqual(
+				expect.arrayContaining([expect.objectContaining({ source })]),
+			);
+		});
+
+		it("propagates dependency update failures instead of reporting completion", async () => {
+			const events: ProgressEvent[] = [];
+			packageManager.setProgressCallback((event) => events.push(event));
+			vi.spyOn(internals, "runCommand").mockRejectedValue(new Error("dependency update failed"));
+
+			await expect(packageManager.update(source)).rejects.toThrow("dependency update failed");
+			expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+		});
+	});
+
 	describe("offline mode and network timeouts", () => {
 		it("should update npm range packages using the configured spec", async () => {
 			const installedPath = join(tempDir, ".pi", "npm", "node_modules", "example");
