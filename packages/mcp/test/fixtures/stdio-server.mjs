@@ -1,6 +1,8 @@
 import { createInterface } from "node:readline";
 
+setTimeout(() => process.exit(90), 10_000).unref();
 console.error("stdio fixture ready");
+console.error('E2 genuine server stderr; S{"pid":1}');
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 for await (const line of lines) {
@@ -17,6 +19,8 @@ for await (const line of lines) {
 		result = { tools: [{ name: "echo", inputSchema: { type: "object" } }] };
 	} else if (message.method === "tools/call") {
 		result = { content: [{ type: "text", text: String(message.params.arguments.text) }] };
+	} else if (message.method === "test/info") {
+		result = { pid: process.pid, cwd: process.cwd(), value: process.env.MCP_TEST_VALUE, argv: process.argv.slice(2) };
 	} else if (message.method === "ping") {
 		result = {};
 	} else {
