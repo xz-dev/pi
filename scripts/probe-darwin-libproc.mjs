@@ -26,7 +26,7 @@ export function assertFact(record, uid, groupNames) {
 	assert.deepEqual(record.children.map((child) => child.kind), ["control", "ps"]);
 	assert.notEqual(record.children[0].pid, record.children[1].pid);
 	for (const child of record.children) {
-		keys(child, ["kind", "pid", "heldDirectChild", "stableLiveSample", "sampleMs", "drainedBytes", "reaped", "cleanupKilled", "waitStatus", "before", "full", "after"]);
+		keys(child, ["kind", "pid", "heldDirectChild", "stableLiveSample", "sampleMs", "drainedBytes", "reaped", "cleanupKilled", "waitStatus", "before", "full", "bsd", "after"]);
 		integer(child.pid); assert(child.pid > 1); assert.equal(child.heldDirectChild, true);
 		assert.equal(child.stableLiveSample, true); assert.equal(child.reaped, true); assert.equal(child.cleanupKilled, false); assert.equal(child.waitStatus, 0);
 		assert(Number.isFinite(child.sampleMs) && child.sampleMs >= 0 && child.sampleMs < 2500);
@@ -50,9 +50,29 @@ export function assertFact(record, uid, groupNames) {
 			keys(child.full, ["returned", "errno", "expectedBytes"]);
 			assert.equal(child.full.returned, 0); assert(child.full.errno > 0);
 		}
+		const bsd = child.bsd;
+		assert(bsd.result === 0 || bsd.result === -1);
+		for (const name of ["errno", "returnedBytes", "expectedBytes"]) integer(bsd[name]);
+		assert(bsd.expectedBytes > 0);
+		if (bsd.result === 0 && bsd.returnedBytes === bsd.expectedBytes) {
+			keys(bsd, ["result", "errno", "returnedBytes", "expectedBytes", "pid", "parent", "group", "state", "uid", "ruid", "svuid", "startSeconds", "startMicros"]);
+			for (const value of Object.values(bsd)) integer(value);
+			assert.equal(bsd.errno, 0); assert.notEqual(bsd.state, 5);
+			for (const name of ["pid", "parent", "group", "uid", "ruid", "svuid"]) assert.equal(bsd[name], child.before[name]);
+			assert(bsd.startSeconds > 0 && bsd.startMicros < 1000000);
+			if (child.full.returned === child.full.expectedBytes) {
+				assert.equal(bsd.startSeconds, child.full.startSeconds);
+				assert.equal(bsd.startMicros, child.full.startMicros);
+			}
+		} else {
+			keys(bsd, ["result", "errno", "returnedBytes", "expectedBytes"]);
+			if (bsd.result === -1) assert(bsd.errno > 0);
+			else assert.equal(bsd.errno, 0);
+		}
 	}
 	const control = record.children[0];
 	assert.equal(control.before.uid, uid); assert.equal(control.full.returned, control.full.expectedBytes);
+	assert.equal(control.bsd.result, 0); assert.equal(control.bsd.returnedBytes, control.bsd.expectedBytes);
 	return record;
 }
 

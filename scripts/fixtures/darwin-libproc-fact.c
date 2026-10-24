@@ -15,6 +15,7 @@
 #include <libproc.h>
 #include <sys/proc.h>
 #include <sys/proc_info.h>
+#include <sys/sysctl.h>
 
 static volatile sig_atomic_t cancelled;
 static void cancel(int signal) { (void)signal; cancelled = 1; }
@@ -27,6 +28,9 @@ static void pause_tick(void) { struct timespec tick = {0, 1000000}; (void)nanosl
 struct sample {
     struct proc_bsdshortinfo before, after;
     struct proc_bsdinfo full;
+    struct kinfo_proc bsd;
+    size_t bsd_n;
+    int bsd_result, bsd_errno;
     int before_n, before_errno, after_n, after_errno;
     int full_n, full_errno;
 };
@@ -38,6 +42,11 @@ static void measure(pid_t pid, struct sample *value) {
     errno = 0;
     value->full_n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &value->full, sizeof(value->full));
     value->full_errno = errno;
+    int name[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    value->bsd_n = sizeof(value->bsd);
+    errno = 0;
+    value->bsd_result = sysctl(name, 4, &value->bsd, &value->bsd_n, NULL, 0);
+    value->bsd_errno = errno;
     errno = 0;
     value->after_n = proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &value->after, sizeof(value->after));
     value->after_errno = errno;
@@ -129,6 +138,11 @@ static int one_child(int ps, char *header) {
     print_short("before", value.before_n, value.before_errno, &value.before); printf(",");
     printf("\"full\":{\"returned\":%d,\"errno\":%d,\"expectedBytes\":%zu", value.full_n, value.full_errno, sizeof(value.full));
     if (value.full_n == (int)sizeof(value.full)) printf(",\"pid\":%u,\"uid\":%u,\"ruid\":%u,\"startSeconds\":%llu,\"startMicros\":%llu", value.full.pbi_pid, value.full.pbi_uid, value.full.pbi_ruid, (unsigned long long)value.full.pbi_start_tvsec, (unsigned long long)value.full.pbi_start_tvusec);
+    printf("},\"bsd\":{\"result\":%d,\"errno\":%d,\"returnedBytes\":%zu,\"expectedBytes\":%zu", value.bsd_result, value.bsd_errno, value.bsd_n, sizeof(value.bsd));
+    if (value.bsd_result == 0 && value.bsd_n == sizeof(value.bsd)) {
+        const struct kinfo_proc *b = &value.bsd;
+        printf(",\"pid\":%d,\"parent\":%d,\"group\":%d,\"state\":%d,\"uid\":%u,\"ruid\":%u,\"svuid\":%u,\"startSeconds\":%llu,\"startMicros\":%llu", b->kp_proc.p_pid, b->kp_eproc.e_ppid, b->kp_eproc.e_pgid, b->kp_proc.p_stat, b->kp_eproc.e_ucred.cr_uid, b->kp_eproc.e_pcred.p_ruid, b->kp_eproc.e_pcred.p_svuid, (unsigned long long)b->kp_proc.p_starttime.tv_sec, (unsigned long long)b->kp_proc.p_starttime.tv_usec);
+    }
     printf("},");
     print_short("after", value.after_n, value.after_errno, &value.after); printf("}");
     return ready && !killed && reaped && WIFEXITED(status) && WEXITSTATUS(status) == 0 && drained > 65536;

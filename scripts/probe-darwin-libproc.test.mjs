@@ -11,7 +11,8 @@ const fixture = () => {
 	const children = [201, 202].map((pid, index) => {
 		const uid = index ? 0 : 502;
 		const short = { returned: 68, errno: 0, expectedBytes: 68, pid, parent: 101, group: 200, state: 2, uid, ruid: 502, svuid: uid };
-		return { kind: index ? "ps" : "control", pid, heldDirectChild: true, stableLiveSample: true, sampleMs: 4, drainedBytes: 98308, reaped: true, cleanupKilled: false, waitStatus: 0, before: { ...short }, after: { ...short }, full: index ? { returned: 0, errno: 1, expectedBytes: 136 } : { returned: 136, errno: 0, expectedBytes: 136, pid, uid, ruid: 502, startSeconds: 1792811227, startMicros: 12345 } };
+		const bsd = { result: 0, errno: 0, returnedBytes: 648, expectedBytes: 648, pid, parent: 101, group: 200, state: 2, uid, ruid: 502, svuid: uid, startSeconds: 1792811227, startMicros: 12345 };
+		return { kind: index ? "ps" : "control", pid, heldDirectChild: true, stableLiveSample: true, sampleMs: 4, drainedBytes: 98308, reaped: true, cleanupKilled: false, waitStatus: 0, before: { ...short }, after: { ...short }, full: index ? { returned: 0, errno: 1, expectedBytes: 136 } : { returned: 136, errno: 0, expectedBytes: 136, pid, uid, ruid: 502, startSeconds: 1792811227, startMicros: 12345 }, bsd };
 	});
 	return { diagnosticOnly: true, publishable: false, complete: true, identity, psFile: { mode: 0o104755, uid: 0, gid: 0, setuid: true }, children };
 };
@@ -26,9 +27,38 @@ test("fact remains falsifiable when ps is same UID and full query succeeds", () 
 	const record = fixture();
 	record.psFile = { mode: 0o100755, uid: 0, gid: 0, setuid: false };
 	const ps = record.children[1];
-	ps.before.uid = ps.after.uid = ps.before.svuid = ps.after.svuid = 502;
+	ps.before.uid = ps.after.uid = ps.before.svuid = ps.after.svuid = ps.bsd.uid = ps.bsd.svuid = 502;
 	ps.full = { ...record.children[0].full, pid: ps.pid };
 	assert.doesNotThrow(() => assertFact(record, 502, ["staff"]));
+});
+
+test("BSD birth capability remains falsifiable for denied, absent and partial ps records", () => {
+	for (const bsd of [
+		{ result: -1, errno: 1, returnedBytes: 648, expectedBytes: 648 },
+		{ result: 0, errno: 0, returnedBytes: 0, expectedBytes: 648 },
+		{ result: 0, errno: 0, returnedBytes: 16, expectedBytes: 648 },
+	]) {
+		const record = fixture(); record.children[1].bsd = bsd;
+		assert.doesNotThrow(() => assertFact(record, 502, ["staff"]));
+	}
+});
+
+test("BSD records require exact identities and successful control birth parity", () => {
+	for (const mutate of [
+		(r) => { r.children[0].bsd.startMicros++; },
+		(r) => { r.children[0].bsd = { result: -1, errno: 1, returnedBytes: 648, expectedBytes: 648 }; },
+		(r) => { r.children[1].bsd.pid++; },
+		(r) => { r.children[1].bsd.parent++; },
+		(r) => { r.children[1].bsd.group++; },
+		(r) => { r.children[1].bsd.uid = 502; },
+		(r) => { r.children[1].bsd.startSeconds = 0; },
+		(r) => { r.children[1].bsd.startMicros = 1000000; },
+		(r) => { r.children[1].bsd.state = 5; },
+		(r) => { r.children[1].bsd.extra = true; },
+	]) {
+		const record = fixture(); mutate(record);
+		assert.throws(() => assertFact(record, 502, ["staff"]));
+	}
 });
 
 test("invalid identity, unstable samples, missing cleanup and arbitrary keys fail closed", () => {
@@ -81,6 +111,8 @@ test("native fact only queries held children and never stops or globally enumera
 	assert.match(text, /proc_pidinfo\(pid, PROC_PIDT_SHORTBSDINFO/);
 	assert.doesNotMatch(text, /PROC_PIDUNIQIDENTIFIERINFO/);
 	assert.match(text, /proc_pidinfo\(pid, PROC_PIDTBSDINFO/);
+	assert.match(text, /CTL_KERN, KERN_PROC, KERN_PROC_PID, pid/);
+	assert.match(text, /sysctl\(name, 4, &value->bsd, &value->bsd_n, NULL, 0\)/);
 	assert.match(text, /"-p", self, "-o", header/);
 	assert.match(text, /alarm\(8\)/);
 	assert.match(text, /if \(!reaped && held\)/);
