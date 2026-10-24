@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -52,19 +52,31 @@ fn beat(path: &Path) -> ! {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn birth(pid: i32) -> Result<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|e| e.to_string())?;
+    query_birth(pid).map_err(|error| {
+        if cfg!(target_os = "freebsd") && error.raw_os_error().is_some() {
+            format!("sysctl(KERN_PROC_PID, pid={pid}): {error}")
+        } else {
+            error.to_string()
+        }
+    })
+}
+#[cfg(target_os = "linux")]
+fn query_birth(pid: i32) -> io::Result<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let fields: Vec<_> = stat
         .rsplit_once(") ")
-        .ok_or("invalid proc stat")?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid proc stat"))?
         .1
         .split_whitespace()
         .collect();
-    Ok(fields.get(19).ok_or("missing proc starttime")?.to_string())
+    Ok(fields
+        .get(19)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing proc starttime"))?
+        .to_string())
 }
 #[cfg(target_os = "macos")]
-fn birth(pid: i32) -> Result<String> {
+fn query_birth(pid: i32) -> io::Result<String> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of_val(&info) as i32;
     let result = unsafe {
@@ -76,18 +88,19 @@ fn birth(pid: i32) -> Result<String> {
             size,
         )
     };
-    require(result == size, "proc_pidinfo birth unavailable")?;
+    require(result == size, "proc_pidinfo birth unavailable")
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok(format!(
         "{}:{}",
         info.pbi_start_tvsec, info.pbi_start_tvusec
     ))
 }
 #[cfg(target_os = "freebsd")]
-fn birth(pid: i32) -> Result<String> {
+fn query_birth(pid: i32) -> io::Result<String> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
     let mut info: libc::kinfo_proc = unsafe { std::mem::zeroed() };
     let mut size = std::mem::size_of_val(&info);
-    check(unsafe {
+    if unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
             4,
@@ -96,12 +109,14 @@ fn birth(pid: i32) -> Result<String> {
             std::ptr::null_mut(),
             0,
         )
-    })
-    .map_err(|error| format!("sysctl(KERN_PROC_PID, pid={pid}): {error}"))?;
+    } < 0 {
+        return Err(io::Error::last_os_error());
+    }
     require(
         size == std::mem::size_of_val(&info),
         "sysctl birth unavailable",
-    )?;
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok(format!(
         "{}:{}",
         info.ki_start.tv_sec, info.ki_start.tv_usec
@@ -286,20 +301,36 @@ impl Held {
     }
 }
 fn owned_exited(
-    table: &BTreeMap<i32, Value>,
+    inventory: impl FnOnce() -> Result<BTreeMap<i32, Value>>,
     owned: &[Held],
     roles: &BTreeMap<&str, i32>,
+    post_fault: bool,
+    mut sample_birth: impl FnMut(i32) -> io::Result<String>,
 ) -> Result<bool> {
+    let table = inventory().map_err(|error| format!("owned teardown ps inventory: {error}"))?;
     for held in owned
         .iter()
         .filter(|h| roles.values().any(|pid| h.identity["pid"] == *pid))
     {
         let pid = number(&held.identity, "pid")?;
         if let Some(p) = table.get(&pid) {
-            let current_birth = birth(pid).map_err(|error| {
-                let role = roles.iter().find(|(_, p)| **p == pid).unwrap().0;
-                format!("owned teardown birth role={role} pinned={} observed={p}: {error}", held.identity)
-            })?;
+            let current_birth = match sample_birth(pid) {
+                Ok(value) => value,
+                Err(error)
+                    if post_fault
+                        && (error.raw_os_error() == Some(libc::ESRCH)
+                            || cfg!(target_os = "linux")
+                                && error.raw_os_error() == Some(libc::ENOENT)) =>
+                {
+                    // A disappearing sample is inconclusive; only a fresh complete poll can finish.
+                    return Ok(false);
+                }
+                Err(error) => {
+                    let role = roles.iter().find(|(_, p)| **p == pid).unwrap().0;
+                    let call = if cfg!(target_os = "freebsd") { "sysctl(KERN_PROC_PID)" } else { "query_birth" };
+                    return Err(format!("owned teardown birth role={role} pinned={} observed={p} call={call}: {error}", held.identity));
+                }
+            };
             if current_birth == held.identity["birth"].as_str().ok_or("birth missing")?
                 && !p["state"].as_str().ok_or("state missing")?.starts_with('Z')
             {
@@ -978,11 +1009,7 @@ fn session(
                     row["exit"] = json!({"code":status.code(),"signal":status.signal()});
                 }
             }
-            owned_exited(
-                &snapshot().map_err(|error| format!("owned teardown ps inventory: {error}"))?,
-                owned,
-                &roles,
-            )
+            owned_exited(snapshot, owned, &roles, !faults.is_empty(), query_birth)
         },
         end,
         master,
@@ -1371,7 +1398,7 @@ mod tests {
         assert_ne!(children_of(&table, 10), vec![12]);
     }
     #[test]
-    fn teardown_birth_failure_names_role_and_pinned_identity_without_crediting_exit() {
+    fn teardown_disappearing_birth_is_pending_until_fresh_complete_absence() {
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
         let pid = child.id() as i32;
         let sampled = snapshot().and_then(|table| {
@@ -1382,13 +1409,174 @@ mod tests {
         child.wait().unwrap();
         let (table, held) = sampled.unwrap();
         let roles = BTreeMap::from([("guardian", pid)]);
-        let native_error = birth(pid).unwrap_err();
-        let error = owned_exited(&table, std::slice::from_ref(&held), &roles).unwrap_err();
-        assert!(error.contains(&native_error), "{error}");
-        assert!(error.contains("owned teardown birth role=guardian"), "{error}");
-        assert!(error.contains(&format!("pinned={}", held.identity)), "{error}");
-        assert!(error.contains(&format!("observed={}", table[&pid])), "{error}");
-        assert!(owned_exited(&snapshot().unwrap(), &[held], &roles).unwrap());
+        assert!(birth(pid).is_err(), "strict pre-fault birth facade must still fail");
+        let pending = owned_exited(
+            || Ok(table),
+            std::slice::from_ref(&held),
+            &roles,
+            true,
+            query_birth,
+        );
+        if cfg!(target_os = "macos") {
+            assert!(pending.is_err(), "Darwin unavailable birth remains a hard failure");
+        } else {
+            assert!(matches!(pending, Ok(false)), "{pending:?}");
+        }
+        let fresh = snapshot().unwrap();
+        assert!(!fresh.contains_key(&pid));
+        assert!(owned_exited(
+            || Ok(fresh),
+            &[held],
+            &roles,
+            true,
+            |_| panic!("absence must come from complete inventory, not another birth error"),
+        ).unwrap());
+    }
+    #[test]
+    fn teardown_only_native_disappearance_after_fault_is_pending() {
+        let table = snapshot().unwrap();
+        let held = Held::open(&pin(&table, std::process::id() as i32).unwrap()).unwrap();
+        let roles = BTreeMap::from([("guardian", number(&held.identity, "pid").unwrap())]);
+        let mut gone = vec![libc::ESRCH];
+        if cfg!(target_os = "linux") {
+            gone.push(libc::ENOENT);
+        }
+        for errno in gone {
+            for post_fault in [false, true] {
+                let mut queries = 0;
+                let result = owned_exited(
+                    || Ok(table.clone()),
+                    std::slice::from_ref(&held),
+                    &roles,
+                    post_fault,
+                    |_| {
+                        queries += 1;
+                        Err(io::Error::from_raw_os_error(errno))
+                    },
+                );
+                assert_eq!(queries, 1, "retry needs a new complete inventory");
+                if post_fault {
+                    assert!(matches!(result, Ok(false)), "{result:?}");
+                } else {
+                    assert!(result.is_err(), "normal exit must not gain retry permission");
+                }
+            }
+        }
+        let mut fatal = vec![libc::EACCES, libc::EPERM, libc::EINVAL, libc::EIO];
+        if !cfg!(target_os = "linux") {
+            fatal.push(libc::ENOENT);
+        }
+        for error in fatal.into_iter().map(io::Error::from_raw_os_error).chain([
+            io::Error::new(io::ErrorKind::InvalidData, "invalid native birth record"),
+            io::Error::new(io::ErrorKind::NotFound, "No such process (os error 3)"),
+        ]) {
+            let message = error.to_string();
+            let mut error = Some(error);
+            let failure = owned_exited(
+                || Ok(table.clone()),
+                std::slice::from_ref(&held),
+                &roles,
+                true,
+                |_| Err(error.take().unwrap()),
+            ).unwrap_err();
+            assert!(failure.contains(&message), "{failure}");
+            assert!(failure.contains("owned teardown birth role=guardian"), "{failure}");
+            assert!(failure.contains(&format!("pinned={}", held.identity)), "{failure}");
+        }
+    }
+    #[test]
+    fn teardown_preserves_stopped_zombie_and_reused_identity_policy() {
+        let table = snapshot().unwrap();
+        let pid = std::process::id() as i32;
+        let held = Held::open(&pin(&table, pid).unwrap()).unwrap();
+        let cases = [("S", false), ("T", false), ("Ts+", false), ("Z", false), ("Z+", false), ("S", true), ("T", true)];
+        for (role, expected) in [
+            ("outer", [false, false, false, true, true, true, true]),
+            ("guardian", [false, false, false, true, true, true, true]),
+            ("pi", [false, false, false, true, true, true, true]),
+            ("taskOuter", [false, false, false, true, true, true, true]),
+            ("taskGuardian", [false, false, false, true, true, true, true]),
+            ("payload", [false, false, false, true, true, true, true]),
+            ("leaf", [false, false, false, true, true, true, true]),
+            ("observer", [false; 7]),
+            ("anchor", [false; 7]),
+            ("extensionChild", [false; 7]),
+            ("adoptedGrandchild", [false; 7]),
+        ] {
+            let roles = BTreeMap::from([(role, pid)]);
+            for ((state, reused), done) in cases.into_iter().zip(expected) {
+                let mut observed = table.clone();
+                observed.get_mut(&pid).unwrap()["state"] = json!(state);
+                let birth = if reused { "other-birth" } else { held.identity["birth"].as_str().unwrap() };
+                let pending_table = observed.clone();
+                assert_eq!(owned_exited(
+                    || Ok(observed),
+                    std::slice::from_ref(&held),
+                    &roles,
+                    true,
+                    |_| Ok(birth.to_string()),
+                ).unwrap(), done, "role={role} state={state} reused={reused}");
+                assert!(!owned_exited(
+                    || Ok(pending_table),
+                    std::slice::from_ref(&held),
+                    &roles,
+                    true,
+                    |_| Err(io::Error::from_raw_os_error(libc::ESRCH)),
+                ).unwrap(), "disappearance never grants {role} completion");
+            }
+        }
+    }
+    #[test]
+    fn teardown_failed_or_malformed_inventory_never_credits_absence() {
+        let table = snapshot().unwrap();
+        let held = Held::open(&pin(&table, std::process::id() as i32).unwrap()).unwrap();
+        let roles = BTreeMap::from([("guardian", number(&held.identity, "pid").unwrap())]);
+        for inventory in [
+            Err("ps inventory failed".to_string()),
+            parse_inventory("1 2 malformed inventory"),
+            parse_inventory(""),
+        ] {
+            let failure = owned_exited(
+                || inventory,
+                std::slice::from_ref(&held),
+                &roles,
+                true,
+                |_| panic!("failed inventory cannot reach birth query or prove absence"),
+            ).unwrap_err();
+            assert!(failure.starts_with("owned teardown ps inventory:"), "{failure}");
+        }
+    }
+    #[test]
+    fn teardown_repeated_inconclusive_polls_keep_original_eight_second_deadline() {
+        let table = snapshot().unwrap();
+        let held = Held::open(&pin(&table, std::process::id() as i32).unwrap()).unwrap();
+        let roles = BTreeMap::from([("guardian", number(&held.identity, "pid").unwrap())]);
+        let mut master = File::open("/dev/null").unwrap();
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(8);
+        let mut polls = 0;
+        let message = "owned teardown exceeded 8s (stopped processes count as alive)";
+        let failure = wait_for(
+            || {
+                assert!(Instant::now() < deadline + Duration::from_secs(2), "pending polls escaped original deadline");
+                polls += 1;
+                owned_exited(
+                    || Ok(table.clone()),
+                    std::slice::from_ref(&held),
+                    &roles,
+                    true,
+                    |_| Err(io::Error::from_raw_os_error(libc::ESRCH)),
+                )
+            },
+            deadline,
+            &mut master,
+            &mut Vec::new(),
+            message,
+        ).unwrap_err();
+        assert_eq!(failure, message);
+        assert!(polls > 1);
+        assert!(start.elapsed() >= Duration::from_secs(8));
+        assert!(start.elapsed() < Duration::from_secs(10));
     }
     #[test]
     fn wait_condition_error_retains_stage_and_native_failure() {
