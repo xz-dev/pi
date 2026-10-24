@@ -181,6 +181,15 @@ describe("DefaultPackageManager git update", () => {
 			packageManager.setProgressCallback((event) => {
 				if (event.type === "result" && event.action === "update" && event.message) updated.push(event.message);
 			});
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([
+				{
+					source: gitSource,
+					displayName: "github.com/test/extension",
+					type: "git",
+					scope: "user",
+					reason: "package",
+				},
+			]);
 			await packageManager.update();
 
 			// Verify update succeeded
