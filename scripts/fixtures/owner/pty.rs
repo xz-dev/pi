@@ -96,7 +96,8 @@ fn birth(pid: i32) -> Result<String> {
             std::ptr::null_mut(),
             0,
         )
-    })?;
+    })
+    .map_err(|error| format!("sysctl(KERN_PROC_PID, pid={pid}): {error}"))?;
     require(
         size == std::mem::size_of_val(&info),
         "sysctl birth unavailable",
@@ -284,6 +285,37 @@ impl Held {
         Ok(())
     }
 }
+fn owned_exited(
+    table: &BTreeMap<i32, Value>,
+    owned: &[Held],
+    roles: &BTreeMap<&str, i32>,
+) -> Result<bool> {
+    for held in owned
+        .iter()
+        .filter(|h| roles.values().any(|pid| h.identity["pid"] == *pid))
+    {
+        let pid = number(&held.identity, "pid")?;
+        if let Some(p) = table.get(&pid) {
+            let current_birth = birth(pid).map_err(|error| {
+                let role = roles.iter().find(|(_, p)| **p == pid).unwrap().0;
+                format!("owned teardown birth role={role} pinned={} observed={p}: {error}", held.identity)
+            })?;
+            if current_birth == held.identity["birth"].as_str().ok_or("birth missing")?
+                && !p["state"].as_str().ok_or("state missing")?.starts_with('Z')
+            {
+                return Ok(false);
+            }
+            if ["observer", "anchor", "extensionChild", "adoptedGrandchild"]
+                .iter()
+                .any(|role| roles.get(role) == Some(&pid))
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn terminal() -> Result<Value> {
     let mut term: libc::termios = unsafe { std::mem::zeroed() };
     check(unsafe { libc::tcgetattr(0, &mut term) })?;
@@ -335,8 +367,8 @@ fn wait_for(
     message: &str,
 ) -> Result<()> {
     loop {
-        drain(master, output)?;
-        if condition()? {
+        drain(master, output).map_err(|error| format!("PTY read while waiting ({message}): {error}"))?;
+        if condition().map_err(|error| format!("wait condition ({message}): {error}"))? {
             return Ok(());
         }
         require(Instant::now() < deadline, message)?;
@@ -910,7 +942,7 @@ fn session(
             && !work.join("shutdown-returned").exists(),
         "shutdown hook entered before injected fault",
     )?;
-    row["faultTargets"] = json!(faults.iter().map(|(role, held)| json!({"role":role,"pid":held.identity["pid"],"birth":held.identity["birth"],"parent":held.identity["parent"],"method":if cfg!(target_os="linux") {"pidfd"} else {"checked-birth"}})).collect::<Vec<_>>());
+    row["faultTargets"] = json!(faults.iter().map(|(role, held)| json!({"role":role,"pid":held.identity["pid"],"birth":held.identity["birth"],"parent":held.identity["parent"],"method":if cfg!(target_os="linux") {"pidfd"} else {"checked-birth"},"delivered":false})).collect::<Vec<_>>());
     let death_start = Instant::now();
     if name == "suspend-resume" {
         foreground(outer_pid)?;
@@ -929,45 +961,37 @@ fn session(
         sleep(Duration::from_millis(500));
         master.write_all(&[4]).map_err(|e| e.to_string())?;
     } else {
-        for (_, held) in &faults {
-            held.signal(libc::SIGKILL)?;
+        for (index, (role, held)) in faults.iter().enumerate() {
+            held.signal(libc::SIGKILL).map_err(|error| {
+                format!("fault SIGKILL role={role} pinned={}: {error}", held.identity)
+            })?;
+            row["faultTargets"][index]["delivered"] = json!(true);
         }
     }
     let end = Instant::now() + Duration::from_secs(8);
     wait_for(
         || {
             for child in children.iter_mut().take(1) {
-                if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                if let Some(status) = child.try_wait().map_err(|error| {
+                    format!("owned teardown try_wait role=outer pinned={}: {error}", processes["outer"])
+                })? {
                     row["exit"] = json!({"code":status.code(),"signal":status.signal()});
                 }
             }
-            let table = snapshot()?;
-            for held in owned
-                .iter()
-                .filter(|h| roles.values().any(|pid| h.identity["pid"] == *pid))
-            {
-                let pid = number(&held.identity, "pid")?;
-                if let Some(p) = table.get(&pid) {
-                    if birth(pid)? == held.identity["birth"].as_str().ok_or("birth missing")?
-                        && !p["state"].as_str().ok_or("state missing")?.starts_with('Z')
-                    {
-                        return Ok(false);
-                    }
-                    if ["observer", "anchor", "extensionChild", "adoptedGrandchild"]
-                        .iter()
-                        .any(|role| roles.get(role) == Some(&pid))
-                    {
-                        return Ok(false);
-                    }
-                }
-            }
-            Ok(true)
+            owned_exited(
+                &snapshot().map_err(|error| format!("owned teardown ps inventory: {error}"))?,
+                owned,
+                &roles,
+            )
         },
         end,
         master,
         output,
         "owned teardown exceeded 8s (stopped processes count as alive)",
-    )?;
+    )
+    .inspect_err(|_| {
+        row["teardownFailureMs"] = json!(death_start.elapsed().as_millis() as u64);
+    })?;
     if name == "suspend-resume" {
         require(
             row["exit"]["code"] == 0 && row["exit"]["signal"].is_null(),
@@ -1181,6 +1205,17 @@ fn main() {
                     ),
                     Err(error) => json!({"error":error}),
                 };
+                let work = Path::new(&args[4]);
+                row["shutdownFilesAtFailure"] = json!({"armed":work.join("shutdown-arm").exists()});
+                for name in ["shutdown-hook-entered", "shutdown-entered", "shutdown-returned"] {
+                    let path = work.join(name);
+                    let record = if path.exists() {
+                        load(&path).unwrap_or_else(|error| json!({"error":error}))
+                    } else {
+                        Value::Null
+                    };
+                    row["shutdownFilesAtFailure"][name] = json!({"record":record,"temporaryExists":path.with_extension("tmp").exists()});
+                }
             }
             row["outputTail"] = json!(String::from_utf8_lossy(&output));
             // Evidence is final BEFORE any cleanup. No cleanup CONT, even on failure.
@@ -1334,6 +1369,41 @@ mod tests {
         assert_eq!(children_of(&table, 10), vec![11]);
         assert_eq!(children_of(&table, 11), vec![12]);
         assert_ne!(children_of(&table, 10), vec![12]);
+    }
+    #[test]
+    fn teardown_birth_failure_names_role_and_pinned_identity_without_crediting_exit() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let sampled = snapshot().and_then(|table| {
+            let held = Held::open(&pin(&table, pid)?)?;
+            Ok((table, held))
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let (table, held) = sampled.unwrap();
+        let roles = BTreeMap::from([("guardian", pid)]);
+        let native_error = birth(pid).unwrap_err();
+        let error = owned_exited(&table, std::slice::from_ref(&held), &roles).unwrap_err();
+        assert!(error.contains(&native_error), "{error}");
+        assert!(error.contains("owned teardown birth role=guardian"), "{error}");
+        assert!(error.contains(&format!("pinned={}", held.identity)), "{error}");
+        assert!(error.contains(&format!("observed={}", table[&pid])), "{error}");
+        assert!(owned_exited(&snapshot().unwrap(), &[held], &roles).unwrap());
+    }
+    #[test]
+    fn wait_condition_error_retains_stage_and_native_failure() {
+        let mut master = File::open("/dev/null").unwrap();
+        let native_error = std::io::Error::from_raw_os_error(libc::ESRCH).to_string();
+        let error = wait_for(
+            || Err(native_error.clone()),
+            Instant::now() + Duration::from_secs(1),
+            &mut master,
+            &mut Vec::new(),
+            "owned teardown exceeded 8s (stopped processes count as alive)",
+        )
+        .unwrap_err();
+        assert!(error.contains(&native_error), "{error}");
+        assert!(error.starts_with("wait condition (owned teardown"), "{error}");
     }
     #[test]
     fn held_target_rejects_wrong_birth_before_signaling() {
