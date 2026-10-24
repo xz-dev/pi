@@ -13,6 +13,7 @@ interface NpmManifest {
 	overrides?: unknown;
 	resolutions?: unknown;
 	pnpm?: { overrides?: unknown };
+	workspaces?: unknown;
 }
 
 export interface NpmRuntimeDependency {
@@ -37,12 +38,18 @@ function readManifest(directory: string): NpmManifest | undefined {
 }
 
 /** Inspect only installed runtime edges; the package manager remains responsible for solving updates. */
-export function getNpmRuntimeDependencies(installRoot: string): Map<string, NpmRuntimeDependency[]> {
+export function getNpmRuntimeDependencies(
+	installRoot: string,
+	packageRoot = false,
+): Map<string, NpmRuntimeDependency[]> {
 	const result = new Map<string, NpmRuntimeDependency[]>();
 	const manifest = readManifest(installRoot);
 	// shortcut: overrides and resolutions need manager-specific planning; skip until that is supported.
 	if (!manifest || manifest.overrides || manifest.resolutions || manifest.pnpm?.overrides) return result;
-	if (!existsSync(installRoot) || existsSync(join(installRoot, "npm-shrinkwrap.json"))) return result;
+	// shortcut: Git workspaces can contain unenumerated affected instances; skip until their graph is supported.
+	if (packageRoot && manifest.workspaces !== undefined) return result;
+	if (!existsSync(installRoot) || (!packageRoot && existsSync(join(installRoot, "npm-shrinkwrap.json"))))
+		return result;
 	const root = realpathSync(installRoot);
 	const nodes = new Map<string, DependencyNode>();
 	const visited = new Set<string>();
@@ -92,18 +99,26 @@ export function getNpmRuntimeDependencies(installRoot: string): Map<string, NpmR
 		return node;
 	};
 
-	for (const name of Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies })) {
+	for (const [name, spec] of Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies })) {
 		const path = resolveDependency(root, name);
 		if (!path) continue;
-		const node = visit(path, false);
+		const range = typeof spec === "string" ? validRange(spec) : null;
+		const bundles = manifest.bundleDependencies ?? manifest.bundledDependencies;
+		const bundled = bundles === true || (Array.isArray(bundles) && bundles.includes(name));
+		const node = visit(path, packageRoot && (!range || bundled));
 		if (node) {
 			roots.set(name, node);
-			blockedNames.add(node.name);
+			if (packageRoot) {
+				if (range && !node.ranges.includes(range)) node.ranges.push(range);
+				if (node.name !== name) blockedNames.add(node.name);
+			} else {
+				blockedNames.add(node.name);
+			}
 		}
 	}
 	for (const [name, node] of roots) {
 		const reachable = new Set<DependencyNode>();
-		const pending = [...node.children];
+		const pending = packageRoot ? [node] : [...node.children];
 		for (const child of pending) {
 			if (reachable.has(child)) continue;
 			reachable.add(child);
