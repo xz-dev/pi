@@ -5,6 +5,10 @@ edition = "2024"
 description = "Remote execution environment daemon for Pi Durable"
 publish = false
 
+[features]
+# Fault injection exists only in explicitly enabled test artifacts, never default builds.
+test-parent-death-failure = []
+
 [dependencies]
 encoding_rs = "=0.8.42"
 ignore = "=0.4.33"
@@ -18,11 +22,19 @@ libc = "=0.2.190"
 windows-sys = { version = "=0.61.2", features = [
 	"Win32_Foundation",
 	"Win32_Security",
+	"Win32_Security_Authorization",
 	"Win32_Storage_FileSystem",
+	"Win32_System_Console",
+	"Win32_System_Diagnostics_ToolHelp",
 	"Win32_System_IO",
 	"Win32_System_JobObjects",
+	"Win32_System_Pipes",
 	"Win32_System_Threading",
 ] }
+
+[[test]]
+name = "supervise_parent_death"
+harness = false
 
 [profile.release]
 lto = true

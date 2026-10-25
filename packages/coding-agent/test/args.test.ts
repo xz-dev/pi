@@ -429,6 +429,21 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--no-process-ownership flag", () => {
+		test("consumes only the switch and preserves the following prompt", () => {
+			const result = parseArgs(["--no-process-ownership", "hello"]);
+			expect(result.noProcessOwnership).toBe(true);
+			expect(result.messages).toEqual(["hello"]);
+			expect(result.unknownFlags.size).toBe(0);
+		});
+
+		test("treats the switch after -- as prompt text", () => {
+			const result = parseArgs(["--", "--no-process-ownership"]);
+			expect(result.noProcessOwnership).toBeUndefined();
+			expect(result.messages).toEqual(["--no-process-ownership"]);
+		});
+	});
+
 	describe("--offline flag", () => {
 		test("parses --offline flag", () => {
 			const result = parseArgs(["--offline"]);
