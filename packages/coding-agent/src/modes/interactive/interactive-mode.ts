@@ -123,6 +123,7 @@ import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { addMcpServerConfig, loadMcpConfig } from "../../extensions/mcp/config.ts";
+import { pauseBashTimeouts, resumeBashTimeouts } from "../../utils/bash-timeout.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardFilePaths, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
@@ -130,6 +131,7 @@ import { parseGitUrl } from "../../utils/git.ts";
 import { ensurePngTranscoder } from "../../utils/image-convert.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
+import { hasLostCliProcessOwner, requestCliProcessOwnerShutdown } from "../../utils/process-owner.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { markStartupBenchmarkStage } from "../../utils/startup-benchmark.ts";
 import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
@@ -4288,8 +4290,46 @@ export class InteractiveMode {
 	 * repaint the final frame while the process is exiting.
 	 */
 	private isShuttingDown = false;
+	private isSuspended = false;
+	private ownerLossExitTimer?: ReturnType<typeof setTimeout>;
 
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+		const finishSignalShutdown = () => {
+			if (this.ownerLossExitTimer) clearTimeout(this.ownerLossExitTimer);
+			this.stop();
+			if (this.isSuspended && !process.stdin.closed) {
+				// Runtime tty close/exit resets can SIGTTOU a background job after Ctrl-Z.
+				// Final-exit only: close our validated tty descriptor, then exit without yielding.
+				const input = process.stdin;
+				const handle: unknown = Reflect.get(input, "_handle");
+				const fd: unknown = handle && typeof handle === "object" ? Reflect.get(handle, "fd") : input.fd;
+				if (typeof fd !== "number" || !Number.isSafeInteger(fd) || fd < 0 || !input.isTTY) {
+					throw new Error("Terminal input descriptor unavailable during suspended shutdown");
+				}
+				const stdin = fs.fstatSync(input.fd);
+				const current = fs.fstatSync(fd);
+				if (
+					!stdin.isCharacterDevice() ||
+					!current.isCharacterDevice() ||
+					stdin.dev !== current.dev ||
+					stdin.ino !== current.ino ||
+					stdin.rdev !== current.rdev
+				) {
+					throw new Error("Terminal input descriptor identity changed during suspended shutdown");
+				}
+				fs.closeSync(fd);
+			}
+			process.exit(0);
+		};
+		// Both native owners may already be gone: extension cleanup cannot own our exit.
+		// Arm before the re-entry guard, including owner loss during an earlier shutdown.
+		if (options?.fromSignal && hasLostCliProcessOwner() && !this.ownerLossExitTimer) {
+			this.ownerLossExitTimer = setTimeout(() => {
+				this.themeController.disableAutoSync();
+				finishSignalShutdown();
+			}, 5_000);
+		}
+
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
 		// Keep signal handlers registered until terminal cleanup has completed.
@@ -4306,9 +4346,8 @@ export class InteractiveMode {
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
 			await this.runtimeHost.dispose();
 			this.themeController.disableAutoSync();
-			await this.ui.terminal.drainInput(1000);
-			this.stop();
-			process.exit(0);
+			if (!this.isSuspended) await this.ui.terminal.drainInput(1000);
+			finishSignalShutdown();
 		}
 
 		// Interactive quit (Ctrl+D, Ctrl+C, /quit, extension shutdown()). Stop the
@@ -4400,11 +4439,23 @@ export class InteractiveMode {
 				// first, then attempts terminal restore. A genuinely dead terminal
 				// surfaces as an EIO on the restore writes, which the stdout/stderr
 				// error handler converts into emergencyTerminalExit (see #4144, #5080).
+				requestCliProcessOwnerShutdown();
 				killTrackedDetachedChildren();
 				void this.shutdown({ fromSignal: true });
 			};
 			process.prependListener(signal, handler);
 			this.signalCleanupHandlers.push(() => process.off(signal, handler));
+		}
+
+		if (process.platform !== "win32" && process.env.PI_PROCESS_OWNER_BINARY) {
+			const redrawOnContinue = () => {
+				// bg already restarted private input; fg must repaint discarded background frames.
+				if (!this.isShuttingDown && !this.isSuspended && !hasLostCliProcessOwner()) {
+					this.ui.requestRender(true);
+				}
+			};
+			process.on("SIGCONT", redrawOnContinue);
+			this.signalCleanupHandlers.push(() => process.off("SIGCONT", redrawOnContinue));
 		}
 
 		const terminalErrorHandler = (error: Error) => {
@@ -4442,6 +4493,7 @@ export class InteractiveMode {
 			return;
 		}
 
+		const parent = process.ppid;
 		// Keep the event loop alive while suspended. Without this, stopping the TUI
 		// can leave Node with no ref'ed handles, causing the process to exit on fg
 		// before the SIGCONT handler gets a chance to restore the terminal.
@@ -4454,6 +4506,14 @@ export class InteractiveMode {
 
 		// Set up handler to restore TUI when resumed
 		process.once("SIGCONT", () => {
+			if (this.isShuttingDown) return;
+			if (process.ppid !== parent) {
+				// A death wake is not fg: touching the shell's tty would stop us on SIGTTOU.
+				process.kill(process.pid, "SIGTERM");
+				return;
+			}
+			this.isSuspended = false;
+			resumeBashTimeouts();
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
 			this.ui.start();
@@ -4463,10 +4523,14 @@ export class InteractiveMode {
 		try {
 			// Stop the TUI (restore terminal to normal mode)
 			this.ui.stop();
+			this.isSuspended = true;
 
+			pauseBashTimeouts();
 			// Send SIGTSTP to process group (pid=0 means all processes in group)
 			process.kill(0, "SIGTSTP");
 		} catch (error) {
+			this.isSuspended = false;
+			resumeBashTimeouts();
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
 			throw error;
@@ -7103,7 +7167,7 @@ export class InteractiveMode {
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
 		this.disposeActiveSelector();
-		if (this.settingsManager.getShowTerminalProgress()) {
+		if (!this.isSuspended && this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}
 		this.clearStatusIndicator();
@@ -7115,7 +7179,7 @@ export class InteractiveMode {
 			this.unsubscribe();
 		}
 		if (this.isInitialized) {
-			this.stopInteractiveTui(fullscreenExitOutput);
+			if (!this.isSuspended) this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
 		this.unregisterSignalHandlers();
