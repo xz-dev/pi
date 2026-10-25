@@ -39,6 +39,7 @@ type LoadedResourcesContext = {
 };
 
 type RebindContext = {
+	session: { readonly isBackgroundCompacting: boolean };
 	unsubscribe?: () => void;
 	applyRuntimeSettings: () => void;
 	programStatus: { reset(): void };
@@ -252,6 +253,7 @@ describe("regression #5943: session_start transient UI", () => {
 
 		try {
 			const context: RebindContext = {
+				session: harness.session,
 				applyRuntimeSettings: () => events.push("apply"),
 				programStatus: { reset: () => {} },
 				renderCurrentSessionState: () => events.push("render"),
@@ -294,6 +296,7 @@ describe("regression #5943: session_start transient UI", () => {
 
 		try {
 			const context: RebindContext = {
+				session: harness.session,
 				applyRuntimeSettings: () => {},
 				programStatus: { reset: () => {} },
 				renderCurrentSessionState: () => events.push("render"),
@@ -347,6 +350,7 @@ describe("regression #5943: session_start transient UI", () => {
 
 		try {
 			const context: RebindContext = {
+				session: harness.session,
 				applyRuntimeSettings: () => {},
 				programStatus: { reset: () => {} },
 				renderCurrentSessionState: () => events.push("render"),
