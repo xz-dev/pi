@@ -5,6 +5,7 @@ import {
 	existsSync,
 	globSync,
 	mkdirSync,
+	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
@@ -1404,11 +1405,14 @@ export class DefaultPackageManager implements PackageManager {
 		scope: InstalledSourceScope,
 	): Promise<Map<string, string[]>> {
 		const updates = new Map<string, string[]>();
-		// shortcut: pnpm's isolated transitive update command needs separate solver validation.
-		if (sources.length === 0 || !["npm", "bun"].includes(this.getPackageManagerName())) return updates;
+		if (sources.length === 0) return updates;
+		const manager = this.getPackageManagerName();
+		if (!["npm", "bun", "pnpm"].includes(manager)) return updates;
+		const installRoot = this.getNpmInstallRoot(scope, false);
 		return this.getDependencyUpdates(
-			getNpmRuntimeDependencies(this.getNpmInstallRoot(scope, false)),
+			getNpmRuntimeDependencies(installRoot),
 			new Map(sources.map((entry) => [entry.source, [entry.parsed.name]])),
+			manager === "pnpm" ? installRoot : this.cwd,
 		);
 	}
 
@@ -1418,6 +1422,16 @@ export class DefaultPackageManager implements PackageManager {
 		metadataCwd = this.cwd,
 	): Promise<Map<string, string[]>> {
 		const updates = new Map<string, string[]>();
+		if (this.getPackageManagerName() === "pnpm") {
+			// shortcut: native workspace settings can alter unenumerated roots; skip until their graph is supported.
+			const env = getEnv();
+			if (env.NPM_CONFIG_WORKSPACE_DIR ?? env.npm_config_workspace_dir) return updates;
+			for (let directory = canonicalizePath(metadataCwd); ; directory = dirname(directory)) {
+				if (existsSync(join(directory, "pnpm-workspace.yaml")) || existsSync(join(directory, "pnpm-workspace.yml")))
+					return updates;
+				if (dirname(directory) === directory) break;
+			}
+		}
 		const affected = new Map<string, Set<NpmRuntimeDependency>>();
 		for (const entries of dependencies.values()) {
 			for (const dependency of entries) {
@@ -1487,7 +1501,10 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async getGitDependencyUpdates(source: string, installedPath: string): Promise<string[]> {
-		if (!existsSync(join(installedPath, "package.json")) || !["npm", "bun"].includes(this.getPackageManagerName()))
+		if (
+			!existsSync(join(installedPath, "package.json")) ||
+			!["npm", "bun", "pnpm"].includes(this.getPackageManagerName())
+		)
 			return [];
 		try {
 			// Tracked locks are author intent; generated installation locks may refresh.
@@ -1526,6 +1543,35 @@ export class DefaultPackageManager implements PackageManager {
 		preserveManifest = false,
 	): Promise<void> {
 		if (names.length === 0) return;
+		if (this.getPackageManagerName() === "pnpm") {
+			// A warm pnpm cache can leave targeted indirect versions unchanged even during an online update.
+			const cacheDir = mkdtempSync(join(getExtensionTempFolder(this.agentDir), "pnpm-update-"));
+			try {
+				await this.runNpmCommand(
+					[
+						"update",
+						...names,
+						"--dir",
+						installRoot,
+						"--depth",
+						"Infinity",
+						"--prod",
+						"--no-save",
+						"--offline=false",
+						"--prefer-offline=false",
+						"--cache-dir",
+						cacheDir,
+						"--config.auto-install-peers=false",
+						"--config.strict-peer-dependencies=false",
+						"--config.strict-dep-builds=false",
+					],
+					{ cwd: installRoot },
+				);
+			} finally {
+				rmSync(cacheDir, { recursive: true, force: true });
+			}
+			return;
+		}
 		const args =
 			this.getPackageManagerName() === "bun"
 				? ["update", ...names, "--cwd", installRoot, "--omit=dev", "--omit=peer"]

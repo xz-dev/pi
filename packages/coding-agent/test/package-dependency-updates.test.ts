@@ -1,10 +1,20 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, it, vi } from "vitest";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -32,6 +42,11 @@ interface Scenario {
 	rejectedVersion?: string;
 	updatedVersion?: string;
 	ownUpdate?: boolean;
+	rootRegistry?: boolean;
+	workspace?: "root" | "ancestor";
+	workspaceEnv?: "NPM_CONFIG_WORKSPACE_DIR" | "npm_config_workspace_dir";
+	updateFailure?: boolean;
+	unrelated?: boolean;
 	git?: "floating" | "sha" | "tag" | "tracked-lock" | "tracked-shrinkwrap" | "both";
 }
 
@@ -57,6 +72,26 @@ async function runFixtureCommand(command: string, args: string[], cwd: string): 
 }
 
 const scenarios: Scenario[] = [
+	...(["NPM_CONFIG_WORKSPACE_DIR", "npm_config_workspace_dir"] as const).flatMap((workspaceEnv) =>
+		([undefined, "floating"] as const).map((git) => ({
+			name: `skips external workspace environment ${workspaceEnv} for ${git ? "Git" : "managed npm"} roots`,
+			workspaceEnv,
+			git,
+			initialA: "1.0.0",
+			rangeA: "^1.0.0",
+			versions: ["1.0.0", "1.1.0", "3.0.0"],
+			latest: "1.1.0",
+		})),
+	),
+	{ name: "preserves an unselected plugin's unrelated floating subtree", unrelated: true, updatedVersion: "2.1.0" },
+	{ name: "skips native pnpm workspace settings at the managed root", workspace: "root" },
+	{
+		name: "skips ancestor native pnpm workspace settings through symlinked Git storage",
+		workspace: "ancestor",
+		git: "floating",
+	},
+	{ name: "cleans temporary pnpm metadata after an update failure", updateFailure: true, updatedVersion: "2.1.0" },
+	{ name: "uses the managed root registry context for dependencies", rootRegistry: true, updatedVersion: "2.1.0" },
 	{ name: "reports both npm package and dependency updates", ownUpdate: true, updatedVersion: "2.1.0" },
 	{ name: "refreshes unchanged floating Git source dependencies", git: "floating", updatedVersion: "2.1.0" },
 	{ name: "refreshes source-SHA-pinned Git dependencies", git: "sha", updatedVersion: "2.1.0" },
@@ -129,15 +164,33 @@ const scenarios: Scenario[] = [
 
 // Exercise real solvers through Pi's public package API, not mocked command arguments.
 const managers = (process.env.PI_TEST_PACKAGE_MANAGERS ?? "npm").split(",");
-for (const manager of managers) {
-	for (const layout of manager === "bun" ? ["hoisted", "isolated"] : ["hoisted"]) {
+for (const configuredCommand of managers) {
+	const manager = basename(configuredCommand).replace(/\.(cmd|exe)$/i, "");
+	const command =
+		manager === "pnpm"
+			? fileURLToPath(new URL("../../../node_modules/.bin/pnpm", import.meta.url))
+			: configuredCommand;
+	const lockName = manager === "bun" ? "bun.lock" : manager === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json";
+	for (const layout of manager === "bun" ? ["hoisted", "isolated"] : manager === "pnpm" ? ["isolated"] : ["hoisted"]) {
 		for (const scenario of scenarios) {
+			if (
+				(scenario.rootRegistry ||
+					scenario.workspace ||
+					scenario.workspaceEnv ||
+					scenario.updateFailure ||
+					scenario.unrelated) &&
+				manager !== "pnpm"
+			)
+				continue;
 			if (scenario.git === "tracked-shrinkwrap" && manager !== "npm") continue;
 			it(`${manager} (${layout}): ${scenario.name}`, async () => {
 				const root = mkdtempSync(join(tmpdir(), "pi-dependency-update-"));
 				const agentDir = join(root, "agent");
 				const work = join(root, "work");
-				mkdirSync(agentDir);
+				if (scenario.workspace === "ancestor") {
+					mkdirSync(join(root, "physical", "agent"), { recursive: true });
+					symlinkSync(join(root, "physical", "agent"), agentDir, "junction");
+				} else mkdirSync(agentDir);
 				mkdirSync(work);
 				const names = {
 					a: "pi-dependency-fixture-a",
@@ -145,6 +198,7 @@ for (const manager of managers) {
 					bridge: "pi-dependency-fixture-bridge",
 					leaf: "pi-dependency-fixture-leaf",
 					fixed: "pi-dependency-fixture-fixed",
+					unrelated: "pi-dependency-fixture-unrelated",
 				};
 				const initialA = scenario.initialA ?? "2.0.0";
 				const initialB = scenario.initialB ?? initialA;
@@ -154,8 +208,28 @@ for (const manager of managers) {
 				const packages: FixturePackage[] = [
 					{ name: names.a, version: "1.0.0", dependencies: { [names.bridge]: "^1.0.0", [names.fixed]: "1.0.0" } },
 					{ name: names.a, version: "2.0.0", dependencies: { [names.bridge]: "^1.0.0", [names.fixed]: "1.0.0" } },
-					{ name: names.b, version: "1.0.0", [runtimeField]: { [names.leaf]: rangeB } },
-					{ name: names.b, version: "2.0.0", [runtimeField]: { [names.leaf]: rangeB } },
+					{
+						name: names.b,
+						version: "1.0.0",
+						[runtimeField]: {
+							[names.leaf]: rangeB,
+							...(scenario.unrelated ? { [names.unrelated]: "^1.0.0" } : {}),
+						},
+					},
+					{
+						name: names.b,
+						version: "2.0.0",
+						[runtimeField]: {
+							[names.leaf]: rangeB,
+							...(scenario.unrelated ? { [names.unrelated]: "^1.0.0" } : {}),
+						},
+					},
+					...(scenario.unrelated
+						? [
+								{ name: names.unrelated, version: "1.0.0" },
+								{ name: names.unrelated, version: "1.1.0" },
+							]
+						: []),
 					{
 						name: names.bridge,
 						version: "1.0.0",
@@ -250,8 +324,9 @@ for (const manager of managers) {
 				base = `http://127.0.0.1:${address.port}`;
 				const userConfig = join(root, ".npmrc");
 				const globalConfig = join(root, "global.npmrc");
-				writeFileSync(userConfig, "");
-				writeFileSync(globalConfig, "");
+				const nativeConfig = `ignore-scripts=true\nengine-strict=${scenario.rejected?.engines ? "true" : "false"}\n`;
+				writeFileSync(userConfig, nativeConfig);
+				writeFileSync(globalConfig, nativeConfig);
 				vi.stubEnv("PI_OFFLINE", "");
 				vi.stubEnv("HOME", root);
 				vi.stubEnv("npm_config_userconfig", userConfig);
@@ -261,13 +336,38 @@ for (const manager of managers) {
 				vi.stubEnv("npm_config_fetch_retries", "0");
 				vi.stubEnv("npm_config_ignore_scripts", "true");
 				vi.stubEnv("npm_config_engine_strict", scenario.rejected?.engines ? "true" : "false");
+				vi.stubEnv("pnpm_config_engine_strict", scenario.rejected?.engines ? "true" : "false");
+				vi.stubEnv("pnpm_config_ignore_scripts", "true");
 				vi.stubEnv("BUN_INSTALL_CACHE_DIR", join(root, "bun-cache"));
+				vi.stubEnv("PNPM_HOME", join(root, "pnpm-home"));
+				vi.stubEnv("XDG_DATA_HOME", join(root, "xdg-data"));
+				vi.stubEnv("XDG_CACHE_HOME", join(root, "xdg-cache"));
+				vi.stubEnv("XDG_CONFIG_HOME", join(root, "xdg-config"));
+				if (manager === "pnpm") {
+					vi.stubEnv("NPM_CONFIG_WORKSPACE_DIR", undefined);
+					vi.stubEnv("npm_config_workspace_dir", undefined);
+				}
 				try {
 					if (manager === "bun") {
 						mkdirSync(join(agentDir, "npm"), { recursive: true });
 						writeFileSync(join(agentDir, "npm", "bunfig.toml"), `[install]\nlinker = "${layout}"\n`);
 					}
-					const settings = SettingsManager.inMemory({ npmCommand: [manager] });
+					const rootRegistry = scenario.git === "tag" || scenario.rootRegistry;
+					const commandArgs = manager === "pnpm" && !rootRegistry ? [`--registry=${base}`] : [];
+					if (scenario.rootRegistry) {
+						mkdirSync(join(agentDir, "npm"), { recursive: true });
+						writeFileSync(join(agentDir, "npm", ".npmrc"), `registry=${base}/\n`);
+						writeFileSync(userConfig, `${nativeConfig}registry=${base}/fallback/\n`);
+						writeFileSync(globalConfig, `${nativeConfig}registry=${base}/fallback/\n`);
+						vi.stubEnv("npm_config_registry", undefined);
+						vi.stubEnv("NPM_CONFIG_REGISTRY", undefined);
+						vi.stubEnv("pnpm_config_registry", undefined);
+						vi.stubEnv("PNPM_CONFIG_REGISTRY", undefined);
+					}
+					if (manager === "pnpm" && scenario.rejected?.engines) {
+						expect(await runFixtureCommand(command, ["config", "get", "engine-strict"], work)).toBe("true");
+					}
+					const settings = SettingsManager.inMemory({ npmCommand: [command, ...commandArgs] });
 					const pm = new DefaultPackageManager({ cwd: work, agentDir, settingsManager: settings });
 					let source = `npm:${names.a}${scenario.ownUpdate ? "" : "@1.0.0"}`;
 					let origin: string | undefined;
@@ -333,10 +433,12 @@ for (const manager of managers) {
 						const tracked = ["package.json", "index.ts", ".gitignore"];
 						if (scenario.git === "tag") {
 							// Project registry must win over isolated user/global configuration, without ENV overrides.
-							writeFileSync(userConfig, `registry=${base}/fallback/\n`);
-							writeFileSync(globalConfig, `registry=${base}/fallback/\n`);
+							writeFileSync(userConfig, `${nativeConfig}registry=${base}/fallback/\n`);
+							writeFileSync(globalConfig, `${nativeConfig}registry=${base}/fallback/\n`);
 							vi.stubEnv("npm_config_registry", undefined);
 							vi.stubEnv("NPM_CONFIG_REGISTRY", undefined);
+							vi.stubEnv("pnpm_config_registry", undefined);
+							vi.stubEnv("PNPM_CONFIG_REGISTRY", undefined);
 							writeFileSync(join(origin, ".npmrc"), `registry=${base}/\n`);
 							tracked.push(".npmrc");
 						}
@@ -347,21 +449,24 @@ for (const manager of managers) {
 						if (scenario.git === "tracked-lock" || scenario.git === "tracked-shrinkwrap") {
 							const lockManager = scenario.git === "tracked-shrinkwrap" ? "npm" : manager;
 							await runFixtureCommand(
-								lockManager,
+								lockManager === "pnpm" ? command : lockManager,
 								lockManager === "bun"
 									? ["install", "--omit=dev", "--omit=peer"]
-									: ["install", "--omit=dev", "--legacy-peer-deps"],
+									: lockManager === "pnpm"
+										? [
+												...commandArgs,
+												"install",
+												"--prod",
+												"--config.auto-install-peers=false",
+												"--config.strict-peer-dependencies=false",
+												"--config.strict-dep-builds=false",
+											]
+										: ["install", "--omit=dev", "--legacy-peer-deps"],
 								origin,
 							);
 							if (scenario.git === "tracked-shrinkwrap")
 								await runFixtureCommand("npm", ["shrinkwrap", "--ignore-scripts"], origin);
-							tracked.push(
-								scenario.git === "tracked-shrinkwrap"
-									? "npm-shrinkwrap.json"
-									: manager === "bun"
-										? "bun.lock"
-										: "package-lock.json",
-							);
+							tracked.push(scenario.git === "tracked-shrinkwrap" ? "npm-shrinkwrap.json" : lockName);
 						}
 						await runFixtureCommand("git", ["add", ...tracked], origin);
 						await runFixtureCommand("git", ["commit", "-m", "Fixture source"], origin);
@@ -410,7 +515,8 @@ console.log(JSON.parse(readFileSync(manifest, "utf8")).version);
 						expect(temporaryRoot).toBeDefined();
 						expect(versionAt(temporaryRoot!, ...firstChain)).toBe(initialA);
 					}
-					if (layout === "isolated") expect(existsSync(join(modules, ".bun"))).toBe(true);
+					if (manager === "bun" && layout === "isolated") expect(existsSync(join(modules, ".bun"))).toBe(true);
+					if (manager === "pnpm") expect(existsSync(join(modules, ".pnpm"))).toBe(true);
 					expect(versionAt(installRoot, ...firstChain)).toBe(initialA);
 					expect(versionAt(installRoot, ...secondChain)).toBe(initialB);
 					if (scenario.git === "both") {
@@ -440,19 +546,70 @@ console.log(JSON.parse(readFileSync(manifest, "utf8")).version);
 					const manifestPath = join(installRoot, "package.json");
 					const lockPath = join(
 						installRoot,
-						scenario.git === "tracked-shrinkwrap"
-							? "npm-shrinkwrap.json"
-							: manager === "bun"
-								? "bun.lock"
-								: "package-lock.json",
+						scenario.git === "tracked-shrinkwrap" ? "npm-shrinkwrap.json" : lockName,
 					);
 					const manifestBefore = readFileSync(manifestPath, "utf8");
 					const lockBefore = readFileSync(lockPath, "utf8");
 					const rootConfig = join(installRoot, ".npmrc");
 					const configBefore = existsSync(rootConfig) ? readFileSync(rootConfig, "utf8") : undefined;
+					if (scenario.workspace) {
+						if (scenario.workspace === "ancestor") {
+							writeFileSync(
+								join(root, "physical", "package.json"),
+								JSON.stringify({ name: "fixture-workspace", private: true }),
+							);
+						}
+						writeFileSync(
+							join(scenario.workspace === "root" ? installRoot : join(root, "physical"), "pnpm-workspace.yaml"),
+							"packages: []\n",
+						);
+					}
+					const externalWorkspace = join(root, "external-workspace");
+					const externalLockPath = join(externalWorkspace, "pnpm-lock.yaml");
+					const externalConfig = `packages: []\noverrides:\n  ${names.leaf}: 3.0.0\n`;
+					const readExternalLock = () =>
+						existsSync(externalLockPath)
+							? {
+									bytes: readFileSync(externalLockPath, "utf8"),
+									mtime: statSync(externalLockPath, { bigint: true }).mtimeNs,
+								}
+							: undefined;
+					if (scenario.workspaceEnv) {
+						mkdirSync(externalWorkspace);
+						writeFileSync(
+							join(externalWorkspace, "package.json"),
+							JSON.stringify({ name: "external-workspace", private: true }),
+						);
+						writeFileSync(join(externalWorkspace, "pnpm-workspace.yaml"), externalConfig);
+						if (scenario.workspaceEnv === "npm_config_workspace_dir") {
+							await runFixtureCommand(
+								command,
+								[
+									...commandArgs,
+									"install",
+									"--lockfile-only",
+									"--prod",
+									"--config.auto-install-peers=false",
+									"--config.strict-peer-dependencies=false",
+									"--config.strict-dep-builds=false",
+								],
+								externalWorkspace,
+							);
+						}
+						vi.stubEnv(scenario.workspaceEnv, externalWorkspace);
+					}
+					const externalLockBefore = readExternalLock();
 					const queriesBeforeCheck = registryQueries.length;
 					const updates = await pm.checkForAvailableUpdates();
-					if (scenario.git === "tag") {
+					if (scenario.workspaceEnv) {
+						expect.soft(updates).toEqual([]);
+						expect.soft(registryQueries.length).toBe(queriesBeforeCheck);
+						expect.soft(readExternalLock()).toEqual(externalLockBefore);
+						expect(process.env[scenario.workspaceEnv]).toBe(externalWorkspace);
+						expect(readFileSync(join(externalWorkspace, "pnpm-workspace.yaml"), "utf8")).toBe(externalConfig);
+					}
+					if (scenario.workspace) expect(registryQueries.length).toBe(queriesBeforeCheck);
+					if (rootRegistry) {
 						expect(fallbackQueries).toEqual([]);
 						expect(registryQueries.length).toBeGreaterThan(queriesBeforeCheck);
 						expect(readFileSync(rootConfig, "utf8")).toBe(configBefore);
@@ -467,24 +624,58 @@ console.log(JSON.parse(readFileSync(manifest, "utf8")).version);
 						);
 						return; // Own-source execution remains covered by the existing source-update regressions.
 					}
+					if (scenario.updatedVersion) {
+						expect(updates).toEqual(
+							expect.arrayContaining([
+								expect.objectContaining({ source, reason: scenario.git === "both" ? "both" : "dependencies" }),
+							]),
+						);
+					}
 					const queriesBeforeUpdate = registryQueries.length;
-					await pm.update(source);
-					if (scenario.git === "tag") {
+					const failure = scenario.updateFailure ? new Error("Native dependency update failed") : undefined;
+					const updateCommand = failure
+						? vi
+								.spyOn(
+									pm as unknown as {
+										runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void>;
+									},
+									"runNpmCommand",
+								)
+								.mockRejectedValueOnce(failure)
+						: undefined;
+					try {
+						if (failure) await expect(pm.update(source)).rejects.toBe(failure);
+						else await pm.update(source);
+					} finally {
+						updateCommand?.mockRestore();
+					}
+					if (scenario.workspaceEnv) {
+						expect.soft(registryQueries.length).toBe(queriesBeforeUpdate);
+						expect.soft(readExternalLock()).toEqual(externalLockBefore);
+						expect(readFileSync(lockPath, "utf8")).toBe(lockBefore);
+						expect(process.env[scenario.workspaceEnv]).toBe(externalWorkspace);
+						expect(readFileSync(join(externalWorkspace, "pnpm-workspace.yaml"), "utf8")).toBe(externalConfig);
+					}
+					if (scenario.workspace) expect(registryQueries.length).toBe(queriesBeforeUpdate);
+					if (manager === "pnpm") {
+						const cacheRoot = join(agentDir, "tmp", "extensions");
+						if (existsSync(cacheRoot))
+							expect(readdirSync(cacheRoot).filter((name) => name.startsWith("pnpm-update-"))).toEqual([]);
+					}
+					if (failure) {
+						expect(versionAt(installRoot, ...firstChain)).toBe(initialA);
+						expect(versionAt(installRoot, ...secondChain)).toBe(initialB);
+						expect(readFileSync(manifestPath, "utf8")).toBe(manifestBefore);
+						expect(readFileSync(lockPath, "utf8")).toBe(lockBefore);
+						return;
+					}
+					if (rootRegistry) {
 						expect(fallbackQueries).toEqual([]);
 						expect(registryQueries.length).toBeGreaterThan(queriesBeforeUpdate);
 					}
 					expect(versionAt(installRoot, ...secondChain)).toBe(scenario.updatedVersion ?? initialB);
 					expect(versionAt(installRoot, ...firstChain)).toBe(scenario.updatedVersion ?? initialA);
-					expect(updates).toEqual(
-						scenario.updatedVersion
-							? expect.arrayContaining([
-									expect.objectContaining({
-										source,
-										reason: scenario.git === "both" ? "both" : "dependencies",
-									}),
-								])
-							: [],
-					);
+					if (!scenario.updatedVersion) expect(updates).toEqual([]);
 					expect(readFileSync(manifestPath, "utf8")).toBe(manifestBefore);
 					if (scenario.git) {
 						expect(await runFixtureCommand("git", ["rev-parse", "HEAD"], installRoot)).toBe(sourceHead);
@@ -515,10 +706,37 @@ console.log(JSON.parse(readFileSync(manifest, "utf8")).version);
 						expect(versionAt(installRoot, names.a)).toBe("1.0.0");
 						expect(versionAt(installRoot, names.b)).toBe("1.0.0");
 					}
+					if (manager === "pnpm" && scenario.updatedVersion) {
+						expect(readFileSync(lockPath, "utf8")).not.toBe(lockBefore);
+						rmSync(modules, { recursive: true, force: true });
+						await runFixtureCommand(
+							command,
+							[
+								...commandArgs,
+								"install",
+								"--frozen-lockfile",
+								"--prod",
+								"--config.auto-install-peers=false",
+								"--config.strict-peer-dependencies=false",
+								"--config.strict-dep-builds=false",
+							],
+							installRoot,
+						);
+						expect(versionAt(installRoot, ...firstChain)).toBe(scenario.updatedVersion);
+						expect(versionAt(installRoot, ...secondChain)).toBe(scenario.updatedVersion);
+						expect(readFileSync(manifestPath, "utf8")).toBe(manifestBefore);
+						if (scenario.git && scenario.git !== "both")
+							expect(readFileSync(sentinel, "utf8")).toBe("preserve me");
+					}
 					expect(versionAt(installRoot, ...(scenario.git ? [] : [names.a]), names.fixed)).toBe("1.0.0");
 					if (utils) expect(versionAt(installRoot, "pi-fixture-utils")).toBe("1.0.0");
 					if (configBefore !== undefined) expect(readFileSync(rootConfig, "utf8")).toBe(configBefore);
-					expect(await pm.checkForAvailableUpdates()).toEqual([]);
+					if (scenario.unrelated) {
+						expect(versionAt(installRoot, names.b, names.unrelated)).toBe("1.0.0");
+						expect(await pm.checkForAvailableUpdates()).toEqual([
+							expect.objectContaining({ source: `npm:${names.b}@1.0.0`, reason: "dependencies" }),
+						]);
+					} else expect(await pm.checkForAvailableUpdates()).toEqual([]);
 					expect(fallbackQueries).toEqual([]);
 				} finally {
 					vi.unstubAllEnvs();
