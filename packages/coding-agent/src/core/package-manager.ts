@@ -53,6 +53,7 @@ import {
 import { stripBom } from "../utils/text.ts";
 import { retryUpdateOperation, UPDATE_RETRY_DELAYS_MS } from "../utils/update-retry.ts";
 import { withBunGitIntegrityCompatibility } from "./bun-git-integrity.ts";
+import { getGitDependencyTarget } from "./git-dependency-updates.ts";
 import { getNpmRuntimeDependencies, type NpmRuntimeDependency } from "./npm-dependency-updates.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { type PiManifest, readPiManifest } from "./pi-manifest.ts";
@@ -71,6 +72,10 @@ function isOfflineModeEnabled(): boolean {
 
 function isExactNpmVersion(version: string | undefined): boolean {
 	return valid(version ?? "") !== null;
+}
+
+function isSafeDependencyTarget(name: string): boolean {
+	return !name.startsWith("-");
 }
 
 function getNpmVersionRange(version: string | undefined): string | undefined {
@@ -1413,6 +1418,7 @@ export class DefaultPackageManager implements PackageManager {
 			getNpmRuntimeDependencies(installRoot),
 			new Map(sources.map((entry) => [entry.source, [entry.parsed.name]])),
 			manager === "pnpm" ? installRoot : this.cwd,
+			installRoot,
 		);
 	}
 
@@ -1420,6 +1426,7 @@ export class DefaultPackageManager implements PackageManager {
 		dependencies: Map<string, NpmRuntimeDependency[]>,
 		sources: Map<string, string[]>,
 		metadataCwd = this.cwd,
+		installRoot = metadataCwd,
 	): Promise<Map<string, string[]>> {
 		const updates = new Map<string, string[]>();
 		if (this.getPackageManagerName() === "pnpm") {
@@ -1443,14 +1450,60 @@ export class DefaultPackageManager implements PackageManager {
 		const owners = new Map<NpmRuntimeDependency, string[]>();
 		for (const [source, packages] of sources) {
 			for (const dependency of new Set(packages.flatMap((name) => dependencies.get(name) ?? []))) {
-				if (dependency.ranges.some((range) => valid(range))) continue;
+				if (dependency.blocked || dependency.ranges.some((range) => valid(range))) continue;
 				const entries = owners.get(dependency) ?? [];
 				entries.push(source);
 				owners.set(dependency, entries);
 			}
 		}
-		const names = [...new Set([...owners.keys()].map((dependency) => dependency.name))];
+		const names = [...new Set([...owners.keys()].map((dependency) => dependency.name))].filter(
+			isSafeDependencyTarget,
+		);
 		const checks = names.map((name) => async (): Promise<NpmRuntimeDependency[]> => {
+			const instances = [...(affected.get(name) ?? [])];
+			if (instances.some((instance) => instance.blocked)) return [];
+			if (instances.some((instance) => instance.specs.some((spec) => !validRange(spec)))) {
+				const env = getEnv();
+				// Repository-directed Git environment can redirect owned metadata writes; leave it untouched and skip.
+				if (
+					[
+						"GIT_DIR",
+						"GIT_COMMON_DIR",
+						"GIT_WORK_TREE",
+						"GIT_INDEX_FILE",
+						"GIT_OBJECT_DIRECTORY",
+						"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+						"GIT_QUARANTINE_PATH",
+					].some((key) => env[key] !== undefined)
+				)
+					return [];
+				const target = await getGitDependencyTarget(
+					name,
+					instances,
+					installRoot,
+					this.getPackageManagerName(),
+					() => getExtensionTempFolder(this.agentDir),
+					(args) =>
+						this.runCommandCapture("git", args, {
+							cwd: installRoot,
+							timeoutMs: NETWORK_TIMEOUT_MS,
+							env: { GIT_TERMINAL_PROMPT: "0" },
+						}),
+				);
+				if (!target || !target.manifest || typeof target.manifest !== "object" || Array.isArray(target.manifest))
+					return [];
+				const manifest = target.manifest as Record<string, unknown>;
+				const version = manifest.version;
+				if (
+					manifest.name !== name ||
+					typeof version !== "string" ||
+					!valid(version) ||
+					!isSupportedNpmRelease(manifest, version) ||
+					instances.some((instance) => gt(instance.version, version))
+				)
+					return [];
+				return target.changed.filter((instance) => owners.has(instance));
+			}
 			try {
 				const metadata = (await this.getNpmMetadata(name, ["versions", "dist-tags"], metadataCwd)) as {
 					versions?: unknown;
@@ -1543,6 +1596,7 @@ export class DefaultPackageManager implements PackageManager {
 		preserveManifest = false,
 	): Promise<void> {
 		if (names.length === 0) return;
+		if (!names.every(isSafeDependencyTarget)) throw new Error("Unsafe dependency update target");
 		if (this.getPackageManagerName() === "pnpm") {
 			// A warm pnpm cache can leave targeted indirect versions unchanged even during an online update.
 			const cacheDir = mkdtempSync(join(getExtensionTempFolder(this.agentDir), "pnpm-update-"));
