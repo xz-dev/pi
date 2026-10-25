@@ -1,4 +1,60 @@
+禁止向上游（earendil-works/pi）发送任何信息，包括但不限于 issues、PR、评论、review。
+
+## 同类实现参考
+
+新增或修复下游 patch 前，优先检查仓库内官方 Pi Durable 的相关实现，再按问题相关性参考 Codex、Claude Code、OpenCode、Hermes Agent，核实它们是否已解决同类问题，以及实现机制能否用于 Pi。优先查官方源码、文档和测试；闭源或无法核实的部分明确标记为未知。
+
+Pi Durable 的现有代码或公共接口满足需求时，优先直接复用，避免自行重写和承担额外维护。在补丁说明或计划中记录参考来源、采用或不采用的理由及适用边界。借鉴成熟实现不等于过度设计：选择满足 Pi 当前需求的最小机制，不照搬无关框架、依赖或功能；取得足够证据后进入验证，不把完整审计所有参考项目作为前置条件。
+
+作为下游发行版，changelog 审阅步骤 `/cl` 对我们永远不需要执行 — 我们维护 downstream CHANGELOG/文档在自己的分支上，上游 changelog 已在上游发版时审阅过。
+
+## 禁止本地发版/版本 bump — 版本号永远跟随上游
+
+下游**绝不**运行 `npm run release:patch|minor|major`、`npm version`，也不在 main 上 commit 版本 bump 或 `Release vX.Y.Z` 提交。原因：
+
+- 基础版本号（`0.87.x`）唯一来源是 `packages/*/package.json` 的 `version` 字段，由**上游 release** bump，经 upstream-sync squash 流入我们的 main。
+- 下游发布是 **CI 自动的**：每次 main push，`publish-github-release.yml` 用 `package.json.version + "-xz." + GITHUB_RUN_NUMBER + ".1.g" + SHA` 生成 tag 并发布（第三段固定为 1，与重跑次数无关，所以 `gh run rerun --failed` 只重建部分平台也能对齐版本）。run number 单调递增，无需人工发版。
+- main 由 sync workflow 重建（upstream + patch 分支 squash），main-only 的 `Release vX.Y.Z` commit 会在下次重建时被丢弃 → package.json 版本回退 → 后续 publish 产出更低 semver 的更新构建 → GitHub 将其标为 Latest → `pi update self` 因 `latest < current` 拒绝安装 → 用户永久卡在旧版。
+- 若误发了一个高 semver 的下游 release（如 `0.87.2-xz.210` 在上游仍是 `0.87.1` 时），必须删除该 GitHub Release + 其 `xz-v*` tag + 对应本地/远端 `v*` tag，否则版本链断裂后所有用户无法 update。
+
+下游需要"发版"时的正确动作：直接触发 sync（`gh workflow run "Upstream Sync" --ref ci`）。修复随 sync 后的 publish workflow 自动上线，不需要任何版本号操作。
+
+# 下游不等上游 — Downstream Never Waits for Upstream
+
+原则：下游完全不等上游。上游带进来的问题（失败测试、过期 fixture、catalog drift、构建或发版阻断）由我们直接修复，不以"等上游修"或"下次 sync 自愈"作为处理方式。
+
+- Upstream breakage that blocks our CI, sync, or publish is our blocker. Fix it in the downstream branch that owns the area (`ci` for workflow/scripts/gates, a `patch/*` branch for product code and its tests), then trigger sync so the fix ships.
+- Do not leave publish red waiting for upstream, and do not hide a real failure by widening skip lists or allow-lists when a direct fix is possible. A skip is acceptable only when the test needs unavailable external resources, and must name the reason.
+- When upstream later lands an equivalent fix, retire ours (drop the patch or overlay, or rebase it away) instead of carrying duplicates.
+
+Model-catalog drift is the most common case. Provider model data is hydrated from a live catalog, so test fixtures can reference model IDs that no longer exist (e.g. `"..." is not assignable to parameter of type ...` in `packages/*/test`, or runtime assertions on a dropped model). Update the fixtures to current catalog IDs on the owning downstream branch. A local commit may still use `git commit --no-verify` when its hook failure is confined to this drift class and the drift is unrelated to the change, but the drift itself must be fixed downstream, not ignored.
+
 # Development Rules
+
+## Downstream Distribution Workflow
+
+This repository is the `xz-dev/pi` downstream distribution fork of `earendil-works/pi`. Do not treat `main` as a normal long-lived development branch.
+
+`main` is automatically rebuilt from upstream and downstream branches by `.github/workflows/upstream-sync.yml`. Direct downstream-only changes committed only to `main` are temporary and can disappear on the next sync. Every downstream change that must persist must live on an appropriate downstream branch, then be brought back to `main` through the sync workflow's squash-merge process.
+
+Branch placement rules:
+
+- Put fork CI, publishing, packaging, release automation, GitHub Actions, and sync workflow changes on `ci`.
+- Put downstream code fixes or behavior patches on a dedicated patch branch such as `patch/esc-abort-and-manual-retry`.
+- If a new downstream branch is introduced, update `.github/workflows/upstream-sync.yml` in the persistent workflow branch (`ci`) so the sync job fetches that branch, squash-merges it in the correct order, and uses an explicit commit message such as `merge <branch> branch`.
+- After changing any persistent downstream branch that participates in sync, rebuild `main` from the upstream sync base and recreate the squash merge commits. Do not leave the only copy of the change as a standalone `main` commit.
+- When a patch branch conflicts with moved upstream, repair it by rebasing onto the latest `upstream/main` (preserving the branch's own commit sequence; rebase rewrites SHAs but keeps the development history readable). Do not add resolver scripts, accumulated compat branches, or exact-conflict-shape pins to the sync machinery — that double-layer was removed because every upstream drift cost a manual repair in two places at once.
+- Before saying a downstream change is complete, verify both the persistent branch and the rebuilt `main` contain the intended result.
+
+Operational checklist for downstream sync work:
+
+- Create downstream code patch branches from the latest `upstream/main`, not from the rebuilt downstream `main`.
+- Keep workflow/packaging changes on `ci`; keep runtime behavior changes on a named patch branch. When a fix spans both, split it across branches instead of mixing branch responsibilities.
+- Sync model: `main` = upstream + ci + each `patch/*` squash-merged in `PATCH_ORDER`. No resolvers, no `*-on-accumulated` branches, no `COMPAT_RANGES`. When sync fails on a merge conflict, the repair is exactly one action: rebase the named patch branch onto the latest `upstream/main` (or onto its predecessor patch tip for dependent chains like `manual-retry` → `slow-hook-tui-only`), force-push it, rerun sync. Dependent patches must keep their predecessor patch tip in their ancestry so their squash-merge applies after the predecessor's content.
+- When adding a new patch branch, update BOTH `scripts/rebuild-from-inputs.sh` (PATCH_ORDER entry, merge_squash block; no commit-ID pins) AND `.github/workflows/upstream-sync.yml` (fetch refspec + rebuild_args list) on `ci`, push `ci` and the patch branch to `origin`, then trigger the sync workflow from the updated `ci` ref if an immediate remote `main` rebuild is needed. Before pushing, replay locally: `scripts/rebuild-from-inputs.sh --source <repo> --target <fresh-path>` must complete green — never use CI as the debugger.
+- Never hand-expand a short SHA into a full one. Always resolve with `git rev-parse`/`git ls-remote`; fabricated SHA tails cost real debugging rounds.
+- After the sync workflow succeeds, fetch `origin/main` and force-sync the local `main` to it before reporting final status. Do not trust a locally rebuilt `main` as the final remote state.
+- For fork package versions, remember that SemVer prerelease versions such as `0.80.6-xz.29.1.g<sha>` are valid. Do not remove release assets such as `CHANGELOG.md` to hide downstream packaging symptoms. Preserve the real fork package version and add explicit package metadata or parser handling when a stable upstream changelog baseline is needed.
 
 ## Conversational Style
 
@@ -18,7 +74,7 @@
 - No `any` unless absolutely necessary.
 - Inline single-line helpers that have only one call site.
 - Check node_modules for external API types; don't guess.
-- **No inline imports** (`await import()`, `import("pkg").Type`, dynamic type imports). Top-level imports only.
+- **Imports:** use top-level imports, including `import type`. Dynamic value imports are allowed in `packages/ai/src/api/*.lazy.ts` only to preserve lazy loading of the corresponding API implementation. Inline type imports remain prohibited.
 - In `packages/coding-agent`, resolve package assets through helpers in `src/config.ts`. Do not use `__dirname` directly; the helpers account for source checkouts, npm installations, and standalone binaries.
 - Never remove or downgrade code to fix type errors from outdated deps; upgrade the dep instead.
 - Use only erasable TypeScript syntax (Node strip-only mode) in code checked by the root config (`packages/*/src`, `packages/*/test`, `packages/coding-agent/examples`): no parameter properties, `enum`, `namespace`/`module`, `import =`, `export =`, or other constructs needing JS emit. Use explicit fields with constructor assignments.
@@ -69,11 +125,12 @@ If rebase conflicts occur:
 
 - Resolve conflicts only in files you modified.
 - If a conflict is in a file you did not modify, abort and ask the user.
-- Never force push.
+
+Force pushes are allowed in this downstream repository; the upstream blanket prohibition does not apply. For authorized downstream maintenance, prefer `git push --force-with-lease=<ref>:<expected-old-sha>` and retain the old tip before rewriting history. Stop on a lease mismatch rather than overwriting concurrent work.
 
 ## Issues and PRs
 
-See `CONTRIBUTING.md` for the contributor gate (auto-close workflows, `lgtm`/`lgtmi`, quality bar).
+See `CONTRIBUTING.md` for the contributor quality bar. This fork does not auto-close issues or PRs.
 
 When reviewing PRs:
 
