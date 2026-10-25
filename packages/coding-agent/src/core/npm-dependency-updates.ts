@@ -20,6 +20,10 @@ export interface NpmRuntimeDependency {
 	name: string;
 	version: string;
 	ranges: string[];
+	specs: string[];
+	directory: string;
+	blocked: boolean;
+	depth: number;
 }
 
 interface DependencyNode extends NpmRuntimeDependency {
@@ -53,8 +57,9 @@ export function getNpmRuntimeDependencies(
 	const root = realpathSync(installRoot);
 	const nodes = new Map<string, DependencyNode>();
 	const visited = new Set<string>();
-	const blockedNames = new Set<string>();
+	const protectedNames = new Set<string>();
 	const roots = new Map<string, DependencyNode>();
+	let outsideRoot = false;
 
 	const resolveDependency = (directory: string, name: string): string | undefined => {
 		if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(name) || name === "." || name === "..") return undefined;
@@ -63,25 +68,40 @@ export function getNpmRuntimeDependencies(
 			const candidate = join(current, "node_modules", name);
 			if (basename(current) !== "node_modules" && existsSync(join(candidate, "package.json"))) {
 				const path = realpathSync(candidate);
-				return path.startsWith(`${root}${sep}`) ? path : undefined;
+				if (path.startsWith(`${root}${sep}`)) return path;
+				outsideRoot = true;
+				return undefined;
 			}
 			current = dirname(current);
 		}
 		return undefined;
 	};
 
-	const visit = (directory: string, locked: boolean): DependencyNode | undefined => {
+	const visit = (directory: string, locked: boolean, opaque: boolean, depth: number): DependencyNode | undefined => {
 		const pkg = readManifest(directory);
-		if (typeof pkg?.name !== "string" || typeof pkg.version !== "string" || !valid(pkg.version)) return undefined;
+		if (typeof pkg?.name !== "string") return undefined;
+		// Unversioned Git instances must still block unsafe name-wide native updates.
+		const version = typeof pkg.version === "string" && valid(pkg.version) ? pkg.version : "";
 		let node = nodes.get(directory);
 		if (!node) {
-			node = { name: pkg.name, version: pkg.version, ranges: [], children: new Set() };
+			node = {
+				name: pkg.name,
+				version,
+				ranges: [],
+				specs: [],
+				directory,
+				blocked: false,
+				depth,
+				children: new Set(),
+			};
 			nodes.set(directory, node);
 		}
-		// Published shrinkwraps constrain descendants, unlike Pi's generated installation lock.
-		locked ||= existsSync(join(directory, "npm-shrinkwrap.json"));
-		if (locked) blockedNames.add(node.name);
-		const key = `${directory}\0${locked}`;
+		const shrinkwrapped = existsSync(join(directory, "npm-shrinkwrap.json"));
+		node.blocked ||= locked || shrinkwrapped || !version;
+		node.depth = Math.max(node.depth, depth);
+		// A Git package may move, but its locked descendants are not independent update targets.
+		const lockChildren = node.blocked || opaque;
+		const key = `${directory}\0${lockChildren}`;
 		if (visited.has(key)) return node;
 		visited.add(key);
 		for (const [name, spec] of Object.entries({ ...pkg.dependencies, ...pkg.optionalDependencies })) {
@@ -90,9 +110,10 @@ export function getNpmRuntimeDependencies(
 			const range = typeof spec === "string" ? validRange(spec) : null;
 			const bundles = pkg.bundleDependencies ?? pkg.bundledDependencies;
 			const bundled = bundles === true || (Array.isArray(bundles) && bundles.includes(name));
-			const child = visit(path, locked || !range || bundled);
+			const child = visit(path, lockChildren || bundled, !range, depth + 1);
 			if (!child) continue;
-			if (child.name !== name) blockedNames.add(child.name);
+			if (child.name !== name || typeof spec !== "string") child.blocked = true;
+			if (typeof spec === "string" && !child.specs.includes(spec)) child.specs.push(spec);
 			if (range && !child.ranges.includes(range)) child.ranges.push(range);
 			node.children.add(child);
 		}
@@ -105,17 +126,21 @@ export function getNpmRuntimeDependencies(
 		const range = typeof spec === "string" ? validRange(spec) : null;
 		const bundles = manifest.bundleDependencies ?? manifest.bundledDependencies;
 		const bundled = bundles === true || (Array.isArray(bundles) && bundles.includes(name));
-		const node = visit(path, packageRoot && (!range || bundled));
+		const node = visit(path, packageRoot && bundled, packageRoot && !range, 0);
 		if (node) {
 			roots.set(name, node);
 			if (packageRoot) {
+				if (typeof spec === "string" && !node.specs.includes(spec)) node.specs.push(spec);
 				if (range && !node.ranges.includes(range)) node.ranges.push(range);
-				if (node.name !== name) blockedNames.add(node.name);
+				if (node.name !== name || typeof spec !== "string") node.blocked = true;
 			} else {
-				blockedNames.add(node.name);
+				protectedNames.add(node.name);
 			}
 		}
 	}
+	// An escaped subtree can contain additional instances and constraints that cannot be enumerated safely.
+	if (outsideRoot) return result;
+	for (const node of nodes.values()) node.blocked ||= protectedNames.has(node.name);
 	for (const [name, node] of roots) {
 		const reachable = new Set<DependencyNode>();
 		const pending = packageRoot ? [node] : [...node.children];
@@ -124,11 +149,8 @@ export function getNpmRuntimeDependencies(
 			reachable.add(child);
 			pending.push(...child.children);
 		}
-		// Retain fixed and invalid instances too: name-wide command safety needs every incoming constraint.
-		result.set(
-			name,
-			[...reachable].filter((child) => !blockedNames.has(child.name) && child.ranges.length > 0),
-		);
+		// Keep every instance and authored constraint, including pins and blocked/shared subtrees.
+		result.set(name, [...reachable]);
 	}
 	return result;
 }
