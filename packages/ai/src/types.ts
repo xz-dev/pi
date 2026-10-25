@@ -643,10 +643,25 @@ export interface ResponseCheckpoint {
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
+	/** Provenance of this input when the host recorded it. Absent on legacy/unrecorded messages. */
+	origin?: MessageOrigin;
 	timestamp: number; // Unix timestamp in milliseconds
 	/** Structured summary projection adopts this user input as a new local baseline; never sent upstream. */
 	responseAncestry?: "local" | "server-dependent";
 }
+
+/**
+ * Provenance of a user-role or custom message. Absence means the source was not
+ * recorded (legacy sessions, hand-edited files); it is never inferred from role
+ * or content. `extension` fields are resolved by the host, not claimed by the
+ * extension.
+ */
+export type MessageOrigin =
+	| { type: "interactive" }
+	| { type: "extension"; extensionId: string; extensionName?: string }
+	| { type: "rpc" }
+	| { type: "sdk" }
+	| { type: "cli" };
 
 export interface AssistantMessage {
 	role: "assistant";
