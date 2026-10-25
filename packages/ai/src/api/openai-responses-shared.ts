@@ -110,6 +110,7 @@ function convertToolResultOutput<TApi extends Api>(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	signal?: AbortSignal;
 	onProviderStreamEvent?: StreamOptions["onProviderStreamEvent"];
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
@@ -676,7 +677,13 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 
 	for await (const event of openaiStream) {
+		if (options?.signal?.aborted) {
+			throw new Error("Request was aborted");
+		}
 		await options?.onProviderStreamEvent?.(event, model);
+		if (options?.signal?.aborted) {
+			throw new Error("Request was aborted");
+		}
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
