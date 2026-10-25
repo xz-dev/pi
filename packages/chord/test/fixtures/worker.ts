@@ -5,6 +5,8 @@ import { createHost, type IpcChannel, ipcLink } from "../../src/index.ts";
 import { childControl } from "../../src/manager.ts";
 import { Echo } from "./echo.ts";
 
+// Failed cleanup must not leave a busy test host behind.
+setTimeout(() => process.exit(91), 12_000);
 const mode = process.env.FIXTURE_MODE ?? "normal";
 const control = childControl();
 if (mode === "fatal") {
@@ -29,7 +31,7 @@ if (mode === "fatal") {
 		pid: () => process.pid,
 	}));
 	if (process.env.GRANDCHILD_FILE) {
-		const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+		const grandchild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { stdio: "ignore" });
 		writeFileSync(process.env.GRANDCHILD_FILE, String(grandchild.pid));
 	}
 	control.onShutdown(async () => {
