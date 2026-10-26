@@ -10,9 +10,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import * as sleepModule from "../src/utils/sleep.ts";
 import { allowNetwork } from "./test-network-env.ts";
 
 // Helper to run git commands in a directory
@@ -153,7 +154,7 @@ describe("DefaultPackageManager git update", () => {
 			await packageManager.update();
 
 			expect(executedCommands).toContain(
-				"git fetch --prune --no-tags origin +refs/heads/main:refs/remotes/origin/main",
+				"git fetch --depth=1 --prune --no-tags origin +refs/heads/main:refs/remotes/origin/main",
 			);
 			expect(executedCommands).not.toContain("git fetch --prune origin");
 			expect(executedCommands).not.toContain("git reset --hard @{upstream}");
@@ -274,9 +275,164 @@ describe("DefaultPackageManager git update", () => {
 			await packageManager.resolveExtensionSources([gitSource], { temporary: true });
 
 			expect(executedCommands).toContain(
-				"git fetch --prune --no-tags origin +refs/heads/main:refs/remotes/origin/main",
+				"git fetch --depth=1 --prune --no-tags origin +refs/heads/main:refs/remotes/origin/main",
 			);
 			expect(getFileContent(cachedDir, "pi-extensions/session-breakdown.ts")).toBe("// fresh");
+		});
+
+		it("should not apply update retries to temporary startup refresh", async () => {
+			// Regression: temporary startup refresh keeps one fetch and no update
+			// sleeps; a failed refresh falls back to the cached extension.
+			const managerWithPaths = packageManager as unknown as PackageManagerPathInternals;
+			const cachedDir = managerWithPaths.getGitInstallPath(managerWithPaths.parseSource(gitSource), "temporary");
+			mkdirSync(join(cachedDir, "pi-extensions"), { recursive: true });
+			writeFileSync(
+				join(cachedDir, "package.json"),
+				JSON.stringify({ pi: { extensions: ["./pi-extensions"] } }, null, 2),
+			);
+			writeFileSync(join(cachedDir, "pi-extensions", "session-breakdown.ts"), "// cached");
+
+			const runCommand = vi.fn(async (_command: string, _args: string[]) => {
+				throw new Error("TLS EOF");
+			});
+			const managerWithInternals = packageManager as unknown as {
+				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommandCapture: (command: string, args: string[], options?: { cwd?: string }) => Promise<string>;
+			};
+			managerWithInternals.runCommand = runCommand;
+			managerWithInternals.runCommandCapture = async () => "origin/main";
+			const delays: number[] = [];
+			vi.spyOn(sleepModule, "sleep").mockImplementation(async (ms) => {
+				delays.push(ms);
+			});
+
+			const result = await packageManager.resolveExtensionSources([gitSource], { temporary: true });
+
+			expect(result.extensions).toHaveLength(1);
+			expect(runCommand).toHaveBeenCalledTimes(1);
+			expect(delays).toEqual([]);
+		});
+	});
+
+	describe("update retries", () => {
+		interface RunCommandInternals {
+			runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void>;
+		}
+
+		function realRunCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void> {
+			const result = spawnSync(command, args, { cwd: options?.cwd, encoding: "utf-8" });
+			if (result.status !== 0) {
+				return Promise.reject(new Error(`Command failed: ${command} ${args.join(" ")}\n${result.stderr}`));
+			}
+			return Promise.resolve();
+		}
+
+		function recordSleeps(): number[] {
+			const delays: number[] = [];
+			vi.spyOn(sleepModule, "sleep").mockImplementation(async (ms) => {
+				delays.push(ms);
+			});
+			return delays;
+		}
+
+		it("recovers a transient git fetch failure without rerunning successful siblings", async () => {
+			// Transient TLS EOF on the first fetch; the update finishes on attempt two.
+			setupRemoteAndInstall();
+			createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
+
+			const delays = recordSleeps();
+			const internals = packageManager as unknown as RunCommandInternals;
+			const original = internals.runCommand.bind(packageManager);
+			let fetches = 0;
+			const progress: string[] = [];
+			packageManager.setProgressCallback((event) => {
+				if (event.type === "progress" && event.message) progress.push(event.message);
+			});
+			vi.spyOn(internals, "runCommand").mockImplementation((command, args, options) => {
+				if (command === "git" && args[0] === "fetch" && fetches++ === 0) {
+					return Promise.reject(new Error("git fetch failed with code 128: TLS EOF"));
+				}
+				return original(command, args, options);
+			});
+
+			await packageManager.update();
+
+			expect(fetches).toBe(2);
+			expect(delays).toEqual([3000]);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2");
+			expect(progress.some((m) => m.includes("retrying in 3s (1/3)"))).toBe(true);
+		});
+
+		it("makes four attempts with 3s/6s/12s waits, then surfaces the original error", async () => {
+			setupRemoteAndInstall();
+
+			const delays = recordSleeps();
+			const internals = packageManager as unknown as RunCommandInternals;
+			let fetches = 0;
+			vi.spyOn(internals, "runCommand").mockImplementation((command, args) => {
+				if (command === "git" && args[0] === "fetch") {
+					fetches++;
+					return Promise.reject(new Error(`git fetch failed with code 128: TLS EOF #${fetches}`));
+				}
+				return realRunCommand(command, args);
+			});
+
+			await expect(packageManager.update()).rejects.toThrow("TLS EOF #4");
+			expect(fetches).toBe(4);
+			expect(delays).toEqual([3000, 6000, 12000]);
+		});
+
+		it("keeps a successful sibling update while another git source fails four times", async () => {
+			setupRemoteAndInstall();
+			createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
+
+			// A second git source maps to a sibling install directory that updates cleanly.
+			const otherSource = "git:github.com/test/other";
+			const otherRemote = join(tempDir, "other-remote");
+			mkdirSync(otherRemote, { recursive: true });
+			initGitRepo(otherRemote);
+			createCommit(otherRemote, "extension.ts", "// other", "other commit");
+			const otherDir = join(agentDir, "git", "github.com", "test", "other");
+			git(["clone", otherRemote, otherDir], tempDir);
+			// Advance after cloning so an unfinished update cannot pass as already up to date.
+			const otherHead = createCommit(otherRemote, "extension.ts", "// other v2", "other second commit");
+			settingsManager.setPackages([gitSource, otherSource]);
+
+			recordSleeps();
+			const internals = packageManager as unknown as RunCommandInternals;
+			const original = internals.runCommand.bind(packageManager);
+			const fetchesByDir = new Map<string, number>();
+			const otherUpdateCompleted = new Promise<boolean>((resolve) => {
+				packageManager.setProgressCallback((event) => {
+					if (
+						event.action === "update" &&
+						event.source === otherSource &&
+						(event.type === "complete" || event.type === "error")
+					) {
+						resolve(event.type === "complete");
+					}
+				});
+			});
+			vi.spyOn(internals, "runCommand").mockImplementation((command, args, options) => {
+				if (command === "git" && args[0] === "fetch" && options?.cwd) {
+					const count = (fetchesByDir.get(options.cwd) ?? 0) + 1;
+					fetchesByDir.set(options.cwd, count);
+					if (options.cwd === installedDir) {
+						return Promise.reject(new Error("git fetch failed with code 128: TLS EOF"));
+					}
+				}
+				return original(command, args, options);
+			});
+
+			await expect(packageManager.update()).rejects.toThrow("TLS EOF");
+
+			expect(fetchesByDir.get(installedDir)).toBe(4);
+			// Rejection does not cancel the sibling; drain its terminal event before cleanup.
+			expect(await otherUpdateCompleted).toBe(true);
+			expect(fetchesByDir.get(otherDir)).toBe(1);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
+			expect(getCurrentCommit(otherDir)).toBe(otherHead);
+			expect(getFileContent(otherDir, "extension.ts")).toBe("// other v2");
 		});
 	});
 });
