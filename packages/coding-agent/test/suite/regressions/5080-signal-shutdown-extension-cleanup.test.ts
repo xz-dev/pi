@@ -1,11 +1,13 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
+import { ProcessTerminal } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { APP_NAME } from "../../../src/config.ts";
 import type { SessionManager } from "../../../src/core/session-manager.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import * as processOwner from "../../../src/utils/process-owner.ts";
 
 // Regression for https://github.com/earendil-works/pi/issues/5080
 //
@@ -157,6 +159,89 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 		);
 	});
 
+	// Owner-loss regression (#5080): an ordinary quit may still be draining input.
+	test.each(["drain", "drain-raw-failure", "drain-blocked-hook"] as const)(
+		"owner loss during interactive quit at %s suppresses further tty I/O and disposes once",
+		async (phase) => {
+			vi.useFakeTimers();
+			let lost = false;
+			vi.spyOn(processOwner, "hasLostCliProcessOwner").mockImplementation(() => lost);
+			const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+				throw new ProcessExitError(code);
+			}) as typeof process.exit);
+			const writes = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+			const rawDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+			const setRawMode = vi.fn(() => {
+				throw new Error(`setRawMode failed with errno: ${constants.errno.EBADF}`);
+			});
+			if (phase === "drain-raw-failure") {
+				Object.defineProperty(process.stdin, "setRawMode", { configurable: true, value: setRawMode });
+			}
+			let releaseDrain!: () => void;
+			const drain = new Promise<void>((resolve) => {
+				releaseDrain = resolve;
+			});
+			const setShutdownProgressListener = vi.fn((_listener: () => void) => {});
+			const extensionRunner = phase === "drain-raw-failure" ? {} : { setShutdownProgressListener };
+			const order: string[] = [];
+			const context = Object.assign(createContext(order, createSessionManager({ sessionFile: createTempFile() })), {
+				shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+					return (interactiveModePrototype as InteractiveModePrototypeWithShutdown).shutdown.call(
+						context,
+						options,
+					);
+				},
+				runtimeHost: {
+					session: { extensionRunner },
+					dispose: vi.fn(async () => {
+						order.push("hook-enter");
+						if (phase === "drain-blocked-hook") await new Promise<void>(() => {});
+						order.push("hook-return");
+					}),
+				},
+				ui: {
+					stop: vi.fn(),
+					terminal: { drainInput: vi.fn(() => drain) },
+				},
+				stop: vi.fn(() => {
+					if (phase === "drain-raw-failure") new ProcessTerminal().stop();
+				}),
+			});
+			const prototype = interactiveModePrototype as { emergencyTerminalExit(this: typeof context): void };
+			const quitting = context.shutdown().catch((error: unknown) => error);
+			try {
+				lost = true;
+				prototype.emergencyTerminalExit.call(context);
+				prototype.emergencyTerminalExit.call(context);
+				releaseDrain();
+				if (phase === "drain-blocked-hook") {
+					await vi.advanceTimersByTimeAsync(4_999);
+					expect(exit).not.toHaveBeenCalled();
+					await expect(vi.advanceTimersByTimeAsync(1)).rejects.toMatchObject({ code: 0 });
+					expect(order).not.toContain("hook-return");
+				} else {
+					await expect(quitting).resolves.toMatchObject({ code: 0 });
+					expect(vi.getTimerCount()).toBe(0);
+				}
+				expect(context.runtimeHost.dispose).toHaveBeenCalledOnce();
+				expect(setShutdownProgressListener).toHaveBeenCalledTimes(phase === "drain-raw-failure" ? 0 : 1);
+				if (phase !== "drain-raw-failure")
+					expect(setShutdownProgressListener.mock.calls[0][0]).toBeTypeOf("function");
+				expect(context.stop).not.toHaveBeenCalled();
+				expect(context.ui.stop).toHaveBeenCalledExactlyOnceWith({ restoreTerminal: false });
+				expect(context.ui.terminal.drainInput).toHaveBeenCalledOnce();
+				expect(exit).toHaveBeenCalledExactlyOnceWith(0);
+				expect(setRawMode).not.toHaveBeenCalled();
+				expect(writes).not.toHaveBeenCalled();
+			} finally {
+				if (rawDescriptor) Object.defineProperty(process.stdin, "setRawMode", rawDescriptor);
+				else Reflect.deleteProperty(process.stdin, "setRawMode");
+				vi.clearAllTimers();
+				vi.useRealTimers();
+			}
+		},
+	);
+
 	test("signal-triggered shutdown does not print a resume hint", async () => {
 		vi.spyOn(process, "exit").mockImplementation((() => {
 			throw new ProcessExitError();
@@ -201,14 +286,15 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 type HandlerContext = {
 	isShuttingDown: boolean;
 	signalCleanupHandlers: Array<() => void>;
-	shutdown: () => Promise<void>;
+	shutdown: (options?: { fromSignal: boolean }) => Promise<void>;
 	unregisterSignalHandlers: () => void;
-	emergencyTerminalExit: () => never;
-	uncaughtCrash: (error: Error) => never;
+	emergencyTerminalExit: () => void;
+	uncaughtCrash: (error: Error) => void;
 	recordCrash: () => boolean;
 	getCrashExtensionHint: () => string | undefined;
 	crashReportInstructions: () => string;
-	ui: { stop: () => void };
+	ui: { stop: (options?: { restoreTerminal: boolean }) => void };
+	themeController: { disableAutoSync: () => void };
 };
 
 type InteractiveModePrivates = {
@@ -232,6 +318,7 @@ function createHandlerContext(): HandlerContext {
 		getCrashExtensionHint: () => undefined,
 		crashReportInstructions: () => "",
 		ui: { stop: vi.fn() },
+		themeController: { disableAutoSync: vi.fn() },
 	};
 	return context;
 }
@@ -270,6 +357,110 @@ describe("dead terminal errors on stdin", () => {
 	}
 
 	test.each([
+		["ENOTTY", constants.errno.ENOTTY],
+		["EIO", constants.errno.EIO],
+		["EBADF", constants.errno.EBADF],
+	])("owner loss during SIGCONT raw-mode %s enters the shutdown hook", async (code, errno) => {
+		let lost = false;
+		vi.spyOn(processOwner, "hasLostCliProcessOwner").mockImplementation(() => lost);
+		vi.spyOn(process, "kill").mockReturnValue(true);
+		const rawDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+		Object.defineProperty(process.stdin, "setRawMode", {
+			configurable: true,
+			value: () => {
+				throw new Error(`setRawMode failed with errno: ${errno}`);
+			},
+		});
+		const ctx = setup();
+		const entered = vi.fn();
+		const runtimeContext = Object.assign(ctx, {
+			sessionManager: createSessionManager(),
+			runtimeHost: {
+				dispose: async () => {
+					entered();
+				},
+				session: { extensionRunner: { setShutdownProgressListener: vi.fn() } },
+			},
+			ui: {
+				stop: vi.fn(),
+				requestRender: vi.fn(),
+				start: () => {
+					lost = true;
+					new ProcessTerminal().start(
+						() => {},
+						() => {},
+					);
+				},
+				terminal: { drainInput: vi.fn(async () => {}) },
+			},
+			stop: vi.fn(),
+		});
+		let shutdown: Promise<void> | undefined;
+		ctx.shutdown = (options) => {
+			const result = (interactiveModePrototype as InteractiveModePrototypeWithShutdown).shutdown.call(
+				runtimeContext,
+				options,
+			);
+			shutdown ??= result;
+			return result;
+		};
+		try {
+			(InteractiveMode.prototype as unknown as { handleCtrlZ(this: typeof runtimeContext): void }).handleCtrlZ.call(
+				runtimeContext,
+			);
+			try {
+				process.emit("SIGCONT");
+				throw new Error("expected raw-mode failure");
+			} catch (error) {
+				expect(error).toMatchObject({ code, errno, syscall: "setRawMode" });
+				ctx.uncaughtCrash(error as Error);
+			}
+			await expect(shutdown).rejects.toMatchObject({ code: 0 });
+			expect(entered).toHaveBeenCalledOnce();
+			expect(ctx.ui.stop).toHaveBeenLastCalledWith({ restoreTerminal: false });
+			expect(ctx.recordCrash).not.toHaveBeenCalled();
+		} finally {
+			if (rawDescriptor) Object.defineProperty(process.stdin, "setRawMode", rawDescriptor);
+			else Reflect.deleteProperty(process.stdin, "setRawMode");
+		}
+	});
+
+	test("owner-loss TERM followed by terminal EIO enters shutdown without more terminal I/O", async () => {
+		vi.spyOn(processOwner, "hasLostCliProcessOwner").mockReturnValue(true);
+		const ctx = setup();
+		const entered = vi.fn();
+		const runtimeContext = Object.assign(ctx, {
+			sessionManager: createSessionManager(),
+			runtimeHost: {
+				dispose: async () => {
+					entered();
+				},
+				session: { extensionRunner: { setShutdownProgressListener: vi.fn() } },
+			},
+			ui: { stop: vi.fn(), terminal: { drainInput: vi.fn(async () => {}) } },
+			stop: vi.fn(),
+		});
+		let shutdown: Promise<void> | undefined;
+		ctx.shutdown = (options) => {
+			const result = (interactiveModePrototype as InteractiveModePrototypeWithShutdown).shutdown.call(
+				runtimeContext,
+				options,
+			);
+			shutdown ??= result;
+			return result;
+		};
+		// Call only this product's prepended handler, not unrelated test-process listeners.
+		process.listeners("SIGTERM")[0]!("SIGTERM");
+		process.stdin.emit("error", errnoError("read EIO", "EIO"));
+		await expect(shutdown).rejects.toMatchObject({ code: 0 });
+		expect(entered).toHaveBeenCalledOnce();
+		expect(ctx.ui.stop).toHaveBeenCalledExactlyOnceWith({ restoreTerminal: false });
+		expect(runtimeContext.ui.terminal.drainInput).not.toHaveBeenCalled();
+		expect(runtimeContext.stop).not.toHaveBeenCalled();
+		expect(ctx.recordCrash).not.toHaveBeenCalled();
+	});
+
+	test.each([
 		["read EIO", "EIO"],
 		["setRawMode EIO", "EIO"],
 		["setRawMode ENOTTY", "ENOTTY"],
@@ -281,6 +472,19 @@ describe("dead terminal errors on stdin", () => {
 		expect(exitCode).toBe(129);
 		expect(ctx.recordCrash).not.toHaveBeenCalled();
 		expect(ctx.ui.stop).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		[false, "setRawMode"],
+		[true, undefined],
+		[true, "open"],
+	])("EBADF remains a crash outside owner-loss raw-mode failure: ownerLost=%s syscall=%s", (lost, syscall) => {
+		vi.spyOn(processOwner, "hasLostCliProcessOwner").mockReturnValue(lost);
+		const ctx = setup();
+		const error = Object.assign(errnoError("bad descriptor", "EBADF"), { syscall });
+		expect(captureExit(() => ctx.uncaughtCrash(error))).toBe(1);
+		expect(ctx.recordCrash).toHaveBeenCalledOnce();
+		expect(ctx.shutdown).not.toHaveBeenCalled();
 	});
 
 	test("other stdin errors still crash", () => {

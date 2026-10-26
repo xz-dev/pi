@@ -49,6 +49,7 @@ export interface Args {
 	listModels?: string | true;
 	refreshModels?: boolean;
 	offline?: boolean;
+	noProcessOwnership?: boolean;
 	tuiMode?: TuiMode;
 	verbose?: boolean;
 	projectTrustOverride?: boolean;
@@ -248,6 +249,8 @@ export function parseArgs(args: string[]): Args {
 			result.projectTrustOverride = true;
 		} else if (arg === "--no-approve" || arg === "-na") {
 			result.projectTrustOverride = false;
+		} else if (arg === "--no-process-ownership") {
+			result.noProcessOwnership = true;
 		} else if (arg === "--offline") {
 			result.offline = true;
 		} else if (arg.startsWith("@")) {
@@ -347,6 +350,7 @@ ${chalk.bold("Options:")}
   --tui-mode <mode>              TUI mode: fullscreen (default) or regular
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
+  --no-process-ownership         Disable Pi's native process-tree owner (PI_NO_PROCESS_OWNERSHIP=1)
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
   --                             End option parsing; treat remaining arguments as messages/files
   --help, -h                     Show this help

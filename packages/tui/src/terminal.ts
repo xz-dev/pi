@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { constants } from "node:os";
 import * as path from "node:path";
 import { setKittyProtocolActive } from "./keys.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
@@ -79,8 +80,8 @@ export interface Terminal {
 	// Start the terminal with input and resize handlers
 	start(onInput: (data: string) => void, onResize: () => void): void;
 
-	// Stop the terminal and restore state
-	stop(): void;
+	// Stop input; skip terminal restoration only when the terminal is already gone.
+	stop(options?: { restore?: boolean }): void;
 
 	/**
 	 * Synchronously restore terminal modes from a process `exit` handler when stop() did not run.
@@ -202,9 +203,7 @@ export class ProcessTerminal implements Terminal {
 
 		// Save previous state and enable raw mode
 		this.wasRaw = process.stdin.isRaw || false;
-		if (process.stdin.setRawMode) {
-			process.stdin.setRawMode(true);
-		}
+		this.setRawMode(true);
 		process.stdin.setEncoding("utf8");
 		process.stdin.resume();
 
@@ -227,6 +226,22 @@ export class ProcessTerminal implements Terminal {
 		// Query Kitty keyboard protocol and fall back to modifyOtherKeys when DA confirms no Kitty response.
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 		this.queryAndEnableKittyProtocol();
+	}
+
+	private setRawMode(enabled: boolean): void {
+		try {
+			process.stdin.setRawMode?.(enabled);
+		} catch (error) {
+			// Bun omits code/errno on this native tty error.
+			const match = error instanceof Error && /^setRawMode failed with errno: (-?\d+)$/.exec(error.message);
+			if (match) {
+				const errno = Number(match[1]);
+				const code = Object.entries(constants.errno).find(([, value]) => value === errno)?.[0];
+				if (code)
+					throw Object.assign(new Error(error.message, { cause: error }), { code, errno, syscall: "setRawMode" });
+			}
+			throw error;
+		}
 	}
 
 	/**
@@ -470,31 +485,33 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
-	stop(): void {
-		if (this.clearProgressInterval()) {
+	stop(options: { restore?: boolean } = {}): void {
+		const restore = options.restore !== false;
+		if (this.clearProgressInterval() && restore) {
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 		// Remove the status while stopped, for example after exit or while suspended. start() reports it again.
-		if (this.programStatusSupported && this.programStatus) {
+		if (restore && this.programStatusSupported && this.programStatus) {
 			process.stdout.write(formatProgramStatus({ state: "clear" }));
 		}
 		this.programStatusSupported = false;
 		this.programStatusQueryPending = false;
 
 		// Disable bracketed paste mode
-		process.stdout.write("\x1b[?2004l");
+		if (restore) process.stdout.write("\x1b[?2004l");
 
 		const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this._kittyProtocolActive;
 		this.clearKeyboardProtocolNegotiationBuffer();
 
 		// Disable Kitty keyboard protocol if not already done by drainInput()
 		if (shouldDisableKittyProtocol) {
-			process.stdout.write("\x1b[<u");
+			if (restore) process.stdout.write("\x1b[<u");
 			this.keyboardProtocolPushed = false;
 			this._kittyProtocolActive = false;
 			setKittyProtocolActive(false);
 		}
-		this.disableModifyOtherKeys();
+		if (restore) this.disableModifyOtherKeys();
+		else this._modifyOtherKeysActive = false;
 
 		// Clean up StdinBuffer
 		if (this.stdinBuffer) {
@@ -519,9 +536,7 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.pause();
 
 		// Restore raw mode state
-		if (process.stdin.setRawMode) {
-			process.stdin.setRawMode(this.wasRaw);
-		}
+		if (restore) this.setRawMode(this.wasRaw);
 	}
 
 	restoreOnExit(before: string, after: string): void {
