@@ -872,7 +872,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (visited.has(box.component)) continue;
 			if (getLayoutNode(box.component) && box.component.handleMouse === Container.prototype.handleMouse) continue;
 			visited.add(box.component);
-			const result = dispatchMouseEvent(box.component, {
+			const result = this.dispatchMousePreservingScroll(box.component, {
 				...event,
 				x: event.screenX - box.rect.x,
 				y: event.screenY - box.rect.y,
@@ -882,6 +882,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (result) return result;
 		}
 		return undefined;
+	}
+
+	private dispatchMousePreservingScroll(
+		component: Component,
+		event: TuiMouseEvent,
+	): TuiMouseDispatchResult | undefined {
+		const layout = this.hasOverlay() ? undefined : this.currentLayout;
+		const result = dispatchMouseEvent(component, event);
+		if (result?.preserveScroll && layout && this.currentLayout === layout) {
+			for (const scrollView of getScrollViewsAt(layout, event.screenX, event.screenY)) {
+				scrollView.scrollTo(scrollView.scrollTop, { disableFollow: true });
+			}
+		}
+		return result;
 	}
 
 	private applyMouseDispatchResult(event: TuiMouseEvent, result: TuiMouseDispatchResult): boolean {
@@ -903,7 +917,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		event: TuiMouseEvent,
 		target: TuiMouseDispatchTarget,
 	): TuiMouseDispatchResult | undefined {
-		return dispatchMouseEvent(target.component, retargetMouseEvent(event, target));
+		return this.dispatchMousePreservingScroll(target.component, retargetMouseEvent(event, target));
 	}
 
 	private getComponentClickCount(target: TuiMouseDispatchTarget, x: number, y: number): number {
