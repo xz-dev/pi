@@ -384,17 +384,15 @@ export class AssistantMessageComponent extends Container {
 			}
 		}
 
-		// Check if incomplete/failed - show after partial content.
-		// For aborted/error tool calls, tool execution components show the error.
-		// Length stops can happen before a tool call is complete, so surface them here too.
-		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
-		this.hasToolCalls = hasToolCalls;
+		// Model failures belong to the assistant, not its unexecuted tool previews.
+		// The session owns retry decisions; this component only renders their outcome.
+		this.hasToolCalls = message.content.some((c) => c.type === "toolCall");
 		if (message.stopReason === "length") {
 			this.contentContainer.addChild(new Spacer(1));
 			this.contentContainer.addChild(
 				new Text(theme.fg("error", "Response was truncated before completion."), this.outputPad, 0),
 			);
-		} else if (!hasToolCalls) {
+		} else {
 			if (message.stopReason === "aborted") {
 				const abortMessage =
 					message.errorMessage && message.errorMessage !== "Request was aborted"
