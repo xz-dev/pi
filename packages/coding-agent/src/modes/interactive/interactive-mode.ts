@@ -4392,6 +4392,9 @@ export class InteractiveMode {
 		}
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
+		try {
+			this.agent.managedExecutions.dispose();
+		} catch {}
 		killTrackedDetachedChildren();
 		// The terminal is gone. Do not run normal shutdown because TUI and
 		// extension cleanup can write restore sequences and re-trigger EIO.
@@ -4421,11 +4424,17 @@ export class InteractiveMode {
 			return;
 		}
 		if (this.isShuttingDown) {
+			try {
+				this.agent.managedExecutions.dispose();
+			} catch {}
 			process.exit(1);
 		}
 		this.isShuttingDown = true;
 		try {
 			this.unregisterSignalHandlers();
+		} catch {}
+		try {
+			this.agent.managedExecutions.dispose();
 		} catch {}
 		try {
 			killTrackedDetachedChildren();
