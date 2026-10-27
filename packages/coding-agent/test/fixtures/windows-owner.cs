@@ -57,11 +57,25 @@ public class OwnerFixture {
         bool survivedCtrlC=true;
         FileStream writer=new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(inputWrite,true),FileAccess.Write);
         writer.WriteByte(3); writer.Flush();
+        int quitOutputStart=0;
         if(tui) {
             Thread.Sleep(150); survivedCtrlC=WaitForSingleObject(child.process,0)==258;
+            lock(sync) { quitOutputStart=output.Length; }
             byte[] quit=System.Text.Encoding.UTF8.GetBytes("/quit\r"); writer.Write(quit,0,quit.Length); writer.Flush();
         }
-        bool exited=WaitForSingleObject(child.process,8000)==0; uint code=0; if(exited) Check(GetExitCodeProcess(child.process,out code)); else TerminateProcess(child.process,98);
+        bool exited;
+        if(tui) {
+            Stopwatch exitWait=Stopwatch.StartNew();
+            do {
+                uint remaining=(uint)Math.Max(0,8000-exitWait.ElapsedMilliseconds);
+                exited=WaitForSingleObject(child.process,Math.Min(250u,remaining))==0;
+                if(exited || exitWait.ElapsedMilliseconds>=8000) break;
+                bool deferred; lock(sync) { deferred=output.IndexOf("Session is still starting",quitOutputStart,StringComparison.Ordinal)>=0; }
+                // Startup puts /quit back in the editor; retry only Enter within the original exit window.
+                if(deferred) { writer.WriteByte(13); writer.Flush(); }
+            } while(true);
+        } else exited=WaitForSingleObject(child.process,8000)==0;
+        uint code=0; if(exited) Check(GetExitCodeProcess(child.process,out code)); else TerminateProcess(child.process,98);
         writer.Dispose();
         CloseHandle(child.process); ClosePseudoConsole(console); reading.Join(5000); reader.Dispose();
         Console.WriteLine(output);
