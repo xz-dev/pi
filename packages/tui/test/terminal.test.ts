@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { constants } from "node:os";
 import { describe, it, mock } from "node:test";
 import { setKittyProtocolActive } from "../src/keys.ts";
 import {
@@ -7,6 +8,83 @@ import {
 	ProcessTerminal,
 	resolveEscapeTimeoutMs,
 } from "../src/terminal.ts";
+
+describe("ProcessTerminal Bun raw-mode errors", () => {
+	for (const phase of ["start", "stop"] as const) {
+		for (const [errno, code] of [
+			[constants.errno.ENOTTY, "ENOTTY"],
+			[constants.errno.EIO, "EIO"],
+			[constants.errno.EBADF, "EBADF"],
+			[99999, undefined],
+		] as const) {
+			it(`${phase}: normalizes only known exact Bun errno ${errno}`, () => {
+				const terminal = new ProcessTerminal();
+				const original = new Error(`setRawMode failed with errno: ${errno}`);
+				const descriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+				Object.defineProperty(process.stdin, "setRawMode", {
+					configurable: true,
+					value: () => {
+						throw original;
+					},
+				});
+				const write = mock.method(process.stdout, "write", () => true);
+				const pause = mock.method(process.stdin, "pause", () => process.stdin);
+				try {
+					assert.throws(
+						() =>
+							phase === "start"
+								? terminal.start(
+										() => {},
+										() => {},
+									)
+								: terminal.stop(),
+						(error: unknown) => {
+							assert.ok(error instanceof Error);
+							assert.equal(error.message, original.message);
+							if (code) {
+								assert.equal(Reflect.get(error, "code"), code);
+								assert.equal(Reflect.get(error, "errno"), errno);
+								assert.equal(Reflect.get(error, "syscall"), "setRawMode");
+								assert.equal(error.cause, original);
+							} else assert.equal(error, original);
+							return true;
+						},
+					);
+				} finally {
+					terminal.stop({ restore: false });
+					write.mock.restore();
+					pause.mock.restore();
+					if (descriptor) Object.defineProperty(process.stdin, "setRawMode", descriptor);
+					else Reflect.deleteProperty(process.stdin, "setRawMode");
+				}
+			});
+		}
+	}
+});
+
+describe("ProcessTerminal dead-terminal stop", () => {
+	it("pauses input without raw-mode ioctls or restore writes", () => {
+		const terminal = new ProcessTerminal();
+		const write = mock.method(process.stdout, "write", () => true);
+		const pause = mock.method(process.stdin, "pause", () => process.stdin);
+		const descriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+		const raw = mock.fn(() => {
+			throw new Error("dead terminal ioctl");
+		});
+		Object.defineProperty(process.stdin, "setRawMode", { configurable: true, value: raw });
+		try {
+			terminal.stop({ restore: false });
+			assert.equal(write.mock.callCount(), 0);
+			assert.equal(raw.mock.callCount(), 0);
+			assert.equal(pause.mock.callCount(), 1);
+		} finally {
+			write.mock.restore();
+			pause.mock.restore();
+			if (descriptor) Object.defineProperty(process.stdin, "setRawMode", descriptor);
+			else Reflect.deleteProperty(process.stdin, "setRawMode");
+		}
+	});
+});
 
 describe("resolveEscapeTimeoutMs", () => {
 	it("uses PI_TUI_ESC_TIMEOUT when configured", () => {

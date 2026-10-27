@@ -459,6 +459,8 @@ export type TuiMode = "regular" | "fullscreen";
 export interface TuiStopOptions {
 	/** Leave renderer output in place for another TUI taking over the same terminal. */
 	preserveScreen?: boolean;
+	/** Stop input/rendering without I/O when the terminal is already gone. */
+	restoreTerminal?: boolean;
 }
 
 export interface TUI extends Component {
@@ -1007,6 +1009,10 @@ export abstract class TuiBase extends Container implements TUI {
 		this.stopped = true;
 		process.off("exit", this.exitRestoreHandler);
 		this.cancelRenderTimer();
+		if (options.restoreTerminal === false) {
+			this.terminal.stop({ restore: false });
+			return;
+		}
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
 		}
