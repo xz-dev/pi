@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "../src/providers/faux.ts";
-import { isRetryableAssistantError, type RetryPolicy, retryAssistantCall, retryDelayMs } from "../src/utils/retry.ts";
+import {
+	getAssistantRetryPlan,
+	isRetryableAssistantError,
+	type RetryPolicy,
+	retryAssistantCall,
+	retryDelayMs,
+} from "../src/utils/retry.ts";
 
 const openAIExplicitRetryMessage =
 	"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_******** in your message.";
@@ -16,6 +22,53 @@ const azurePeakLoadError =
 	"The system is currently experiencing high demand and cannot process your request. Your request exceeds the maximum usage size allowed during peak load. For improved capacity reliability, consider switching to Provisioned Throughput.";
 
 describe("provider retry classification", () => {
+	// #61: terminal repair veto wins over ordinary errors and transport recovery, in either diagnostic order.
+	it.each([false, true])("does not retry a started reference repair (terminal last=%s)", (terminalLast) => {
+		const terminal = { type: "provider_reference_repair_terminal", timestamp: 1 };
+		const transport = {
+			type: "provider_transport_failure",
+			timestamp: 2,
+			details: { configuredTransport: "auto", retryAttempt: 0, fallbackTransport: "sse", eventsEmitted: true },
+		};
+		const message = {
+			...fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "server_error" }),
+			api: "openai-responses",
+			diagnostics: terminalLast ? [transport, terminal] : [terminal, transport],
+		};
+		expect(isRetryableAssistantError(message)).toBe(false);
+		expect(getAssistantRetryPlan(message, { enabled: true, maxRetries: 3, baseDelayMs: 0 }, 2)).toBeUndefined();
+	});
+
+	it.each(["openai-codex-responses", "anthropic-messages", "openai-completions"] as const)(
+		"keeps other API %s classification unchanged",
+		(api) => {
+			const message = {
+				...fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "server_error" }),
+				api,
+				diagnostics: [{ type: "provider_reference_repair_terminal", timestamp: 1 }],
+			};
+			expect(isRetryableAssistantError(message)).toBe(true);
+		},
+	);
+
+	it("keeps unmarked partial errors, unknown diagnostics, and remaining ordinary retry budget", () => {
+		const message = {
+			...fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "server_error" }),
+			api: "openai-responses",
+			diagnostics: [{ type: "provider_reference_repair_terminal_unknown", timestamp: 1 }],
+		};
+		const policy = { enabled: true, maxRetries: 3, baseDelayMs: 10 };
+		expect(isRetryableAssistantError(message)).toBe(true);
+		expect(getAssistantRetryPlan(message, policy, 2)).toEqual({
+			attempt: 3,
+			globalAttempt: 3,
+			maxAttempts: 3,
+			delayMs: 40,
+		});
+		expect(getAssistantRetryPlan(message, policy, 3)).toBeUndefined();
+		expect(isRetryableAssistantError({ ...message, diagnostics: undefined })).toBe(true);
+	});
+
 	it("matches explicit provider retry guidance", () => {
 		expect(
 			isRetryableAssistantError(
@@ -196,6 +249,26 @@ describe("retryDelayMs", () => {
 describe("retryAssistantCall", () => {
 	const disabled: RetryPolicy = { enabled: false, maxRetries: 3, baseDelayMs: 0 };
 	const enabled: RetryPolicy = { enabled: true, maxRetries: 3, baseDelayMs: 0 };
+
+	it("does not carry a terminal repair veto into a separate later call", async () => {
+		const terminal = {
+			...fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "server_error" }),
+			api: "openai-responses",
+			diagnostics: [{ type: "provider_reference_repair_terminal", timestamp: 1 }],
+		};
+		const first = vi.fn(async () => terminal);
+		expect(await retryAssistantCall(first, enabled, undefined)).toBe(terminal);
+		expect(first).toHaveBeenCalledTimes(1);
+		const later = vi
+			.fn()
+			.mockResolvedValueOnce({
+				...fauxAssistantMessage("", { stopReason: "error", errorMessage: "server_error" }),
+				api: "openai-responses",
+			})
+			.mockResolvedValueOnce({ ...fauxAssistantMessage("later success"), api: "openai-responses" });
+		expect((await retryAssistantCall(later, enabled, undefined)).stopReason).toBe("stop");
+		expect(later).toHaveBeenCalledTimes(2);
+	});
 
 	it("returns a successful response immediately without retrying", async () => {
 		const produce = vi.fn(async () => fauxAssistantMessage("ok"));
