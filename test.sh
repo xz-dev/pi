@@ -81,4 +81,16 @@ for name in CI GITHUB_ACTIONS; do
 done
 
 echo "Running tests without API keys in isolated home: $test_root/home"
-env -i "${test_env[@]}" npm test
+# Downstream (ci): exclude upstream tests pinned to models that the live
+# catalog dropped; the list is scripts/catalog-drift-test-skips.txt.
+skip_pattern="$(node scripts/catalog-drift-test-pattern.mjs)"
+# Optional workspace arguments partition CI; --scripts also runs the shared script tests.
+if [[ $# -eq 0 || $1 == --scripts ]]; then
+	[[ $# -eq 0 ]] || shift
+	env -i "${test_env[@]}" npm run test:scripts
+fi
+if [[ $# -eq 0 ]]; then
+	env -i "${test_env[@]}" npm run test --workspaces --if-present -- --testNamePattern="$skip_pattern"
+else
+	env -i "${test_env[@]}" npm run test --if-present "$@" -- --testNamePattern="$skip_pattern"
+fi
