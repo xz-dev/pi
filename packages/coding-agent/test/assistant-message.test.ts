@@ -146,7 +146,7 @@ describe("AssistantMessageComponent", () => {
 				],
 				{ stopReason: "toolUse" },
 			),
-			true,
+			"collapsed",
 			undefined,
 			"",
 		);
@@ -157,7 +157,7 @@ describe("AssistantMessageComponent", () => {
 				{ type: "thinking", thinking: "reasoning" },
 				{ type: "text", text: "answer" },
 			]),
-			true,
+			"collapsed",
 			undefined,
 			"",
 		);
@@ -172,7 +172,7 @@ describe("AssistantMessageComponent", () => {
 				{ type: "thinking", thinking: "reasoning" },
 				{ type: "text", text: "answer" },
 			]),
-			true,
+			"collapsed",
 		);
 		expect(component.render(80).map((line) => stripAnsi(line).trim())).toEqual(["", "Thinking...", "", "answer"]);
 	});
