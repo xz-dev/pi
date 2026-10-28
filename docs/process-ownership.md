@@ -14,7 +14,9 @@ procward run --grace 6s --fatal-grace 3s --cleanup-deadline 7500ms -- <same Pi r
 
 Unix replaces the lightweight bootstrap with procward using `execve`. Windows uses a lightweight spawn/wait wrapper; that wrapper does not load the CLI graph. A lone `--version` or `-v` skips automatic wrapping.
 
-A primary already started by procward consumes the versioned managed-child contract instead of starting another owner. Environment alone is not evidence: Pi checks bounded READY records, launch ID, its exact primary PID and the live immediate native parent. Windows additionally compares the parent's full 64-bit creation FILETIME. Pi makes the lifecycle fd/HANDLE non-inheritable and removes contract metadata before loading the CLI or starting tools. Invalid readiness fails startup; invalid active records or EOF cause failed owner-loss shutdown.
+Pi adds a fresh owner layer by default, including under external procward and inside another Pi. Without Pi's private bootstrap marker, it discards inherited contract metadata and the application endpoint before wrapping; even a valid external READY is not Pi's own handoff. Only a one-shot random `PI_PROCWARD_BOOTSTRAP_NONCE` **and** valid READY skip wrapping. This marker prevents bootstrap loops; it is **not a security boundary** against the launcher. Pi consumes it before CLI imports. A stale/copied marker with missing or invalid READY exits non-zero with one stderr line naming the variable and the recovery: unset it, or use `--no-process-ownership` / `PI_NO_PROCESS_OWNERSHIP=1`.
+
+For its own handoff, Pi checks bounded READY records, protocol version, launch ID, its exact primary PID and the live immediate native parent. Windows additionally compares the parent's full 64-bit creation FILETIME. Pi makes that lifecycle fd/HANDLE non-inheritable and removes contract metadata before loading the CLI or starting tools. Invalid readiness fails startup; invalid active records or EOF cause failed owner-loss shutdown.
 
 The managed primary still publishes the existing `PI_PROCESS_OWNER_BINARY` pointing at bundled `pi-env`. Its task wrappers, Chord IPC and remote execution are not migrated to procward.
 
@@ -22,7 +24,7 @@ The managed primary still publishes the existing `PI_PROCESS_OWNER_BINARY` point
 
 Use `pi --no-process-ownership`, or inherit `PI_NO_PROCESS_OWNERSHIP=1`. This disables **automatic** wrapping and the existing per-task ownership setup. It also suppresses the missing-helper notice and macOS hint. Text used as another option's value, or after `--`, is not an opt-out switch.
 
-An opt-out cannot remove containment already imposed by an external procward or sandbox. Pi still consumes a valid external managed-child contract, including lifecycle notification. Internal `PI_PROCESS_OWNER_*` claims are cleared before a new CLI launch; they are not accepted as proof of an outer owner.
+An opt-out takes precedence over markers and readiness, but cannot remove containment already imposed by an external procward or sandbox. Pi discards that owner's lifecycle endpoint and metadata; it does not adopt external notifications. Internal `PI_PROCESS_OWNER_*` claims are cleared before a new CLI launch; they are not accepted as proof of an outer owner.
 
 ## Compiled executables and source/npm
 
@@ -72,7 +74,8 @@ Procward's tagged release CI owns native containment, paused-owner, PTY/job-cont
 Pi runs one small `procward-contract` on each existing platform row. Evidence binds the Pi artifact hash and procward version/source/ZIP/executable digests, then checks:
 
 - bundled version/digest/licenses and no PATH substitution;
-- automatic wrapping, validated-parent no nesting and both opt-outs;
+- automatic wrapping, default nesting under external procward and Pi-in-Pi, and both opt-outs;
+- stale-marker failure with an actionable hint, and one-shot handoff metadata scrubbing;
 - option values and positional text do not disable ownership;
 - externally imposed containment survives a child opt-out;
 - notice-only shutdown hook entry, the original 5-second responsive-hook bound and full terminal/console restoration.

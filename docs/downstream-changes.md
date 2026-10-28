@@ -106,6 +106,7 @@ Losslessly reduce model-upload bytes without changing JSON or image data. HTTP s
 
 Pi delegates its local session tree to [procward](https://github.com/xz-dev/procward) so descendants are cleaned up when Pi exits. Existing pi-env per-task owners and remote owned-exec capability rules remain unchanged; this is not a task-protocol migration.
 
+- Pi adds its own layer under external procward and inside another Pi by default. Only its one-shot random marker plus valid READY skips wrapping; the marker prevents loops, not hostile launchers. Both opt-outs override stale metadata, while a stale marker without valid READY fails with an unset/opt-out hint.
 - Details: [Process ownership](process-ownership.md): pin/provenance, opt-outs, source/PATH fallback, hooks, licenses and integration verification.
 - Kernel-enforced outer boundaries on Linux, FreeBSD and Windows; Windows hook opportunity is best effort. macOS observed-descendant cleanup is best effort; use a Linux container/VM for a hard boundary.
 - Compiled releases bundle verified helper bytes; source/npm performs no runtime download and reports a missing helper explicitly. An `unpinned-dev` procward pin blocks publishing.
