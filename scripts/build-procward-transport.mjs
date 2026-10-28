@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,15 @@ try {
 		execFileSync(process.env.CC || "cc", [...flags, source, "-o", built], { stdio: "inherit", timeout: 120000 });
 	}
 	mkdirSync(dirname(output), { recursive: true });
-	copyFileSync(built, output);
+	const staging = mkdtempSync(join(dirname(output), ".procward-transport-"));
+	try {
+		const replacement = join(staging, "procward-transport.node");
+		copyFileSync(built, replacement);
+		// Loaded addons retain the old inode; never truncate executable pages in a live process.
+		renameSync(replacement, output);
+	} finally {
+		rmSync(staging, { recursive: true, force: true });
+	}
 	console.log(`Built ${output}`);
 } finally {
 	rmSync(scratch, { recursive: true, force: true });
