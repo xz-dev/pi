@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PROCWARD_PIN } from "./lib/procward-pin.mjs";
 
 const [outputArg, lockArg] = process.argv.slice(2);
 if (!outputArg) throw new Error("Usage: generate-third-party-notices.mjs <output> [package-lock.json]");
@@ -96,5 +97,10 @@ const inventory = packages.map((entry) => {
 	].join("\n"));
 	return [`## ${entry.path}@${entry.version}`, `License: ${entry.license}${entry.packagedNative ? " (packaged native)" : ""}`, ...(entry.packagedNative ? [`Component: ${entry.name}`, ...entry.helpers.map((helper) => `Helper SHA-256: ${helper}`)] : []), "", ...sections].join("\n");
 }).join("\n\n");
-writeFileSync(output, `# Third-Party Notices\n\nGenerated deterministically from package-lock.json's complete production dependency closure rooted at @earendil-works/pi-coding-agent, plus packaged native modules.\n\n## Dependency inventory and included license texts\n\n${inventory}\n`);
+const procwardLicenses = ["LICENSE", "third-party-licenses.md"].map((name) => {
+	const bytes = readFileSync(join(repoRoot, "scripts/vendor/procward", name));
+	return `### ${name}\nLicense SHA-256: ${sha256(bytes)}\n\n${bytes.toString("utf8").trimEnd()}`;
+}).join("\n\n");
+const procward = [`## procward@${PROCWARD_PIN.version}`, "License: BSD-3-Clause (bundled executable)", `Source: https://github.com/${PROCWARD_PIN.repository}/tree/${PROCWARD_PIN.sourceCommit}`, `Pin state: ${PROCWARD_PIN.state}; tag: ${PROCWARD_PIN.tag ?? "none (development build; not publishable)"}`, "The exact executable, README and complete license tree are also embedded in every Pi binary.", ...Object.entries(PROCWARD_PIN.targets).map(([target, asset]) => `${target}: ZIP SHA-256 ${asset?.zipSha256 ?? "missing"}; executable SHA-256 ${asset?.binarySha256 ?? "missing"}`), "", procwardLicenses].join("\n");
+writeFileSync(output, `# Third-Party Notices\n\nGenerated deterministically from package-lock.json's complete production dependency closure rooted at @earendil-works/pi-coding-agent, plus packaged native modules and the authoritative procward pin. Acquisition rejects procward assets whose legal texts differ from these verbatim notices.\n\n## Dependency inventory and included license texts\n\n${inventory}\n\n${procward}\n`);
 console.log(`${packages.length} dependency notices: ${sha256(readFileSync(output))}`);

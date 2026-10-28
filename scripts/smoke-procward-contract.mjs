@@ -70,7 +70,7 @@ export function smokeProcwardContract(executable, targetId, version, { allowDev 
 		const manifest = JSON.parse(readFileSync(join(cache, "pin.json"), "utf8"));
 		const procward = { state: pin.state, version: pin.version, repository: pin.repository, workflow: pin.workflow, sourceCommit: pin.sourceCommit, tag: pin.tag, target: descriptor.cargoTarget, ...expected };
 		const helperVersion = run(helper, ["--version"]).stdout.trim();
-		passed("bundle-pin", isDeepStrictEqual(manifest, procward) && digest(helper) === expected.binarySha256 && helperVersion === `procward ${pin.version}` && ["LICENSE", "README.md", "third-party-licenses.md"].every((file) => existsSync(join(cache, file)) && readFileSync(join(cache, file)).length));
+		passed("bundle-pin", isDeepStrictEqual(manifest, procward) && digest(helper) === expected.binarySha256 && helperVersion === `procward ${pin.version}` && ["LICENSE", "README.md", "third-party-licenses.md"].every((file) => existsSync(join(cache, file)) && readFileSync(join(cache, file)).length) && ["LICENSE", "third-party-licenses.md"].every((file) => readFileSync(join(cache, file)).equals(readFileSync(join(import.meta.dirname, "vendor/procward", file)))));
 		const baseline = JSON.parse(run(helper, ["run", "--", process.execPath, join(fixtures, "topology.mjs")]).stdout.trim());
 		passed("auto-wrap", baseline.ownerLayers > 0 && direct.topology.ownerLayers === baseline.ownerLayers && typeof direct.taskOwner === "string");
 		const external = probe("external", [], {}, helper);

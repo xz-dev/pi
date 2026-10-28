@@ -54,6 +54,10 @@ export function acquireProcward(targetId, output, { allowDev = false } = {}) {
 		const stage = join(scratch, "verified");
 		execFileSync(process.platform === "freebsd" ? "python3.11" : "python3", [fileURLToPath(new URL("./lib/extract-procward.py", import.meta.url)), join(scratch, archive), stage, binary, asset.zipSha256, asset.binarySha256], { stdio: "inherit", timeout: 30000 });
 		if (pin.state === "release") attest(join(stage, binary), pin);
+		for (const name of ["LICENSE", "third-party-licenses.md"]) {
+			const notice = readFileSync(fileURLToPath(new URL(`./vendor/procward/${name}`, import.meta.url)));
+			if (!notice.equals(readFileSync(join(stage, name)))) throw new Error(`procward ${name} changed; review and update vendored legal notices before bundling`);
+		}
 		const manifest = { state: pin.state, version: pin.version, repository: pin.repository, workflow: pin.workflow, sourceCommit: pin.sourceCommit, tag: pin.tag, target, ...asset };
 		writeFileSync(join(stage, "pin.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 		chmodSync(join(stage, binary), 0o700);

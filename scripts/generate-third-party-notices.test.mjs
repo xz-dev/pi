@@ -4,12 +4,28 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { PROCWARD_PIN } from "./lib/procward-pin.mjs";
 
 function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "pi-notices-"));
 	const lock = { version: "1.0.0", lockfileVersion: 3, packages: { "packages/coding-agent": { name: "@earendil-works/pi-coding-agent", dependencies: { alpha: "1.0.0", "proper-lockfile": "4.1.2", "p-retry": "4.6.2" }, optionalDependencies: { "@mariozechner/clipboard": "1.0.0" } }, "node_modules/alpha": { version: "1.0.0", license: "ISC", dependencies: { beta: "2.0.0" } }, "node_modules/beta": { version: "2.0.0", license: "MIT" }, "node_modules/@mariozechner/clipboard": { version: "1.0.0", license: "MIT" }, "node_modules/proper-lockfile": { version: "4.1.2", license: "MIT", dependencies: { retry: "0.12.0" } }, "node_modules/proper-lockfile/node_modules/retry": { version: "0.12.0", license: "MIT" }, "node_modules/p-retry": { version: "4.6.2", license: "MIT", dependencies: { retry: "0.13.1", "@types/retry": "0.12.0" } }, "node_modules/p-retry/node_modules/@types/retry": { version: "0.12.0", license: "MIT" }, "node_modules/retry": { version: "0.13.1", license: "MIT" }, "node_modules/@types/retry": { version: "0.12.5", license: "MIT" } } };
 	const lockPath = join(root, "package-lock.json"); writeFileSync(lockPath, JSON.stringify(lock)); return { root, lockPath, output: join(root, "notices.md") };
 }
+
+test("procward notice uses the single pin and verbatim upstream legal texts", () => {
+	const value = fixture();
+	try {
+		execFileSync(process.execPath, [join(import.meta.dirname, "generate-third-party-notices.mjs"), value.output, value.lockPath]);
+		const text = readFileSync(value.output, "utf8");
+		assert.ok(text.includes(`## procward@${PROCWARD_PIN.version}`));
+		assert.ok(text.includes(PROCWARD_PIN.sourceCommit));
+		for (const asset of Object.values(PROCWARD_PIN.targets)) {
+			assert.ok(text.includes(asset.zipSha256));
+			assert.ok(text.includes(asset.binarySha256));
+		}
+		for (const name of ["LICENSE", "third-party-licenses.md"]) assert.ok(text.includes(readFileSync(join(import.meta.dirname, "vendor/procward", name), "utf8").trimEnd()));
+	} finally { rmSync(value.root, { recursive: true, force: true }); }
+});
 
 test("notices deterministically cover exact runtime closure and packaged natives", () => {
 	const value = fixture(); try {
