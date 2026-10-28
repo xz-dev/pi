@@ -77,7 +77,10 @@ describe("procward notice shutdown bridge", () => {
 			isSuspended: false,
 			ownerLossExitTimer: undefined as ReturnType<typeof setTimeout> | undefined,
 			stop: vi.fn(),
-			runtimeHost: { dispose: vi.fn(async () => {}) },
+			runtimeHost: {
+				dispose: vi.fn(async () => {}),
+				session: { extensionRunner: { setShutdownProgressListener: vi.fn() } },
+			},
 			themeController: { disableAutoSync: vi.fn() },
 			ui: { terminal: { drainInput: vi.fn(async () => {}) } },
 		};
