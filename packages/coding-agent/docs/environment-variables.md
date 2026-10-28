@@ -81,7 +81,7 @@ These variables are read by Pi itself:
 | `PI_CODING_AGENT_DIR` | Override the config directory; default is `~/.pi/agent` |
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage; overridden by `--session-dir` |
 | `PI_PACKAGE_DIR` | Override the package directory, useful for Nix/Guix store paths |
-| `PI_NO_PROCESS_OWNERSHIP` | Set to `1` to disable automatic procward wrapping and existing pi-env per-task ownership setup. Inherited by nested Pi invocations. Does not undo external containment; valid external lifecycle metadata is consumed and scrubbed before tools start. No runtime helper download occurs. |
+| `PI_NO_PROCESS_OWNERSHIP` | Set to `1` to disable automatic procward wrapping and existing pi-env per-task ownership setup, even with a stale bootstrap marker. Inherited by nested Pi invocations, which otherwise add their own layer. Does not undo external containment; external lifecycle metadata and its endpoint are discarded before tools start. No runtime helper download occurs. |
 | `PI_OFFLINE` | Disable automatic network activity, including model catalog refreshes |
 | `PI_SKIP_VERSION_CHECK` | Disable the `pi.dev` latest-version request |
 | `PI_TELEMETRY` | Override install/update telemetry and provider attribution headers: `1`/`true`/`yes` or `0`/`false`/`no` |
@@ -99,5 +99,7 @@ These variables are read by Pi itself:
 | `PI_TUI_ESC_TIMEOUT` | How long to wait after a lone ESC before treating it as Escape, in milliseconds; defaults to `100` over SSH and `10` otherwise. Increase if Alt-key input is misread as Escape |
 | `VISUAL`, `EDITOR` | External editor fallback when `externalEditor` is unset |
 | `HTTP_PROXY`, `HTTPS_PROXY` | Proxy outbound HTTP requests |
+
+`PI_PROCWARD_BOOTSTRAP_NONCE` is a private one-shot random bootstrap marker, not user configuration. Pi removes it before CLI imports and skips wrapping only with a valid matching managed-child READY. It prevents loops; it is not a security boundary. A stale/copied marker fails startup with a hint to unset it or use `--no-process-ownership` / `PI_NO_PROCESS_OWNERSHIP=1`.
 
 Provider credentials such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and provider-specific configuration are listed in [Providers](providers.md#use-an-api-key-from-the-environment).
