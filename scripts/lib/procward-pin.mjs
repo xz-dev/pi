@@ -10,7 +10,7 @@ export const PROCWARD_PIN = Object.freeze({
 	developmentRun: 40643608524,
 	targets: {
 		"x86_64-unknown-freebsd": { zipSha256: "61d5857be187fef5aca8a9091f83f0548c9f3a5af4bde0488c4c3d0bd643457f", binarySha256: "fd672f1c7464d3952bcf3cbbea51f2ae564f2f57c18e6b417d77b5270b7ede0e" },
-		"aarch64-unknown-freebsd": null,
+		"aarch64-unknown-freebsd": { zipSha256: "18f5cf8c66e8a3345991de82bdedbf14bd69e3071b3ce3f8244e47a8a7a4118a", binarySha256: "e887be53ea32f8f0a909363ddffa4f0c9861a5b3566e34512467deca33d13958" },
 		"x86_64-apple-darwin": { zipSha256: "b00ac1e17c8812451f448f48fe1f9bf693c3ae8f61a69253591c5561dd882c23", binarySha256: "28c194adf85313559c9b11795c9f586628a08c65397413e5aae0694523d72be4" },
 		"aarch64-apple-darwin": { zipSha256: "e1abee0f65bf8ec4586016ea967a7800c8ac086f926395fc6ec08c2f87eb38e9", binarySha256: "31eba3fbae5ca0328a1d11b3b4191f0c766a9c7d1435f08a9f3f89d49c6a0d16" },
 		"x86_64-unknown-linux-gnu": { zipSha256: "73b0b7e4a0135dcb4910e2ff28347f25209d47cb7cecee36ba43af428c62d902", binarySha256: "6ef4b7cd36fe5fe3c1d76448fe62ab559909af1fb4c02d399d5c20c21d9d3765" },
