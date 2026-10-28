@@ -67,59 +67,141 @@ describe.skipIf(process.platform !== "linux")("source helper policy", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
-	it("rejects a failed bootstrap handoff without recursively wrapping", () => {
-		const out = spawnSync(process.execPath, command, {
-			env: { ...process.env, PI_PROCWARD_BOOTSTRAP_PENDING: "1", PI_NO_PROCESS_OWNERSHIP: "" },
-			encoding: "utf8",
-			timeout: 10000,
-		});
-		expect(out.status).not.toBe(0);
-		expect(out.stderr).toContain("did not complete its managed-child startup handoff");
+	it.each(["forged", "a".repeat(32)])(
+		"fails closed for stale private marker %s with one actionable CLI error",
+		(nonce) => {
+			const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+			const out = spawnSync(process.execPath, [...command.slice(0, -1), cli, "--version"], {
+				env: { ...process.env, PI_PROCWARD_BOOTSTRAP_NONCE: nonce, PI_NO_PROCESS_OWNERSHIP: "" },
+				encoding: "utf8",
+				timeout: 10000,
+			});
+			expect(out.status).not.toBe(0);
+			expect(out.stdout).toBe("");
+			expect(out.stderr.trim().split("\n")).toHaveLength(1);
+			expect(out.stderr).toContain("PI_PROCWARD_BOOTSTRAP_NONCE");
+			expect(out.stderr).toContain("unset PI_PROCWARD_BOOTSTRAP_NONCE");
+			expect(out.stderr).toContain("--no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1");
+		},
+	);
+	it.each(["wrong-primary", "wrong-owner", "wrong-launch", "wrong-version", "eof-before"])(
+		"fails closed for marker with invalid READY (%s)",
+		(mode) => {
+			const fixture = fileURLToPath(new URL("./fixtures/procward-consumer.py", import.meta.url));
+			const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+			const out = spawnSync("python3", [fixture, process.execPath, resolver, cli, `bootstrap-${mode}`], {
+				encoding: "utf8",
+				timeout: 10000,
+			});
+			expect(out.status).toBe(0);
+			const result = JSON.parse(out.stdout);
+			expect(result.code).not.toBe(0);
+			expect(result.stdout).toBe("");
+			expect(result.stderr.trim().split("\n")).toHaveLength(1);
+			expect(result.stderr).toContain("unset PI_PROCWARD_BOOTSTRAP_NONCE");
+		},
+	);
+	it.each(["flag", "environment"])("%s opt-out wins over stale marker and invalid contract", (mode) => {
+		const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+		const out = spawnSync(
+			process.execPath,
+			[...command.slice(0, -1), cli, "--version", ...(mode === "flag" ? ["--no-process-ownership"] : [])],
+			{
+				env: {
+					...process.env,
+					PI_PROCWARD_BOOTSTRAP_NONCE: "stale",
+					PROCWARD_PROTOCOL: "invalid",
+					PROCWARD_LIFECYCLE_FD: "9999999",
+					PI_NO_PROCESS_OWNERSHIP: mode === "environment" ? "1" : "",
+				},
+				encoding: "utf8",
+				timeout: 10000,
+			},
+		);
+		expect(out.status).toBe(0);
+		expect(out.stderr).toBe("");
+		expect(out.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
 	});
 });
 
 describe.skipIf(process.platform !== "linux")("real procward managed-child boundary", () => {
-	it.each(["default", "external", "flag", "environment"])("%s launch", (mode) => {
+	it.each([
+		"default",
+		"external",
+		"nested",
+		"flag",
+		"environment",
+		"external-flag",
+		"external-environment",
+		"nested-flag",
+		"nested-environment",
+	])("%s launch", (mode) => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-procward-"));
 		try {
 			const trace = join(dir, "trace");
 			const env = {
 				...process.env,
 				PROCWARD_PROBE_TRACE: trace,
-				PI_NO_PROCESS_OWNERSHIP: mode === "environment" ? "1" : "",
+				PI_NO_PROCESS_OWNERSHIP: mode === "environment" || mode === "external-environment" ? "1" : "",
+				PI_PROCWARD_PROBE_NEST: mode.startsWith("nested") ? "1" : "",
+				PI_PROCWARD_PROBE_CHILD_OPT_OUT: mode.slice("nested-".length),
 			};
-			const args = [...command, ...(mode === "flag" ? ["--no-process-ownership"] : [])];
-			const out =
-				mode === "external"
-					? spawnSync(getPackagedProcward() ?? "procward", ["run", "--", process.execPath, ...args], {
-							env,
-							encoding: "utf8",
-							timeout: 10000,
-						})
-					: spawnSync(process.execPath, args, { env, encoding: "utf8", timeout: 10000 });
+			const helper = getPackagedProcward() ?? "procward";
+			const baseline = spawnSync(helper, ["run", "--", process.execPath, ...command, "--no-process-ownership"], {
+				env: { ...process.env, PI_NO_PROCESS_OWNERSHIP: "" },
+				encoding: "utf8",
+				timeout: 10000,
+			});
+			expect(baseline.status).toBe(0);
+			const oneLayer = JSON.parse(baseline.stdout.trim()).layers;
+			expect(oneLayer).toBeGreaterThan(0);
+			const args = [...command, ...(mode === "flag" || mode === "external-flag" ? ["--no-process-ownership"] : [])];
+			const out = mode.startsWith("external")
+				? spawnSync(helper, ["run", "--", process.execPath, ...args], {
+						env,
+						encoding: "utf8",
+						timeout: 10000,
+					})
+				: spawnSync(process.execPath, args, { env, encoding: "utf8", timeout: 10000 });
 			expect(out.stderr).toBe("");
 			expect(out.status).toBe(0);
 			const result = JSON.parse(out.stdout.trim());
 			expect(result.contract.filter((key: string) => key !== "PROCWARD_PROBE_TRACE")).toEqual([]);
 			const starts = readFileSync(trace, "utf8").trim().split("\n");
-			expect(starts).toHaveLength(mode === "default" ? 2 : 1);
-			if (mode === "default" || mode === "external") {
+			expect(result.bootstrapNonce).toBeUndefined();
+			const disabled = mode.includes("flag") || mode.includes("environment");
+			const nested = mode.startsWith("nested");
+			expect(starts).toHaveLength(nested ? (disabled ? 3 : 4) : disabled ? 1 : 2);
+			expect(result.layers).toBe(
+				oneLayer * (disabled ? (mode.startsWith("external") || nested ? 1 : 0) : mode === "default" ? 1 : 2),
+			);
+			if (!disabled) {
 				expect(result.taskOwner).toMatch(/pi-env$/);
 				expect(result.endpoints).toHaveLength(1);
 				expect(parseInt(result.endpoints[0].flags, 8) & 0o2000000).not.toBe(0);
+			} else {
+				expect(result.taskOwner).toBeUndefined();
+				expect(result.endpoints).toHaveLength(0);
 			}
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
-	it("rejects inherited environment without a valid immediate owner", () => {
+	it("discards inherited external metadata without adopting its READY", () => {
 		const out = spawnSync(process.execPath, command, {
-			env: { ...process.env, PI_NO_PROCESS_OWNERSHIP: "", PROCWARD_PROTOCOL: "1", PROCWARD_OWNER_PID: "1" },
+			env: {
+				...process.env,
+				PI_NO_PROCESS_OWNERSHIP: "",
+				PROCWARD_PROTOCOL: "1",
+				PROCWARD_OWNER_PID: "1",
+				PI_PROCWARD_BOOTSTRAP_PENDING: "1",
+			},
 			encoding: "utf8",
 			timeout: 10000,
 		});
-		expect(out.status).not.toBe(0);
-		expect(out.stderr).toContain("Invalid procward managed-child environment");
+		expect(out.status).toBe(0);
+		expect(out.stderr).toBe("");
+		expect(JSON.parse(out.stdout.trim()).taskOwner).toMatch(/pi-env$/);
 	});
 });

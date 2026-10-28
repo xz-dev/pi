@@ -10,6 +10,8 @@ import threading
 import time
 
 runtime, resolver, probe, mode = sys.argv[1:]
+bootstrap = mode.startswith("bootstrap-")
+if bootstrap: mode = mode.removeprefix("bootstrap-")
 read_fd, write_fd = os.pipe()
 os.set_inheritable(read_fd, True)
 owner = os.getpid()
@@ -37,6 +39,7 @@ else:
     options = {"pass_fds": (read_fd,)}
 env.update(PROCWARD_PROTOCOL="1", PROCWARD_OWNER_PID=str(owner), PROCWARD_CONTRACT_ID=launch,
            PI_CONTRACT_MODE=mode, PROCWARD_PRIMARY_PID="obsolete-must-be-scrubbed", PI_CONTRACT_BLOCK="1" if mode == "blocked" else "0")
+if bootstrap: env["PI_PROCWARD_BOOTSTRAP_NONCE"] = launch
 started = time.monotonic()
 child = subprocess.Popen([runtime, "--disable-warning=ExperimentalWarning", "--import", resolver, probe],
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)

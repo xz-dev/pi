@@ -65,7 +65,9 @@ static napi_value transport(napi_env env, napi_callback_info info) {
 #ifdef _WIN32
     if (raw > UINTPTR_MAX) return fail(env, "procward HANDLE out of range");
     HANDLE handle = (HANDLE)(uintptr_t)raw;
-    if (!strcmp(operation, "prepare")) {
+    if (!strcmp(operation, "discard")) {
+        if (GetFileType(handle) == FILE_TYPE_PIPE && !CloseHandle(handle)) return fail(env, "procward external pipe close failed");
+    } else if (!strcmp(operation, "prepare")) {
         if (GetFileType(handle) != FILE_TYPE_PIPE || !SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0)) return fail(env, "procward pipe preparation failed");
     } else if (!strcmp(operation, "close")) {
         if (!CloseHandle(handle)) return fail(env, "procward pipe close failed");
@@ -83,7 +85,10 @@ static napi_value transport(napi_env env, napi_callback_info info) {
 #else
     if (raw > INT_MAX) return fail(env, "procward fd out of range");
     int fd = (int)raw;
-    if (!strcmp(operation, "prepare")) {
+    if (!strcmp(operation, "discard")) {
+        struct stat st;
+        if (!fstat(fd, &st) && S_ISFIFO(st.st_mode) && close(fd)) return fail(env, "procward external pipe close failed");
+    } else if (!strcmp(operation, "prepare")) {
         struct stat st;
         int descriptor_flags = fcntl(fd, F_GETFD), flags = fcntl(fd, F_GETFL);
         if (fstat(fd, &st) || !S_ISFIFO(st.st_mode) || descriptor_flags < 0 || flags < 0 ||

@@ -11,7 +11,7 @@ const CONTRACT_ENV = [
 	"PROCWARD_PRIMARY_PID",
 ];
 type Transport = (
-	operation: "prepare" | "read" | "close" | "identity",
+	operation: "prepare" | "read" | "close" | "identity" | "discard",
 	endpoint: string,
 	identity?: string,
 ) => string | null;
@@ -115,6 +115,22 @@ parentPort.on("message", () => { poll(); parentPort.postMessage({ drained: true 
 Atomics.store(ready, 0, 1);
 Atomics.notify(ready, 0);
 `;
+
+/** Drop an external owner's application endpoint without adopting its lifecycle or READY. */
+export function discardProcwardContract(): void {
+	const endpoint =
+		process.platform === "win32" ? process.env.PROCWARD_LIFECYCLE_HANDLE : process.env.PROCWARD_LIFECYCLE_FD;
+	for (const key of CONTRACT_ENV) delete process.env[key];
+	if (
+		!endpoint ||
+		!/^\d+$/.test(endpoint) ||
+		BigInt(endpoint) <= 2n ||
+		BigInt(endpoint) > (process.platform === "win32" ? 0xffff_ffff_ffff_ffffn : 0x7fff_ffffn)
+	)
+		return;
+	const { transport } = createRequire(import.meta.url)(getProcwardTransport()) as { transport: Transport };
+	transport("discard", endpoint);
+}
 
 /** Consume once, scrub metadata and remove inheritance before any CLI graph or task can load. */
 export function consumeProcwardContract(): boolean {

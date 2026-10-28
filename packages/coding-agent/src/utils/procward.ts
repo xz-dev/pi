@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { accessSync, constants } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import { getPackagedProcward, isBunBinary } from "../config.ts";
-import { consumeProcwardContract } from "./managed-child.ts";
+import { consumeProcwardContract, discardProcwardContract } from "./managed-child.ts";
 import { enableTaskProcessOwnership } from "./process-owner.ts";
 
 const VALUE_OPTIONS = new Set([
@@ -30,6 +31,8 @@ const VALUE_OPTIONS = new Set([
 	"--prompt-template",
 	"--theme",
 ]);
+// One-shot loop prevention for our bootstrap, not a security boundary against a parent.
+const BOOTSTRAP_NONCE = "PI_PROCWARD_BOOTSTRAP_NONCE";
 let bootstrapped = false;
 
 export function ownershipDisabled(args: string[]): boolean {
@@ -46,17 +49,38 @@ export function ownershipDisabled(args: string[]): boolean {
 export function ownCliProcesses(): undefined | false {
 	if (bootstrapped) return;
 	for (const key of Object.keys(process.env)) if (key.startsWith("PI_PROCESS_OWNER_")) delete process.env[key];
-	const pending = process.env.PI_PROCWARD_BOOTSTRAP_PENDING;
+	const nonce = process.env[BOOTSTRAP_NONCE];
+	delete process.env[BOOTSTRAP_NONCE];
 	delete process.env.PI_PROCWARD_BOOTSTRAP_PENDING;
 	const args = process.argv.slice(2);
-	const disabled = ownershipDisabled(args);
-	if (consumeProcwardContract()) {
-		if (!disabled) enableTaskProcessOwnership();
+	if (ownershipDisabled(args)) {
+		discardProcwardContract();
 		bootstrapped = true;
 		return;
 	}
-	if (pending !== undefined) throw new Error("Procward did not complete its managed-child startup handoff");
-	if (disabled || (args.length === 1 && (args[0] === "--version" || args[0] === "-v"))) {
+	if (nonce !== undefined) {
+		try {
+			if (!/^[0-9a-f]{32}$/.test(nonce) || !consumeProcwardContract()) throw new Error("Missing bootstrap READY");
+		} catch {
+			try {
+				discardProcwardContract();
+			} catch {
+				/* Startup exits without loading the CLI. */
+			}
+			const error = new Error(
+				`${BOOTSTRAP_NONCE} has no matching valid procward READY; unset ${BOOTSTRAP_NONCE}, or use --no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1`,
+			);
+			// CLI entry reports one actionable line, not a stack for stale private metadata.
+			error.stack = undefined;
+			throw error;
+		}
+		enableTaskProcessOwnership();
+		bootstrapped = true;
+		return;
+	}
+	// An external owner is not our handoff: discard its endpoint and create our own layer.
+	discardProcwardContract();
+	if (args.length === 1 && (args[0] === "--version" || args[0] === "-v")) {
 		bootstrapped = true;
 		return;
 	}
@@ -89,7 +113,7 @@ export function ownCliProcesses(): undefined | false {
 	}
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
-	env.PI_PROCWARD_BOOTSTRAP_PENDING = "1";
+	env[BOOTSTRAP_NONCE] = randomBytes(16).toString("hex");
 	const commandArgs = isBunBinary ? args : [...process.execArgv, ...process.argv.slice(1)];
 	const ownerArgs = [
 		"run",
