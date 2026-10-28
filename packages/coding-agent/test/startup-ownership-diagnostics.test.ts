@@ -5,7 +5,7 @@ import { macOSOwnershipDiagnostics } from "../src/utils/macos-ownership-diagnost
 
 // Execute main's actual startup-selection expression, without launching the TUI or model runtime.
 const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const expression = source.match(/const startupDiagnostics = deduplicateDiagnostics\((\[[\s\S]*?\n\t\])\);/)?.[1];
+const expression = source.match(/^\tstartupDiagnostics = deduplicateDiagnostics\((\[[\s\S]*?\n\t\])\);/m)?.[1];
 if (!expression) throw new Error("main startup diagnostic selection was not found");
 const select = new Function(
 	"args",
@@ -14,7 +14,7 @@ const select = new Function(
 	"offlineMode",
 	"settingsManager",
 	"runtime",
-	"startupSettingsDiagnostics",
+	"startupDiagnostics",
 	"macOSOwnershipDiagnostics",
 	`return ${expression};`,
 );
