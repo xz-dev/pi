@@ -169,6 +169,10 @@ jobs:
       - name: Build rebuilt main
         run: npm run build
 
+      - name: Stage release-pinned procward for source integration tests
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: node scripts/acquire-procward.mjs --target linux-x64-gnu-modern packages/coding-agent/dist/native/procward
+
       - name: Check rebuilt main
         run: |
           # biome check --write may apply formatting fixes to merged files
