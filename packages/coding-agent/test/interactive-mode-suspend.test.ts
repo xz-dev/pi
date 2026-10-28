@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 const ownerState = vi.hoisted(() => ({ lost: false, code: 0, handler: undefined as (() => void) | undefined }));
-vi.mock("../src/utils/procward-contract.ts", () => ({
+vi.mock("../src/utils/managed-child.ts", () => ({
 	cliProcessOwnerExitCode: () => ownerState.code,
 	hasLostCliProcessOwner: () => ownerState.lost,
 	drainCliProcessOwner: async () => {},

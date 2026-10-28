@@ -1,6 +1,6 @@
 import { appendFileSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { hasLostCliProcessOwner, onCliProcessOwnerLoss } from "../../src/utils/managed-child.ts";
 import { ownCliProcesses } from "../../src/utils/procward.ts";
-import { hasLostCliProcessOwner, onCliProcessOwnerLoss } from "../../src/utils/procward-contract.ts";
 
 if (process.env.PROCWARD_PROBE_TRACE) appendFileSync(process.env.PROCWARD_PROBE_TRACE, `${process.pid}\n`);
 const lifecyclePipe = process.env.PROCWARD_LIFECYCLE_FD

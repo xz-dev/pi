@@ -77,8 +77,8 @@ import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/inte
 import { validateThemeJson } from "./modes/interactive/theme/theme-schema.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { macOSOwnershipDiagnostics } from "./utils/macos-ownership-diagnostics.ts";
+import { completeCliProcessOwnerStartup } from "./utils/managed-child.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
-import { completeCliProcessOwnerStartup } from "./utils/procward-contract.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;

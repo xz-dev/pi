@@ -2,8 +2,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import { getPackagedProcward, isBunBinary } from "../config.ts";
+import { consumeProcwardContract } from "./managed-child.ts";
 import { enableTaskProcessOwnership } from "./process-owner.ts";
-import { consumeProcwardContract } from "./procward-contract.ts";
 
 const VALUE_OPTIONS = new Set([
 	"--provider",

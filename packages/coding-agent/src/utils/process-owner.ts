@@ -6,8 +6,8 @@ import * as packageConfig from "../config.ts";
 
 const OWNER_BINARY = "PI_PROCESS_OWNER_BINARY";
 
+export { hasLostCliProcessOwner } from "./managed-child.ts";
 export { ownCliProcesses } from "./procward.ts";
-export { hasLostCliProcessOwner } from "./procward-contract.ts";
 
 /** Retain pi-env's existing per-task ownership inside the procward-managed primary. */
 export function enableTaskProcessOwnership(): void {

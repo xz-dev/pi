@@ -5,7 +5,7 @@ import {
 	consumeProcwardContract,
 	hasLostCliProcessOwner,
 	onCliProcessOwnerLoss,
-} from "../../src/utils/procward-contract.ts";
+} from "../../src/utils/managed-child.ts";
 
 const endpoint = process.env.PROCWARD_LIFECYCLE_FD;
 consumeProcwardContract();
