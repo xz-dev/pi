@@ -10,6 +10,7 @@ SKIP_BUILD=false
 HYDRATE_TARGET_DEPS=false
 OFFLINE_MODEL_DATA=false
 WITHOUT_X11=false
+ALLOW_DEV_PROCWARD=false
 PLATFORMS_REQUESTED=()
 OUTPUT_DIR=""
 DISTRIBUTION_VERSION=""
@@ -23,6 +24,7 @@ while [[ $# -gt 0 ]]; do
 		--hydrate-target-deps) HYDRATE_TARGET_DEPS=true; shift ;;
 		--offline-model-data) OFFLINE_MODEL_DATA=true; shift ;;
 		--without-x11) WITHOUT_X11=true; shift ;;
+		--allow-dev-procward) ALLOW_DEV_PROCWARD=true; shift ;;
 		--platform) PLATFORMS_REQUESTED+=("$2"); shift 2 ;;
 		--out) OUTPUT_DIR="$2"; shift 2 ;;
 		--distribution-version) DISTRIBUTION_VERSION="$2"; shift 2 ;;
@@ -100,7 +102,15 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 			case $library in libc.so.7 | libthr.so.3 | libm.so.5 | libgcc_s.so.1) ;; *) echo "process-owner links non-portable $library" >&2; exit 1 ;; esac
 		done
 	fi
+	procward_args=(--target "$target" "$build_dir/procward")
+	if [[ "$ALLOW_DEV_PROCWARD" == true ]]; then procward_args+=(--allow-dev); fi
+	node ../../scripts/acquire-procward.mjs "${procward_args[@]}"
+	target_os=$(node ../../scripts/lib/bun-targets.mjs --get "$target" os)
+	target_arch=$(node ../../scripts/lib/bun-targets.mjs --get "$target" arch)
+	node ../../scripts/build-procward-transport.mjs "$build_dir/procward-transport/procward-transport.node" "$target_os" "$target_arch"
 	asset_args=(
+		--asset="$build_dir/procward"
+		--asset="$build_dir/procward-transport"
 		--asset="$build_dir/package.json"
 		--asset="$build_dir/process-owner"
 		--asset=README.md

@@ -50,6 +50,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep tmux
       - run: sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
       - run: npm run hydrate:model-data && npm run build && bash scripts/check-allow-model-catalog-drift.sh
+      - name: Stage release-pinned procward for source integration tests
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: node scripts/acquire-procward.mjs --target linux-x64-gnu-modern packages/coding-agent/dist/native/procward
       - name: Build the pi-env daemon for tests
         run: npm run build:daemon --workspace packages/env
       - run: ./test.sh
@@ -95,7 +98,7 @@ jobs:
         run: scripts/build-musl-clipboard.sh "$RUNNER_TEMP/clipboard-musl" '${{ matrix.arch }}'
       - name: Build one canonical production target
         shell: bash
-        env: { NODE_ENV: production }
+        env: { NODE_ENV: production, GH_TOKEN: "${{ github.token }}" }
         run: |
           set -euo pipefail
           version=$(node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.GITHUB_RUN_NUMBER + ".1.g" + process.env.GITHUB_SHA.slice(0, 8)')
@@ -137,10 +140,10 @@ jobs:
           release: "14.3"
           arch: ${{ matrix.arch }}
           mem: ${{ matrix.mem }}
-          prepare: pkg install -y node22 npm-node22 bash curl git-lite zip unzip libxcb xorg-vfbserver fd-find ripgrep
+          prepare: pkg install -y node22 npm-node22 bash curl git-lite zip unzip libxcb xorg-vfbserver fd-find ripgrep python311 gh
           # The synced checkout keeps the runner uid; trust it so release tooling can verify HEAD == GITHUB_SHA.
           # Runtime engines require ^22.22.2 || ^24.15.0 || >=26.0.0; FreeBSD pkg 'node22' must satisfy it.
-          run: git config --global --add safe.directory "$PWD" && node -e 'const v=process.versions.node.split(".").map(Number); if (!((v[0]===22&&(v[1]>22||v[1]===22&&v[2]>=2))||(v[0]===24&&(v[1]>15||v[1]===15&&v[2]>=0))||v[0]>=26)) { console.error(`node ${process.version} outside engines ^22.22.2 || ^24.15.0 || >=26.0.0`); process.exit(1) }' && bash scripts/freebsd-release.sh
+          run: export GH_TOKEN='${{ github.token }}'; git config --global --add safe.directory "$PWD" && node -e 'const v=process.versions.node.split(".").map(Number); if (!((v[0]===22&&(v[1]>22||v[1]===22&&v[2]>=2))||(v[0]===24&&(v[1]>15||v[1]===15&&v[2]>=0))||v[0]>=26)) { console.error(`node ${process.version} outside engines ^22.22.2 || ^24.15.0 || >=26.0.0`); process.exit(1) }' && bash scripts/freebsd-release.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-target-${{ github.sha }}-${{ matrix.target }}", path: ".artifacts/freebsd-release/pi-${{ matrix.target }}", if-no-files-found: error, overwrite: true, retention-days: 14 }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

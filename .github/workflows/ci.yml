@@ -69,6 +69,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Stage procward for source integration tests
+        if: matrix.name == 'coding-agent'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: node scripts/acquire-procward.mjs --target linux-x64-gnu-modern packages/coding-agent/dist/native/procward --allow-dev
+
       - name: Build the pi-env daemon
         if: matrix.name == 'other'
         run: npm run build:daemon --workspace packages/env
