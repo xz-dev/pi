@@ -6,8 +6,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const [destination, expectedOs, expectedArch] = process.argv.slice(2);
+const hostOs = process.platform === "win32" ? "windows" : process.platform;
+if ((expectedOs && expectedOs !== hostOs) || (expectedArch && expectedArch !== process.arch))
+	throw new Error("Procward transport must be built on the target OS and architecture");
 const source = join(root, "packages/coding-agent/native/procward/transport.c");
-const output = resolve(process.argv[2] ?? join(root, "packages/coding-agent/dist/native/procward-transport/procward-transport.node"));
+const output = resolve(destination ?? join(root, "packages/coding-agent/dist/native/procward-transport/procward-transport.node"));
 const scratch = mkdtempSync(join(tmpdir(), "pi-procward-transport-"));
 try {
 	const built = join(scratch, "procward-transport.node");
