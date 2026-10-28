@@ -84,6 +84,7 @@ int main(int argc, char **argv) {
         unsetenv("PROCWARD_LIFECYCLE_HANDLE"); unsetenv("PROCWARD_PRIMARY_PID");
         setenv("PROCWARD_PROTOCOL", "1", 1); setenv("PROCWARD_OWNER_PID", owner, 1);
         setenv("PROCWARD_CONTRACT_ID", id, 1); setenv("PROCWARD_LIFECYCLE_FD", endpoint, 1);
+        setenv("PI_PROCWARD_BOOTSTRAP_NONCE", id, 1);
         setenv("PI_PROCWARD_CONTRACT_DIRECTORY", argv[3], 1); setenv("PI_PROCWARD_CONTRACT_BLOCKED", argv[4], 1);
         if (snprintf(path, sizeof(path), "%s/agent", argv[3]) >= (int)sizeof(path)) _exit(125);
         setenv("PI_CODING_AGENT_DIR", path, 1);

@@ -12,7 +12,7 @@ import { PROCWARD_PIN } from "./lib/procward-pin.mjs";
 
 const fixtures = fileURLToPath(new URL("./fixtures/procward/", import.meta.url));
 const digest = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
-export const PROCWARD_CONTRACT_CASES = Object.freeze(["bundle-pin", "auto-wrap", "validated-parent-no-nesting", "flag-opt-out", "env-opt-out", "option-value", "after-terminator", "external-opt-out", "notice-hook", "blocked-hook", "terminal-restored"]);
+export const PROCWARD_CONTRACT_CASES = Object.freeze(["bundle-pin", "auto-wrap", "external-default-nesting", "pi-in-pi-default-nesting", "flag-opt-out", "env-opt-out", "option-value", "after-terminator", "external-opt-out", "external-env-opt-out", "nested-flag-opt-out", "nested-env-opt-out", "stale-marker", "notice-hook", "blocked-hook", "terminal-restored"]);
 export function assertProcwardContract(record, targetId, piSha256, pin = PROCWARD_PIN) {
 	const target = bunTarget(targetId).cargoTarget;
 	if (!/^[0-9a-f]{64}$/.test(pin.targets[target]?.zipSha256 ?? "") || !/^[0-9a-f]{64}$/.test(pin.targets[target]?.binarySha256 ?? "")) throw new Error(`${targetId} missing procward pin digests`);
@@ -35,7 +35,7 @@ export function smokeProcwardContract(executable, targetId, version, { allowDev 
 	const work = mkdtempSync(join(tmpdir(), "pi-procward-contract-"));
 	const python = process.platform === "win32" ? "python" : process.platform === "freebsd" ? "python3.11" : "python3";
 	const env = { ...process.env, PI_OFFLINE: "1", PI_TELEMETRY: "0", PI_NO_PROCESS_OWNERSHIP: "", PI_PROCWARD_CONTRACT_HARNESS_PID: String(process.pid), PI_PROCWARD_CONTRACT_RUNTIME: process.execPath, PI_PROCWARD_CONTRACT_TOPOLOGY: join(fixtures, "topology.mjs"), TERM: "xterm-256color" };
-	for (const key of Object.keys(env)) if (key.startsWith("PROCWARD_") || key.startsWith("PI_PROCESS_OWNER_") || key === "PI_PACKAGE_DIR" || key === "PI_PROCWARD_BOOTSTRAP_PENDING") delete env[key];
+	for (const key of Object.keys(env)) if (key.startsWith("PROCWARD_") || key.startsWith("PI_PROCESS_OWNER_") || key === "PI_PACKAGE_DIR" || key === "PI_PROCWARD_BOOTSTRAP_PENDING" || key === "PI_PROCWARD_BOOTSTRAP_NONCE") delete env[key];
 	const isolatedTmp = join(work, "tmp");
 	mkdirSync(isolatedTmp);
 	Object.assign(env, { HOME: join(work, "home"), USERPROFILE: join(work, "home"), TMPDIR: isolatedTmp, TMP: isolatedTmp, TEMP: isolatedTmp });
@@ -74,7 +74,9 @@ export function smokeProcwardContract(executable, targetId, version, { allowDev 
 		const baseline = JSON.parse(run(helper, ["run", "--", process.execPath, join(fixtures, "topology.mjs")]).stdout.trim());
 		passed("auto-wrap", baseline.ownerLayers > 0 && direct.topology.ownerLayers === baseline.ownerLayers && typeof direct.taskOwner === "string");
 		const external = probe("external", [], {}, helper);
-		passed("validated-parent-no-nesting", external.topology.ownerLayers === baseline.ownerLayers && typeof external.taskOwner === "string");
+		passed("external-default-nesting", external.topology.ownerLayers === 2 * baseline.ownerLayers && typeof external.taskOwner === "string");
+		const nested = probe("nested", [], { PI_PROCWARD_CONTRACT_NEST: "1" });
+		passed("pi-in-pi-default-nesting", nested.topology.ownerLayers === 2 * baseline.ownerLayers && typeof nested.taskOwner === "string");
 		for (const [name, args, extra] of [["flag-opt-out", ["--no-process-ownership"], {}], ["env-opt-out", [], { PI_NO_PROCESS_OWNERSHIP: "1" }]]) {
 			const record = probe(name, args, extra);
 			passed(name, record.topology.ownerLayers === 0 && record.pid === record.launcherPid && record.taskOwner === undefined);
@@ -85,6 +87,14 @@ export function smokeProcwardContract(executable, targetId, version, { allowDev 
 		}
 		const externalDisabled = probe("external-disabled", ["--no-process-ownership"], {}, helper);
 		passed("external-opt-out", externalDisabled.topology.ownerLayers === baseline.ownerLayers && externalDisabled.taskOwner === undefined);
+		const externalEnvDisabled = probe("external-env-disabled", [], { PI_NO_PROCESS_OWNERSHIP: "1" }, helper);
+		passed("external-env-opt-out", externalEnvDisabled.topology.ownerLayers === baseline.ownerLayers && externalEnvDisabled.taskOwner === undefined);
+		for (const mode of ["flag", "env"]) {
+			const record = probe(`nested-${mode}`, [], { PI_PROCWARD_CONTRACT_NEST: mode });
+			passed(`nested-${mode}-opt-out`, record.topology.ownerLayers === baseline.ownerLayers && record.taskOwner === undefined);
+		}
+		const stale = spawnSync(executable, ["--version"], { env: { ...env, PI_PROCWARD_BOOTSTRAP_NONCE: "a".repeat(32) }, encoding: "utf8", timeout: 10000 * scale });
+		passed("stale-marker", !stale.error && stale.status !== 0 && stale.stdout === "" && stale.stderr.trim().split("\n").length === 1 && stale.stderr.includes("unset PI_PROCWARD_BOOTSTRAP_NONCE") && stale.stderr.includes("--no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1"));
 		const harness = join(fixtures, process.platform === "win32" ? "conpty-contract.py" : "pty-contract.py");
 		const terminalContract = (directory, block) => process.env.PI_PROCWARD_CONTRACT_PTY
 			? JSON.parse(run(process.env.PI_PROCWARD_CONTRACT_PTY, [executable, join(fixtures, "extension.mjs"), directory, block, String(scale)], {}, 40000).stdout.trim())

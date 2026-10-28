@@ -22,7 +22,8 @@ read_fd, write_fd = os.pipe()
 launch = "a" * 32
 env = {k: v for k, v in os.environ.items() if not k.startswith(("PROCWARD_", "PI_PROCESS_OWNER_"))}
 env.update(PROCWARD_PROTOCOL="1", PROCWARD_OWNER_PID=str(os.getpid()), PROCWARD_CONTRACT_ID=launch,
-           PROCWARD_LIFECYCLE_FD=str(read_fd), PI_PROCWARD_CONTRACT_DIRECTORY=str(root),
+           PROCWARD_LIFECYCLE_FD=str(read_fd), PI_PROCWARD_BOOTSTRAP_NONCE=launch,
+           PI_PROCWARD_CONTRACT_DIRECTORY=str(root),
            PI_PROCWARD_CONTRACT_BLOCKED=blocked, PI_CODING_AGENT_DIR=str(root / "agent"),
            PI_OFFLINE="1", PI_TELEMETRY="0", TERM="xterm-256color")
 

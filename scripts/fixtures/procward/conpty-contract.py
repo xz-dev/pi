@@ -148,6 +148,7 @@ try:
     launch_id = "a" * 32
     env = dict(base_env, PROCWARD_PROTOCOL="1", PROCWARD_OWNER_PID=str(os.getpid()),
                PROCWARD_CONTRACT_ID=launch_id, PROCWARD_LIFECYCLE_HANDLE=str(read_notice.value),
+               PI_PROCWARD_BOOTSTRAP_NONCE=launch_id,
                PI_PROCWARD_CONTRACT_DIRECTORY=str(root), PI_PROCWARD_CONTRACT_BLOCKED=blocked,
                PI_CODING_AGENT_DIR=str(root / "agent"))
     child = launch(json.loads(command) + ["--offline", "--no-session", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "--provider", "anthropic", "--model", "claude-sonnet-4-5", "--api-key", "fixture-never-used", "-e", extension], env, read_notice)
