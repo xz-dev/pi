@@ -10,7 +10,8 @@ import { PROCWARD_PIN } from "./lib/procward-pin.mjs";
 
 const hash = (data) => createHash("sha256").update(data).digest("hex");
 test("development builds cannot pass the publication gate", () => {
-	assert.throws(() => validateProcwardPin(), /publishing is forbidden/);
+	const dev = { ...PROCWARD_PIN, state: "unpinned-dev", tag: null };
+	assert.throws(() => validateProcwardPin(dev), /publishing is forbidden/);
 	assert.equal(validateProcwardPin(PROCWARD_PIN, { allowDev: true }), PROCWARD_PIN);
 	const release = { ...PROCWARD_PIN, state: "release", tag: `v${PROCWARD_PIN.version}` };
 	assert.equal(validateProcwardPin(release), release);
