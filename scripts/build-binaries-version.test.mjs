@@ -9,12 +9,22 @@ import { bunTarget } from "./lib/bun-targets.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 
-/** The real builder needs cargo; the stub stages a placeholder and records the cross target it was given. */
-function stubProcessOwnerBuilder(agent) {
+/** Build-test fixtures only: stage placeholder native resources, never runtime/provenance evidence. */
+function stubNativeBuilders(agent) {
   mkdirSync(join(agent, "scripts"), { recursive: true });
   writeFileSync(join(agent, "scripts/build-process-owner.mjs"), `import { mkdirSync, writeFileSync } from "node:fs";
 mkdirSync(process.argv[2], { recursive: true });
 writeFileSync(process.argv[2] + "/pi-env", process.env.CARGO_BUILD_TARGET ?? "");
+`);
+  const scripts = join(agent, "../../scripts");
+  writeFileSync(join(scripts, "acquire-procward.mjs"), `import { mkdirSync, writeFileSync } from "node:fs";
+mkdirSync(process.argv[4], { recursive: true });
+writeFileSync(process.argv[4] + "/procward", "build fixture");
+`);
+  writeFileSync(join(scripts, "build-procward-transport.mjs"), `import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+mkdirSync(dirname(process.argv[2]), { recursive: true });
+writeFileSync(process.argv[2], "build fixture");
 `);
 }
 
@@ -27,7 +37,7 @@ test("binary builds accept a different Bun version and propagate compiler errors
     const agent = join(temporary, "packages/coding-agent");
     mkdirSync(agent, { recursive: true });
     writeFileSync(join(agent, "package.json"), "{}");
-    stubProcessOwnerBuilder(agent);
+    stubNativeBuilders(agent);
     const bun = join(temporary, "bun");
     writeFileSync(bun, `#!/usr/bin/env node
 const args = process.argv.slice(2);
@@ -59,7 +69,7 @@ test("--without-x11 omits only X11 helpers and needs no musl helper directory", 
     const agent = join(temporary, "packages/coding-agent");
     mkdirSync(agent, { recursive: true });
     writeFileSync(join(agent, "package.json"), "{}");
-    stubProcessOwnerBuilder(agent);
+    stubNativeBuilders(agent);
     const bun = join(temporary, "bun");
     writeFileSync(bun, `#!/usr/bin/env node
 const fs = require("node:fs");
