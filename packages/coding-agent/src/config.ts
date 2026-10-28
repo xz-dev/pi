@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { chmodSync } from "node:fs";
 import {
 	accessSync,
 	constants,
@@ -211,6 +213,53 @@ export function materializeNativeAddons(cacheRoot?: string): string | undefined 
 		relativePath: "native",
 		cacheRoot,
 	});
+}
+
+/** Bundled procward is verified against its build-derived manifest; compiled builds never use PATH. */
+export function getPackagedProcward(): string | undefined {
+	const sourceDir = isBunBinary
+		? getEmbeddedAssetPath("procward")
+		: join(getPackageDir(), "dist", "native", "procward");
+	if (!isBunBinary && !existsSync(sourceDir)) return undefined;
+	const manifest: unknown = JSON.parse(readFileSync(join(sourceDir, "pin.json"), "utf8"));
+	if (
+		!manifest ||
+		typeof manifest !== "object" ||
+		!("version" in manifest) ||
+		typeof manifest.version !== "string" ||
+		!/^\d+\.\d+\.\d+$/.test(manifest.version) ||
+		!("binarySha256" in manifest) ||
+		typeof manifest.binarySha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(manifest.binarySha256) ||
+		!("state" in manifest) ||
+		!["release", "unpinned-dev"].includes(String(manifest.state))
+	)
+		throw new Error("Invalid bundled procward pin manifest");
+	const directory = materializeResourceTree({
+		sourceDir,
+		relativePath: `procward/${manifest.version}-${manifest.binarySha256}`,
+	});
+	const binary = join(directory, process.platform === "win32" ? "procward.exe" : "procward");
+	if (createHash("sha256").update(readFileSync(binary)).digest("hex") !== manifest.binarySha256)
+		throw new Error("Bundled procward executable digest mismatch");
+	chmodSync(binary, 0o700);
+	return binary;
+}
+
+/** Pi's small fd/HANDLE adapter is a Pi resource, not another process owner. */
+export function getProcwardTransport(): string {
+	const sourceDir = isBunBinary
+		? getEmbeddedAssetPath("procward-transport")
+		: join(getPackageDir(), "dist", "native", "procward-transport");
+	const filename = "procward-transport.node";
+	const digest = createHash("sha256")
+		.update(readFileSync(join(sourceDir, filename)))
+		.digest("hex");
+	const directory = materializeResourceTree({ sourceDir, relativePath: `procward-transport/${digest}` });
+	const addon = join(directory, filename);
+	if (createHash("sha256").update(readFileSync(addon)).digest("hex") !== digest)
+		throw new Error("Procward transport resource digest mismatch");
+	return addon;
 }
 
 // =============================================================================
