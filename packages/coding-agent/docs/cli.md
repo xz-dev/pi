@@ -239,7 +239,7 @@ See [Configuration](configuration.md) for saved configuration, [Security](securi
 - `-na`, `--no-approve`<br>
   Ignores trust-gated project-local configuration and resources for this process.
 - `--no-process-ownership`<br>
-  Disables Pi's native session and per-task process-tree supervision. Use this only when an external sandbox or supervisor owns the subprocess lifecycle. Legacy cancellation remains available, but detached descendants may outlive Pi. The flag affects this invocation; `PI_NO_PROCESS_OWNERSHIP=1` also applies to nested Pi invocations through environment inheritance.
+  Disables automatic outer [procward](https://github.com/xz-dev/procward) wrapping and the existing pi-env per-task setup. Use an external supervisor or sandbox if descendant cleanup is required. This cannot undo external procward containment; a valid external lifecycle contract is still consumed. The flag affects this invocation; `PI_NO_PROCESS_OWNERSHIP=1` also applies to nested Pi invocations through environment inheritance. Source/npm uses a packaged helper or PATH, never a runtime download; a missing helper produces one ownership-disabled notice unless opted out. Compiled Pi requires its verified bundled helper. macOS cleanup and Windows shutdown-hook opportunity remain best effort.
 - `--offline`<br>
   Disables automatic network activity, including model catalog refreshes. Equivalent to `PI_OFFLINE=1`.
 - `-h`, `--help`<br>
