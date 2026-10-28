@@ -63,7 +63,7 @@ test("authoritative Bun target descriptors contain the exact supported matrix", 
 		assert.equal(target.filesystemHelperFile, undefined);
 		assert.equal(target.requiredCommands.some((command) => command.startsWith("win32-filesystem-snapshot") || command === "usage-claim" || command === "extract" || command === "measure-extracted-size"), false);
 		assert.ok(target.requiredCommands.includes("resource-materialization"));
-		assert.ok(target.requiredCommands.includes("owner-lifecycle"));
+		assert.ok(target.requiredCommands.includes("procward-contract"));
 		assert.match(target.clipboardNativePackage, target.os === "freebsd" ? /native-freebsd-/ : target.libc ? new RegExp(`${target.libc}$`) : /clipboard-/);
 		// cargoTarget derives from the same os/arch/libc fields (no second matrix).
 		const rustArch = target.arch === "x64" ? "x86_64" : "aarch64";

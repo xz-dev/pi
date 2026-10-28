@@ -107,14 +107,6 @@ jobs:
           if [[ '${{ matrix.id }}' == *-musl* ]]; then args+=(--clipboard-musl-dir "$RUNNER_TEMP/clipboard-musl"); fi
           scripts/build-binaries.sh "${args[@]}"
           test "$(find "$RUNNER_TEMP/target" -maxdepth 1 -type f -name 'pi-*' | wc -l)" -eq 1
-      - name: Build CI-only Unix PTY fixture for target architecture
-        if: runner.os != 'Windows'
-        shell: bash
-        env: { CARGO_TARGET_DIR: "${{ runner.temp }}/owner-pty-cargo-${{ matrix.id }}" }
-        run: node scripts/build-owner-pty.mjs '${{ matrix.id }}' "$RUNNER_TEMP/owner-pty-${{ matrix.id }}/owner-pty"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: runner.os != 'Windows'
-        with: { name: "owner-pty-${{ github.sha }}-${{ matrix.id }}", path: "${{ runner.temp }}/owner-pty-${{ matrix.id }}/owner-pty", if-no-files-found: error, overwrite: true, retention-days: 14 }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-target-${{ github.sha }}-${{ matrix.id }}", path: "${{ runner.temp }}/target/pi-*", if-no-files-found: error, overwrite: true, retention-days: 14 }
 
@@ -146,9 +138,6 @@ jobs:
           run: export GH_TOKEN='${{ github.token }}'; git config --global --add safe.directory "$PWD" && node -e 'const v=process.versions.node.split(".").map(Number); if (!((v[0]===22&&(v[1]>22||v[1]===22&&v[2]>=2))||(v[0]===24&&(v[1]>15||v[1]===15&&v[2]>=0))||v[0]>=26)) { console.error(`node ${process.version} outside engines ^22.22.2 || ^24.15.0 || >=26.0.0`); process.exit(1) }' && bash scripts/freebsd-release.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-target-${{ github.sha }}-${{ matrix.target }}", path: ".artifacts/freebsd-release/pi-${{ matrix.target }}", if-no-files-found: error, overwrite: true, retention-days: 14 }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with: { name: "owner-pty-${{ github.sha }}-${{ matrix.target }}", path: ".artifacts/freebsd-release/owner-pty", if-no-files-found: error, overwrite: true, retention-days: 14 }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with: { name: "smoke-diagnostics-${{ github.sha }}-${{ matrix.target }}", path: ".artifacts/freebsd-release/${{ matrix.target }}.json.diagnostics", if-no-files-found: ignore, overwrite: true, retention-days: 30 }
@@ -185,7 +174,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: "^22.22.2" }
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' || matrix.executor == 'pinned-musl-container'
         with: { version: "0.15.2" }
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with: { bun-version: "latest" }
@@ -200,17 +189,10 @@ jobs:
       - name: Restore executable bits dropped by artifact transport
         shell: bash
         run: chmod +x "$RUNNER_TEMP"/pi-github-release/pi-*
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: runner.os != 'Windows'
-        with: { name: "owner-pty-${{ github.sha }}-${{ matrix.target }}", path: "${{ runner.temp }}/owner-pty" }
-      - name: Restore CI-only PTY fixture executable bit
-        if: runner.os != 'Windows'
-        shell: bash
-        run: chmod +x "$RUNNER_TEMP/owner-pty/owner-pty"
       - name: Execute final native archive
         if: matrix.executor == 'native'
         shell: bash
-        env: { PI_XZ_EXECUTOR: native, PI_OWNER_PTY_HARNESS: "${{ runner.temp }}/owner-pty/owner-pty" }
+        env: { PI_XZ_EXECUTOR: native }
         run: |
           set -euo pipefail
           xvfb_pid=""
@@ -255,7 +237,9 @@ jobs:
       - name: Prepare hash-pinned musl XCB test libraries
         if: matrix.executor == 'pinned-musl-container'
         shell: bash
-        run: node scripts/prepare-musl-smoke.mjs "$(node scripts/lib/bun-targets.mjs --get '${{ matrix.target }}' arch)" "$RUNNER_TEMP/musl-libraries"
+        run: |
+          node scripts/prepare-musl-smoke.mjs "$(node scripts/lib/bun-targets.mjs --get '${{ matrix.target }}' arch)" "$RUNNER_TEMP/musl-libraries"
+          node scripts/build-procward-contract-pty.mjs '${{ matrix.target }}' "$RUNNER_TEMP/procward-contract-pty"
       - name: Execute final archive in immutable native musl userspace
         if: matrix.executor == 'pinned-musl-container'
         shell: bash
@@ -283,7 +267,7 @@ jobs:
           test -S /tmp/.X11-unix/X99
           # Keep the basic TUI probe free of XCB libraries: clipboard is optional at startup.
           timeout --foreground --signal=TERM --kill-after=10s 20s docker run --name "$container" --rm --network none -e TERM=xterm-256color -e NODE_ENV=production -e PI_OFFLINE=1 -e PI_CODING_AGENT_DIR=/tmp/isolated-agent -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/musl-staging:/extracted:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-bun-tui.mjs "/extracted/$archive" > "$RUNNER_TEMP/musl-tui/tui.json"
-          docker run --rm --network none -e PI_OWNER_PTY_HARNESS=/owner-pty/owner-pty -v "$RUNNER_TEMP/owner-pty:/owner-pty:ro" -e DISPLAY=:99 -e LD_LIBRARY_PATH=/musl-libraries/usr/lib -e PI_XZ_MUSL_LIBRARIES=/musl-libraries -e GITHUB_SHA -v "$RUNNER_TEMP/musl-libraries:/musl-libraries:ro" -e PI_XZ_EXECUTOR=pinned-musl-container -e PI_XZ_CONTAINER_DIGEST='${{ matrix.containerImage }}' -e PI_XZ_TUI_EVIDENCE=/evidence/tui.json -e RUNNER_NAME -e RUNNER_OS -e RUNNER_ARCH -e ImageOS -e ImageVersion -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/repo:ro" -v "$candidate:/release:ro" -v "$RUNNER_TEMP/smoke-record:/record" -v "$RUNNER_TEMP/musl-tui:/evidence:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-binary-release.mjs "/release/$archive" '${{ matrix.target }}' "$version" "/record/${{ matrix.target }}.json"
+          docker run --rm --network none -e PI_PROCWARD_CONTRACT_PTY=/procward-contract-pty -v "$RUNNER_TEMP/procward-contract-pty:/procward-contract-pty:ro" -e DISPLAY=:99 -e LD_LIBRARY_PATH=/musl-libraries/usr/lib -e PI_XZ_MUSL_LIBRARIES=/musl-libraries -e GITHUB_SHA -v "$RUNNER_TEMP/musl-libraries:/musl-libraries:ro" -e PI_XZ_EXECUTOR=pinned-musl-container -e PI_XZ_CONTAINER_DIGEST='${{ matrix.containerImage }}' -e PI_XZ_TUI_EVIDENCE=/evidence/tui.json -e RUNNER_NAME -e RUNNER_OS -e RUNNER_ARCH -e ImageOS -e ImageVersion -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/repo:ro" -v "$candidate:/release:ro" -v "$RUNNER_TEMP/smoke-record:/record" -v "$RUNNER_TEMP/musl-tui:/evidence:ro" -w /repo '${{ matrix.containerImage }}' bun scripts/smoke-binary-release.mjs "/release/$archive" '${{ matrix.target }}' "$version" "/record/${{ matrix.target }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "github-release-smoke-${{ github.sha }}-${{ matrix.target }}", path: "${{ runner.temp }}/smoke-record/${{ matrix.target }}.json", if-no-files-found: error, overwrite: true, retention-days: 14 }
       # Failure evidence only: written next to the smoke record by

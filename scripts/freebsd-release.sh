@@ -50,8 +50,6 @@ for _ in {1..300}; do [[ -S /tmp/.X11-unix/X99 ]] && break; sleep 0.1; done
 test -S /tmp/.X11-unix/X99
 export DISPLAY=:99
 mkdir -p .artifacts/freebsd-release
-CARGO_TARGET_DIR="$work/owner-pty-cargo" node scripts/build-owner-pty.mjs "$target" "$PWD/.artifacts/freebsd-release/owner-pty"
-export PI_OWNER_PTY_HARNESS="$PWD/.artifacts/freebsd-release/owner-pty"
 node scripts/smoke-binary-release.mjs "$work/candidate/pi-$target" "$target" "$version" ".artifacts/freebsd-release/$target.json"
 # Signed self-update E2E runs in update-freebsd-release-candidate after attestation.
 cp "$work/candidate/pi-$target" .artifacts/freebsd-release/

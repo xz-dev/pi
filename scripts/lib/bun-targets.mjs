@@ -110,7 +110,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 			"version",
 			"help",
 			"list-models",
-			"owner-lifecycle",
+			"procward-contract",
 			os === "windows" ? "tui-pseudoconsole" : "tui-pseudoterminal",
 			"resource-materialization",
 			"clipboard",

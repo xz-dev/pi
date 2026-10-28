@@ -22,8 +22,8 @@ const commands = [];
 const probeStartedMs = Date.now();
 const diagnosticsPath = `${recordPath}.diagnostics`;
 const tuiEvidencePath = join(work, "tui-diagnostics.json");
-const ownerEvidencePath = join(work, "owner-lifecycle.json");
-let ownerLifecycle = null;
+const procwardEvidencePath = join(work, "procward-contract.json");
+let procwardContract = null;
 // Filled in once the staged executable exists so the outer catch can record the
 // exact launch context even for failures after staging.
 let stagedExecutable = null;
@@ -60,7 +60,7 @@ function writeFailureDiagnostics(error, context) {
 			},
 			bunRevision: spawnSync("bun", ["--revision"], { encoding: "utf8" }).stdout?.trim() ?? null,
 			commands,
-			ownerLifecycle: ownerLifecycle ?? (existsSync(ownerEvidencePath) ? JSON.parse(readFileSync(ownerEvidencePath, "utf8")) : null),
+			procwardContract: procwardContract ?? (existsSync(procwardEvidencePath) ? JSON.parse(readFileSync(procwardEvidencePath, "utf8")) : null),
 			...extra,
 		};
 		writeFileSync(diagnosticsPath, `${JSON.stringify(diagnostics, null, 2)}\n`);
@@ -125,16 +125,11 @@ try {
 	if (!help.stdout.includes("Usage") && !help.stdout.includes("pi")) throw new Error("help output was not recognized");
 	const listModels = run("list-models", executable, ["--list-models"], { env, maxMs: SMOKE_LIMITS.listModelsMs });
 	if (!listModels.stdout.trim()) throw new Error("list-models produced no output");
-	// The owner probe provisions a standard CI user when this host token is privileged.
-	const ownerStarted = performance.now();
-	const ownerResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), executable, targetId, ownerEvidencePath], { encoding: "utf8", env, timeout: target.os === "windows" ? 1_250_000 : (target.emulated ? 1_100_000 : 460_000) });
-	try { ownerLifecycle = JSON.parse(ownerResult.stdout.trim().split(/\r?\n/).at(-1)); } catch {}
-	commands.push({ name: "owner-lifecycle", command: `${process.execPath} smoke-owner-lifecycle.mjs ${executable}`, status: ownerResult.status, elapsedMs: Math.round(performance.now() - ownerStarted) });
-	if (ownerResult.status !== 0 || ownerLifecycle?.status !== "passed") {
-		// Print the full privilege-drop trail: hosted Darwin/Windows failures are only diagnosable from CI logs.
-		if (ownerLifecycle?.privilegeDrop?.diagnostics) console.error(`owner privilege-drop diagnostics: ${JSON.stringify(ownerLifecycle.privilegeDrop.diagnostics)}`);
-		throw new Error(`owner lifecycle failed: ${ownerLifecycle?.error || ownerResult.stderr || ownerResult.error?.message || "missing evidence"}`);
-	}
+	const contractStarted = performance.now();
+	const contractResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-procward-contract.mjs"), executable, targetId, expectedVersion, procwardEvidencePath], { encoding: "utf8", env, timeout: 120000 * hangGuardScale });
+	try { procwardContract = JSON.parse(contractResult.stdout.trim().split(/\r?\n/).at(-1)); } catch {}
+	commands.push({ name: "procward-contract", command: `${process.execPath} smoke-procward-contract.mjs ${executable}`, status: contractResult.status, elapsedMs: Math.round(performance.now() - contractStarted) });
+	if (contractResult.status !== 0 || procwardContract?.status !== "passed") throw new Error(`procward contract failed: ${contractResult.stderr || contractResult.error?.message || "missing evidence"}`);
 	// Resource materialization: the paste-probed TUI session below unfolds the
 	// embedded native helper into the per-user tmpdir cache (Linux needs a
 	// display, which CI provides via Xvfb; Windows loads the helper at TUI
@@ -195,7 +190,7 @@ try {
 		asset: { file: basename(asset), sha256: sha256(asset), bytes: assetBytes },
 		runner: { name: process.env.RUNNER_NAME ?? "local", os: process.env.RUNNER_OS ?? platform(), arch: process.env.RUNNER_ARCH ?? osArchitecture, osArchitecture, imageOs: process.env.ImageOS ?? null, imageVersion: process.env.ImageVersion ?? null, cpuModel: cpus()[0]?.model ?? "unknown", cpuFeatures: cpuFeatures(), libc: target.libc ?? null },
 		executor: { kind: process.env.PI_XZ_EXECUTOR ?? "native", containerDigest: process.env.PI_XZ_CONTAINER_DIGEST ?? null, libraries: muslLibraries, emulated: target.emulated, ...(process.env.PI_XZ_UNPINNED_RUST ? { unpinnedRust: process.env.PI_XZ_UNPINNED_RUST } : {}) },
-		commands, tui, clipboard, ownerLifecycle,
+		commands, tui, clipboard, procwardContract,
 		timingsMs: { coldVersion: coldVersion.elapsedMs, version: version.elapsedMs, help: help.elapsedMs, listModels: listModels.elapsedMs, interactive: commands.filter(({ name }) => name.startsWith("tui-")).reduce((sum, entry) => sum + entry.elapsedMs, 0) },
 		limits: SMOKE_LIMITS,
 	};

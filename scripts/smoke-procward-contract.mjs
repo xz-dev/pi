@@ -1,0 +1,110 @@
+#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { fileURLToPath } from "node:url";
+import { validateProcwardPin } from "./acquire-procward.mjs";
+import { bunTarget, EMULATED_SMOKE_SLOWDOWN, isMainModulePath } from "./lib/bun-targets.mjs";
+import { PROCWARD_PIN } from "./lib/procward-pin.mjs";
+
+const fixtures = fileURLToPath(new URL("./fixtures/procward/", import.meta.url));
+const digest = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
+export const PROCWARD_CONTRACT_CASES = Object.freeze(["bundle-pin", "auto-wrap", "validated-parent-no-nesting", "flag-opt-out", "env-opt-out", "option-value", "after-terminator", "external-opt-out", "notice-hook", "blocked-hook", "terminal-restored"]);
+export function assertProcwardContract(record, targetId, piSha256, pin = PROCWARD_PIN) {
+	const target = bunTarget(targetId).cargoTarget;
+	if (!/^[0-9a-f]{64}$/.test(pin.targets[target]?.zipSha256 ?? "") || !/^[0-9a-f]{64}$/.test(pin.targets[target]?.binarySha256 ?? "")) throw new Error(`${targetId} missing procward pin digests`);
+	const expected = { state: pin.state, version: pin.version, repository: pin.repository, workflow: pin.workflow, sourceCommit: pin.sourceCommit, tag: pin.tag, target, ...pin.targets[target] };
+	if (record?.schemaVersion !== 1 || record.status !== "passed" || record.target !== targetId || record.piSha256 !== piSha256 || !/^[0-9a-f]{64}$/.test(piSha256) || !isDeepStrictEqual(record.procward, expected)) throw new Error(`${targetId} procward contract identity mismatch`);
+	if (JSON.stringify(record.cases?.map((entry) => entry.name)) !== JSON.stringify(PROCWARD_CONTRACT_CASES) || record.cases.some((entry) => entry.passed !== true)) throw new Error(`${targetId} incomplete procward integration contract`);
+	for (const hook of [record.notice, record.blocked]) {
+		if (hook?.noticeOnly !== true || hook.parentAlive !== true || hook.hookRan !== true || hook.terminalRestored !== true || JSON.stringify(hook.terminalBefore) !== JSON.stringify(hook.terminalAfter) || !Number.isSafeInteger(hook.elapsedMs) || hook.elapsedMs < 0) throw new Error(`${targetId} invalid procward notice/terminal evidence`);
+	}
+	const scale = bunTarget(targetId).emulated ? EMULATED_SMOKE_SLOWDOWN : 1;
+	if (record.notice.blockedHook !== false || record.blocked.blockedHook !== true || record.blocked.elapsedMs < 4500 || record.blocked.elapsedMs >= 6500 * scale) throw new Error(`${targetId} missing original 5s hook bound`);
+}
+
+export function smokeProcwardContract(executable, targetId, version, { allowDev = false } = {}) {
+	const pin = validateProcwardPin(PROCWARD_PIN, { allowDev });
+	const descriptor = bunTarget(targetId);
+	const expected = pin.targets[descriptor.cargoTarget];
+	if (!expected) throw new Error(`No procward development asset for ${targetId}`);
+	const scale = descriptor.emulated ? EMULATED_SMOKE_SLOWDOWN : 1;
+	const work = mkdtempSync(join(tmpdir(), "pi-procward-contract-"));
+	const python = process.platform === "win32" ? "python" : process.platform === "freebsd" ? "python3.11" : "python3";
+	const env = { ...process.env, PI_OFFLINE: "1", PI_TELEMETRY: "0", PI_NO_PROCESS_OWNERSHIP: "", PI_PROCWARD_CONTRACT_HARNESS_PID: String(process.pid), PI_PROCWARD_CONTRACT_RUNTIME: process.execPath, PI_PROCWARD_CONTRACT_TOPOLOGY: join(fixtures, "topology.mjs"), TERM: "xterm-256color" };
+	for (const key of Object.keys(env)) if (key.startsWith("PROCWARD_") || key.startsWith("PI_PROCESS_OWNER_") || key === "PI_PACKAGE_DIR" || key === "PI_PROCWARD_BOOTSTRAP_PENDING") delete env[key];
+	const isolatedTmp = join(work, "tmp");
+	mkdirSync(isolatedTmp);
+	Object.assign(env, { HOME: join(work, "home"), USERPROFILE: join(work, "home"), TMPDIR: isolatedTmp, TMP: isolatedTmp, TEMP: isolatedTmp });
+	mkdirSync(env.HOME);
+	const cases = [];
+	const passed = (name, proof) => { if (!proof) throw new Error(`procward contract failed: ${name}`); cases.push({ name, passed: true }); };
+	function run(command, args, extra = {}, timeout = 30000) {
+		const result = spawnSync(command, args, { env: { ...env, ...extra }, encoding: "utf8", timeout: timeout * scale, maxBuffer: 4 * 1024 * 1024 });
+		if (result.error || result.status !== 0) throw new Error(`procward contract command failed (${result.status ?? result.signal}): ${result.error?.message ?? ""}\n${result.stdout ?? ""}${result.stderr ?? ""}`);
+		return result;
+	}
+	function probe(name, args = [], extra = {}, owner) {
+		const directory = join(work, name);
+		mkdirSync(directory);
+		const cliArgs = ["--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "-e", join(fixtures, "extension.mjs"), "--help", ...args];
+		const result = owner ? run(owner, ["run", "--", executable, ...cliArgs], { ...extra, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_PROCWARD_CONTRACT_DIRECTORY: directory, PI_PROCWARD_CONTRACT_PROBE: "1" }) : run(executable, cliArgs, { ...extra, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_PROCWARD_CONTRACT_DIRECTORY: directory, PI_PROCWARD_CONTRACT_PROBE: "1" });
+		const lines = readFileSync(join(directory, "probe.json"), "utf8").trim().split("\n");
+		if (lines.length !== 1) throw new Error("CLI extension graph loaded more than once");
+		const record = JSON.parse(lines[0]);
+		if (record.metadata.length) throw new Error("procward metadata leaked into extensions");
+		return { ...record, launcherPid: result.pid };
+	}
+	try {
+		// A broken executable at the front of PATH proves compiled assets cannot substitute it.
+		const pathSentinel = join(work, "path"); mkdirSync(pathSentinel);
+		const fake = join(pathSentinel, process.platform === "win32" ? "procward.exe" : "procward");
+		writeFileSync(fake, "not an executable procward\n"); chmodSync(fake, 0o700);
+		env.PATH = `${pathSentinel}${process.platform === "win32" ? ";" : ":"}${env.PATH ?? ""}`;
+		const direct = probe("direct");
+		const cache = join(isolatedTmp, `pi-resources-${userInfo().uid}`, targetId, version, "procward", `${pin.version}-${expected.binarySha256}`);
+		const helper = join(cache, descriptor.os === "windows" ? "procward.exe" : "procward");
+		const manifest = JSON.parse(readFileSync(join(cache, "pin.json"), "utf8"));
+		const procward = { state: pin.state, version: pin.version, repository: pin.repository, workflow: pin.workflow, sourceCommit: pin.sourceCommit, tag: pin.tag, target: descriptor.cargoTarget, ...expected };
+		const helperVersion = run(helper, ["--version"]).stdout.trim();
+		passed("bundle-pin", isDeepStrictEqual(manifest, procward) && digest(helper) === expected.binarySha256 && helperVersion === `procward ${pin.version}` && ["LICENSE", "README.md", "third-party-licenses.md"].every((file) => existsSync(join(cache, file)) && readFileSync(join(cache, file)).length));
+		const baseline = JSON.parse(run(helper, ["run", "--", process.execPath, join(fixtures, "topology.mjs")]).stdout.trim());
+		passed("auto-wrap", baseline.ownerLayers > 0 && direct.topology.ownerLayers === baseline.ownerLayers && typeof direct.taskOwner === "string");
+		const external = probe("external", [], {}, helper);
+		passed("validated-parent-no-nesting", external.topology.ownerLayers === baseline.ownerLayers && typeof external.taskOwner === "string");
+		for (const [name, args, extra] of [["flag-opt-out", ["--no-process-ownership"], {}], ["env-opt-out", [], { PI_NO_PROCESS_OWNERSHIP: "1" }]]) {
+			const record = probe(name, args, extra);
+			passed(name, record.topology.ownerLayers === 0 && record.pid === record.launcherPid && record.taskOwner === undefined);
+		}
+		for (const [name, args] of [["option-value", ["--system-prompt", "--no-process-ownership"]], ["after-terminator", ["--", "--no-process-ownership"]]]) {
+			const record = probe(name, args);
+			passed(name, record.topology.ownerLayers === baseline.ownerLayers && typeof record.taskOwner === "string");
+		}
+		const externalDisabled = probe("external-disabled", ["--no-process-ownership"], {}, helper);
+		passed("external-opt-out", externalDisabled.topology.ownerLayers === baseline.ownerLayers && externalDisabled.taskOwner === undefined);
+		const harness = join(fixtures, process.platform === "win32" ? "conpty-contract.py" : "pty-contract.py");
+		const terminalContract = (directory, block) => process.env.PI_PROCWARD_CONTRACT_PTY
+			? JSON.parse(run(process.env.PI_PROCWARD_CONTRACT_PTY, [executable, join(fixtures, "extension.mjs"), directory, block, String(scale)], {}, 40000).stdout.trim())
+			: JSON.parse(run(python, [harness, JSON.stringify([executable]), join(fixtures, "extension.mjs"), directory, block, String(scale)], {}, 40000).stdout.trim());
+		const notice = terminalContract(join(work, "notice"), "0");
+		passed("notice-hook", notice.noticeOnly && notice.parentAlive && notice.hookRan);
+		const blocked = terminalContract(join(work, "blocked"), "1");
+		passed("blocked-hook", blocked.hookRan && blocked.elapsedMs >= 4500 && blocked.elapsedMs < 6500 * scale);
+		passed("terminal-restored", notice.terminalRestored && blocked.terminalRestored);
+		const record = { schemaVersion: 1, status: "passed", target: targetId, piSha256: digest(executable), procward, cases, notice, blocked };
+		assertProcwardContract(record, targetId, record.piSha256);
+		return record;
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}
+
+if (process.argv[1] && isMainModulePath(fileURLToPath(import.meta.url), process.argv[1])) {
+	const [executable, target, version, output, ...rest] = process.argv.slice(2);
+	if (!executable || !target || !version || !output || rest.some((arg) => arg !== "--allow-dev")) throw new Error("Usage: smoke-procward-contract.mjs <pi> <target> <version> <record.json> [--allow-dev]");
+	const record = smokeProcwardContract(resolve(executable), target, version, { allowDev: rest.includes("--allow-dev") });
+	mkdirSync(dirname(resolve(output)), { recursive: true });
+	writeFileSync(output, `${JSON.stringify(record, null, 2)}\n`);
+	console.log(JSON.stringify(record));
+}
