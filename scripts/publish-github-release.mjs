@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { validateProcwardPin } from "./acquire-procward.mjs";
 import { BUN_TARGET_IDS, releaseArchiveName } from "./lib/bun-targets.mjs";
 
 const EXPECTED_REPOSITORY = "xz-dev/pi";
@@ -359,5 +360,6 @@ export async function publishGitHubRelease(manifestPath, env = process.env) {
 if (import.meta.url === new URL(process.argv[1], "file:").href) {
   const [manifestArg, ...extra] = process.argv.slice(2);
   if (!manifestArg || extra.length > 0) fail(usage());
+  validateProcwardPin();
   await publishGitHubRelease(resolve(manifestArg));
 }

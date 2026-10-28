@@ -31,6 +31,7 @@ jobs:
             *) echo "unsupported Release workflow context: $GITHUB_REF:$GITHUB_EVENT_NAME" >&2; exit 1 ;;
           esac
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node scripts/acquire-procward.mjs --require-release
           echo "matrix=$(node scripts/lib/bun-targets.mjs --matrix)" >> "$GITHUB_OUTPUT"
           echo "smoke-matrix=$(node scripts/lib/bun-targets.mjs --smoke-matrix)" >> "$GITHUB_OUTPUT"
 
