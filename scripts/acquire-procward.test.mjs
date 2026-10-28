@@ -13,7 +13,10 @@ test("development builds cannot pass the publication gate", () => {
 	assert.throws(() => validateProcwardPin(), /publishing is forbidden/);
 	assert.equal(validateProcwardPin(PROCWARD_PIN, { allowDev: true }), PROCWARD_PIN);
 	const release = { ...PROCWARD_PIN, state: "release", tag: `v${PROCWARD_PIN.version}` };
-	assert.throws(() => validateProcwardPin(release), /Missing procward digests/);
+	assert.equal(validateProcwardPin(release), release);
+	const missingDigest = structuredClone(release);
+	missingDigest.targets["x86_64-unknown-linux-gnu"].binarySha256 = "";
+	assert.throws(() => validateProcwardPin(missingDigest), /Missing procward digests/);
 });
 
 for (const fault of ["none", "zip-digest", "binary-digest", "traversal", "duplicate", "symlink"]) {
