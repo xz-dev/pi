@@ -131,7 +131,12 @@ import { parseGitUrl } from "../../utils/git.ts";
 import { ensurePngTranscoder } from "../../utils/image-convert.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
-import { hasLostCliProcessOwner } from "../../utils/process-owner.ts";
+import {
+	cliProcessOwnerExitCode,
+	drainCliProcessOwner,
+	hasLostCliProcessOwner,
+	onCliProcessOwnerLoss,
+} from "../../utils/procward-contract.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { stripBom } from "../../utils/text.ts";
@@ -4424,7 +4429,7 @@ export class InteractiveMode {
 				}
 				fs.closeSync(fd);
 			}
-			process.exit(0);
+			process.exit(cliProcessOwnerExitCode());
 		};
 		// Both native owners may already be gone: extension cleanup cannot own our exit.
 		// Arm before the re-entry guard, including owner loss during an earlier shutdown.
@@ -4532,6 +4537,12 @@ export class InteractiveMode {
 
 	private registerSignalHandlers(): void {
 		this.unregisterSignalHandlers();
+		this.signalCleanupHandlers.push(
+			onCliProcessOwnerLoss(() => {
+				killTrackedDetachedChildren();
+				void this.shutdown({ fromSignal: true });
+			}),
+		);
 
 		const signals: NodeJS.Signals[] = ["SIGTERM"];
 		if (process.platform !== "win32") {
@@ -4539,7 +4550,8 @@ export class InteractiveMode {
 		}
 
 		for (const signal of signals) {
-			const handler = () => {
+			const handler = async () => {
+				await drainCliProcessOwner();
 				// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
 				// first, then attempts terminal restore. A genuinely dead terminal
 				// surfaces as an EIO on the restore writes, which the stdout/stderr

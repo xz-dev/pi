@@ -3,6 +3,7 @@ import ctypes
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -35,7 +36,7 @@ else:
     env["PROCWARD_LIFECYCLE_FD"] = str(read_fd)
     options = {"pass_fds": (read_fd,)}
 env.update(PROCWARD_PROTOCOL="1", PROCWARD_OWNER_PID=str(owner), PROCWARD_CONTRACT_ID=launch,
-           PROCWARD_PRIMARY_PID="obsolete-must-be-scrubbed", PI_CONTRACT_BLOCK="1" if mode == "blocked" else "0")
+           PI_CONTRACT_MODE=mode, PROCWARD_PRIMARY_PID="obsolete-must-be-scrubbed", PI_CONTRACT_BLOCK="1" if mode == "blocked" else "0")
 started = time.monotonic()
 child = subprocess.Popen([runtime, "--disable-warning=ExperimentalWarning", "--import", resolver, probe],
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
@@ -55,13 +56,14 @@ try:
     if mode != "eof-before": os.write(write_fd, record.encode())
     if mode == "eof-before": os.close(write_fd); write_fd = None
     output = []
-    if mode in ("notice", "invalid-notice", "eof-after", "blocked"):
+    if mode in ("notice", "invalid-notice", "eof-after", "blocked", "startup-term", "print-notice", "rpc-notice"):
         ready = queue.Queue()
         threading.Thread(target=lambda: ready.put(child.stdout.readline()), daemon=True).start()
         line = ready.get(timeout=5)
         output.append(line.decode())
         if not json.loads(line).get("ready"): raise RuntimeError("consumer did not become ready")
-        if mode == "eof-after": os.close(write_fd); write_fd = None
+        if mode == "startup-term": os.kill(child.pid, signal.SIGTERM)
+        elif mode == "eof-after": os.close(write_fd); write_fd = None
         else: os.write(write_fd, (f"PROCWARD/1 OWNER-LOSS {launch}\n" if mode != "invalid-notice" else "invalid\n").encode())
     stdout, stderr = child.communicate(timeout=12)
     print(json.dumps({"code": child.returncode, "seconds": time.monotonic() - started,

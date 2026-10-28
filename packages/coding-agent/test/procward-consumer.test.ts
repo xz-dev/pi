@@ -55,6 +55,16 @@ describe("managed-child boundary with a live native parent", () => {
 		},
 		20000,
 	);
+	it.each(["startup-term", "print-notice", "rpc-notice"])(
+		"retains ordinary noninteractive TERM semantics (%s)",
+		(mode) => {
+			const result = run(mode);
+			expect(result.code).not.toBe(0);
+			expect(result.seconds).toBeLessThan(5);
+			expect(result.stdout.trim().split("\n")).toHaveLength(1);
+		},
+		20000,
+	);
 	it("enforces notice-driven 7s bound while main JS blocks and parent lives", () => {
 		const result = run("blocked");
 		expect(result.parentAlive).toBe(true);

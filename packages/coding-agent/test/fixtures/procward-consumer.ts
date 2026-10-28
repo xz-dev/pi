@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
 	cliProcessOwnerExitCode,
+	completeCliProcessOwnerStartup,
 	consumeProcwardContract,
 	hasLostCliProcessOwner,
 	onCliProcessOwnerLoss,
@@ -20,9 +21,12 @@ console.log(
 				: undefined,
 	}),
 );
-onCliProcessOwnerLoss(() => {
-	console.log(JSON.stringify({ loss: hasLostCliProcessOwner(), code: cliProcessOwnerExitCode() }));
-	process.exit(cliProcessOwnerExitCode());
-});
+if (!["startup-term", "print-notice", "rpc-notice"].includes(process.env.PI_CONTRACT_MODE ?? "")) {
+	onCliProcessOwnerLoss(() => {
+		console.log(JSON.stringify({ loss: hasLostCliProcessOwner(), code: cliProcessOwnerExitCode() }));
+		process.exit(cliProcessOwnerExitCode());
+	});
+}
+if (["print-notice", "rpc-notice"].includes(process.env.PI_CONTRACT_MODE ?? "")) completeCliProcessOwnerStartup();
 if (process.env.PI_CONTRACT_BLOCK === "1") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000);
 setInterval(() => {}, 1000);

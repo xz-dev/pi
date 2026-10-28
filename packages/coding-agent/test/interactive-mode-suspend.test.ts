@@ -3,12 +3,17 @@ import * as fs from "node:fs";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
-const ownerState = vi.hoisted(() => ({ lost: false }));
+const ownerState = vi.hoisted(() => ({ lost: false, code: 0, handler: undefined as (() => void) | undefined }));
 vi.mock("../src/utils/procward-contract.ts", () => ({
-	cliProcessOwnerExitCode: () => 0,
+	cliProcessOwnerExitCode: () => ownerState.code,
 	hasLostCliProcessOwner: () => ownerState.lost,
 	drainCliProcessOwner: async () => {},
-	onCliProcessOwnerLoss: () => () => {},
+	onCliProcessOwnerLoss: (handler: () => void) => {
+		ownerState.handler = handler;
+		return () => {
+			ownerState.handler = undefined;
+		};
+	},
 }));
 
 vi.mock("node:fs", async (original) => {
@@ -37,6 +42,63 @@ function callHandleCtrlZ(context: HandleCtrlZThis): void {
 }
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown;
+
+describe("procward notice shutdown bridge", () => {
+	test("runs the existing signal shutdown path from notice alone and unsubscribes", () => {
+		const shutdown = vi.fn(async () => {});
+		const context = {
+			signalCleanupHandlers: [] as (() => void)[],
+			unregisterSignalHandlers() {
+				for (const cleanup of this.signalCleanupHandlers) cleanup();
+				this.signalCleanupHandlers = [];
+			},
+			shutdown,
+			emergencyTerminalExit: vi.fn(),
+			uncaughtCrash: vi.fn(),
+		};
+		const prototype = interactiveModePrototype as { registerSignalHandlers(this: typeof context): void };
+		try {
+			prototype.registerSignalHandlers.call(context);
+			expect(ownerState.handler).toBeTypeOf("function");
+			ownerState.handler?.();
+			expect(shutdown).toHaveBeenCalledExactlyOnceWith({ fromSignal: true });
+		} finally {
+			context.unregisterSignalHandlers();
+		}
+		expect(ownerState.handler).toBeUndefined();
+	});
+	test("restores and exits failed when lifecycle transport failed", async () => {
+		const exited = new Error("exit intercepted");
+		const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+			throw exited;
+		});
+		const context = {
+			isShuttingDown: false,
+			isSuspended: false,
+			ownerLossExitTimer: undefined as ReturnType<typeof setTimeout> | undefined,
+			stop: vi.fn(),
+			runtimeHost: { dispose: vi.fn(async () => {}) },
+			themeController: { disableAutoSync: vi.fn() },
+			ui: { terminal: { drainInput: vi.fn(async () => {}) } },
+		};
+		ownerState.lost = true;
+		ownerState.code = 125;
+		try {
+			const prototype = interactiveModePrototype as {
+				shutdown(this: typeof context, options: { fromSignal: boolean }): Promise<void>;
+			};
+			await expect(prototype.shutdown.call(context, { fromSignal: true })).rejects.toBe(exited);
+			expect(context.runtimeHost.dispose).toHaveBeenCalledOnce();
+			expect(context.stop).toHaveBeenCalledOnce();
+			expect(exit).toHaveBeenCalledWith(125);
+		} finally {
+			if (context.ownerLossExitTimer) clearTimeout(context.ownerLossExitTimer);
+			ownerState.lost = false;
+			ownerState.code = 0;
+			vi.restoreAllMocks();
+		}
+	});
+});
 
 describe("InteractiveMode.handleCtrlZ", () => {
 	afterEach(() => {

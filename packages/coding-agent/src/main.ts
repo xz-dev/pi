@@ -78,6 +78,7 @@ import { validateThemeJson } from "./modes/interactive/theme/theme-schema.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { macOSOwnershipDiagnostics } from "./utils/macos-ownership-diagnostics.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
+import { completeCliProcessOwnerStartup } from "./utils/procward-contract.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;
@@ -681,6 +682,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
+	if (appMode !== "interactive") completeCliProcessOwnerStartup();
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
@@ -959,6 +961,7 @@ export async function main(args: string[], options?: MainOptions) {
 		stdinContent = await readPipedStdin();
 		if (stdinContent !== undefined && appMode === "interactive") {
 			appMode = "print";
+			completeCliProcessOwnerStartup();
 		}
 	}
 	time("readPipedStdin");
