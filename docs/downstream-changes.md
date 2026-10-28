@@ -104,10 +104,12 @@ Losslessly reduce model-upload bytes without changing JSON or image data. HTTP s
 
 ## Process ownership
 
-Pi owns every subprocess tree it starts and stops it when the task or Pi ends, as an ordinary user, with no root, cgroups or setup.
+Pi delegates its local session tree to [procward](https://github.com/xz-dev/procward) so descendants are cleaned up when Pi exits. Existing pi-env per-task owners and remote owned-exec capability rules remain unchanged; this is not a task-protocol migration.
 
-- Details: [Process ownership](process-ownership.md): owners, per-platform guarantees, macOS limits, remote execution and verification.
-- Kernel-enforced on Linux, FreeBSD and Windows. Best effort on macOS, where a fast `setsid` escape is possible; use a container for a hard boundary.
+- Details: [Process ownership](process-ownership.md): pin/provenance, opt-outs, source/PATH fallback, hooks, licenses and integration verification.
+- Kernel-enforced outer boundaries on Linux, FreeBSD and Windows; Windows hook opportunity is best effort. macOS observed-descendant cleanup is best effort; use a Linux container/VM for a hard boundary.
+- Compiled releases bundle verified helper bytes; source/npm performs no runtime download and reports a missing helper explicitly. An `unpinned-dev` procward pin blocks publishing.
+- Pi's release gate checks a small per-platform integration contract. Procward's tagged CI, not a duplicate Pi native lifecycle matrix, owns containment coverage.
 - Patch branch: [`patch/process-ownership`](https://github.com/xz-dev/pi/tree/patch/process-ownership)
 
 ## TUI and display

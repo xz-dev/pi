@@ -36,7 +36,7 @@ Features:
 - WebSocket recovery and incremental context for OpenAI Responses and Codex
 - [Response checkpoints](docs/downstream-changes.md#response-checkpoints) across reconnects and session restarts
 - Lossless [request-body compression](docs/request-compression.md) for model JSON posts and Responses WebSocket frames, with the active algorithm beside the protocol
-- [Process ownership](docs/process-ownership.md): Pi stops every subprocess tree it starts (bash, MCP, workers), including background and `setsid` descendants, without root or cgroups (best effort on macOS)
+- [Process ownership](docs/process-ownership.md) through [procward](https://github.com/xz-dev/procward): outer-session cleanup covers local descendants when Pi exits; existing pi-env per-task ownership stays in place (best effort on macOS)
 - Custom fail-fast patterns for terminal gateway errors
 - Actual connection and request mode beside Working (`SSE`, `WS/full`, `WS/continuation`, or another reported protocol)
 - Detach long tool calls, keep chatting (`tool_task`)
@@ -77,7 +77,7 @@ xz-dev Pi is distributed through immutable [GitHub Releases](https://github.com/
 
 The executable embeds Bun's JIT runtime and precompiled JavaScript bytecode. All 14 Release targets use `--minify --bytecode --format=esm`, moving parsing and initial bytecode generation to build time without disabling runtime JIT.
 
-The executable materializes its embedded runtime assets (docs, themes, native clipboard helper) into a per-user tmpdir cache at `os.tmpdir()/pi-resources-<uid>/<target>/<version>` on first use; a nonempty cache directory is reused as-is. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
+The executable materializes its embedded runtime assets (docs, themes, native clipboard helper, procward and licenses) into a per-user tmpdir cache at `os.tmpdir()/pi-resources-<uid>/<target>/<version>` on first use. General nonempty resource directories are reused as-is; procward and its native consumer adapter use digest-keyed paths and verify cached executable bytes before use. Linux clipboard support follows upstream: the native X11 helper uses the system's `libxcb.so.1` and an available X11 display. Their absence does not prevent basic CLI or TUI startup; clipboard availability and fallback tools depend on the desktop environment.
 
 ### Linux and macOS
 
@@ -170,6 +170,8 @@ npm run build
 cd packages/coding-agent
 npm link
 ```
+
+For session ownership in source/npm runs, install [procward](https://github.com/xz-dev/procward) on PATH or supply the packaged helper. Pi does not download it at runtime. A missing helper produces one explicit ownership-disabled notice; a present incompatible helper fails startup. `--no-process-ownership` and `PI_NO_PROCESS_OWNERSHIP=1` opt out. A user-provided PATH helper has no bundled-pin provenance. See [process ownership](docs/process-ownership.md) for platform limits, native adapter build requirements and Windows hook caveats.
 
 For this installation, `pi update --self` never runs a package-manager update and never queries official upstream Release/update sources; it prints xz-dev source-checkout update instructions that you run yourself.
 
