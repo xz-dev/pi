@@ -2,19 +2,13 @@ import type * as FsModule from "node:fs";
 import * as fs from "node:fs";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
-import { ownCliProcesses } from "../src/utils/process-owner.ts";
 
-vi.mock("node:worker_threads", () => ({
-	Worker: class {
-		constructor(_url: URL, options: { workerData: { ready: SharedArrayBuffer } }) {
-			Atomics.store(new Int32Array(options.workerData.ready), 0, 1);
-		}
-		once() {}
-		unref() {}
-		async terminate() {
-			return 0;
-		}
-	},
+const ownerState = vi.hoisted(() => ({ lost: false }));
+vi.mock("../src/utils/procward-contract.ts", () => ({
+	cliProcessOwnerExitCode: () => 0,
+	hasLostCliProcessOwner: () => ownerState.lost,
+	drainCliProcessOwner: async () => {},
+	onCliProcessOwnerLoss: () => () => {},
 }));
 
 vi.mock("node:fs", async (original) => {
@@ -203,10 +197,8 @@ describe("owner-loss shutdown deadline", () => {
 	for (const mode of ["owner-loss", "loss-during-shutdown", "ordinary-signal", "interactive-quit"] as const) {
 		test(mode, async () => {
 			vi.useFakeTimers();
-			const parentDescriptor = Object.getOwnPropertyDescriptor(process, "ppid")!;
 			const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
 			const stdinDescriptor = Object.getOwnPropertyDescriptor(process, "stdin")!;
-			const parent = process.ppid;
 			const stopped = vi.fn();
 			const exited = new Error("exit intercepted");
 			const exit = vi.spyOn(process, "exit").mockImplementation(() => {
@@ -226,10 +218,7 @@ describe("owner-loss shutdown deadline", () => {
 			vi.spyOn(stat, "isCharacterDevice").mockReturnValue(true);
 			vi.mocked(fs.fstatSync).mockReturnValue(stat);
 			const close = vi.mocked(fs.closeSync).mockImplementation(() => {});
-			vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "");
-			vi.stubEnv("PI_PROCESS_OWNER_PENDING", undefined);
-			vi.stubEnv("PI_PROCESS_OWNER_PID", String(parent));
-			ownCliProcesses();
+			ownerState.lost = false;
 			const context = {
 				isShuttingDown: false,
 				isSuspended: true,
@@ -245,11 +234,10 @@ describe("owner-loss shutdown deadline", () => {
 				shutdown(this: typeof context, options?: { fromSignal: boolean }): Promise<void>;
 			};
 			try {
-				if (mode === "owner-loss")
-					Object.defineProperty(process, "ppid", { configurable: true, get: () => parent + 1 });
+				if (mode === "owner-loss") ownerState.lost = true;
 				void prototype.shutdown.call(context, mode === "interactive-quit" ? undefined : { fromSignal: true });
 				if (mode === "loss-during-shutdown") {
-					Object.defineProperty(process, "ppid", { configurable: true, get: () => parent + 1 });
+					ownerState.lost = true;
 					await prototype.shutdown.call(context, { fromSignal: true });
 				}
 				if (mode === "owner-loss" || mode === "loss-during-shutdown") {
@@ -265,11 +253,9 @@ describe("owner-loss shutdown deadline", () => {
 				}
 				expect(context.runtimeHost.dispose).toHaveBeenCalledOnce();
 			} finally {
-				Object.defineProperty(process, "ppid", parentDescriptor);
 				Object.defineProperty(process, "platform", platformDescriptor);
 				Object.defineProperty(process, "stdin", stdinDescriptor);
-				vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "1");
-				ownCliProcesses();
+				ownerState.lost = false;
 				vi.clearAllTimers();
 				vi.useRealTimers();
 				vi.restoreAllMocks();
