@@ -1145,7 +1145,7 @@ export async function handlePackageCommand(
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
 
 	packageManager.setProgressCallback((event) => {
-		if (event.type === "start" || event.type === "progress") {
+		if (event.type === "start") {
 			process.stdout.write(chalk.dim(`${event.message}\n`));
 		} else if (event.type === "progress" && event.message) {
 			process.stdout.write(chalk.yellow(`${event.message}\n`));
