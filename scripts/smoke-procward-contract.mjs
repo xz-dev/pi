@@ -32,17 +32,18 @@ export function assertProcwardContract(record, targetId, piSha256, pin = PROCWAR
 export function procwardAccessBoundary(executable, env, work, scale = 1) {
 	const python = process.platform === "win32" ? "python" : process.platform === "freebsd" ? "python3.11" : "python3";
 	const windows = process.platform === "win32";
-	const directory = join(work, "access-boundary");
-	mkdirSync(directory);
+	const root = !windows && process.getuid() === 0;
+	// uid 65534 cannot traverse the harness's private 0700 temp ancestors; use a fresh directory under /tmp.
+	const directory = root ? mkdtempSync("/tmp/pi-procward-access-") : join(work, "access-boundary");
+	if (!root) mkdirSync(directory);
 	const ready = join(directory, "linger.ready");
 	const linger = [process.execPath, "-e", `require("node:fs").writeFileSync(${JSON.stringify(ready)}, "ready\\n"); setInterval(() => {}, 1 << 30);`];
 	let spec, launch = executable, extension = join(fixtures, "extension.mjs"), extra = {}, drop = {};
 	if (windows) {
 		const script = join(fixtures, "access-boundary.py");
 		spec = { mechanism: "process DACL denies the controller", ok: [python, script, "exit", "0"], fail: [python, script, "exit", "7"], linger: [python, script, "linger", ready], check: [python, script, "check"] };
-	} else if (process.getuid() === 0) {
+	} else if (root) {
 		// A root controller crosses no boundary: run Pi as nobody and give it a setuid-root runtime to start.
-		chmodSync(work, 0o711);
 		for (const path of [directory, ...["home", "tmp"].map((name) => join(directory, name))]) { mkdirSync(path, { recursive: true }); chmodSync(path, 0o777); }
 		const setuid = join(directory, "setuid-runtime");
 		copyFileSync(process.execPath, setuid); chmodSync(setuid, 0o4755);
@@ -52,7 +53,7 @@ export function procwardAccessBoundary(executable, env, work, scale = 1) {
 		spec = { mechanism: "setuid-root runtime started by uid 65534", ok: [setuid, "-e", euid(0)], fail: [setuid, "-e", euid(7)], linger };
 		const home = join(directory, "home"), tmp = join(directory, "tmp");
 		extra = { HOME: home, USERPROFILE: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp };
-		drop = { uid: 65534, gid: 65534 };
+		drop = { uid: 65534, gid: 65534, cwd: directory };
 	} else if (process.platform === "darwin") {
 		spec = { mechanism: "setuid-root /bin/ps", ok: ["/bin/ps", "-p", "1", "-o", "pid="], fail: ["/bin/ps", "-p", "2147483646"], linger };
 	} else {
@@ -75,6 +76,7 @@ export function procwardAccessBoundary(executable, env, work, scale = 1) {
 	let lingerReaped = false;
 	for (let i = 0; i < 40 && !(lingerReaped = !alive(record.linger)); i++) Atomics.wait(pause, 0, 0, 50);
 	if (!lingerReaped) try { process.kill(record.linger, "SIGKILL"); } catch {}
+	if (root) rmSync(directory, { recursive: true, force: true });
 	const evidence = { mechanism: spec.mechanism, okStatus: record.ok.status, commandStatus: record.fail.status, piStatus: result.status, lingerReaped, ...(windows ? { denied: record.check?.status === 0 } : {}) };
 	if (!record.ready || evidence.okStatus !== 0 || !evidence.commandStatus || evidence.piStatus !== evidence.commandStatus || !lingerReaped || (windows && !evidence.denied)) throw new Error(`procward contract failed: access-boundary ${JSON.stringify({ evidence, record, stderr: (result.stderr ?? "").slice(-2000) })}`);
 	return evidence;
