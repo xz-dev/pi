@@ -386,6 +386,7 @@ jobs:
           sudo apt-get install -y xvfb libxcb1
 
       - name: Smoke test host binary packaging path
+        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           set -euo pipefail
           release_dir=$(mktemp -d "${RUNNER_TEMP}/pi-host-binary.XXXXXX")
