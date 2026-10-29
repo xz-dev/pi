@@ -61,14 +61,16 @@ export function ownCliProcesses(): undefined | false {
 	if (nonce !== undefined) {
 		try {
 			if (!/^[0-9a-f]{32}$/.test(nonce) || !consumeProcwardContract()) throw new Error("Missing bootstrap READY");
-		} catch {
+		} catch (cause) {
 			try {
 				discardProcwardContract();
 			} catch {
 				/* Startup exits without loading the CLI. */
 			}
+			// Keep the one-line contract while naming which handoff check failed.
+			const reason = (cause instanceof Error ? cause.message : String(cause)).replace(/\s+/g, " ").slice(0, 200);
 			const error = new Error(
-				`${BOOTSTRAP_NONCE} has no matching valid procward READY; unset ${BOOTSTRAP_NONCE}, or use --no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1`,
+				`${BOOTSTRAP_NONCE} has no matching valid procward READY (${reason}); unset ${BOOTSTRAP_NONCE}, or use --no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1`,
 			);
 			// CLI entry reports one actionable line, not a stack for stale private metadata.
 			error.stack = undefined;
