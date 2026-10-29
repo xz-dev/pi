@@ -38,7 +38,9 @@ else:
 chain = []
 seen = set()
 while pid != stop:
-    if pid <= 1 or pid in seen or pid not in processes: raise RuntimeError("harness is not a live ancestor")
+    if pid <= 1 or pid in seen or pid not in processes:
+        related = {p: row for p, row in processes.items() if p in (pid, stop) or row[0] in (pid, stop) or any(p == c["pid"] or row[0] == c["pid"] for c in chain)}
+        raise RuntimeError(f"harness {stop} is not a live ancestor at {pid}: chain={chain} related={related}")
     seen.add(pid)
     parent, name = processes[pid]
     chain.append({"pid": pid, "parent": parent, "name": name})
