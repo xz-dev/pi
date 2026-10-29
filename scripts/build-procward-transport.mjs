@@ -29,6 +29,8 @@ try {
 		// Strict POSIX mode hides dlfcn's RTLD_DEFAULT on macOS and FreeBSD; their default headers already expose POSIX.
 		if (process.platform === "linux") flags.push("-D_POSIX_C_SOURCE=200809L");
 		if (process.platform === "darwin") flags.push("-dynamiclib");
+		// FreeBSD binds unversioned references to the oldest symbol version (freebsd11 fstat); link libc for current ABIs.
+		else if (process.platform === "freebsd") flags.push("-shared");
 		else flags.push("-shared", "-nostdlib", "-Wl,--unresolved-symbols=ignore-all");
 		execFileSync(process.env.CC || "cc", [...flags, source, "-o", built], { stdio: "inherit", timeout: 120000 });
 	}
