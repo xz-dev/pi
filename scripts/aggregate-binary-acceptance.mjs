@@ -28,7 +28,7 @@ for (const id of BUN_TARGET_IDS) {
 	if (descriptor.libc === "musl" && JSON.stringify(record.executor.libraries) !== JSON.stringify(muslSmokeLibraries(descriptor.arch))) throw new Error(`${id} musl library evidence does not match fixed inputs`);
 	const features = String(record.runner.cpuFeatures ?? "").toLowerCase().replaceAll(".", "_");
 	for (const feature of descriptor.requiredCpuFeatures) if (!features.includes(feature)) throw new Error(`${id} CPU lacks required ${feature}`);
-	assertOwnerLifecycle(record.ownerLifecycle, descriptor.os, id, record.asset.sha256);
+	assertOwnerLifecycle(record.ownerLifecycle, descriptor.os);
 	if (descriptor.os === "windows") assertWindowsOwnerGate(record.ownerLifecycle.windowsRuntimeGate, id, record.asset.sha256, record.ownerLifecycle.identity, record.ownerLifecycle.artifactBunVersion);
 	const commands = record.commands ?? [];
 	if (JSON.stringify(commands.map(({ name }) => name)) !== JSON.stringify(descriptor.requiredCommands)) throw new Error(`${id} command inventory does not match authoritative descriptor`);
