@@ -17,7 +17,10 @@ root = pathlib.Path(directory)
 root.mkdir(parents=True)
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, b"\x18\0\x64\0\0\0\0\0")
-before = termios.tcgetattr(slave)
+# BSD kernels (FreeBSD, macOS) revoke the controlling terminal when the session leader exits, so the
+# slave fd stops answering; their master fd reads the same tty settings. Linux masters keep their own.
+settings_fd = slave if sys.platform.startswith("linux") else master
+before = termios.tcgetattr(settings_fd)
 read_fd, write_fd = os.pipe()
 launch = "a" * 32
 env = {k: v for k, v in os.environ.items() if not k.startswith(("PROCWARD_", "PI_PROCESS_OWNER_"))}
@@ -68,7 +71,7 @@ try:
     drain(0)
     elapsed = time.monotonic() - started
     if child.returncode != 0 or not event("hook.json"): raise RuntimeError(f"notice did not run shutdown hook: {output[-5000:]!r}")
-    after = termios.tcgetattr(slave)
+    after = termios.tcgetattr(settings_fd)
     if before != after: raise RuntimeError(f"full terminal settings not restored: {before!r} != {after!r}")
     if blocked == "1" and not (4.5 <= elapsed < 6.5 * float(scale)): raise RuntimeError(f"5s hook bound not observed: {elapsed}")
     print(json.dumps({"noticeOnly": True, "parentAlive": True, "hookRan": True, "terminalRestored": True,
