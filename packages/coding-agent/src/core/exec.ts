@@ -83,9 +83,15 @@ export async function execCommand(
 	let settled = false;
 	let timeoutId: NodeJS.Timeout | undefined;
 	let forceKillId: NodeJS.Timeout | undefined;
+	// The child may exit while inherited output still drains; never cancel it after exit (#7864).
+	let exited = false;
+	proc.once("exit", () => {
+		exited = true;
+		clearTimeout(forceKillId);
+	});
 
 	const killProcess = () => {
-		if (killed || settled) return;
+		if (killed || settled || exited) return;
 		killed = true;
 		if (process.platform === "win32" && owner) owner.cancel();
 		else proc.kill("SIGTERM");
