@@ -32,8 +32,8 @@ if os.name == "nt":
             ok = kernel.Process32NextW(snapshot, ctypes.byref(entry))
     finally: kernel.CloseHandle(snapshot)
 elif sys.platform == "darwin":
-    # macOS ps is setuid root; a root-owned descendant would be an unrelated owner-inventory hazard. Read the
-    # ancestors directly with libproc PROC_PIDT_SHORTBSDINFO (struct proc_bsdshortinfo, 64 bytes).
+    # Read the ancestors with libproc PROC_PIDT_SHORTBSDINFO (struct proc_bsdshortinfo, 64 bytes), then
+    # cross-check them with the real setuid-root /bin/ps, which must keep working under procward.
     libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     class Short(ctypes.Structure):
         _fields_ = [("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("status", ctypes.c_uint32),
@@ -45,6 +45,10 @@ elif sys.platform == "darwin":
         processes[walk] = (info.ppid, info.comm.decode(errors="replace"))
         if walk == stop or info.ppid <= 1: break
         walk = info.ppid
+    listed = {}
+    for line in subprocess.check_output(["/bin/ps", "-A", "-o", "pid=", "-o", "ppid="], text=True).splitlines():
+        fields = line.split()
+        if len(fields) == 2: listed[int(fields[0])] = int(fields[1])
 else:
     # BSD ps reads everything after "=" as the header, so "pid=,ppid=,comm=" would yield only the pid column.
     for line in subprocess.check_output(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "comm="], text=True).splitlines():
@@ -60,4 +64,6 @@ while pid != stop:
     parent, name = processes[pid]
     chain.append({"pid": pid, "parent": parent, "name": name})
     pid = parent
+if sys.platform == "darwin" and any(listed.get(row["pid"]) != row["parent"] for row in chain):
+    raise RuntimeError(f"/bin/ps disagrees with libproc ancestry: chain={chain}")
 print(json.dumps({"chain": chain, "ownerLayers": sum(row["name"] in ("procward", "procward.exe") for row in chain)}))
