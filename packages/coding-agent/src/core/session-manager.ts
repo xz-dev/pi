@@ -43,6 +43,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import { getRawInputText, normalizeRawInputText, setRawInputText } from "./raw-input-text.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
 export interface SessionHeader {
@@ -68,6 +69,11 @@ export interface SessionEntryBase {
 
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
+	/**
+	 * Interactive command behind an expanded prompt-template user message, for display only.
+	 * Present only when that command cannot be recovered from `message`; never sent to the model.
+	 */
+	__raw_inputText?: string;
 	message: AgentMessage;
 }
 
@@ -1225,6 +1231,9 @@ export class SessionManager {
 			if (entry.type === "session" || entry.type === "run_state") continue;
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
+			if (entry.type === "message" && typeof entry.message === "object" && entry.message !== null) {
+				setRawInputText(entry.message, normalizeRawInputText(entry.__raw_inputText));
+			}
 			if (entry.type === "compaction") {
 				this.latestCompactionTime = Math.max(this.latestCompactionTime, Date.parse(entry.timestamp) || 0);
 			}
@@ -1511,11 +1520,13 @@ export class SessionManager {
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
 	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+		const rawInputText = getRawInputText(message);
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: this._entryTimestamp(),
+			...(rawInputText ? { __raw_inputText: rawInputText } : {}),
 			message,
 		};
 		this._appendEntry(entry);

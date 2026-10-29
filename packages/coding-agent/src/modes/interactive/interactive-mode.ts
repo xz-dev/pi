@@ -110,6 +110,7 @@ import {
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { RADIUS_MCP_URL, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
+import { getRawInputText } from "../../core/raw-input-text.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
@@ -193,6 +194,7 @@ import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { editInExternalEditor } from "./external-editor.ts";
+import { getSubmittedCommandText } from "./input-presentation.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
 import { type BlockedStatus, ProgramStatusReporter } from "./program-status-reporter.ts";
@@ -2211,9 +2213,10 @@ export class InteractiveMode {
 				},
 				fork: async (entryId, options) => {
 					try {
+						const commandText = this.getEntrySubmittedCommandText(entryId);
 						const result = await this.runtimeHost.fork(entryId, options);
 						if (!result.cancelled) {
-							this.editor.setText(result.selectedText ?? "");
+							this.editor.setText(result.selectedText === undefined ? "" : (commandText ?? result.selectedText));
 							this.showStatus("Forked to new session");
 						}
 						return { cancelled: result.cancelled };
@@ -2235,7 +2238,7 @@ export class InteractiveMode {
 					this.chatContainer.clear();
 					this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
-						this.editor.setText(result.editorText);
+						this.editor.setText(this.getEntrySubmittedCommandText(targetId) ?? result.editorText);
 					}
 					this.showStatus("Navigated to selected point");
 					void this.flushCompactionQueue({ willRetry: false });
@@ -4208,6 +4211,26 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Submitted command for an interactive user message when the collapsed base presentation is on.
+	 * Only stored data is used: the recorded raw command or a stored skill block.
+	 */
+	private getSubmittedCommandTextFor(message: AgentMessage): string | undefined {
+		if (!this.settingsManager.getCollapseExpandedInput()) return undefined;
+		if (message.role !== "user" || message.origin?.type !== "interactive") return undefined;
+		return getSubmittedCommandText(this.getUserMessageText(message), getRawInputText(message));
+	}
+
+	private getEntrySubmittedCommandText(entryId: string): string | undefined {
+		const entry = this.sessionManager.getEntry(entryId);
+		return entry?.type === "message" ? this.getSubmittedCommandTextFor(entry.message) : undefined;
+	}
+
+	/** User message text as the TUI shows, copies, and refills it. */
+	private getUserMessageDisplayText(message: Message): string {
+		return this.getSubmittedCommandTextFor(message) ?? this.getUserMessageText(message);
+	}
+
 	/** Extract text content from a user message */
 	private getUserMessageText(message: Message): string {
 		if (message.role !== "user") return "";
@@ -4439,7 +4462,7 @@ export class InteractiveMode {
 						}
 					} else {
 						const userComponent = new UserMessageComponent(
-							textContent,
+							this.getUserMessageDisplayText(message),
 							this.getMarkdownThemeWithSettings(),
 							this.outputPad,
 							this.getMarkdownTransformers(),
@@ -4449,7 +4472,7 @@ export class InteractiveMode {
 						this.chatContainer.addChild(userComponent);
 					}
 					if (options?.populateHistory && message.origin?.type === "interactive") {
-						this.editor.addToHistory?.(textContent);
+						this.editor.addToHistory?.(this.getUserMessageDisplayText(message));
 					}
 				}
 				break;
@@ -5257,7 +5280,7 @@ export class InteractiveMode {
 	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
 		const inputs = this.session.getQueuedInputs();
 		const label = (message: (typeof inputs.steering)[number]) => {
-			const text = this.getUserMessageText(message);
+			const text = this.getUserMessageDisplayText(message);
 			return message.origin?.type === "interactive" ? text : `[${formatMessageOrigin(message.origin)}] ${text}`;
 		};
 		return {
@@ -5277,7 +5300,9 @@ export class InteractiveMode {
 	 * Clears both session queue and compaction queue.
 	 */
 	private clearAllQueues(): { steering: string[]; followUp: string[] } {
-		const { steering, followUp } = this.session.takeInteractiveDrafts();
+		const drafts = this.session.takeInteractiveDraftMessages();
+		const steering = drafts.steering.map((message) => this.getUserMessageDisplayText(message));
+		const followUp = drafts.followUp.map((message) => this.getUserMessageDisplayText(message));
 		const compactionSteering = this.compactionQueuedMessages
 			.filter((msg) => msg.mode === "steer")
 			.map((msg) => msg.text);
@@ -5501,6 +5526,7 @@ export class InteractiveMode {
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
 					blockImages: this.settingsManager.getBlockImages(),
 					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
+					collapseExpandedInput: this.settingsManager.getCollapseExpandedInput(),
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
 					transport: this.settingsManager.getTransport(),
@@ -5569,6 +5595,11 @@ export class InteractiveMode {
 					onEnableSkillCommandsChange: (enabled) => {
 						this.settingsManager.setEnableSkillCommands(enabled);
 						this.setupAutocompleteProvider();
+					},
+					onCollapseExpandedInputChange: (enabled) => {
+						this.settingsManager.setCollapseExpandedInput(enabled);
+						this.rebuildChatFromMessages();
+						this.updatePendingMessagesDisplay();
 					},
 					onSteeringModeChange: (mode) => {
 						this.session.setSteeringMode(mode);
@@ -6112,17 +6143,18 @@ export class InteractiveMode {
 
 		this.showSelector((done) => {
 			const selector = new UserMessageSelectorComponent(
-				userMessages.map((m) => ({ id: m.entryId, text: m.text })),
+				userMessages.map((m) => ({ id: m.entryId, text: this.getEntrySubmittedCommandText(m.entryId) ?? m.text })),
 				async (entryId) => {
 					done();
 					try {
+						const commandText = this.getEntrySubmittedCommandText(entryId);
 						const result = await this.runtimeHost.fork(entryId);
 						if (result.cancelled) {
 							this.ui.requestRender();
 							return;
 						}
 
-						this.editor.setText(result.selectedText ?? "");
+						this.editor.setText(commandText ?? result.selectedText ?? "");
 						this.showStatus("Forked to new session");
 					} catch (error: unknown) {
 						this.showError(error instanceof Error ? error.message : String(error));
@@ -6268,7 +6300,7 @@ export class InteractiveMode {
 						this.chatContainer.clear();
 						this.renderInitialMessages();
 						if (result.editorText && !this.editor.getText().trim()) {
-							this.editor.setText(result.editorText);
+							this.editor.setText(this.getEntrySubmittedCommandText(entryId) ?? result.editorText);
 						}
 						this.showStatus("Navigated to selected point");
 						void this.flushCompactionQueue({ willRetry: false });
@@ -6291,6 +6323,7 @@ export class InteractiveMode {
 				},
 				initialSelectedId,
 				initialFilterMode,
+				(message) => this.getSubmittedCommandTextFor(message),
 			);
 			selector.onCopy = async (text) => {
 				if (!text) {
