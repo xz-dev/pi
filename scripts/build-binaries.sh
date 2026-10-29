@@ -98,8 +98,9 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		# LLVM readelf (FreeBSD 15) prints "(NEEDED)"; ELF Tool Chain readelf (14) prints "NEEDED" without parentheses.
 		needed=$(readelf -d "$build_dir/process-owner/pi-env" | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }')
 		[[ $needed == *libc.so.7* ]] || { echo "process-owner NEEDED check found no libc.so.7" >&2; exit 1; }
+		# POSIX AIO for the process-owner exit wake lives in librt on FreeBSD 14 and 15.
 		for library in $needed; do
-			case $library in libc.so.7 | libthr.so.3 | libm.so.5 | libgcc_s.so.1) ;; *) echo "process-owner links non-portable $library" >&2; exit 1 ;; esac
+			case $library in libc.so.7 | libthr.so.3 | libm.so.5 | libgcc_s.so.1 | librt.so.1) ;; *) echo "process-owner links non-portable $library" >&2; exit 1 ;; esac
 		done
 	fi
 	procward_args=(--target "$target" "$build_dir/procward")
