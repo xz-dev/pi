@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 import { validateProcwardPin } from "./acquire-procward.mjs";
@@ -12,7 +12,7 @@ import { PROCWARD_PIN } from "./lib/procward-pin.mjs";
 
 const fixtures = fileURLToPath(new URL("./fixtures/procward/", import.meta.url));
 const digest = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
-export const PROCWARD_CONTRACT_CASES = Object.freeze(["bundle-pin", "auto-wrap", "external-default-nesting", "pi-in-pi-default-nesting", "flag-opt-out", "env-opt-out", "option-value", "after-terminator", "external-opt-out", "external-env-opt-out", "nested-flag-opt-out", "nested-env-opt-out", "stale-marker", "notice-hook", "blocked-hook", "terminal-restored"]);
+export const PROCWARD_CONTRACT_CASES = Object.freeze(["bundle-pin", "auto-wrap", "external-default-nesting", "pi-in-pi-default-nesting", "flag-opt-out", "env-opt-out", "option-value", "after-terminator", "external-opt-out", "external-env-opt-out", "nested-flag-opt-out", "nested-env-opt-out", "stale-marker", "access-boundary", "notice-hook", "blocked-hook", "terminal-restored"]);
 export function assertProcwardContract(record, targetId, piSha256, pin = PROCWARD_PIN) {
 	const target = bunTarget(targetId).cargoTarget;
 	if (!/^[0-9a-f]{64}$/.test(pin.targets[target]?.zipSha256 ?? "") || !/^[0-9a-f]{64}$/.test(pin.targets[target]?.binarySha256 ?? "")) throw new Error(`${targetId} missing procward pin digests`);
@@ -23,9 +23,62 @@ export function assertProcwardContract(record, targetId, piSha256, pin = PROCWAR
 		if (hook?.noticeOnly !== true || hook.parentAlive !== true || hook.hookRan !== true || hook.terminalRestored !== true || JSON.stringify(hook.terminalBefore) !== JSON.stringify(hook.terminalAfter) || !Number.isSafeInteger(hook.elapsedMs) || hook.elapsedMs < 0) throw new Error(`${targetId} invalid procward notice/terminal evidence`);
 	}
 	const scale = bunTarget(targetId).emulated ? EMULATED_SMOKE_SLOWDOWN : 1;
+	const access = record.access;
+	if (typeof access?.mechanism !== "string" || access.okStatus !== 0 || !Number.isSafeInteger(access.commandStatus) || access.commandStatus === 0 || access.piStatus !== access.commandStatus || access.lingerReaped !== true || (bunTarget(targetId).os === "windows" && access.denied !== true)) throw new Error(`${targetId} invalid procward access-boundary evidence`);
 	if (record.notice.blockedHook !== false || record.blocked.blockedHook !== true || record.blocked.elapsedMs < 4500 || record.blocked.elapsedMs >= 6500 * scale) throw new Error(`${targetId} missing original 5s hook bound`);
 }
 
+// A descendant the controller may not inspect or open must neither kill procward nor escape cleanup.
+export function procwardAccessBoundary(executable, env, work, scale = 1) {
+	const python = process.platform === "win32" ? "python" : process.platform === "freebsd" ? "python3.11" : "python3";
+	const windows = process.platform === "win32";
+	const directory = join(work, "access-boundary");
+	mkdirSync(directory);
+	const ready = join(directory, "linger.ready");
+	const linger = [process.execPath, "-e", `require("node:fs").writeFileSync(${JSON.stringify(ready)}, "ready\\n"); setInterval(() => {}, 1 << 30);`];
+	let spec, launch = executable, extension = join(fixtures, "extension.mjs"), extra = {}, drop = {};
+	if (windows) {
+		const script = join(fixtures, "access-boundary.py");
+		spec = { mechanism: "process DACL denies the controller", ok: [python, script, "exit", "0"], fail: [python, script, "exit", "7"], linger: [python, script, "linger", ready], check: [python, script, "check"] };
+	} else if (process.getuid() === 0) {
+		// A root controller crosses no boundary: run Pi as nobody and give it a setuid-root runtime to start.
+		chmodSync(work, 0o711);
+		for (const path of [directory, ...["home", "tmp"].map((name) => join(directory, name))]) { mkdirSync(path, { recursive: true }); chmodSync(path, 0o777); }
+		const setuid = join(directory, "setuid-runtime");
+		copyFileSync(process.execPath, setuid); chmodSync(setuid, 0o4755);
+		launch = join(directory, basename(executable)); copyFileSync(executable, launch); chmodSync(launch, 0o755);
+		extension = join(directory, "extension.mjs"); copyFileSync(join(fixtures, "extension.mjs"), extension); chmodSync(extension, 0o644);
+		const euid = (code) => `process.exit(process.geteuid() === 0 && process.getuid() !== 0 ? ${code} : 3)`;
+		spec = { mechanism: "setuid-root runtime started by uid 65534", ok: [setuid, "-e", euid(0)], fail: [setuid, "-e", euid(7)], linger };
+		const home = join(directory, "home"), tmp = join(directory, "tmp");
+		extra = { HOME: home, USERPROFILE: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp };
+		drop = { uid: 65534, gid: 65534 };
+	} else if (process.platform === "darwin") {
+		spec = { mechanism: "setuid-root /bin/ps", ok: ["/bin/ps", "-p", "1", "-o", "pid="], fail: ["/bin/ps", "-p", "2147483646"], linger };
+	} else {
+		spec = { mechanism: "setuid-root sudo -n", ok: ["/usr/bin/sudo", "-n", "/bin/sh", "-c", 'test "$(id -u)" = 0'], fail: ["/usr/bin/sudo", "-n", "/bin/sh", "-c", 'test "$(id -u)" = 0 && exit 7'], linger };
+	}
+	if (!windows) {
+		const mode = statSync(spec.ok[0]);
+		if (!(mode.mode & 0o4000) || mode.uid !== 0) throw new Error(`procward contract failed: access-boundary ${spec.ok[0]} is not setuid root`);
+	}
+	const cliArgs = ["--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "-e", extension, "--help"];
+	const result = spawnSync(launch, cliArgs, { env: { ...env, ...extra, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_PROCWARD_CONTRACT_DIRECTORY: directory, PI_PROCWARD_CONTRACT_PROBE: "1", PI_PROCWARD_CONTRACT_ACCESS: JSON.stringify({ ...spec, ready }) }, encoding: "utf8", timeout: 30000 * scale, maxBuffer: 4 * 1024 * 1024, ...drop });
+	const file = join(directory, "access.json");
+	if (!existsSync(file)) throw new Error(`procward contract failed: access-boundary wrote no record (${result.status ?? result.signal}): ${result.error?.message ?? ""}\n${result.stderr ?? ""}${(result.stdout ?? "").slice(-2000)}`);
+	const record = JSON.parse(readFileSync(file, "utf8"));
+	const alive = (pid) => {
+		if (windows) return spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"], { encoding: "utf8" }).stdout.includes(`"${pid}"`);
+		try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
+	};
+	const pause = new Int32Array(new SharedArrayBuffer(4));
+	let lingerReaped = false;
+	for (let i = 0; i < 40 && !(lingerReaped = !alive(record.linger)); i++) Atomics.wait(pause, 0, 0, 50);
+	if (!lingerReaped) try { process.kill(record.linger, "SIGKILL"); } catch {}
+	const evidence = { mechanism: spec.mechanism, okStatus: record.ok.status, commandStatus: record.fail.status, piStatus: result.status, lingerReaped, ...(windows ? { denied: record.check?.status === 0 } : {}) };
+	if (!record.ready || evidence.okStatus !== 0 || !evidence.commandStatus || evidence.piStatus !== evidence.commandStatus || !lingerReaped || (windows && !evidence.denied)) throw new Error(`procward contract failed: access-boundary ${JSON.stringify({ evidence, record, stderr: (result.stderr ?? "").slice(-2000) })}`);
+	return evidence;
+}
 export function smokeProcwardContract(executable, targetId, version, { allowDev = false } = {}) {
 	const pin = validateProcwardPin(PROCWARD_PIN, { allowDev });
 	const descriptor = bunTarget(targetId);
@@ -98,6 +151,8 @@ export function smokeProcwardContract(executable, targetId, version, { allowDev 
 		}
 		const stale = spawnSync(executable, ["--version"], { env: { ...env, PI_PROCWARD_BOOTSTRAP_NONCE: "a".repeat(32) }, encoding: "utf8", timeout: 10000 * scale });
 		passed("stale-marker", !stale.error && stale.status !== 0 && stale.stdout === "" && stale.stderr.trim().split("\n").length === 1 && stale.stderr.includes("unset PI_PROCWARD_BOOTSTRAP_NONCE") && stale.stderr.includes("--no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1"));
+		const access = procwardAccessBoundary(executable, env, work, scale);
+		passed("access-boundary", true);
 		const harness = join(fixtures, process.platform === "win32" ? "conpty-contract.py" : "pty-contract.py");
 		const terminalContract = (directory, block) => process.env.PI_PROCWARD_CONTRACT_PTY
 			? JSON.parse(run(process.env.PI_PROCWARD_CONTRACT_PTY, [executable, join(fixtures, "extension.mjs"), directory, block, String(scale)], {}, 40000).stdout.trim())
@@ -107,7 +162,7 @@ export function smokeProcwardContract(executable, targetId, version, { allowDev 
 		const blocked = terminalContract(join(work, "blocked"), "1");
 		passed("blocked-hook", blocked.hookRan && blocked.elapsedMs >= 4500 && blocked.elapsedMs < 6500 * scale);
 		passed("terminal-restored", notice.terminalRestored && blocked.terminalRestored);
-		const record = { schemaVersion: 1, status: "passed", target: targetId, piSha256: digest(executable), procward, cases, notice, blocked };
+		const record = { schemaVersion: 1, status: "passed", target: targetId, piSha256: digest(executable), procward, cases, access, notice, blocked };
 		assertProcwardContract(record, targetId, record.piSha256);
 		return record;
 	} finally { rmSync(work, { recursive: true, force: true }); }

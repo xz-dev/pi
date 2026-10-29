@@ -11,6 +11,7 @@ export function passedProcwardContract(targetId, piSha256) {
 		schemaVersion: 1, status: "passed", target: targetId, piSha256,
 		procward: { state: pin.state, version: pin.version, repository: pin.repository, workflow: pin.workflow, sourceCommit: pin.sourceCommit, tag: pin.tag, target, ...pin.targets[target] },
 		cases: PROCWARD_CONTRACT_CASES.map((name) => ({ name, passed: true })),
+		access: { mechanism: "fixture", okStatus: 0, commandStatus: 7, piStatus: 7, lingerReaped: true, denied: true },
 		notice: hook,
 		blocked: { ...hook, elapsedMs: 5000, blockedHook: true },
 	};
