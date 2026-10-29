@@ -283,6 +283,9 @@ pub fn configure(
 
 pub fn after_spawn(_child: &Child) {}
 
+/// Signal mask the daemon inherited, before `on_exit_signal` blocked its exit signals on every thread.
+static INHERITED_SIGNAL_MASK: std::sync::OnceLock<libc::sigset_t> = std::sync::OnceLock::new();
+
 /// Run `on_signal` with the signal on its own thread when `SIGTERM`, `SIGINT` or `SIGHUP` arrives, instead of dying
 /// at once. Call before starting any other thread: threads inherit the blocked signals, so only this one receives
 /// them. Commands reset their signal mask before they run.
@@ -294,7 +297,10 @@ pub fn on_exit_signal(on_signal: impl FnOnce(i32) + Send + 'static) {
         for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
             libc::sigaddset(&mut set, signal);
         }
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        let mut inherited: libc::sigset_t = std::mem::zeroed();
+        if libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut inherited) == 0 {
+            let _ = INHERITED_SIGNAL_MASK.set(inherited);
+        }
         set
     };
     std::thread::spawn(move || {
@@ -578,6 +584,11 @@ pub mod owned {
                     {
                         return Err(io::Error::other("cannot read signal mask"));
                     }
+                    // Exit signals are blocked daemon-wide for the sigwait thread; owned
+                    // commands keep the mask the daemon itself inherited.
+                    if let Some(inherited) = super::INHERITED_SIGNAL_MASK.get() {
+                        mask = *inherited;
+                    }
                     for (bit, signal) in SIGNALS.iter().copied().enumerate() {
                         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
                         if unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) } != 0 {
@@ -857,6 +868,27 @@ pub mod owned {
                     .unwrap()
                     .zero_attempt
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exit_signal_thread_keeps_the_inherited_mask_for_owned_commands() {
+        // cargo runs each test on its own thread, so blocking here does not leak into other tests.
+        super::on_exit_signal(|_| {});
+        // SAFETY: plain signal mask queries on initialized sigset_t values.
+        unsafe {
+            let mut current: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut current);
+            let inherited = super::INHERITED_SIGNAL_MASK
+                .get()
+                .expect("inherited mask recorded");
+            for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+                assert_eq!(libc::sigismember(&current, signal), 1);
+                assert_eq!(libc::sigismember(inherited, signal), 0);
+            }
         }
     }
 }
