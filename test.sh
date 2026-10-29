@@ -84,5 +84,20 @@ echo "Running tests without API keys in isolated home: $test_root/home"
 # Downstream (ci): exclude upstream tests pinned to models that the live
 # catalog dropped; the list is scripts/catalog-drift-test-skips.txt.
 skip_pattern="$(node scripts/catalog-drift-test-pattern.mjs)"
-env -i "${test_env[@]}" npm run test:scripts
-env -i "${test_env[@]}" npm run test --workspaces --if-present -- --testNamePattern="$skip_pattern"
+workspace_args=(--workspaces)
+case "${PI_TEST_WORKSPACE_GROUP-}" in
+	"") ;;
+	coding-agent|durable) workspace_args=(--workspace "packages/$PI_TEST_WORKSPACE_GROUP") ;;
+	other)
+		workspace_args=()
+		for dir in packages/*/; do
+			case "$dir" in packages/coding-agent/|packages/durable/) continue ;; esac
+			workspace_args+=(--workspace "${dir%/}")
+		done
+		;;
+	*) echo "Unknown test workspace group: $PI_TEST_WORKSPACE_GROUP" >&2; exit 1 ;;
+esac
+if [[ -z "${PI_TEST_WORKSPACE_GROUP-}" || "$PI_TEST_WORKSPACE_GROUP" == other ]]; then
+	env -i "${test_env[@]}" npm run test:scripts
+fi
+env -i "${test_env[@]}" npm run test "${workspace_args[@]}" --if-present -- --testNamePattern="$skip_pattern"
