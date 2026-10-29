@@ -25,7 +25,9 @@ try {
 		writeFileSync(batch, ["@echo off", `call ${quote(join(installation, "Common7/Tools/VsDevCmd.bat"))} -no_logo -arch=${process.arch} -host_arch=${process.arch}`, "if errorlevel 1 exit /b %errorlevel%", `cl /nologo /TC /std:c11 /W4 /O1 /LD ${quote(source)} /Fe:${quote(built)} /link /OPT:REF /OPT:ICF`, "if errorlevel 1 exit /b %errorlevel%"].join("\r\n"));
 		execFileSync("cmd.exe", ["/d", "/s", "/c", batch], { cwd: scratch, stdio: "inherit", timeout: 120000 });
 	} else {
-		const flags = ["-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror", "-Os", "-fPIC", "-fvisibility=hidden"];
+		const flags = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-Os", "-fPIC", "-fvisibility=hidden"];
+		// Strict POSIX mode hides dlfcn's RTLD_DEFAULT on macOS and FreeBSD; their default headers already expose POSIX.
+		if (process.platform === "linux") flags.push("-D_POSIX_C_SOURCE=200809L");
 		if (process.platform === "darwin") flags.push("-dynamiclib");
 		else flags.push("-shared", "-nostdlib", "-Wl,--unresolved-symbols=ignore-all");
 		execFileSync(process.env.CC || "cc", [...flags, source, "-o", built], { stdio: "inherit", timeout: 120000 });
