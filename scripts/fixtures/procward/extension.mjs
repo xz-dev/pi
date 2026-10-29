@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export default function (pi) {
@@ -18,8 +18,10 @@ export default function (pi) {
 		linger.unref();
 		const pause = new Int32Array(new SharedArrayBuffer(4));
 		for (let i = 0; i < 400 && !existsSync(spec.ready); i++) Atomics.wait(pause, 0, 0, 50);
-		const check = spec.check ? exec([...spec.check, String(linger.pid)]) : null;
-		write("access.json", { pid: process.pid, ok, fail, linger: linger.pid, ready: existsSync(spec.ready), check });
+		// The ready file carries the pid of the process that actually set its DACL, not of a launcher shim.
+		const lingerPid = existsSync(spec.ready) ? Number(readFileSync(spec.ready, "utf8")) || linger.pid : linger.pid;
+		const check = spec.check ? exec([...spec.check, String(lingerPid)]) : null;
+		write("access.json", { pid: process.pid, ok, fail, linger: lingerPid, ready: existsSync(spec.ready), check });
 		process.exit(fail.status ?? 125);
 	}
 	if (process.env.PI_PROCWARD_CONTRACT_PROBE === "1") {

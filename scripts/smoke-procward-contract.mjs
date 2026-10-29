@@ -37,17 +37,18 @@ export function procwardAccessBoundary(executable, env, work, scale = 1) {
 	const directory = root ? mkdtempSync("/tmp/pi-procward-access-") : join(work, "access-boundary");
 	if (!root) mkdirSync(directory);
 	const ready = join(directory, "linger.ready");
-	const linger = [process.execPath, "-e", `require("node:fs").writeFileSync(${JSON.stringify(ready)}, "ready\\n"); setInterval(() => {}, 1 << 30);`];
-	let spec, launch = executable, extension = join(fixtures, "extension.mjs"), extra = {}, drop = {};
+	const linger = [process.execPath, "-e", `require("node:fs").writeFileSync(${JSON.stringify(ready)}, process.pid + "\\n"); setInterval(() => {}, 1 << 30);`];
+	let spec, launch = [executable], extension = join(fixtures, "extension.mjs"), extra = {}, drop = {};
 	if (windows) {
 		const script = join(fixtures, "access-boundary.py");
+		launch = [python, script, "launch", executable];
 		spec = { mechanism: "process DACL denies the controller", ok: [python, script, "exit", "0"], fail: [python, script, "exit", "7"], linger: [python, script, "linger", ready], check: [python, script, "check"] };
 	} else if (root) {
 		// A root controller crosses no boundary: run Pi as nobody and give it a setuid-root runtime to start.
 		for (const path of [directory, ...["home", "tmp"].map((name) => join(directory, name))]) { mkdirSync(path, { recursive: true }); chmodSync(path, 0o777); }
 		const setuid = join(directory, "setuid-runtime");
 		copyFileSync(process.execPath, setuid); chmodSync(setuid, 0o4755);
-		launch = join(directory, basename(executable)); copyFileSync(executable, launch); chmodSync(launch, 0o755);
+		launch = [join(directory, basename(executable))]; copyFileSync(executable, launch[0]); chmodSync(launch[0], 0o755);
 		extension = join(directory, "extension.mjs"); copyFileSync(join(fixtures, "extension.mjs"), extension); chmodSync(extension, 0o644);
 		const euid = (code) => `process.exit(process.geteuid() === 0 && process.getuid() !== 0 ? ${code} : 3)`;
 		spec = { mechanism: "setuid-root runtime started by uid 65534", ok: [setuid, "-e", euid(0)], fail: [setuid, "-e", euid(7)], linger };
@@ -64,7 +65,7 @@ export function procwardAccessBoundary(executable, env, work, scale = 1) {
 		if (!(mode.mode & 0o4000) || mode.uid !== 0) throw new Error(`procward contract failed: access-boundary ${spec.ok[0]} is not setuid root`);
 	}
 	const cliArgs = ["--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "-e", extension, "--help"];
-	const result = spawnSync(launch, cliArgs, { env: { ...env, ...extra, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_PROCWARD_CONTRACT_DIRECTORY: directory, PI_PROCWARD_CONTRACT_PROBE: "1", PI_PROCWARD_CONTRACT_ACCESS: JSON.stringify({ ...spec, ready }) }, encoding: "utf8", timeout: 30000 * scale, maxBuffer: 4 * 1024 * 1024, ...drop });
+	const result = spawnSync(launch[0], [...launch.slice(1), ...cliArgs], { env: { ...env, ...extra, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_PROCWARD_CONTRACT_DIRECTORY: directory, PI_PROCWARD_CONTRACT_PROBE: "1", PI_PROCWARD_CONTRACT_ACCESS: JSON.stringify({ ...spec, ready }) }, encoding: "utf8", timeout: 30000 * scale, maxBuffer: 4 * 1024 * 1024, ...drop });
 	const file = join(directory, "access.json");
 	if (!existsSync(file)) throw new Error(`procward contract failed: access-boundary wrote no record (${result.status ?? result.signal}): ${result.error?.message ?? ""}\n${result.stderr ?? ""}${(result.stdout ?? "").slice(-2000)}`);
 	const record = JSON.parse(readFileSync(file, "utf8"));
