@@ -762,7 +762,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				return { consume: true };
 			}
 		}
-		if (this.shouldDeferViewportInput()) return undefined;
+		// A hidden focused panel (collapsed dock) must not capture viewport keys; the transcript scrolls instead.
+		if (this.shouldDeferViewportInput() && !this.isFocusedInputHidden()) return undefined;
 		if (keybindings.matches(data, "tui.altScreen.pageUp")) {
 			if (!isRelease) {
 				this.scrollBy(-Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP));
