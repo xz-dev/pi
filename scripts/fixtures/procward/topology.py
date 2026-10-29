@@ -31,6 +31,20 @@ if os.name == "nt":
             processes[entry.th32ProcessID] = (entry.th32ParentProcessID, entry.szExeFile)
             ok = kernel.Process32NextW(snapshot, ctypes.byref(entry))
     finally: kernel.CloseHandle(snapshot)
+elif sys.platform == "darwin":
+    # macOS ps is setuid root; a root-owned descendant would be an unrelated owner-inventory hazard. Read the
+    # ancestors directly with libproc PROC_PIDT_SHORTBSDINFO (struct proc_bsdshortinfo, 64 bytes).
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    class Short(ctypes.Structure):
+        _fields_ = [("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("status", ctypes.c_uint32),
+                    ("comm", ctypes.c_char * 16), ("flags", ctypes.c_uint32), ("ids", ctypes.c_uint32 * 7)]
+    walk = pid
+    for _ in range(64):
+        info = Short()
+        if libproc.proc_pidinfo(walk, 13, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info): break
+        processes[walk] = (info.ppid, info.comm.decode(errors="replace"))
+        if walk == stop or info.ppid <= 1: break
+        walk = info.ppid
 else:
     # BSD ps reads everything after "=" as the header, so "pid=,ppid=,comm=" would yield only the pid column.
     for line in subprocess.check_output(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "comm="], text=True).splitlines():
