@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type Component,
 	Container,
@@ -18,6 +19,9 @@ import { shortenHomePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { formatKeyText, keyHint } from "./keybinding-hints.ts";
+
+/** Display text override for a user message; undefined keeps the stored content. */
+export type UserMessageTextResolver = (message: AgentMessage) => string | undefined;
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -121,6 +125,7 @@ class TreeList implements Component {
 	private visibleChildrenMap: Map<string | null, string[]> = new Map();
 	private lastSelectedId: string | null = null;
 	private foldedNodes: Set<string> = new Set();
+	private resolveUserMessageText?: UserMessageTextResolver;
 
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
@@ -133,7 +138,9 @@ class TreeList implements Component {
 		maxVisibleLines: number,
 		initialSelectedId?: string,
 		initialFilterMode?: FilterMode,
+		resolveUserMessageText?: UserMessageTextResolver,
 	) {
+		this.resolveUserMessageText = resolveUserMessageText;
 		this.currentLeafId = currentLeafId;
 		this.maxVisibleLines = maxVisibleLines;
 		this.filterMode = initialFilterMode ?? "default";
@@ -580,7 +587,7 @@ class TreeList implements Component {
 				const msg = entry.message;
 				parts.push(msg.role);
 				if ("content" in msg && msg.content) {
-					parts.push(this.extractContent(msg.content));
+					parts.push(this.getMessageText(msg).slice(0, 200));
 				}
 				if (msg.role === "bashExecution") {
 					const bashMsg = msg as { command?: string };
@@ -789,8 +796,7 @@ class TreeList implements Component {
 				const msg = entry.message;
 				const role = msg.role;
 				if (role === "user") {
-					const msgWithContent = msg as { content?: unknown };
-					const content = normalize(this.extractContent(msgWithContent.content));
+					const content = normalize(this.getMessageText(msg).slice(0, 200));
 					result = theme.fg("accent", "user: ") + content;
 				} else if (role === "assistant") {
 					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
@@ -896,6 +902,12 @@ class TreeList implements Component {
 		return this.extractFullContent(content).slice(0, 200);
 	}
 
+	/** Full text of a message with content, using the user-message display override when present. */
+	private getMessageText(message: AgentMessage): string {
+		const override = message.role === "user" ? this.resolveUserMessageText?.(message) : undefined;
+		return override ?? ("content" in message ? this.extractFullContent(message.content) : "");
+	}
+
 	private extractFullContent(content: unknown): string {
 		if (typeof content === "string") return content;
 		if (!Array.isArray(content)) return "";
@@ -918,7 +930,7 @@ class TreeList implements Component {
 				if (entry.message.role === "bashExecution") {
 					text = entry.message.command;
 				} else if ("content" in entry.message) {
-					text = this.extractFullContent(entry.message.content);
+					text = this.getMessageText(entry.message);
 					if (!text && entry.message.role === "assistant") {
 						text = entry.message.errorMessage;
 					}
@@ -1359,13 +1371,21 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		onLabelChange?: (entryId: string, label: string | undefined) => void,
 		initialSelectedId?: string,
 		initialFilterMode?: FilterMode,
+		resolveUserMessageText?: UserMessageTextResolver,
 	) {
 		super();
 
 		this.onLabelChangeCallback = onLabelChange;
 		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));
 
-		this.treeList = new TreeList(tree, currentLeafId, maxVisibleLines, initialSelectedId, initialFilterMode);
+		this.treeList = new TreeList(
+			tree,
+			currentLeafId,
+			maxVisibleLines,
+			initialSelectedId,
+			initialFilterMode,
+			resolveUserMessageText,
+		);
 		this.treeList.onSelect = onSelect;
 		this.treeList.onCancel = onCancel;
 		this.treeList.onCopy = (text) => this.onCopy?.(text);

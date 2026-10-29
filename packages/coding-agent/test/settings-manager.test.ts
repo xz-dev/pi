@@ -427,6 +427,30 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("collapseExpandedInput", () => {
+		it("defaults to true", () => {
+			expect(SettingsManager.create(projectDir, agentDir).getCollapseExpandedInput()).toBe(true);
+		});
+
+		it("applies trusted project settings over user settings, but not untrusted ones", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ collapseExpandedInput: true }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ collapseExpandedInput: false }));
+
+			expect(SettingsManager.create(projectDir, agentDir).getCollapseExpandedInput()).toBe(false);
+			expect(
+				SettingsManager.create(projectDir, agentDir, { projectTrusted: false }).getCollapseExpandedInput(),
+			).toBe(true);
+		});
+
+		it("persists the user setting", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setCollapseExpandedInput(false);
+			await manager.flush();
+			expect(manager.getCollapseExpandedInput()).toBe(false);
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).collapseExpandedInput).toBe(false);
+		});
+	});
+
 	describe("httpIdleTimeoutMs", () => {
 		it("should default to 5 minutes", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

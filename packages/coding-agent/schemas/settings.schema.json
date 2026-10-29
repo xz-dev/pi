@@ -409,6 +409,11 @@
       "description": "Register skills as /skill:name commands.",
       "default": true
     },
+    "collapseExpandedInput": {
+      "type": "boolean",
+      "description": "Show submitted prompt-template and skill commands instead of their expansion in the terminal UI transcript, tree, fork list, history, and queue. The model still receives the expansion.",
+      "default": true
+    },
     "terminal": {
       "type": "object",
       "properties": {

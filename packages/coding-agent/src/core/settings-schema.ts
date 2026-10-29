@@ -354,6 +354,13 @@ export const SettingsSchema = Type.Object(
 				default: SETTINGS_DEFAULTS.enableSkillCommands,
 			}),
 		),
+		collapseExpandedInput: Type.Optional(
+			Type.Boolean({
+				description:
+					"Show submitted prompt-template and skill commands instead of their expansion in the terminal UI transcript, tree, fork list, history, and queue. The model still receives the expansion.",
+				default: SETTINGS_DEFAULTS.collapseExpandedInput,
+			}),
+		),
 		terminal: Type.Optional(TerminalSettingsSchema),
 		images: Type.Optional(ImageSettingsSchema),
 		enabledModels: Type.Optional(
