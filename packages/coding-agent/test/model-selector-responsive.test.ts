@@ -200,7 +200,9 @@ describe("model selector fullscreen height", () => {
 			for (let i = 0; i < 8; i++) terminal.sendInput("\x1b[B");
 			await terminal.waitForRender();
 			expect(screen()).toMatch(/→.*model-08/);
-			terminal.sendInput("\x1b[5~");
+			// Wheel, not PageUp: a focused selector captures page keys (upstream #7629).
+			terminal.sendInput("\x1b[<64;1;1M");
+			await terminal.waitForRender();
 			terminal.sendInput("\r");
 			terminal.sendInput("X");
 			await terminal.waitForRender();
