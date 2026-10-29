@@ -44,6 +44,7 @@ Features:
 - Thinking shown as one preview line (`Ctrl+T` to expand)
 - Smaller input dock when reading fullscreen history
 - See where each message came from (you, extension, RPC, SDK)
+- [Typed commands instead of expansions](docs/downstream-changes.md#tui-and-display): `/review a.ts` stays `/review a.ts` in chat, `/tree`, `/fork` and history, and prompt templates fold into a `[prompt]` card (the model still gets the full text)
 - [Self-update and mirrors](docs/updating.md) (`pi update --self`, `--mirror`)
 - [Update retries](docs/updating.md#automatic-retries) with 3, 6 and 12 second waits
 - [Verified downloads](docs/updating.md#verification-backups-and-managed-installs) (Sigstore signatures)

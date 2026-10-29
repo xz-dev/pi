@@ -69,7 +69,9 @@ jobs:
             +refs/heads/patch/message-origin:refs/remotes/origin/patch/message-origin \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort \
             +refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures \
-            +refs/heads/patch/preserve-tool-arguments-json:refs/remotes/origin/patch/preserve-tool-arguments-json
+            +refs/heads/patch/preserve-tool-arguments-json:refs/remotes/origin/patch/preserve-tool-arguments-json \
+            +refs/heads/patch/collapse-expanded-input:refs/remotes/origin/patch/collapse-expanded-input \
+            +refs/heads/patch/prompt-invocation-cards:refs/remotes/origin/patch/prompt-invocation-cards
 
           # Driver source: the replay script comes
           # from the reviewed ci snapshot, never from a stale generated-main
@@ -120,6 +122,8 @@ jobs:
             model-thinking-sort \
             env-native-test-fixtures \
             preserve-tool-arguments-json \
+            collapse-expanded-input \
+            prompt-invocation-cards \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done
@@ -306,6 +310,15 @@ jobs:
               test/suite/message-origin.test.ts \
               test/message-origin-rendering.test.ts \
               test/interactive-model-switch-indicator.test.ts
+          )
+          # Typed-command presentation and prompt-template card gates.
+          (
+            cd packages/coding-agent
+            node ../../node_modules/vitest/dist/cli.js --run \
+              test/suite/raw-input-text.test.ts \
+              test/interactive-input-presentation.test.ts \
+              test/settings-selector-collapse-input.test.ts \
+              test/prompt-invocation-message.test.ts
           )
           # This cross-patch test requires both refresh-selection and responsive-selectors.
           node node_modules/vitest/dist/cli.js --run \

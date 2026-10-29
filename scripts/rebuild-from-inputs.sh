@@ -139,6 +139,8 @@ PATCH_ORDER=(
 	model-thinking-sort
 	env-native-test-fixtures
 	preserve-tool-arguments-json
+	collapse-expanded-input
+	prompt-invocation-cards
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip
@@ -166,6 +168,8 @@ CHAIN_EDGES=(
 	cold-start-retry:compaction-boundary-insert
 	compaction-boundary-insert:async-compaction
 	compaction-boundary-insert:message-origin
+	message-origin:collapse-expanded-input
+	collapse-expanded-input:prompt-invocation-cards
 	compact-input-dock:responsive-selectors
 )
 

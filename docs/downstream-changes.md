@@ -135,6 +135,16 @@ Presentation-only changes: layout, selectors, thinking display, startup screen.
 - Hide `[Skill conflicts]` / `[Prompt conflicts]` / `[Extension issues]` / `[Theme conflicts]` startup diagnostic blocks by default; enable them with `showStartupDiagnostics: true` in `settings.json`.
   - Use case: Keep the startup screen clean unless actively debugging resource conflicts or extension loading issues.
   - Patch branch: [`patch/slow-hook-tui-only`](https://github.com/xz-dev/pi/tree/patch/slow-hook-tui-only)
+- Show the prompt-template or skill command you typed, such as `/review src/a.ts` or `/skill:review check this`, instead of its long expansion. This applies to chat messages, session restore, `/tree` preview, search, copy and refill, the `/fork` list and refill, input history, and the queued-message list. Turn it off with `collapseExpandedInput: false` or in `/settings`.
+  - Use case: Find and re-edit an earlier `/review` call in `/tree` or `/fork` without scrolling through the template body.
+  - Limits: Only the terminal UI changes. The model, `/retry`, RPC, SDK, JSONL `message.content` and HTML export keep the full expansion. Pi stores the typed template command as the optional `__raw_inputText` field on the message entry only when an interactive template expanded into different text. Skills are rebuilt from the stored skill block and get no extra field. Messages from older sessions, extensions or SDK calls show their stored text. Refilled commands expand again with the current template when you submit them.
+  - Details: [Settings](../packages/coding-agent/docs/settings.md), [Session format](../packages/coding-agent/docs/session-format.md#sessionmessageentry)
+  - Patch branch: [`patch/collapse-expanded-input`](https://github.com/xz-dev/pi/tree/patch/collapse-expanded-input)
+- Show a typed prompt template in the chat as a collapsed `[prompt]` card, styled like the skill card. Click it or use the tool-output expand key (`app.tools.expand`, `Ctrl+O` by default) to read the expansion that was sent.
+  - Use case: Keep long template bodies out of the chat while still being able to check exactly what the model received.
+  - Limits: Only messages with a recorded command get a card, independent of `collapseExpandedInput`. The expanded state is kept in memory only; a restored session starts collapsed.
+  - Details: [Prompt templates](../packages/coding-agent/docs/prompt-templates.md#use-a-template)
+  - Patch branch: [`patch/prompt-invocation-cards`](https://github.com/xz-dev/pi/tree/patch/prompt-invocation-cards)
 ### Model and thinking switches
 
 Show pending changes in the message list: `Model: old → new` and `Thinking level: high → xhigh`. Each line settles in place to its new value when the next request starts.
