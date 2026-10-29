@@ -36,6 +36,7 @@ export const SETTINGS_DEFAULTS = {
 	collapseChangelog: false,
 	enableAnalytics: false,
 	enableSkillCommands: true,
+	collapseExpandedInput: true,
 	terminal: {
 		showImages: true,
 		imageWidthCells: 60,
