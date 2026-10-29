@@ -91,8 +91,14 @@ static napi_value transport(napi_env env, napi_callback_info info) {
     } else if (!strcmp(operation, "prepare")) {
         struct stat st;
         int descriptor_flags = fcntl(fd, F_GETFD), flags = fcntl(fd, F_GETFL);
+#ifdef __FreeBSD__
+        /* FreeBSD pipes are bidirectional: both ends report O_RDWR. */
+        int access_mode_ok = (flags & O_ACCMODE) != O_WRONLY;
+#else
+        int access_mode_ok = (flags & O_ACCMODE) == O_RDONLY;
+#endif
         if (fstat(fd, &st) || !S_ISFIFO(st.st_mode) || descriptor_flags < 0 || flags < 0 ||
-            (flags & O_ACCMODE) != O_RDONLY || fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) ||
+            !access_mode_ok || fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) ||
             fcntl(fd, F_SETFL, flags | O_NONBLOCK)) return fail(env, "procward pipe preparation failed");
     } else if (!strcmp(operation, "close")) {
         if (close(fd)) return fail(env, "procward pipe close failed");
