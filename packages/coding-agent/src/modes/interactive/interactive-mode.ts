@@ -170,6 +170,7 @@ import {
 } from "./components/oauth-selector.ts";
 import { formatMessageOrigin, OriginMessageComponent } from "./components/origin-message.ts";
 import { piLogoLines, piWordmark, supportsPiLogo } from "./components/pi-logo.ts";
+import { PromptInvocationMessageComponent } from "./components/prompt-invocation-message.ts";
 import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SelectorHost } from "./components/selector-host.ts";
@@ -4438,6 +4439,7 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new Spacer(1));
 					}
 					const skillBlock = parseSkillBlock(textContent);
+					const rawInputText = getRawInputText(message);
 					if (skillBlock) {
 						// Render skill block (collapsible)
 						const component = new SkillInvocationMessageComponent(
@@ -4460,6 +4462,16 @@ export class InteractiveMode {
 							);
 							this.chatContainer.addChild(userComponent);
 						}
+					} else if (rawInputText) {
+						// Prompt-template card: always shown for recorded commands, independent of collapseExpandedInput.
+						const component = new PromptInvocationMessageComponent(
+							rawInputText,
+							textContent,
+							this.getMarkdownThemeWithSettings(),
+							this.outputPad,
+						);
+						component.setExpanded(this.toolOutputExpanded);
+						this.chatContainer.addChild(component);
 					} else {
 						const userComponent = new UserMessageComponent(
 							this.getUserMessageDisplayText(message),
