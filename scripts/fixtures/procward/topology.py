@@ -32,7 +32,8 @@ if os.name == "nt":
             ok = kernel.Process32NextW(snapshot, ctypes.byref(entry))
     finally: kernel.CloseHandle(snapshot)
 else:
-    for line in subprocess.check_output(["ps", "-A", "-o", "pid=,ppid=,comm="], text=True).splitlines():
+    # BSD ps reads everything after "=" as the header, so "pid=,ppid=,comm=" would yield only the pid column.
+    for line in subprocess.check_output(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "comm="], text=True).splitlines():
         fields = line.strip().split(None, 2)
         if len(fields) == 3: processes[int(fields[0])] = (int(fields[1]), os.path.basename(fields[2]))
 chain = []
