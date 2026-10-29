@@ -104,6 +104,9 @@ def launch(args, env, inherited=None):
             check(k.UpdateProcThreadAttribute(attributes, 0, 0x20002, c.cast(handles, c.c_void_p), c.sizeof(handles), None, None))
         startup = StartupEx()
         startup.startup.cb = c.sizeof(startup)
+        # Null standard handles: the pseudoconsole supplies them. Otherwise a child of a redirected parent
+        # (CI) copies the parent's pipe handle values, which are invalid in the child (ERROR_INVALID_HANDLE).
+        startup.startup.flags = 0x100  # STARTF_USESTDHANDLES
         startup.attributes = attributes
         info = Process()
         environment = c.create_unicode_buffer("\0".join(f"{key}={value}" for key, value in sorted(env.items(), key=lambda item: item[0].upper())) + "\0\0")
@@ -125,12 +128,14 @@ def modes(name):
     script = """import ctypes as c, json, pathlib, sys
 from ctypes import wintypes as w
 k=c.WinDLL('kernel32',use_last_error=True)
-k.GetStdHandle.argtypes=[w.DWORD]; k.GetStdHandle.restype=w.HANDLE
+k.CreateFileW.argtypes=[w.LPCWSTR,w.DWORD,w.DWORD,c.c_void_p,w.DWORD,w.DWORD,w.HANDLE]; k.CreateFileW.restype=w.HANDLE
 k.GetConsoleMode.argtypes=[w.HANDLE,c.POINTER(w.DWORD)]
 values=[]
-for number in (-10,-11):
+# The console's own input and active screen buffers, independent of inherited standard handles.
+for name in ('CONIN$','CONOUT$'):
+    handle=k.CreateFileW(name,0xC0000000,3,None,3,0,None)
     value=w.DWORD()
-    if not k.GetConsoleMode(k.GetStdHandle(number),c.byref(value)): raise c.WinError(c.get_last_error())
+    if handle in (None,w.HANDLE(-1).value) or not k.GetConsoleMode(handle,c.byref(value)): raise c.WinError(c.get_last_error())
     values.append(value.value)
 pathlib.Path(sys.argv[1]).write_text(json.dumps(values)+'\\n')
 """
