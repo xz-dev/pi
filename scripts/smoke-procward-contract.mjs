@@ -52,7 +52,10 @@ export function smokeProcwardContract(executable, targetId, version, { allowDev 
 		mkdirSync(directory);
 		const cliArgs = ["--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "-e", join(fixtures, "extension.mjs"), "--help", ...args];
 		const result = owner ? run(owner, ["run", "--", executable, ...cliArgs], { ...extra, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_PROCWARD_CONTRACT_DIRECTORY: directory, PI_PROCWARD_CONTRACT_PROBE: "1" }) : run(executable, cliArgs, { ...extra, PI_CODING_AGENT_DIR: join(directory, "agent"), PI_PROCWARD_CONTRACT_DIRECTORY: directory, PI_PROCWARD_CONTRACT_PROBE: "1" });
-		const lines = readFileSync(join(directory, "probe.json"), "utf8").trim().split("\n");
+		const probeFile = join(directory, "probe.json");
+		// The CLI can exit 0 after an extension load error; keep its diagnostics with the failure.
+		if (!existsSync(probeFile)) throw new Error(`procward contract probe ${name} wrote no record:\n${result.stderr ?? ""}${(result.stdout ?? "").slice(-2000)}`);
+		const lines = readFileSync(probeFile, "utf8").trim().split("\n");
 		if (lines.length !== 1) throw new Error("CLI extension graph loaded more than once");
 		const record = JSON.parse(lines[0]);
 		if (record.metadata.length) throw new Error("procward metadata leaked into extensions");
