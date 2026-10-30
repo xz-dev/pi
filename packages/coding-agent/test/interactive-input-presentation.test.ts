@@ -4,6 +4,7 @@ import { Container } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { setRawInputText } from "../src/core/raw-input-text.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { PromptInvocationMessageComponent } from "../src/modes/interactive/components/prompt-invocation-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -58,23 +59,37 @@ function rendered(container: Container): string {
 describe("collapsed expanded input presentation", () => {
 	beforeAll(() => initTheme("dark"));
 
-	it("shows and records the template command when enabled", () => {
-		const { host, history } = createHost(true);
+	it.each([true, false])("shows a collapsed prompt card regardless of the setting (%s)", (collapse) => {
+		const { host, history } = createHost(collapse);
 		controller.addMessageToChat.call(host, userMessage("Review this code: a.ts", "interactive", "/review a.ts"), {
 			populateHistory: true,
 		});
-		expect(rendered(host.chatContainer)).toContain("/review a.ts");
+		expect(host.chatContainer.children.at(-1)).toBeInstanceOf(PromptInvocationMessageComponent);
+		expect(rendered(host.chatContainer)).toContain("[prompt] /review a.ts");
 		expect(rendered(host.chatContainer)).not.toContain("Review this code");
-		expect(history).toHaveBeenCalledWith("/review a.ts");
+		// History keeps following the base setting.
+		expect(history).toHaveBeenCalledWith(collapse ? "/review a.ts" : "Review this code: a.ts");
 	});
 
-	it("keeps the expanded body when disabled", () => {
-		const { host, history } = createHost(false);
-		controller.addMessageToChat.call(host, userMessage("Review this code: a.ts", "interactive", "/review a.ts"), {
-			populateHistory: true,
+	it("expands prompt cards through the existing tools-expand dispatch", () => {
+		const { host } = createHost(true);
+		controller.addMessageToChat.call(host, userMessage("Review this code: a.ts", "interactive", "/review a.ts"));
+		const view = Object.assign(host, {
+			loadedResourcesContainer: new Container(),
+			builtInHeader: undefined,
+			showStatus: vi.fn(),
 		});
+		(proto.setToolsExpanded as (this: object, expanded: boolean) => void).call(view, true);
 		expect(rendered(host.chatContainer)).toContain("Review this code: a.ts");
-		expect(history).toHaveBeenCalledWith("Review this code: a.ts");
+		(proto.setToolsExpanded as (this: object, expanded: boolean) => void).call(view, false);
+		expect(rendered(host.chatContainer)).not.toContain("Review this code");
+	});
+
+	it("shows the stored body for an old template message without metadata when disabled", () => {
+		const { host } = createHost(false);
+		controller.addMessageToChat.call(host, userMessage("Review this code: a.ts"));
+		expect(host.chatContainer.children.at(-1)).not.toBeInstanceOf(PromptInvocationMessageComponent);
+		expect(rendered(host.chatContainer)).toContain("Review this code: a.ts");
 	});
 
 	it("keeps the skill card in chat and uses the skill command for history", () => {
@@ -91,6 +106,8 @@ describe("collapsed expanded input presentation", () => {
 		const { host } = createHost(true);
 		const message = userMessage(SKILL_TEXT, "sdk", "/review spoof");
 		expect(controller.getUserMessageDisplayText.call(host, message)).toBe(SKILL_TEXT);
+		controller.addMessageToChat.call(host, message);
+		expect(host.chatContainer.children.at(-1)).not.toBeInstanceOf(PromptInvocationMessageComponent);
 	});
 
 	it("resolves fork and tree refill text from the selected entry", () => {
