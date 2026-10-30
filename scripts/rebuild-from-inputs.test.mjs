@@ -658,13 +658,15 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 38);
+	assert.equal(order.length, 40);
 	const downstreamChanges = readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8");
 	assert.equal(order[order.indexOf("single-executable") + 1], "process-ownership");
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
-	assert.equal(order.at(-5), "env-native-test-fixtures");
-	assert.equal(order.at(-4), "preserve-tool-arguments-json");
+	assert.equal(order.at(-7), "env-native-test-fixtures");
+	assert.equal(order.at(-6), "preserve-tool-arguments-json");
+	assert.equal(order.at(-5), "responses-background-replay");
+	assert.equal(order.at(-4), "ws-retry-jitter");
 	assert.equal(order.at(-3), "collapse-expanded-input");
 	assert.equal(order.at(-2), "prompt-invocation-cards");
 	assert.equal(order.at(-1), "plugin-dependency-updates");
