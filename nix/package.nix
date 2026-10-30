@@ -1,180 +1,103 @@
 {
-  autoPatchelfHook,
+  buildFHSEnv,
   fd,
   fetchurl,
-  importNpmLock,
   lib,
-  libxcb,
   makeWrapper,
-  nodejs_22,
   ripgrep,
-  source,
+  source ? null,
   stdenv,
+  tag ? "xz-v${version}",
+  unzip,
+  version ? "1.4.0-xz.390.1.g29730c7e",
   wl-clipboard,
   xclip,
 }:
 
 let
-  nodejs = nodejs_22;
-  packageJson = lib.importJSON (source + "/packages/coding-agent/package.json");
-  # Lockfile root used by the pi.dev installer. It pins the coding agent's
-  # runtime dependency tree and is kept in sync with package-lock.json by
-  # `npm run check`.
-  installLock = source + "/packages/coding-agent/install-lock";
-  modelCatalogPin = lib.importJSON ./model-catalog.json;
-  modelCatalog = fetchurl {
-    name = "pi-model-catalog.json";
-    # The typed catalog is the representation whose bytes the revision hashes.
-    url = "https://pi.dev/api/models/revisions/${modelCatalogPin.revision}?types=chat,image,classifier";
-    sha256 = lib.removePrefix "sha256-" modelCatalogPin.revision;
+  packageJson =
+    if source != null && builtins.pathExists (source + "/packages/coding-agent/package.json") then
+      lib.importJSON (source + "/packages/coding-agent/package.json")
+    else
+      {
+        description = "Pi coding agent";
+      };
+
+  targetMap = {
+    "aarch64-darwin" = "darwin-arm64";
+    "x86_64-darwin" = "darwin-x64-baseline";
+    "aarch64-linux" = if stdenv.hostPlatform.isMusl then "linux-arm64-musl" else "linux-arm64-gnu";
+    "x86_64-linux" = if stdenv.hostPlatform.isMusl then "linux-x64-musl-baseline" else "linux-x64-gnu-baseline";
+    "aarch64-freebsd" = "freebsd-arm64";
+    "x86_64-freebsd" = "freebsd-x64";
   };
 
-  workspacePackages = stdenv.mkDerivation {
-    pname = "pi-workspace-packages";
-    inherit (packageJson) version;
-    src = source;
+  system = stdenv.hostPlatform.system;
+  target = targetMap.${system} or (throw "Unsupported platform for pi: ${system}");
 
-    npmDeps = importNpmLock { npmRoot = source; };
-    npmRebuildFlags = [ "--ignore-scripts" ];
-
-    nativeBuildInputs = [
-      nodejs
-      importNpmLock.npmConfigHook
-    ];
-
-    buildPhase = ''
-      runHook preBuild
-      node packages/ai/scripts/hydrate-model-catalog.ts ${modelCatalog}
-      npm run build:offline
-      runHook postBuild
-    '';
-
-    installPhase = ''
-      runHook preInstall
-
-      pack_package() {
-        local package_dir="$1"
-        local output_name="$2"
-        local tarball
-
-        tarball="$(cd "$package_dir" && npm pack --ignore-scripts --silent --pack-destination "$TMPDIR")"
-        mv "$TMPDIR/$tarball" "$out/$output_name.tgz"
-      }
-
-      mkdir -p "$out"
-      pack_package packages/telemetry telemetry
-      pack_package packages/ai ai
-      pack_package packages/tui tui
-      pack_package packages/agent agent
-      pack_package packages/codemode codemode
-      pack_package packages/mcp mcp
-      pack_package packages/coding-agent coding-agent
-
-      runHook postInstall
-    '';
+  # Pre-built release archive checksums for each platform from xz-dev/pi
+  hashes = {
+    "darwin-arm64" = "sha256-BtzfZtIiyuX+V3NuZxW3gw2xg+k7c5krj0Pj02vDNE0=";
+    "darwin-x64-baseline" = "sha256-BdqsF/Zja0zB4BGln/K7m/9yxVelttwvQ2B09ryEf5w=";
+    "linux-arm64-gnu" = "sha256-d4OFeA4bXKYhJOcqalz7OPHa00ymp+oKmtsZtonL5Xg=";
+    "linux-x64-gnu-baseline" = "sha256-lb+AcsJL1MHhucNolgqaWM4orfU+h6+U6eBFWBZcm9Q=";
+    "linux-arm64-musl" = "sha256-px3xeP1a4amtA3sVRFrSbbAg/hLtJiChOfyTSgnOKBc=";
+    "linux-x64-musl-baseline" = "sha256-tKzo4oQ0iv9//SFCSrWIK4pqpbW/JndFwyRjc3Rq2s4=";
+    "freebsd-arm64" = "sha256-WZxsaCu5zyPacj9MvMs+9z4rPTNG0/eSo1bpgl8yKho=";
+    "freebsd-x64" = "sha256-N17EjHTWr1HWLVmX+i/560FS2z22POLsPRmzcXyCtjY=";
   };
 
-  npmDeps = importNpmLock {
-    npmRoot = installLock;
-    # The install lock points internal packages at registry releases. Replace
-    # them with the packages built from this checkout.
-    packageSourceOverrides = {
-      "node_modules/@earendil-works/pi-agent-core" = workspacePackages + "/agent.tgz";
-      "node_modules/@earendil-works/pi-ai" = workspacePackages + "/ai.tgz";
-      "node_modules/@earendil-works/pi-codemode" = workspacePackages + "/codemode.tgz";
-      "node_modules/@earendil-works/pi-coding-agent" = workspacePackages + "/coding-agent.tgz";
-      "node_modules/@earendil-works/pi-mcp" = workspacePackages + "/mcp.tgz";
-      "node_modules/@earendil-works/pi-telemetry" = workspacePackages + "/telemetry.tgz";
-      "node_modules/@earendil-works/pi-tui" = workspacePackages + "/tui.tgz";
-    };
+  tools = [ fd ripgrep ] ++ lib.optionals stdenv.hostPlatform.isLinux [ wl-clipboard xclip ];
+  meta = {
+    description = packageJson.description;
+    homepage = "https://github.com/xz-dev/pi";
+    license = lib.licenses.mit;
+    mainProgram = "pi";
+    platforms = builtins.attrNames targetMap;
+    sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
   };
-in
-stdenv.mkDerivation {
-  pname = "pi";
-  inherit (packageJson) version;
-  src = installLock;
-  inherit npmDeps;
 
-  npmRebuildFlags = [ "--ignore-scripts" ];
-
-  nativeBuildInputs = [
-    nodejs
-    importNpmLock.npmConfigHook
-    makeWrapper
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isLinux [ autoPatchelfHook ];
-
-  buildInputs = [ nodejs ] ++ lib.optionals stdenv.hostPlatform.isLinux [
-    stdenv.cc.cc.lib
-    libxcb
-  ];
-
-  dontBuild = true;
-  dontStrip = true;
-
-  installPhase = ''
-    runHook preInstall
-
-    mkdir -p "$out/lib/pi" "$out/bin"
-    cp -R . "$out/lib/pi"
-
-    # The wrapper runs Pi with an absolute Node path. Node is only on PATH so Pi can
-    # find npm for package installs; append it so that shells started by the
-    # bash tool keep the user's node/npm (e.g. from mise or nvm). fd, ripgrep,
-    # and the clipboard tools are Pi's own dependencies and take precedence.
-    makeWrapper ${nodejs}/bin/node "$out/bin/pi" \
-      --add-flags "$out/lib/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js" \
-      --suffix PATH : ${lib.makeBinPath [ nodejs ]} \
-      --prefix PATH : ${
-        lib.makeBinPath (
-          [
-            fd
-            ripgrep
-          ]
-          ++ lib.optionals stdenv.hostPlatform.isLinux [
-            wl-clipboard
-            xclip
-          ]
-        )
-      }
-
-    runHook postInstall
-  '';
-
-  doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    test "$("$out/bin/pi" --version)" = "${packageJson.version}"
-    # Load host-platform TUI helpers directly so missing native dependencies
-    # fail the build rather than silently disabling clipboard support.
-    ${nodejs}/bin/node -e \
-      "const fs = require('node:fs');
-       const path = require('node:path');
-       const dir = '$out/lib/pi/node_modules/@earendil-works/pi-tui/native/' + process.platform + '/prebuilds/' + process.platform + '-' + process.arch;
-       if (fs.existsSync(dir)) {
-         for (const file of fs.readdirSync(dir)) {
-           if (file.endsWith('.node')) require(path.join(dir, file));
-         }
-       }"
-    ${nodejs}/bin/node -e \
-      "require('$out/lib/pi/node_modules/@silvia-odwyer/photon-node')"
+    test "$("$out/bin/pi" --version)" = "${version}"
+    PI_OFFLINE=1 "$out/bin/pi" --help > /dev/null
     runHook postInstallCheck
   '';
 
-  meta = {
-    description = packageJson.description;
-    homepage = "https://pi.dev";
-    license = lib.licenses.mit;
-    mainProgram = "pi";
-    platforms = [
-      "aarch64-darwin"
-      "aarch64-linux"
-      "x86_64-darwin"
-      "x86_64-linux"
-    ];
-    sourceProvenance = with lib.sourceTypes; [
-      fromSource
-      binaryNativeCode
-    ];
+  raw = stdenv.mkDerivation {
+    pname = "pi-unwrapped";
+    inherit version meta;
+    src = fetchurl {
+      url = "https://github.com/xz-dev/pi/releases/download/${tag}/pi-${target}.zip";
+      hash = hashes.${target} or (throw "Missing pre-built binary hash for target: ${target}");
+    };
+    nativeBuildInputs = [ unzip makeWrapper ];
+    sourceRoot = ".";
+    dontBuild = true;
+    dontStrip = true;
+    dontPatchELF = true;
+    installPhase = ''
+      runHook preInstall
+      mkdir -p "$out/libexec" "$out/bin"
+      install -m755 pi "$out/libexec/pi"
+      touch "$out/libexec/.nix.managed.lock"
+      makeWrapper "$out/libexec/pi" "$out/bin/pi" \
+        --prefix PATH : ${lib.makeBinPath tools}
+      runHook postInstall
+    '';
+    doInstallCheck = !stdenv.hostPlatform.isLinux;
+    inherit installCheckPhase;
   };
-}
+in
+if stdenv.hostPlatform.isLinux then
+  # The embedded owner helper needs an FHS loader too; patching only pi is insufficient.
+  buildFHSEnv {
+    pname = "pi";
+    inherit version meta;
+    targetPkgs = pkgs: [ pkgs.glibc pkgs.stdenv.cc.cc.lib pkgs.libxcb ] ++ tools;
+    runScript = "${raw}/bin/pi";
+    extraInstallCommands = installCheckPhase;
+    passthru.unwrapped = raw;
+  }
+else
+  raw
