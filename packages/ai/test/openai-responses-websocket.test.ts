@@ -615,8 +615,25 @@ describe("openai-responses WebSocket transport", () => {
 });
 
 describe("openai-responses retry plan", () => {
+	it("adds the maximum jitter before a second WS send", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(Math, "random").mockReturnValue(5000 / 5001);
+		const { run, onSend, sent, fetchMock } = mockTransport();
+		onSend.mockImplementationOnce((socket) => socket.fail());
+		const policy: RetryPolicy = { enabled: true, maxRetries: 1, baseDelayMs: 10, maxAgentDelayMs: 10_000 };
+		const request = retryAssistantCall(() => run({ responseCheckpointExclude: ["*"] }), policy, undefined);
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(5009);
+		expect(sent).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect((await request).stopReason).toBe("stop");
+		expect(sent).toHaveLength(2);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it("uses the transport recovery budget for auto failures", async () => {
 		vi.useFakeTimers();
+		vi.spyOn(Math, "random").mockReturnValue(0);
 		// Legacy transport fixture: opt out of checkpoints (now default always).
 		const { run, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementation((socket) => socket.fail());

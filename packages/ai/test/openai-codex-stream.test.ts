@@ -1662,6 +1662,7 @@ describe("openai-codex streaming", () => {
 
 	it("falls back to SSE when websocket connect does not open before the connect timeout", async () => {
 		vi.useFakeTimers();
+		vi.spyOn(Math, "random").mockReturnValue(0);
 		const token = mockToken();
 		const encoder = new TextEncoder();
 		const sse = buildSSEPayload({ status: "completed" });
@@ -1812,6 +1813,7 @@ describe("openai-codex streaming", () => {
 
 	it("falls back to SSE when a websocket is idle before the first event", async () => {
 		vi.useFakeTimers();
+		vi.spyOn(Math, "random").mockReturnValue(0);
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
 		const encoder = new TextEncoder();

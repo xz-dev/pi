@@ -34,7 +34,13 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText, getAssistantRetryPlan, getCurrentSystemMessage, getCurrentTools } from "@earendil-works/pi-ai";
+import {
+	contentText,
+	getAssistantRetryPlan,
+	getCurrentSystemMessage,
+	getCurrentTools,
+	prepareAssistantRetry,
+} from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -4841,7 +4847,7 @@ export class AgentSession {
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
 	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
-		const plan = getAssistantRetryPlan(message, this.settingsManager.getRetrySettings(), this._retryGlobalAttempt);
+		const plan = prepareAssistantRetry(message, this.settingsManager.getRetrySettings(), this._retryGlobalAttempt);
 		if (!plan) return false;
 		this._retryAttempt = plan.attempt;
 		this._retryGlobalAttempt = plan.globalAttempt;
