@@ -5,6 +5,7 @@ import {
 	existsSync,
 	globSync,
 	mkdirSync,
+	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
@@ -35,6 +36,7 @@ function getEnv(): NodeJS.ProcessEnv {
 
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { gt, maxSatisfying, rcompare, satisfies, valid, validRange } from "semver";
@@ -53,6 +55,8 @@ import {
 import { stripBom } from "../utils/text.ts";
 import { retryUpdateOperation, UPDATE_RETRY_DELAYS_MS } from "../utils/update-retry.ts";
 import { withBunGitIntegrityCompatibility } from "./bun-git-integrity.ts";
+import { getGitDependencyTarget } from "./git-dependency-updates.ts";
+import { getNpmRuntimeDependencies, type NpmRuntimeDependency } from "./npm-dependency-updates.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { type PiManifest, readPiManifest } from "./pi-manifest.ts";
 import type { PackageSource, SettingsManager, SkillOverrides } from "./settings-manager.ts";
@@ -72,8 +76,48 @@ function isExactNpmVersion(version: string | undefined): boolean {
 	return valid(version ?? "") !== null;
 }
 
+function isSafeDependencyTarget(name: string): boolean {
+	return !name.startsWith("-");
+}
+
 function getNpmVersionRange(version: string | undefined): string | undefined {
 	return version ? (validRange(version) ?? undefined) : undefined;
+}
+
+function isSupportedNpmRelease(metadata: unknown, version: string): boolean {
+	// npm/Bun collapse field queries to a scalar when only `version` is present.
+	if (typeof metadata === "string") return metadata === version;
+	if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+	const release = metadata as Record<string, unknown>;
+	if (release.version !== version) return false;
+	for (const [field, current] of [
+		["os", process.platform],
+		["cpu", process.arch],
+	]) {
+		const value = release[field];
+		if (value === undefined) continue;
+		const allowed = typeof value === "string" ? [value] : value;
+		if (!Array.isArray(allowed) || allowed.length === 0 || !allowed.every((entry) => typeof entry === "string"))
+			return false;
+		if (allowed.includes(`!${current}`)) return false;
+		if (!allowed.includes("any") && !allowed.includes(current) && !allowed.every((entry) => entry.startsWith("!"))) {
+			return false;
+		}
+	}
+	if (release.engines !== undefined) {
+		if (!release.engines || typeof release.engines !== "object" || Array.isArray(release.engines)) return false;
+		const engines = release.engines as Record<string, unknown>;
+		// Reject unknown engine policies rather than assume the configured manager will ignore them.
+		if (Object.keys(engines).some((engine) => engine !== "node")) return false;
+		if (
+			engines.node !== undefined &&
+			(typeof engines.node !== "string" ||
+				!validRange(engines.node) ||
+				!satisfies(process.version, engines.node, { includePrerelease: true }))
+		)
+			return false;
+	}
+	return true;
 }
 
 export interface PathMetadata {
@@ -120,6 +164,7 @@ export interface ProgressEvent {
 export type ProgressCallback = (event: ProgressEvent) => void;
 
 export interface PackageUpdate {
+	reason: "package" | "dependencies" | "both";
 	source: string;
 	displayName: string;
 	type: "npm" | "git";
@@ -1203,18 +1248,16 @@ export class DefaultPackageManager implements PackageManager {
 
 		for (const entry of sources) {
 			const parsed = this.parseSource(entry.source);
-			// Pinned npm versions are fixed. Pinned git refs are configured checkout targets,
-			// so include them to reconcile an existing clone when the configured ref changes.
+			// Fixed npm source versions can still have floating runtime dependencies.
 			if (parsed.type === "npm") {
-				if (!parsed.pinned) {
-					npmCandidates.push({ ...entry, parsed });
-				}
+				npmCandidates.push({ ...entry, parsed });
 			} else if (parsed.type === "git") {
 				gitCandidates.push({ ...entry, parsed });
 			}
 		}
 
 		const npmCheckTasks = npmCandidates.map((entry) => async () => {
+			if (entry.parsed.pinned) return { entry, shouldUpdate: false };
 			const check = await this.shouldUpdateNpmSource(entry.parsed, entry.scope);
 			return {
 				entry: { ...entry, installedVersion: check.installedVersion, targetVersion: check.targetVersion },
@@ -1236,17 +1279,25 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		const tasks: Promise<void>[] = [];
-		if (userNpmUpdates.length > 0) {
-			tasks.push(this.updateNpmBatch(userNpmUpdates, "user"));
-		}
-		if (projectNpmUpdates.length > 0) {
-			tasks.push(this.updateNpmBatch(projectNpmUpdates, "project"));
+		for (const scope of ["user", "project"] as const) {
+			const candidates = npmCandidates.filter((entry) => entry.scope === scope);
+			if (candidates.length === 0) continue;
+			const sourceUpdates = scope === "user" ? userNpmUpdates : projectNpmUpdates;
+			tasks.push(
+				(async () => {
+					await this.updateNpmBatch(sourceUpdates, scope);
+					await this.updateNpmDependencies(candidates, scope);
+				})(),
+			);
 		}
 		if (gitCandidates.length > 0) {
 			const gitTasks = gitCandidates.map(
 				(entry) => async () =>
 					this.withProgress("update", entry.source, `Updating ${entry.source}...`, async () => {
 						await this.updateGit(entry.parsed, entry.scope);
+						const installedPath = this.getGitInstallPath(entry.parsed, entry.scope);
+						const names = await this.getGitDependencyUpdates(entry.source, installedPath);
+						await this.refreshRuntimeDependencies(names, installedPath, true);
 					}),
 			);
 			tasks.push(this.runWithConcurrency(gitTasks, GIT_UPDATE_CONCURRENCY).then(() => {}));
@@ -1358,6 +1409,293 @@ export class DefaultPackageManager implements PackageManager {
 		await this.runNpmCommand(this.getNpmInstallArgs(specs, installRoot));
 	}
 
+	private async getNpmDependencyUpdates(
+		sources: NpmUpdateTarget[],
+		scope: InstalledSourceScope,
+	): Promise<Map<string, string[]>> {
+		const updates = new Map<string, string[]>();
+		if (sources.length === 0) return updates;
+		const manager = this.getPackageManagerName();
+		if (!["npm", "bun", "pnpm"].includes(manager)) return updates;
+		const installRoot = this.getNpmInstallRoot(scope, false);
+		return this.getDependencyUpdates(
+			getNpmRuntimeDependencies(installRoot),
+			new Map(sources.map((entry) => [entry.source, [entry.parsed.name]])),
+			manager === "pnpm" || this.getNpmCommand().embeddedBun ? installRoot : this.cwd,
+			installRoot,
+		);
+	}
+
+	private async getDependencyUpdates(
+		dependencies: Map<string, NpmRuntimeDependency[]>,
+		sources: Map<string, string[]>,
+		metadataCwd = this.cwd,
+		installRoot = metadataCwd,
+	): Promise<Map<string, string[]>> {
+		const updates = new Map<string, string[]>();
+		if (this.getPackageManagerName() === "pnpm") {
+			// shortcut: native workspace settings can alter unenumerated roots; skip until their graph is supported.
+			const env = getEnv();
+			if (env.NPM_CONFIG_WORKSPACE_DIR ?? env.npm_config_workspace_dir) return updates;
+			for (let directory = canonicalizePath(metadataCwd); ; directory = dirname(directory)) {
+				if (existsSync(join(directory, "pnpm-workspace.yaml")) || existsSync(join(directory, "pnpm-workspace.yml")))
+					return updates;
+				if (dirname(directory) === directory) break;
+			}
+		}
+		const affected = new Map<string, Set<NpmRuntimeDependency>>();
+		for (const entries of dependencies.values()) {
+			for (const dependency of entries) {
+				const instances = affected.get(dependency.name) ?? new Set<NpmRuntimeDependency>();
+				instances.add(dependency);
+				affected.set(dependency.name, instances);
+			}
+		}
+		const owners = new Map<NpmRuntimeDependency, string[]>();
+		for (const [source, packages] of sources) {
+			for (const dependency of new Set(packages.flatMap((name) => dependencies.get(name) ?? []))) {
+				if (dependency.blocked || dependency.ranges.some((range) => valid(range))) continue;
+				const entries = owners.get(dependency) ?? [];
+				entries.push(source);
+				owners.set(dependency, entries);
+			}
+		}
+		const names = [...new Set([...owners.keys()].map((dependency) => dependency.name))].filter(
+			isSafeDependencyTarget,
+		);
+		const checks = names.map((name) => async (): Promise<NpmRuntimeDependency[]> => {
+			const instances = [...(affected.get(name) ?? [])];
+			if (instances.some((instance) => instance.blocked)) return [];
+			if (instances.some((instance) => instance.specs.some((spec) => !validRange(spec)))) {
+				const env = getEnv();
+				// Repository-directed Git environment can redirect owned metadata writes; leave it untouched and skip.
+				if (
+					[
+						"GIT_DIR",
+						"GIT_COMMON_DIR",
+						"GIT_WORK_TREE",
+						"GIT_INDEX_FILE",
+						"GIT_OBJECT_DIRECTORY",
+						"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+						"GIT_QUARANTINE_PATH",
+					].some((key) => env[key] !== undefined)
+				)
+					return [];
+				const target = await getGitDependencyTarget(
+					name,
+					instances,
+					installRoot,
+					this.getPackageManagerName(),
+					() => getExtensionTempFolder(this.agentDir),
+					(args) =>
+						this.runCommandCapture("git", args, {
+							cwd: installRoot,
+							timeoutMs: NETWORK_TIMEOUT_MS,
+							env: { GIT_TERMINAL_PROMPT: "0" },
+						}),
+				);
+				if (!target || !target.manifest || typeof target.manifest !== "object" || Array.isArray(target.manifest))
+					return [];
+				const manifest = target.manifest as Record<string, unknown>;
+				const version = manifest.version;
+				if (
+					manifest.name !== name ||
+					typeof version !== "string" ||
+					!valid(version) ||
+					!isSupportedNpmRelease(manifest, version) ||
+					instances.some((instance) => gt(instance.version, version))
+				)
+					return [];
+				return target.changed.filter((instance) => owners.has(instance));
+			}
+			try {
+				const metadata = (await this.getNpmMetadata(name, ["versions", "dist-tags"], metadataCwd)) as {
+					versions?: unknown;
+					"dist-tags"?: { latest?: unknown };
+				};
+				const latest = metadata?.["dist-tags"]?.latest;
+				if (typeof latest !== "string" || !valid(latest) || !Array.isArray(metadata.versions)) return [];
+				const versions = metadata.versions.filter(
+					(version): version is string => typeof version === "string" && valid(version) !== null,
+				);
+				if (!versions.includes(latest)) return [];
+				const targets = new Map<NpmRuntimeDependency, string>();
+				// Bare-name updates affect every instance, including unselected plugins' dependencies.
+				for (const instance of affected.get(name) ?? []) {
+					if (!instance.ranges.every((range) => satisfies(instance.version, range))) return [];
+					const choices = instance.ranges.map((range) =>
+						satisfies(latest, range) ? latest : maxSatisfying(versions, range),
+					);
+					const target = choices[0];
+					// shortcut: conflicting shared selections need graph restructuring; skip the whole name.
+					if (!target || choices.some((choice) => choice !== target) || gt(instance.version, target)) return [];
+					targets.set(instance, target);
+				}
+				const forward = [...targets].filter(
+					([instance, target]) => owners.has(instance) && gt(target, instance.version),
+				);
+				if (forward.length === 0) return [];
+				for (const target of new Set(targets.values())) {
+					const release = await this.getNpmMetadata(
+						`${name}@${target}`,
+						["version", "os", "cpu", "engines"],
+						metadataCwd,
+					);
+					// Do not fall back to an eligible version that the name-wide command will not select.
+					if (!isSupportedNpmRelease(release, target)) return [];
+				}
+				return forward.map(([instance]) => instance);
+			} catch {
+				return [];
+			}
+		});
+		for (const dependency of (await this.runWithConcurrency(checks, UPDATE_CHECK_CONCURRENCY)).flat()) {
+			for (const source of owners.get(dependency) ?? []) {
+				updates.set(source, [...(updates.get(source) ?? []), dependency.name]);
+			}
+		}
+		return updates;
+	}
+
+	private async getGitDependencyUpdates(source: string, installedPath: string): Promise<string[]> {
+		if (
+			!existsSync(join(installedPath, "package.json")) ||
+			!["npm", "bun", "pnpm"].includes(this.getPackageManagerName())
+		)
+			return [];
+		try {
+			// Tracked locks are author intent; generated installation locks may refresh.
+			const locks = await this.runCommandCapture(
+				"git",
+				[
+					"ls-files",
+					"--",
+					"package-lock.json",
+					"npm-shrinkwrap.json",
+					"bun.lock",
+					"bun.lockb",
+					"pnpm-lock.yaml",
+					"yarn.lock",
+				],
+				{
+					cwd: installedPath,
+					timeoutMs: NETWORK_TIMEOUT_MS,
+				},
+			);
+			if (locks) return [];
+		} catch {
+			return [];
+		}
+		const dependencies = getNpmRuntimeDependencies(installedPath, true);
+		return (
+			(
+				await this.getDependencyUpdates(dependencies, new Map([[source, [...dependencies.keys()]]]), installedPath)
+			).get(source) ?? []
+		);
+	}
+
+	private async refreshRuntimeDependencies(
+		names: string[],
+		installRoot: string,
+		preserveManifest = false,
+	): Promise<void> {
+		if (names.length === 0) return;
+		if (!names.every(isSafeDependencyTarget)) throw new Error("Unsafe dependency update target");
+		if (this.getPackageManagerName() === "pnpm") {
+			// A warm pnpm cache can leave targeted indirect versions unchanged even during an online update.
+			const cacheDir = mkdtempSync(join(getExtensionTempFolder(this.agentDir), "pnpm-update-"));
+			try {
+				await this.runNpmCommand(
+					[
+						"update",
+						...names,
+						"--dir",
+						installRoot,
+						"--depth",
+						"Infinity",
+						"--prod",
+						"--no-save",
+						"--offline=false",
+						"--prefer-offline=false",
+						"--cache-dir",
+						cacheDir,
+						"--config.auto-install-peers=false",
+						"--config.strict-peer-dependencies=false",
+						"--config.strict-dep-builds=false",
+					],
+					{ cwd: installRoot, update: true },
+				);
+			} finally {
+				rmSync(cacheDir, { recursive: true, force: true });
+			}
+			return;
+		}
+		const args =
+			this.getPackageManagerName() === "bun"
+				? ["update", ...names, "--cwd", installRoot, "--omit=dev", "--omit=peer"]
+				: ["update", ...names, "--prefix", installRoot, "--no-save", "--omit=dev", "--legacy-peer-deps"];
+		if (!preserveManifest || this.getPackageManagerName() !== "bun") {
+			await this.runNpmCommand(args, { ...(preserveManifest ? { cwd: installRoot } : {}), update: true });
+			return;
+		}
+		const manifestPath = join(installRoot, "package.json");
+		const originalBytes = readFileSync(manifestPath, "utf8");
+		const original = JSON.parse(stripBom(originalBytes)) as Record<string, unknown>;
+		const errors: unknown[] = [];
+		try {
+			await this.runNpmCommand(args, { cwd: installRoot, update: true });
+		} catch (error) {
+			errors.push(error);
+		} finally {
+			try {
+				const current = JSON.parse(stripBom(readFileSync(manifestPath, "utf8"))) as Record<string, unknown>;
+				for (const field of ["dependencies", "optionalDependencies"]) {
+					const before = original[field];
+					const after = current[field];
+					if (
+						!before ||
+						typeof before !== "object" ||
+						Array.isArray(before) ||
+						!after ||
+						typeof after !== "object" ||
+						Array.isArray(after)
+					)
+						continue;
+					const beforeDeps = before as Record<string, unknown>;
+					const afterDeps = after as Record<string, unknown>;
+					for (const name of names) {
+						if (Object.hasOwn(beforeDeps, name) && Object.hasOwn(afterDeps, name))
+							afterDeps[name] = beforeDeps[name];
+					}
+				}
+				if (!isDeepStrictEqual(original, current)) {
+					errors.push(new Error("Refusing to restore package.json: changes outside targeted dependency ranges"));
+				} else {
+					// Bun saves direct dependency ranges with the lock; retain the author's original bytes.
+					writeFileSync(manifestPath, originalBytes, "utf8");
+				}
+			} catch (error) {
+				errors.push(error);
+			}
+		}
+		if (errors.length > 1)
+			throw new AggregateError(errors, "Dependency update failed and package.json restoration failed", {
+				cause: errors[0],
+			});
+		if (errors.length === 1) throw errors[0];
+	}
+
+	private async updateNpmDependencies(sources: NpmUpdateTarget[], scope: InstalledSourceScope): Promise<void> {
+		const updates = await this.getNpmDependencyUpdates(sources, scope);
+		const names = [...new Set([...updates.values()].flat())];
+		if (names.length === 0) return;
+		const installRoot = this.getNpmInstallRoot(scope, false);
+		const sourceLabel = updates.size === 1 ? [...updates.keys()][0] : `${scope} npm packages`;
+		await this.withProgress("update", sourceLabel, `Updating dependencies of ${sourceLabel}...`, async () => {
+			await this.refreshRuntimeDependencies(names, installRoot);
+		});
+	}
+
 	async checkForAvailableUpdates(): Promise<PackageUpdate[]> {
 		if (isOfflineModeEnabled()) {
 			return [];
@@ -1374,6 +1712,7 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		const packageSources = this.dedupePackages(allPackages);
+		const npmDependencyChecks = new Map<InstalledSourceScope, Promise<Map<string, string[]>>>();
 		const checks = packageSources
 			.filter(
 				(entry): entry is { pkg: PackageSource; scope: Exclude<SourceScope, "temporary"> } =>
@@ -1382,7 +1721,7 @@ export class DefaultPackageManager implements PackageManager {
 			.map((entry) => async (): Promise<PackageUpdate | undefined> => {
 				const source = typeof entry.pkg === "string" ? entry.pkg : entry.pkg.source;
 				const parsed = this.parseSource(source);
-				if (parsed.type === "local" || parsed.pinned) {
+				if (parsed.type === "local") {
 					return undefined;
 				}
 
@@ -1391,11 +1730,24 @@ export class DefaultPackageManager implements PackageManager {
 					if (!existsSync(installedPath)) {
 						return undefined;
 					}
-					const hasUpdate = await this.npmHasAvailableUpdate(parsed, installedPath, entry.scope);
-					if (!hasUpdate) {
-						return undefined;
+					const hasUpdate =
+						!parsed.pinned && (await this.npmHasAvailableUpdate(parsed, installedPath, entry.scope));
+					let dependencyCheck = npmDependencyChecks.get(entry.scope);
+					if (!dependencyCheck) {
+						const sources: NpmUpdateTarget[] = [];
+						for (const candidate of packageSources) {
+							if (candidate.scope !== entry.scope) continue;
+							const source = this.getPackageSourceString(candidate.pkg);
+							const parsed = this.parseSource(source);
+							if (parsed.type === "npm") sources.push({ source, parsed, scope: entry.scope });
+						}
+						dependencyCheck = this.getNpmDependencyUpdates(sources, entry.scope);
+						npmDependencyChecks.set(entry.scope, dependencyCheck);
 					}
+					const hasDependencies = (await dependencyCheck).has(source);
+					if (!hasUpdate && !hasDependencies) return undefined;
 					return {
+						reason: hasUpdate ? (hasDependencies ? "both" : "package") : "dependencies",
 						source,
 						displayName: parsed.name,
 						type: "npm",
@@ -1407,11 +1759,11 @@ export class DefaultPackageManager implements PackageManager {
 				if (!existsSync(installedPath)) {
 					return undefined;
 				}
-				const hasUpdate = await this.gitHasAvailableUpdate(installedPath);
-				if (!hasUpdate) {
-					return undefined;
-				}
+				const hasUpdate = !parsed.pinned && (await this.gitHasAvailableUpdate(installedPath));
+				const hasDependencies = (await this.getGitDependencyUpdates(source, installedPath)).length > 0;
+				if (!hasUpdate && !hasDependencies) return undefined;
 				return {
+					reason: hasUpdate ? (hasDependencies ? "both" : "package") : "dependencies",
 					source,
 					displayName: `${parsed.host}/${parsed.path}`,
 					type: "git",
@@ -1726,33 +2078,33 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async getLatestNpmVersion(
-		packageSpec: string,
-		range?: string,
-		scope: InstalledSourceScope = "user",
-	): Promise<string> {
+	private async getNpmMetadata(packageSpec: string, fields: string[], metadataCwd = this.cwd): Promise<unknown> {
 		const npmCommand = this.getNpmCommand();
 		const verb = this.getPackageManagerName() === "bun" ? "info" : "view";
-		// Bun `info` requires a package.json in cwd; run it inside the managed
-		// install root so version checks don't depend on the user's cwd.
-		let cwd = this.cwd;
-		if (npmCommand.embeddedBun) {
-			const installRoot = this.getNpmInstallRoot(scope, false);
-			this.ensureNpmProject(installRoot);
-			cwd = installRoot;
-		}
 		const stdout = await this.runCommandCapture(
 			npmCommand.command,
-			[...npmCommand.args, verb, packageSpec, "version", "--json"],
+			[...npmCommand.args, verb, packageSpec, ...fields, "--json"],
 			{
-				cwd,
+				cwd: metadataCwd,
 				timeoutMs: NETWORK_TIMEOUT_MS,
 				...(npmCommand.embeddedBun ? { env: { BUN_BE_BUN: "1" } } : {}),
 			},
 		);
 		const raw = stdout.trim();
 		if (!raw) throw new Error(`Empty response from ${npmCommand.command} ${verb}`);
-		const parsed = JSON.parse(raw) as unknown;
+		return JSON.parse(raw) as unknown;
+	}
+
+	private async getLatestNpmVersion(
+		packageSpec: string,
+		range?: string,
+		scope: InstalledSourceScope = "user",
+	): Promise<string> {
+		const npmCommand = this.getNpmCommand();
+		// Bun `info` requires a package.json in cwd; use the matching managed scope.
+		const cwd = npmCommand.embeddedBun ? this.getNpmInstallRoot(scope, false) : this.cwd;
+		if (npmCommand.embeddedBun) this.ensureNpmProject(cwd);
+		const parsed = await this.getNpmMetadata(packageSpec, ["version"], cwd);
 		if (typeof parsed === "string" && valid(parsed) && (!range || satisfies(parsed, range))) {
 			return parsed;
 		}
@@ -1761,6 +2113,7 @@ export class DefaultPackageManager implements PackageManager {
 			const latest = range ? maxSatisfying(versions, range) : [...versions].sort(rcompare)[0];
 			if (latest) return latest;
 		}
+		const verb = this.getPackageManagerName() === "bun" ? "info" : "view";
 		throw new Error(`Unexpected response from ${npmCommand.command} ${verb}`);
 	}
 
