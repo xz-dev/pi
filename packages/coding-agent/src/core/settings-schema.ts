@@ -197,6 +197,12 @@ const PackageSourceSchema = Type.Union(
 	},
 );
 
+const BackgroundToolCallSettingSchema = Type.Object({
+	detachAfterSeconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+});
+
+const BackgroundToolCallsSettingsSchema = Type.Record(Type.String(), BackgroundToolCallSettingSchema);
+
 const StringArraySchema = Type.Array(Type.String());
 const SkillsInputSchema = Type.Union(
 	[
@@ -355,6 +361,7 @@ export const SettingsSchema = Type.Object(
 					"Initial tool selection. Plain names replace the inherited selection; +name and -name entries add or remove tools.",
 			}),
 		),
+		backgroundToolCalls: Type.Optional(BackgroundToolCallsSettingsSchema),
 		doubleEscapeAction: Type.Optional(
 			Type.Union([Type.Literal("fork"), Type.Literal("tree"), Type.Literal("none")], {
 				description: "Action for double-escape with an empty editor.",
@@ -493,6 +500,8 @@ export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust
 export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
 export type TransportSetting = NonNullable<SettingsInput["transport"]>;
 export type SessionShareDestination = NonNullable<SettingsInput["sessionShareDestination"]>;
+export interface BackgroundToolCallSetting extends Static<typeof BackgroundToolCallSettingSchema> {}
+export type BackgroundToolCallsSettings = Static<typeof BackgroundToolCallsSettingsSchema>;
 export type PackageSource = Static<typeof PackageSourceSchema>;
 export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutput"]>;
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
