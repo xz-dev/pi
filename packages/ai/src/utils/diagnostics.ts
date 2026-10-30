@@ -13,6 +13,8 @@ export interface AssistantMessageDiagnostic {
 	 * its permitted full-history reference repair started and then failed without abort.
 	 * Automatic retry consumers must veto replay of this message, not later turns.
 	 * Hosts without that consumer ignore the diagnostic and do not provide this guarantee.
+	 * provider_response_replay_unavailable instead makes an unrecoverable background
+	 * stream eligible for the ordinary retry policy; it does not grant a retry budget.
 	 */
 	type: string;
 	timestamp: number;

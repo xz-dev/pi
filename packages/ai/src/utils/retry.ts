@@ -348,6 +348,11 @@ export function isRetryableAssistantError(message: AssistantMessage, options?: R
 	const errorMessage = message.errorMessage;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
 	if (matchesNonRetryableErrorPatterns(errorMessage, options?.nonRetryableErrorPatterns)) return false;
+	if (
+		message.api === "openai-responses" &&
+		message.diagnostics?.some((diagnostic) => diagnostic.type === "provider_response_replay_unavailable")
+	)
+		return true;
 	if (supportsWebSocketTransportRecovery(message.api)) {
 		const failure = message.diagnostics?.findLast((diagnostic) => diagnostic.type === "provider_transport_failure");
 		// A prior WS failure must not classify a subsequent, possibly terminal SSE error.
