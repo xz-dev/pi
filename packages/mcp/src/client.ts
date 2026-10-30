@@ -156,6 +156,7 @@ export class McpClient {
 	readonly options: Readonly<McpClientOptions>;
 	private state: ClientState = "idle";
 	private transport: McpTransport | undefined;
+	private closing: Promise<void> | undefined;
 	private nextRequestId = 1;
 	private serverInfoValue: Implementation | undefined;
 	private serverCapabilitiesValue: ServerCapabilities | undefined;
@@ -244,7 +245,10 @@ export class McpClient {
 			this.state = "connected";
 			return result;
 		} catch (error) {
-			await this.close().catch(() => {});
+			await this.close().catch((closeError: unknown) => {
+				if (closeError instanceof Error && "code" in closeError && closeError.code === "ERR_PROCESS_OWNER_CLEANUP")
+					throw closeError;
+			});
 			throw error;
 		}
 	}
@@ -385,12 +389,15 @@ export class McpClient {
 		);
 	}
 
-	async close(): Promise<void> {
+	close(): Promise<void> {
+		if (this.closing) return this.closing;
 		const transport = this.transport;
 		this.transport = undefined;
+		// Store before notifying close listeners, which may call close again.
+		this.closing = Promise.resolve().then(() => transport?.close());
 		this.disposeTransportListeners();
 		this.markClosed(new McpConnectionClosedError());
-		await transport?.close();
+		return this.closing;
 	}
 
 	private async requestInternal(
