@@ -171,6 +171,15 @@ describe("DefaultPackageManager git update", () => {
 			const newCommit = createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
 
 			// Update via package manager (no args = uses settings)
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([
+				{
+					source: gitSource,
+					displayName: "github.com/test/extension",
+					type: "git",
+					scope: "user",
+					reason: "package",
+				},
+			]);
 			await packageManager.update();
 
 			// Verify update succeeded
