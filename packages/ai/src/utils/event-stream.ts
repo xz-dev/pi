@@ -133,3 +133,18 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 export function createAssistantMessageEventStream(): AssistantMessageEventStream {
 	return new AssistantMessageEventStream();
 }
+
+/**
+ * Report the actual transport to the optional `onTransport` hook. Hook failures
+ * are swallowed: a reporting callback is never a transport failure.
+ */
+export async function emitTransport<TModel>(
+	hook: ((transport: string | undefined, model: TModel) => void | Promise<void>) | undefined,
+	transport: string | undefined,
+	model: TModel,
+): Promise<void> {
+	if (!hook) return;
+	try {
+		await hook(transport, model);
+	} catch {}
+}
