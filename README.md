@@ -31,6 +31,7 @@ Highlights only; full details with use cases, limits, and patch branches: [docs/
 Features:
 
 - Single executable, no Node.js needed (Bun JIT + precompiled bytecode)
+- [Nix installation](#nix) from fixed, authenticated Release archives
 - FreeBSD support
 - Resume interrupted work (`/retry`, eligible sessions also recover on startup)
 - WebSocket recovery and incremental context for OpenAI Responses and Codex
@@ -57,7 +58,7 @@ Features:
 - Per-skill automatic invocation controls; manual `/skill:<name>` stays available
 - Detect slow extensions (opt-in)
 - Clean old binary backups in the install directory (`pi update --clean`)
-- Scoop/ebuild installs blocked from self-update fights
+- Nix/Scoop/ebuild installs blocked from self-update fights
 
 Fixes:
 
@@ -88,6 +89,21 @@ unzip pi-<target>.zip
 # Optionally install it on PATH:
 mv pi ~/.local/bin/pi
 ```
+
+### Nix
+
+```sh
+nix run github:xz-dev/pi/nix
+# Or install into your profile:
+nix profile add github:xz-dev/pi/nix
+nix profile upgrade pi
+```
+
+The generated `nix` branch packages a fixed prebuilt Release, not source from the selected Git revision. It advances only after the Release manifest passes Sigstore verification and native Nix builds and CLI checks pass. Pin a commit from that branch for an exact installation. The flake on `ci`/`main` is the packaging template and can refer to an older Release.
+
+Flake packages cover Linux x64/arm64 and macOS x64/arm64. Linux uses Nixpkgs `buildFHSEnv` so the executable and its embedded native helpers share the Nix library closure. **Bubblewrap user namespaces must be available**: restrictive containers and Ubuntu AppArmor policies can block startup. An administrator must allow that mechanism; installing Pi does not change host security settings. FreeBSD and musl `callPackage` mappings are not native-validated flake outputs.
+
+An adjacent `.nix.managed.lock` blocks `pi update --self`, including `--force`, before any download. Upgrade Pi through Nix instead; extension and model updates remain available.
 
 ### FreeBSD
 
