@@ -60,7 +60,7 @@ export async function readClipboardText(): Promise<string | null> {
 	const commands: [string, string[]][] = [];
 	// Termux reports platform "android", not "linux" (#10391).
 	if (process.env.TERMUX_VERSION) commands.push(["termux-clipboard-get", []]);
-	if (platform() === "linux") {
+	if (platform() === "linux" || platform() === "freebsd") {
 		if (process.env.WAYLAND_DISPLAY) commands.push(["wl-paste", ["--no-newline", "--type", "text"]]);
 		if (process.env.DISPLAY) {
 			commands.push(["xclip", ["-selection", "clipboard", "-out"]], ["xsel", ["--clipboard", "--output"]]);
@@ -89,7 +89,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 	let copied = false;
 	// Direct writes precede OSC 52 so the terminal cannot race the native writer.
 	// Linux tools retain clipboard selection ownership after this call returns.
-	if (p !== "linux") {
+	if (p !== "linux" && p !== "freebsd") {
 		try {
 			const clipboard = getNativeClipboard();
 			if (clipboard?.setText) {
@@ -127,7 +127,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 	// OSC 52 cannot be verified, so a desktop session with a display reports the failure
 	// instead (#9618). Without a display the terminal is the only clipboard route (containers,
 	// WSL without WSLg), and remote sessions always emit it to reach the client clipboard.
-	const headless = p === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY && !env.TERMUX_VERSION;
+	const headless = (p === "linux" || p === "freebsd") && !env.DISPLAY && !env.WAYLAND_DISPLAY && !env.TERMUX_VERSION;
 	let oversized = false;
 	if (!osc52Emitted && (isRemoteSession(env) || (!copied && headless))) {
 		if (emitOsc52(text)) copied = true;
@@ -138,7 +138,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 	if (env.TERMUX_VERSION) {
 		throw new Error("Clipboard unavailable: install the Termux:API app and `termux-api` package");
 	}
-	if (p === "linux") {
+	if (p === "linux" || p === "freebsd") {
 		if (env.WAYLAND_DISPLAY) {
 			throw new Error("Clipboard unavailable: install `wl-clipboard` (`wl-copy`) or check Wayland access");
 		}
