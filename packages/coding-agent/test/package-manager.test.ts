@@ -1084,7 +1084,10 @@ fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({
   path: process.env.PATH, registry: process.env.npm_config_registry
 }) + "\\n");
 if (process.env.PI_TEST_PM_FAIL === "1") process.exit(37);
-if (args[0] === "info") console.log(JSON.stringify("1.1.0"));
+if (args[0] === "info") console.log(JSON.stringify(
+  args.includes("versions") ? { versions: ["1.0.0", "1.1.0"], "dist-tags": { latest: "1.1.0" } }
+    : args.includes("engines") ? { version: "1.1.0" } : "1.1.0"
+));
 if (args[0] === "pm") console.log(${JSON.stringify(legacyBin)});
 if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit root"))});
 `,
@@ -1156,6 +1159,48 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					}),
 				);
 			});
+
+			it.each([
+				{ scope: "user", pinned: false },
+				{ scope: "project", pinned: false },
+				{ scope: "user", pinned: true },
+				{ scope: "project", pinned: true },
+			] as const)(
+				"checks $scope dependencies through the scoped self executable (pinned=$pinned)",
+				async ({ scope, pinned }) => {
+					const root = scope === "user" ? join(agentDir, "npm") : join(tempDir, ".pi", "npm");
+					for (const [directory, manifest] of [
+						[root, { dependencies: { fixture: "1.0.0" } }],
+						[
+							join(root, "node_modules", "fixture"),
+							{ name: "fixture", version: "1.0.0", dependencies: { leaf: "^1.0.0" } },
+						],
+						[join(root, "node_modules", "leaf"), { name: "leaf", version: "1.0.0" }],
+					] as const) {
+						mkdirSync(directory, { recursive: true });
+						writeFileSync(join(directory, "package.json"), JSON.stringify(manifest));
+					}
+					const source = `npm:fixture${pinned ? "@1.0.0" : ""}`;
+					if (scope === "user") settingsManager.setPackages([source]);
+					else settingsManager.setProjectPackages([source]);
+					const before = readFileSync(join(root, "package.json"), "utf8");
+					expect(await packageManager.checkForAvailableUpdates()).toEqual([
+						expect.objectContaining({ source, scope, reason: pinned ? "dependencies" : "both" }),
+					]);
+					const calls: Array<{ args: string[]; cwd: string; mode: string }> = readFileSync(logPath, "utf8")
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line));
+					expect(calls.map(({ args }) => args)).toEqual([
+						...(!pinned ? [["info", "fixture", "version", "--json"]] : []),
+						["info", "leaf", "versions", "dist-tags", "--json"],
+						["info", "leaf@1.1.0", "version", "os", "cpu", "engines", "--json"],
+					]);
+					expect(calls.every(({ cwd, mode }) => cwd === root && mode === "1")).toBe(true);
+					expect(readFileSync(join(root, "package.json"), "utf8")).toBe(before);
+					expect(process.env.BUN_BE_BUN).toBeUndefined();
+				},
+			);
 
 			it("does not inject mode into explicit pi and invalidates the legacy root cache", async () => {
 				const embeddedRoot = join(dirname(legacyBin), "install", "global", "node_modules");
@@ -3269,13 +3314,30 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			);
 		});
 
+		it("retries only the failed dependency command, not planning or progress", async () => {
+			const events: ProgressEvent[] = [];
+			packageManager.setProgressCallback((event) => events.push(event));
+			const run = vi
+				.spyOn(internals, "runCommand")
+				.mockRejectedValueOnce(new Error("TLS EOF"))
+				.mockResolvedValue(undefined);
+
+			await packageManager.update(source);
+			expect(run).toHaveBeenCalledTimes(2);
+			expect(internals.runCommandCapture).toHaveBeenCalledTimes(2);
+			expect(vi.mocked(sleepModule.sleep).mock.calls.map(([delay]) => delay)).toEqual([3000]);
+			expect(events.map((event) => event.type)).toEqual(["start", "progress", "complete"]);
+		});
+
 		it("propagates dependency update failures instead of reporting completion", async () => {
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
-			vi.spyOn(internals, "runCommand").mockRejectedValue(new Error("dependency update failed"));
+			const run = vi.spyOn(internals, "runCommand").mockRejectedValue(new Error("dependency update failed"));
 
 			await expect(packageManager.update(source)).rejects.toThrow("dependency update failed");
-			expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+			expect(run).toHaveBeenCalledTimes(4);
+			expect(vi.mocked(sleepModule.sleep).mock.calls.map(([delay]) => delay)).toEqual([3000, 6000, 12000]);
+			expect(events.map((event) => event.type)).toEqual(["start", "progress", "progress", "progress", "error"]);
 		});
 	});
 
@@ -3361,14 +3423,32 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			expect(readFileSync(manifestPath, "utf8")).toBe(original);
 		});
 
-		it("does not overwrite unrelated manifest changes", async () => {
+		it("retries a failed Bun command before restoring the original manifest bytes", async () => {
+			let attempts = 0;
+			const run = vi
+				.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+				.mockImplementation(async () => {
+					writeFileSync(manifestPath, '{"dependencies":{"leaf":"^2.1.0"},"description":"original"}');
+					if (attempts++ === 0) throw new Error("TLS EOF");
+				});
+			await runtime.refreshRuntimeDependencies(["leaf"], installRoot, true);
+			expect(run).toHaveBeenCalledTimes(2);
+			expect(vi.mocked(sleepModule.sleep).mock.calls.map(([delay]) => delay)).toEqual([3000]);
+			expect(readFileSync(manifestPath, "utf8")).toBe(original);
+		});
+
+		it("does not overwrite unrelated manifest changes or retry restoration failures", async () => {
 			const changed = '{"dependencies":{"leaf":"^2.1.0"},"description":"external change"}';
-			vi.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand").mockImplementation(async () => {
-				writeFileSync(manifestPath, changed);
-			});
+			const run = vi
+				.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+				.mockImplementation(async () => {
+					writeFileSync(manifestPath, changed);
+				});
 			await expect(runtime.refreshRuntimeDependencies(["leaf"], installRoot, true)).rejects.toThrow(
 				"changes outside targeted dependency ranges",
 			);
+			expect(run).toHaveBeenCalledTimes(1);
+			expect(sleepModule.sleep).not.toHaveBeenCalled();
 			expect(readFileSync(manifestPath, "utf8")).toBe(changed);
 		});
 
