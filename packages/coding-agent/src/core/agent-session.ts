@@ -145,6 +145,7 @@ import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { NestedToolCallRunner } from "./nested-tool-calls.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { setRawInputText } from "./raw-input-text.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
 import {
@@ -2461,12 +2462,16 @@ export class AgentSession {
 	 * starting another, and an abort requested meanwhile aborts the run as soon as it exists.
 	 * @param onStarted Called once the run's messages are prepared, before the first request.
 	 */
-	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
+	private async _startRun(
+		trigger: BeforeAgentStartTrigger,
+		onStarted?: () => void,
+		rawInputText?: string,
+	): Promise<void> {
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
 		let messages: AgentMessage[];
 		try {
-			messages = await this._prepareRun(trigger);
+			messages = await this._prepareRun(trigger, rawInputText);
 		} catch (error) {
 			this._isAgentRunActive = false;
 			this._flushPendingBashMessages();
@@ -2518,7 +2523,7 @@ export class AgentSession {
 	 * message followed by pending nextTurn messages (consumed here) and handler messages, with a
 	 * system patch first when the prompt changed.
 	 */
-	private async _prepareRun(trigger: BeforeAgentStartTrigger): Promise<AgentMessage[]> {
+	private async _prepareRun(trigger: BeforeAgentStartTrigger, rawInputText?: string): Promise<AgentMessage[]> {
 		// Check overflow recovery before sending (including aborted responses). Threshold
 		// checks wait for prepareInput, where pending input and the routed model are known.
 		// The starting message is sent below, so do not call agent.continue() here.
@@ -2546,12 +2551,14 @@ export class AgentSession {
 			const normalized = await this._normalizePromptImages(trigger.images);
 			const text =
 				normalized.hints.length > 0 ? `${trigger.prompt}\n\n${normalized.hints.join("\n")}` : trigger.prompt;
-			messages.push({
+			const message: UserMessage = {
 				role: "user",
 				content: [{ type: "text", text }, ...normalized.images],
 				origin: trigger.origin,
 				timestamp: Date.now(),
-			});
+			};
+			setRawInputText(message, rawInputText);
+			messages.push(message);
 		}
 		// Inject any pending "nextTurn" messages as context alongside the starting message
 		messages.push(...this._pendingNextTurnMessages);
@@ -2861,11 +2868,9 @@ export class AgentSession {
 		const { text: currentText, images: currentImages } = processedInput;
 
 		// Expand skill commands (/skill:name args) and prompt templates (/template args)
-		let expandedText = currentText;
-		if (expandPromptTemplates) {
-			expandedText = this._expandSkillCommand(expandedText);
-			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-		}
+		const { text: expandedText, rawInputText } = expandPromptTemplates
+			? this._expandInputCommands(currentText, currentText === text, origin)
+			: { text: currentText, rawInputText: undefined };
 
 		// If streaming, queue via steer() or followUp() based on option
 		if (this.isStreaming) {
@@ -2875,9 +2880,9 @@ export class AgentSession {
 				);
 			}
 			if (options.streamingBehavior === "followUp") {
-				await this._queueFollowUp(expandedText, currentImages, origin);
+				await this._queueFollowUp(expandedText, currentImages, origin, rawInputText);
 			} else {
-				await this._queueSteer(expandedText, currentImages, origin);
+				await this._queueSteer(expandedText, currentImages, origin, rawInputText);
 			}
 			preflightResult?.("queued");
 			return;
@@ -2903,9 +2908,27 @@ export class AgentSession {
 			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 		}
 
-		await this._startRun({ messageType: "user", prompt: expandedText, images: currentImages, origin }, () =>
-			preflightResult?.("started"),
+		await this._startRun(
+			{ messageType: "user", prompt: expandedText, images: currentImages, origin },
+			() => preflightResult?.("started"),
+			rawInputText,
 		);
+	}
+
+	/**
+	 * Expand a skill command, then a prompt template. Returns the raw interactive command only when a
+	 * prompt template actually changed it: skill blocks keep their invocation in the stored content.
+	 * @param unchangedInput Whether input handlers left the submitted text untouched.
+	 */
+	private _expandInputCommands(
+		text: string,
+		unchangedInput: boolean,
+		origin: MessageOrigin,
+	): { text: string; rawInputText: string | undefined } {
+		const afterSkill = this._expandSkillCommand(text);
+		const expanded = expandPromptTemplate(afterSkill, [...this.promptTemplates]);
+		const recordRaw = expanded !== afterSkill && unchangedInput && origin.type === "interactive";
+		return { text: expanded, rawInputText: recordRaw ? text : undefined };
 	}
 
 	/**
@@ -2988,13 +3011,16 @@ export class AgentSession {
 		);
 		if (!processedInput) return "handled";
 
-		let expandedText = this._expandSkillCommand(processedInput.text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+		const { text: expandedText, rawInputText } = this._expandInputCommands(
+			processedInput.text,
+			processedInput.text === text,
+			origin,
+		);
 
 		if (behavior === "steer") {
-			await this._queueSteer(expandedText, processedInput.images, origin);
+			await this._queueSteer(expandedText, processedInput.images, origin, rawInputText);
 		} else {
-			await this._queueFollowUp(expandedText, processedInput.images, origin);
+			await this._queueFollowUp(expandedText, processedInput.images, origin, rawInputText);
 		}
 		return "queued";
 	}
@@ -3035,13 +3061,19 @@ export class AgentSession {
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[], origin?: MessageOrigin): Promise<void> {
+	private async _queueSteer(
+		text: string,
+		images?: ImageContent[],
+		origin?: MessageOrigin,
+		rawInputText?: string,
+	): Promise<void> {
 		const message: UserMessage = {
 			role: "user",
 			content: [{ type: "text", text }, ...(images ?? [])],
 			origin,
 			timestamp: Date.now(),
 		};
+		setRawInputText(message, rawInputText);
 		this._steeringMessages.push(message);
 		this.agent.steer(message);
 		this._emitQueueUpdate();
@@ -3050,13 +3082,19 @@ export class AgentSession {
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[], origin?: MessageOrigin): Promise<void> {
+	private async _queueFollowUp(
+		text: string,
+		images?: ImageContent[],
+		origin?: MessageOrigin,
+		rawInputText?: string,
+	): Promise<void> {
 		const message: UserMessage = {
 			role: "user",
 			content: [{ type: "text", text }, ...(images ?? [])],
 			origin,
 			timestamp: Date.now(),
 		};
+		setRawInputText(message, rawInputText);
 		this._followUpMessages.push(message);
 		this.agent.followUp(message);
 		this._emitQueueUpdate();
@@ -3246,6 +3284,15 @@ export class AgentSession {
 
 	/** Retrieve only terminal drafts; plugin/custom messages and image attachments stay queued. */
 	takeInteractiveDrafts(): { steering: string[]; followUp: string[] } {
+		const { steering, followUp } = this.takeInteractiveDraftMessages();
+		return {
+			steering: steering.map((message) => contentText(message.content, "")),
+			followUp: followUp.map((message) => contentText(message.content, "")),
+		};
+	}
+
+	/** Like takeInteractiveDrafts(), but returns the queued message objects instead of their text. */
+	takeInteractiveDraftMessages(): { steering: UserMessage[]; followUp: UserMessage[] } {
 		const isDraft = (message: UserMessage) =>
 			message.origin?.type === "interactive" &&
 			(typeof message.content === "string" || !message.content.some((part) => part.type === "image"));
@@ -3256,10 +3303,7 @@ export class AgentSession {
 		this._steeringMessages = this._steeringMessages.filter((message) => !selected.has(message));
 		this._followUpMessages = this._followUpMessages.filter((message) => !selected.has(message));
 		this._emitQueueUpdate();
-		return {
-			steering: steering.map((message) => contentText(message.content, "")),
-			followUp: followUp.map((message) => contentText(message.content, "")),
-		};
+		return { steering, followUp };
 	}
 
 	get resourceLoader(): ResourceLoader {

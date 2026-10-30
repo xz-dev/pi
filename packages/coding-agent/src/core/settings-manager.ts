@@ -1370,6 +1370,16 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getCollapseExpandedInput(): boolean {
+		return this.settings.collapseExpandedInput ?? SETTINGS_DEFAULTS.collapseExpandedInput;
+	}
+
+	setCollapseExpandedInput(enabled: boolean): void {
+		this.globalSettings.collapseExpandedInput = enabled;
+		this.markModified("collapseExpandedInput");
+		this.save();
+	}
+
 	getThinkingBudgets(): ThinkingBudgetsSettings | undefined {
 		return this.settings.thinkingBudgets;
 	}
