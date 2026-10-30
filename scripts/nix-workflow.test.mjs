@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
@@ -166,6 +168,62 @@ test("every native runner builds and smokes the flake before publication", () =>
 	assert.match(smoke.run, /"\$pi" update --self "\$@"/);
 	assert.match(smoke.run, /grep -F 'is managed by nix; self-update is disabled'/);
 	assert.match(smoke.run, /\n\s*refuses\n\s*refuses --force\n/);
+});
+
+// Nix run 41019342707: Darwin builders keep HOME=/homeless-shelter on a read-only root, and pi
+// writes startup state under HOME. This checks the phase's shell contract, not a native macOS build.
+test("the shared install check runs the CLI with a fresh private HOME", (t) => {
+	const recipe = readFileSync(join(import.meta.dirname, "..", "nix", "package.nix"), "utf8");
+	const phase = /installCheckPhase = ''\n([\s\S]*?)\n\s*'';/.exec(recipe)?.[1];
+	assert.ok(phase, "package.nix must define installCheckPhase");
+	const version = "1.2.3-xz.4.1.gabcdef12";
+	const body = phase.replaceAll("${version}", version);
+	assert.doesNotMatch(body, /\$\{|''/, "the phase may only take ${version} from Nix");
+	const root = mkdtempSync(join(tmpdir(), "pi-nix-install-check-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	// A HOME below a regular file can never be created, not even by root.
+	writeFileSync(join(root, "read-only-root"), "");
+	const out = join(root, "out");
+	const tmp = join(root, "tmp");
+	const hooks = join(root, "hooks.log");
+	mkdirSync(join(out, "bin"), { recursive: true });
+	mkdirSync(tmp);
+	// Like the release binary, the fixture writes startup state under HOME before it handles any flag.
+	writeFileSync(
+		join(out, "bin", "pi"),
+		`#!/usr/bin/env bash\nset -eu\nmkdir -p "$HOME/.pi/agent"\nprintf '%s\\n' "$1" >> "$HOME/.pi/agent/startup.log"\nif [[ $1 == --version ]]; then echo ${version}; fi\n`,
+		{ mode: 0o755 },
+	);
+	const runPhase = (stubs, hooksLog, outPath) =>
+		spawnSync("bash", ["-eu", "-c", `${stubs}\n${body}`], {
+			env: {
+				PATH: process.env.PATH,
+				HOME: join(root, "read-only-root", "homeless-shelter"),
+				TMPDIR: tmp,
+				HOOKS: hooksLog,
+				out: outPath,
+			},
+			// Builders run with stdin on /dev/null; a socket on stdin makes bash source ~/.bashrc.
+			stdio: ["ignore", "pipe", "pipe"],
+			encoding: "utf8",
+		});
+	const result = runPhase(`runHook() { printf '%s %s\\n' "$1" "$HOME" >> "$HOOKS"; }`, hooks, out);
+	assert.equal(result.status, 0, result.stderr);
+	const hookLines = readFileSync(hooks, "utf8").split("\n");
+	const home = hookLines[0].replace(/^preInstallCheck /, "");
+	assert.deepEqual(hookLines, [`preInstallCheck ${home}`, `postInstallCheck ${home}`, ""]);
+	assert.equal(dirname(home), tmp, "HOME must be a new directory from mktemp");
+	assert.equal(statSync(home).mode & 0o777, 0o700);
+	assert.equal(readFileSync(join(home, ".pi", "agent", "startup.log"), "utf8"), "--version\n--help\n");
+	// `export HOME="$(mktemp -d)"` hides a mktemp failure and runs the hooks with an empty HOME.
+	const failedHooks = join(root, "failed-hooks.log");
+	const failed = runPhase(
+		`mktemp() { return 73; }\nrunHook() { echo "$1" >> "$HOOKS"; return 74; }`,
+		failedHooks,
+		join(root, "unreached"),
+	);
+	assert.equal(failed.status, 73, failed.stderr);
+	assert.ok(!existsSync(failedHooks), "a failed mktemp must stop the phase before any hook or CLI call");
 });
 
 test("Nix pins never mutate generated main during upstream sync, and Releases do not publish Nix directly", () => {

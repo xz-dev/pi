@@ -57,7 +57,10 @@ let
     sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
   };
 
+  # pi writes startup state under HOME; builders set HOME=/homeless-shelter, read-only on Darwin.
   installCheckPhase = ''
+    HOME="$(mktemp -d)"
+    export HOME
     runHook preInstallCheck
     test "$("$out/bin/pi" --version)" = "${version}"
     PI_OFFLINE=1 "$out/bin/pi" --help > /dev/null
