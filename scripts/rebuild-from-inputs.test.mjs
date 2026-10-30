@@ -357,6 +357,34 @@ test("single-executable preserves its catalog settings predecessor range", () =>
 	}
 });
 
+test("plugin dependency updates apply only their single-executable range after the last patch", () => {
+	const fixture = buildFixture();
+	// A squash merge would add/add-conflict on aaa.txt; only the declared
+	// single-executable..plugin-dependency-updates range applies cleanly.
+	const single = fixture.file("aaa.txt", "aaa\nembedded-bun\n", "single", "patch/single-executable", "patch/model-refresh");
+	const cards = fixture.file("cards.txt", "prompt card\n", "cards", "patch/prompt-invocation-cards");
+	const deps = fixture.file("aaa.txt", "aaa\nembedded-bun\ndependency-refresh\n", "deps", "patch/plugin-dependency-updates", "patch/single-executable");
+	const { target } = replay(fixture, [
+		"--upstream", fixture.upstream,
+		"--ci", fixture.ci,
+		"--patch", `model-refresh=${fixture.aaa}`,
+		"--patch", `single-executable=${single}`,
+		"--patch", `prompt-invocation-cards=${cards}`,
+		"--patch", `plugin-dependency-updates=${deps}`,
+	]);
+	try {
+		assert.equal(readFileSync(join(target, "aaa.txt"), "utf8"), "aaa\nembedded-bun\ndependency-refresh\n");
+		assert.equal(readFileSync(join(target, "cards.txt"), "utf8"), "prompt card\n");
+		assert.deepEqual(log(target), [
+			"base", "merge ci branch", "merge patch/model-refresh branch",
+			"merge patch/single-executable branch", "merge patch/prompt-invocation-cards branch",
+			"merge patch/plugin-dependency-updates branch", "record upstream sync inputs (diagnostic subset)",
+		]);
+	} finally {
+		cleanup(fixture, target);
+	}
+});
+
 test("Codex recovery applies only its delta after retry and cache prerequisites", () => {
 	const fixture = buildFixture();
 	const patterns = fixture.file("retry-policy.txt", "terminal-patterns\n", "patterns", "patch/retry-non-retryable-patterns");
@@ -528,6 +556,7 @@ for (const consumer of ["single-executable", "thinking-preview", "env-native-tes
 
 for (const [ancestor, descendant] of [
 	["model-refresh", "single-executable"],
+	["single-executable", "plugin-dependency-updates"],
 	["slow-hook-tui-only", "defer-threshold-compaction"],
 	["defer-threshold-compaction", "startup-submit-readiness"],
 	["startup-submit-readiness", "cold-start-retry"],
@@ -629,16 +658,17 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 37);
+	assert.equal(order.length, 38);
 	const downstreamChanges = readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8");
 	assert.equal(order[order.indexOf("single-executable") + 1], "process-ownership");
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
-	assert.equal(order.at(-4), "env-native-test-fixtures");
-	assert.equal(order.at(-3), "preserve-tool-arguments-json");
-	assert.equal(order.at(-2), "collapse-expanded-input");
-	assert.equal(order.at(-1), "prompt-invocation-cards");
-	for (const name of ["collapse-expanded-input", "prompt-invocation-cards"]) {
+	assert.equal(order.at(-5), "env-native-test-fixtures");
+	assert.equal(order.at(-4), "preserve-tool-arguments-json");
+	assert.equal(order.at(-3), "collapse-expanded-input");
+	assert.equal(order.at(-2), "prompt-invocation-cards");
+	assert.equal(order.at(-1), "plugin-dependency-updates");
+	for (const name of ["collapse-expanded-input", "prompt-invocation-cards", "plugin-dependency-updates"]) {
 		assert.ok(sync.includes(`refs/heads/patch/${name}:refs/remotes/origin/patch/${name}`));
 		assert.ok(sync.includes(`            ${name} \\\n`));
 		assert.ok(downstreamChanges.includes(`patch/${name}`));
