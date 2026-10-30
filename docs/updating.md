@@ -33,6 +33,69 @@ When an extension requires new host APIs, update Pi first and restart before
 reloading that extension. The [OpenAI plugin's compression requirements](https://github.com/xz-dev/openai-api-pi-extension/blob/main/docs/request-compression.md#host-requirement)
 are one example.
 
+## Extension dependencies
+
+**Available only in builds containing `patch/plugin-dependency-updates`; older binaries lack dependency refresh.** No new flags; notifications do not apply updates automatically.
+
+Package update notifications include runtime dependency updates even when the
+extension's own npm version or Git commit has not changed. One package appears
+once, labelled for its own update, its dependencies, or both.
+
+Use the same commands:
+
+```sh
+pi update --extensions   # All configured packages and eligible dependencies
+pi update <source>       # One package and its eligible dependencies
+pi update --all          # Pi, packages and eligible dependencies
+```
+
+| Manager | Dependency-refresh coverage |
+| --- | --- |
+| npm / Bun | Direct and indirect registry dependencies and eligible Git default HEAD/named branches in managed npm and Git-sourced extension roots. Bun hoisted and isolated layouts are covered. |
+| pnpm | Direct and indirect registry dependencies. Git refresh is limited to a direct, unaliased dependency declared by a Git-sourced extension, using a validated isolated local-store layout. |
+
+pnpm's default `blockExoticSubdeps` policy forbids indirect Git dependencies,
+including Git beneath a managed npm extension. Pi does not disable that policy
+or claim support for configurations that manually allow it. pnpm Git paths with
+aliases, peer-context suffixes, optional-importer entries, custom/global virtual
+stores or unproven native lock formats are skipped. Workspace contexts, including
+an explicit native workspace-directory environment, are conservatively skipped.
+
+Registry updates stay within declared version ranges. Exact registry dependency
+versions stay fixed; out-of-range releases are not advertised. A Git runtime dependency
+on default HEAD or an unambiguous named branch can advance its commit even when
+its package version is unchanged. Full Git SHAs and tags stay fixed; Git semver
+selectors, ambiguous branch/tag names, mixed repository/ref/transport constraints
+and unknown Git lock instances are skipped rather than advertised as updates.
+Git URL checks preserve the authored transport and authentication; SSH failures
+do not trigger an HTTP fallback.
+
+Fixing an extension's source does not by itself fix dependencies that its
+manifest allows to float. Dependency-only refresh leaves the extension's own npm
+version or Git SHA and source declarations unchanged. Tracked Git author locks
+(`package-lock.json`, `npm-shrinkwrap.json`, `bun.lock`, `bun.lockb`,
+`pnpm-lock.yaml`, `yarn.lock`) and published npm shrinkwraps remain respected.
+Pi-generated installation locks may refresh; they record an installation, not
+an additional author pin. Bundled and author-locked subtrees are not refreshed.
+
+Only runtime dependencies, including eligible indirect dependencies, are
+maintained. Local development directories, development dependencies and
+host-provided peers are excluded. A targeted refresh preserves other extensions'
+own versions and unique dependency trees; shared dependencies must still satisfy
+every incoming constraint. Unsafe name-wide transitions, downgrades and
+incompatible OS/CPU/Node targets are withheld.
+Overrides/resolutions, Git workspace roots and unknown graph contexts are skipped
+for dependency-only planning rather than guessing solver policy. Package source
+updates retain their existing behavior, and applying updates uses the native
+package manager's existing security policy.
+
+Dependency availability checks do not modify installed plugins, dependency
+graphs or author locks, and do not run lifecycle scripts. Git metadata checks may
+use an owned temporary repository, removed after success or failure; normal
+native cache writes can still occur. Pi does not reset or clean a Git checkout
+merely to refresh dependencies. Restart Pi after updating loaded extension code
+or dependencies.
+
 ## Automatic retries
 
 An eligible failed update operation gets **three additional attempts**, after
