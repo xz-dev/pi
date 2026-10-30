@@ -34,6 +34,22 @@ function text(message: { content: string | Array<{ type: string; text?: string }
 }
 
 describe("session context edits", () => {
+	it.each(["server-dependent", null, "invalid"])(
+		"content replacement or omission cannot erase ancestry %j",
+		(fact) => {
+			const session = SessionManager.inMemory();
+			const message = Object.assign(assistant("dependent input"), { responseAncestry: fact }) as AssistantMessage;
+			const target = session.appendMessage(message);
+			session.appendContextEdit(target, { content: "edited input" });
+			expect(session.buildSessionProjection().messages[0]).toHaveProperty("responseAncestry", fact);
+			session.appendContextEdit(target, null);
+			const projected = session.buildSessionProjection().messages;
+			expect(projected).toHaveLength(1);
+			expect(projected[0]).toMatchObject({ role: "assistant", content: [], responseAncestry: fact });
+			expect(message.content).toEqual([{ type: "text", text: "dependent input" }]);
+		},
+	);
+
 	it("omits a target only from model projection", () => {
 		const session = SessionManager.inMemory();
 		session.appendMessage({ role: "user", content: "request", timestamp: Date.now() });
