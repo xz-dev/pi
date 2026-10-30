@@ -197,6 +197,34 @@ export function getAssistantRetryPlan(
 	return { attempt, maxAttempts: policy.maxRetries, delayMs: retryDelayMs(policy, attempt), globalAttempt: attempt };
 }
 
+/** Select a delay only when an approved retry is actually scheduled, never during eligibility previews. */
+export function prepareAssistantRetry(
+	message: AssistantMessage,
+	policy: RetryPolicy | undefined,
+	globalAttempt: number,
+): AssistantRetryPlan | undefined {
+	const plan = getAssistantRetryPlan(message, policy, globalAttempt);
+	if (!plan || !supportsWebSocketTransportRecovery(message.api)) return plan;
+	const failure = message.diagnostics?.findLast(
+		(diagnostic) => diagnostic.type === "provider_transport_failure",
+	)?.details;
+	if (
+		failure?.fallbackTransport === "sse" ||
+		(failure?.configuredTransport !== "auto" &&
+			failure?.configuredTransport !== "websocket" &&
+			failure?.configuredTransport !== "websocket-cached")
+	) {
+		return plan;
+	}
+	return {
+		...plan,
+		delayMs: Math.min(
+			policy?.maxAgentDelayMs ?? DEFAULT_MAX_AGENT_RETRY_DELAY_MS,
+			plan.delayMs + Math.floor(Math.random() * 5001),
+		),
+	};
+}
+
 export function retryDelayMs(policy: Pick<RetryPolicy, "baseDelayMs" | "maxAgentDelayMs">, attempt: number): number {
 	const delay = policy.baseDelayMs * 2 ** Math.max(0, attempt - 1);
 	const safeDelay = Number.isSafeInteger(delay) ? delay : Number.MAX_SAFE_INTEGER;
@@ -290,7 +318,7 @@ export async function retryAssistantCall(
 			return response;
 		}
 
-		const plan = getAssistantRetryPlan(response, policy, globalAttempt);
+		const plan = prepareAssistantRetry(response, policy, globalAttempt);
 		if (!plan) {
 			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt, response.errorMessage);
 			return response;
