@@ -1666,7 +1666,7 @@ export class DefaultPackageManager implements PackageManager {
 	private async npmHasAvailableUpdate(
 		source: NpmSource,
 		installedPath: string,
-		scope: InstalledSourceScope,
+		scope: InstalledSourceScope = "user",
 	): Promise<boolean> {
 		if (isOfflineModeEnabled()) {
 			return false;
