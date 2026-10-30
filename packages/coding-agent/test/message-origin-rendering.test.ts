@@ -51,6 +51,8 @@ const controller = InteractiveMode.prototype as unknown as {
 	addMessageToChat(this: object, message: AgentMessage, options?: { populateHistory?: boolean }): void;
 };
 
+const proto = InteractiveMode.prototype as unknown as Record<string, unknown>;
+
 describe("message origin rendering", () => {
 	const harnesses: Harness[] = [];
 	afterEach(() => {
@@ -315,8 +317,14 @@ describe("message origin rendering", () => {
 			outputPad: 1,
 			toolOutputExpanded: false,
 			session: { extensionRunner: { getMessageRenderer: () => undefined } },
-			settingsManager: { getShowImages: () => false, getImageWidthCells: () => 60 },
+			settingsManager: {
+				getShowImages: () => false,
+				getImageWidthCells: () => 60,
+				getCollapseExpandedInput: () => true,
+			},
 			getUserMessageText: () => "human input",
+			getUserMessageDisplayText: proto.getUserMessageDisplayText,
+			getSubmittedCommandTextFor: proto.getSubmittedCommandTextFor,
 			getMarkdownThemeWithSettings: () => undefined,
 			getMarkdownTransformers: () => [],
 			editor: { addToHistory: history },
