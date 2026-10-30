@@ -354,6 +354,43 @@ describe("TreeSelectorComponent", () => {
 		});
 	});
 
+	describe("user message text resolver", () => {
+		test("uses resolved command text for preview, search, and copy", () => {
+			const entries = [
+				userMessage("user-1", null, "Review this code: src"),
+				assistantMessage("asst-1", "user-1", "done"),
+			];
+			const commandMessage = (entries[0] as SessionMessageEntry).message;
+			const selector = new TreeSelectorComponent(
+				buildTree(entries),
+				"user-1",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				undefined,
+				undefined,
+				(message) => (message === commandMessage ? "/review a.ts" : undefined),
+			);
+			const list = selector.getTreeList();
+			let copied: string | undefined;
+			selector.onCopy = (text) => {
+				copied = text;
+			};
+
+			const rendered = stripVTControlCharacters(list.render(200).join("\n"));
+			expect(rendered).toContain("user: /review a.ts");
+			expect(rendered).not.toContain("Review this code");
+
+			selector.handleInput("\x18");
+			expect(copied).toBe("/review a.ts");
+
+			for (const char of "a.ts") selector.handleInput(char);
+			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+			expect(stripVTControlCharacters(list.render(200).join("\n"))).not.toContain("assistant: done");
+		});
+	});
+
 	describe("copy", () => {
 		test("copies the full selected message with ctrl+x", () => {
 			const message = `${"long message ".repeat(30)}\nsecond line`;
