@@ -139,6 +139,8 @@ PATCH_ORDER=(
 	model-thinking-sort
 	env-native-test-fixtures
 	preserve-tool-arguments-json
+	responses-background-replay
+	ws-retry-jitter
 	collapse-expanded-input
 	prompt-invocation-cards
 	plugin-dependency-updates
@@ -163,6 +165,8 @@ CHAIN_EDGES=(
 	ws-cached-empty-delta:codex-websocket-recovery
 	codex-websocket-recovery:responses-websocket-transport
 	responses-websocket-transport:request-compression
+	request-compression:responses-background-replay
+	responses-background-replay:ws-retry-jitter
 	responses-websocket-transport:provider-transport-indicator
 	slow-hook-tui-only:defer-threshold-compaction
 	defer-threshold-compaction:startup-submit-readiness

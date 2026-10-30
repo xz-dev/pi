@@ -70,6 +70,8 @@ jobs:
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort \
             +refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures \
             +refs/heads/patch/preserve-tool-arguments-json:refs/remotes/origin/patch/preserve-tool-arguments-json \
+            +refs/heads/patch/responses-background-replay:refs/remotes/origin/patch/responses-background-replay \
+            +refs/heads/patch/ws-retry-jitter:refs/remotes/origin/patch/ws-retry-jitter \
             +refs/heads/patch/collapse-expanded-input:refs/remotes/origin/patch/collapse-expanded-input \
             +refs/heads/patch/prompt-invocation-cards:refs/remotes/origin/patch/prompt-invocation-cards \
             +refs/heads/patch/plugin-dependency-updates:refs/remotes/origin/patch/plugin-dependency-updates
@@ -123,6 +125,8 @@ jobs:
             model-thinking-sort \
             env-native-test-fixtures \
             preserve-tool-arguments-json \
+            responses-background-replay \
+            ws-retry-jitter \
             collapse-expanded-input \
             prompt-invocation-cards \
             plugin-dependency-updates \
