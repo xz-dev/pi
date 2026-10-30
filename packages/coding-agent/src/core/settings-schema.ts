@@ -19,6 +19,21 @@ const CompactionSettingsSchema = Type.Object({
 	enabled: Type.Optional(Type.Boolean({ default: SETTINGS_DEFAULTS.compaction.enabled })),
 	reserveTokens: Type.Optional(nonNegativeSafeInteger({ default: SETTINGS_DEFAULTS.compaction.reserveTokens })),
 	keepRecentTokens: Type.Optional(nonNegativeSafeInteger({ default: SETTINGS_DEFAULTS.compaction.keepRecentTokens })),
+	background: Type.Optional(
+		Type.Boolean({
+			description: "Summarize in the background before the threshold so the agent keeps working.",
+			default: SETTINGS_DEFAULTS.compaction.background,
+		}),
+	),
+	backgroundStartRatio: Type.Optional(
+		Type.Number({
+			description:
+				"Earliest-start guard for background summarization, as a fraction of the compaction threshold. The actual start point is threshold - min(32768, (1 - ratio) * threshold).",
+			exclusiveMinimum: 0,
+			exclusiveMaximum: 1,
+			default: SETTINGS_DEFAULTS.compaction.backgroundStartRatio,
+		}),
+	),
 	modelOverrides: Type.Optional(
 		Type.Record(Type.String(), CompactionModelOverrideSchema, {
 			description: 'Per-model overrides keyed by exact "provider/modelId" strings.',
