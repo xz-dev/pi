@@ -1417,7 +1417,7 @@ export class DefaultPackageManager implements PackageManager {
 		return this.getDependencyUpdates(
 			getNpmRuntimeDependencies(installRoot),
 			new Map(sources.map((entry) => [entry.source, [entry.parsed.name]])),
-			manager === "pnpm" ? installRoot : this.cwd,
+			manager === "pnpm" || this.getNpmCommand().embeddedBun ? installRoot : this.cwd,
 			installRoot,
 		);
 	}
@@ -1619,7 +1619,7 @@ export class DefaultPackageManager implements PackageManager {
 						"--config.strict-peer-dependencies=false",
 						"--config.strict-dep-builds=false",
 					],
-					{ cwd: installRoot },
+					{ cwd: installRoot, update: true },
 				);
 			} finally {
 				rmSync(cacheDir, { recursive: true, force: true });
@@ -1631,7 +1631,7 @@ export class DefaultPackageManager implements PackageManager {
 				? ["update", ...names, "--cwd", installRoot, "--omit=dev", "--omit=peer"]
 				: ["update", ...names, "--prefix", installRoot, "--no-save", "--omit=dev", "--legacy-peer-deps"];
 		if (!preserveManifest || this.getPackageManagerName() !== "bun") {
-			await this.runNpmCommand(args, preserveManifest ? { cwd: installRoot } : undefined);
+			await this.runNpmCommand(args, { ...(preserveManifest ? { cwd: installRoot } : {}), update: true });
 			return;
 		}
 		const manifestPath = join(installRoot, "package.json");
@@ -1639,7 +1639,7 @@ export class DefaultPackageManager implements PackageManager {
 		const original = JSON.parse(stripBom(originalBytes)) as Record<string, unknown>;
 		const errors: unknown[] = [];
 		try {
-			await this.runNpmCommand(args, { cwd: installRoot });
+			await this.runNpmCommand(args, { cwd: installRoot, update: true });
 		} catch (error) {
 			errors.push(error);
 		} finally {
