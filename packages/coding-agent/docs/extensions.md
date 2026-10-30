@@ -773,6 +773,15 @@ pi.on("message_end", async (event, ctx) => {
 });
 ```
 
+A `message_end` handler registered with `{ uninterruptible: true }` still runs after the run is aborted. Use it only for bounded synchronous terminal cleanup, such as redacting private finalized content. These handlers run separately from ordinary `message_end` handlers, and TypeScript rejects async handlers for this registration:
+
+```typescript
+pi.on("message_end", (event) => {
+  if (event.message.role !== "assistant" || !isPrivateRun(event.message)) return;
+  return { message: { ...event.message, content: [] } };
+}, { uninterruptible: true });
+```
+
 #### tool_execution_start / tool_execution_update / tool_execution_end
 
 Fired for tool execution lifecycle updates.
