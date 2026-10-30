@@ -415,6 +415,55 @@ mod unix {
         Ok(())
     }
 
+    #[cfg(not(target_os = "freebsd"))]
+    fn open_pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        let mut size = winsize(cols, rows);
+        // SAFETY: openpty writes two descriptors; the name and termios are not requested.
+        check(unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut size,
+            )
+        })?;
+        // SAFETY: openpty returned two new descriptors this function now owns.
+        Ok(unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) })
+    }
+
+    /// FreeBSD's openpty lives in libutil, whose soname changes across releases
+    /// (libutil.so.9 on 14, .10 on 15); the POSIX calls are all in libc.so.7.
+    #[cfg(target_os = "freebsd")]
+    fn open_pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+        // SAFETY: posix_openpt returns a new descriptor this function now owns.
+        let master = unsafe {
+            OwnedFd::from_raw_fd(check(libc::posix_openpt(
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            ))?)
+        };
+        // SAFETY: grantpt/unlockpt on the owned master descriptor.
+        check(unsafe { libc::grantpt(master.as_raw_fd()) })?;
+        check(unsafe { libc::unlockpt(master.as_raw_fd()) })?;
+        let mut name = [0 as libc::c_char; 128];
+        // SAFETY: ptsname_r writes a NUL-terminated name within the given length.
+        // FreeBSD's ptsname_r returns -1 and sets errno on failure.
+        check(unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) })?;
+        // SAFETY: name is NUL-terminated by ptsname_r; open returns a new owned descriptor.
+        let slave = unsafe {
+            OwnedFd::from_raw_fd(check(libc::open(
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            ))?)
+        };
+        let size = winsize(cols, rows);
+        // SAFETY: TIOCSWINSZ reads one winsize from a valid pointer.
+        check(unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &size) })?;
+        Ok((master, slave))
+    }
+
     /// The program to run: `argv`, or the user's shell as a login shell (`-` before its name, as `login` does).
     fn command(request: &PtyRequest) -> Command {
         match &request.argv {
@@ -441,22 +490,7 @@ mod unix {
     }
 
     pub fn spawn(request: &PtyRequest) -> io::Result<(File, Child)> {
-        let mut master: libc::c_int = -1;
-        let mut slave: libc::c_int = -1;
-        let mut size = winsize(request.cols, request.rows);
-        // SAFETY: openpty writes two descriptors; the name and termios are not requested.
-        check(unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &raw mut size,
-            )
-        })?;
-        // SAFETY: openpty returned two new descriptors this function now owns.
-        let (master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let (master, slave) = open_pty(request.cols, request.rows)?;
         cloexec(master.as_raw_fd())?;
         cloexec(slave.as_raw_fd())?;
         let slave = File::from(slave);
@@ -577,5 +611,31 @@ mod unix {
             }
         }
         true
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{PtyRequest, unix};
+    use serde_json::json;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn spawned_program_sees_a_sized_terminal() {
+        let request = PtyRequest::from_json(&json!({
+            "argv": ["/bin/sh", "-c", "test -t 0 && stty size"],
+            "cwd": "/",
+            "cols": 91,
+            "rows": 17,
+        }))
+        .expect("request");
+        let (master, mut child) = unix::spawn(&request).expect("spawn");
+        let mut output = Vec::new();
+        unix::read(&master, &AtomicBool::new(false), |bytes| {
+            output.extend_from_slice(bytes);
+            true
+        });
+        assert!(child.wait().expect("wait").success());
+        assert_eq!(String::from_utf8_lossy(&output).trim(), "17 91");
     }
 }
