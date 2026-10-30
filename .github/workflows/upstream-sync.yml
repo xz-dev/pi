@@ -169,6 +169,17 @@ jobs:
       - name: Build rebuilt main
         run: npm run build
 
+      - name: Update Nix package hashes from latest built release
+        run: |
+          set -euo pipefail
+          node scripts/update-nix-package.mjs || {
+            echo "::warning::Failed to update Nix package hashes from latest release"
+          }
+          if ! git diff --quiet -- nix/package.nix; then
+            git add nix/package.nix
+            git commit -m "feat(coding-agent): update Nix package hashes from latest built release"
+          fi
+
       - name: Check rebuilt main
         run: |
           # biome check --write may apply formatting fixes to merged files
