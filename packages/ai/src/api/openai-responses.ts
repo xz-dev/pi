@@ -33,6 +33,7 @@ import { getDeclaredTools, normalizeContext, resolveTranscript, resolveTranscrip
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import { replayBackgroundResponses } from "./openai-responses-background.ts";
 import {
 	convertResponsesMessages,
 	convertResponsesTools,
@@ -252,7 +253,11 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	toolChoice?: ResponseCreateParamsStreaming["tool_choice"];
+	/** Own explicit background SSE replay in this provider; off by default and never sent on the wire. */
+	responseReplay?: boolean;
 }
+
+type SimpleResponsesOptions = SimpleStreamOptions & Pick<OpenAIResponsesOptions, "responseReplay">;
 
 /** Resolve before encoding/filtering; only structured projection can adopt preceding history as local. */
 function getResponseAncestry(
@@ -314,6 +319,9 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		let recoveryState = undefined as ReturnType<typeof getWebSocketSseFallbackState> | undefined;
 		let checkpointProbe = undefined as CheckpointCooldownProbe | undefined;
 		let checkpointIdentityKey = "";
+		let backgroundClient: OpenAI | undefined;
+		let backgroundResponseId: string | undefined;
+		let backgroundStreamController: AbortController | undefined;
 		try {
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
@@ -393,6 +401,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const requestOptions = sendOptions();
 
 			const transport = options?.transport || "auto";
+			const background =
+				options?.responseReplay === true &&
+				params.background === true &&
+				transport === "sse" &&
+				params.stream === true;
 			const sessionId = options?.sessionId;
 			const identityKey = websocketIdentityKey(model, websocketHeaders);
 			const fallbackState =
@@ -714,9 +727,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				}
 			}
 
-			// The SSE/HTTP path is a hard gate for checkpoints: it must never carry
-			// a store:true request. An explicit hook store:false and a caller-owned
-			// previous_response_id pass through unchanged.
+			// SSE never requests WS checkpoints; explicit background requests own their standard store choice.
 			if (!callerOwnedParent && (responseAncestry === "server-dependent" || responseAncestry === "unknown")) {
 				throw new ResponsesApiError("Cannot continue conversation without its server-owned ancestry", {
 					code: "checkpoint_lineage_unavailable",
@@ -726,7 +737,10 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			invalidateResponsesWebSocketContinuation(OPENAI_RESPONSES_WEBSOCKET_SCOPE, cacheSessionId, identityKey);
 			const { store: _store, ...sseRest } = params;
 			const sseParams =
-				checkpointsEnabled && params.store === true ? (sseRest as ResponseCreateParamsStreaming) : params;
+				!background && checkpointsEnabled && params.store === true
+					? (sseRest as ResponseCreateParamsStreaming)
+					: params;
+			if (background) backgroundClient = client;
 			const { data: openaiStream, response } = await retryProviderRequest(
 				() => client.responses.create(sseParams, requestOptions).withResponse(),
 				{
@@ -735,6 +749,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 					signal: options?.signal,
 				},
 			);
+			if (background) backgroundStreamController = openaiStream.controller;
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			let sseReported = false;
 			const reportSseOnce = async () => {
@@ -757,14 +772,46 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			// The SDK picks its SSE decoder from the requested stream:true, not the
 			// observed media type. When headers did not prove SSE (hidden headers,
 			// gateway mislabeling), the first decoded event is the earliest proof.
+			const markReplayUnavailable = () => {
+				appendAssistantMessageDiagnostic(output, {
+					type: "provider_response_replay_unavailable",
+					timestamp: Date.now(),
+				});
+			};
+			const events = background
+				? replayBackgroundResponses(
+						openaiStream,
+						async (id, startingAfter) => {
+							const resumed = await client.responses
+								.retrieve(id, { stream: true, starting_after: startingAfter }, requestOptions)
+								.withResponse()
+								.catch((error: unknown) => {
+									if (error instanceof OpenAI.APIError && (error.status === 404 || error.status === 409)) {
+										markReplayUnavailable();
+									}
+									throw error;
+								});
+							backgroundStreamController = resumed.data.controller;
+							await options?.onResponse?.(
+								{ status: resumed.response.status, headers: headersToRecord(resumed.response.headers) },
+								model,
+							);
+							return resumed.data;
+						},
+						options?.signal,
+						markReplayUnavailable,
+					)
+				: openaiStream;
 			const proofedStream = (async function* () {
-				for await (const event of openaiStream) {
+				for await (const event of events) {
+					if (background && "response" in event) backgroundResponseId = event.response.id;
 					await reportSseOnce();
 					yield event;
 				}
 			})();
 
 			await processResponsesStream(proofedStream, output, stream, model, {
+				signal: background ? options?.signal : undefined,
 				onProviderStreamEvent: options?.onProviderStreamEvent,
 				serviceTier: options?.serviceTier,
 				grammarToolInputProperties,
@@ -785,6 +832,26 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			if (backgroundClient) {
+				backgroundStreamController?.abort();
+				if (options?.signal?.aborted && backgroundResponseId) {
+					try {
+						const cancelled = await backgroundClient.responses.cancel(backgroundResponseId, {
+							signal: AbortSignal.timeout(3000),
+							timeout: 3000,
+							maxRetries: 0,
+						});
+						if (cancelled.id !== backgroundResponseId || cancelled.status !== "cancelled") {
+							throw new Error("Background cancellation was not confirmed");
+						}
+					} catch {
+						appendAssistantMessageDiagnostic(output, {
+							type: "provider_response_cancel_failed",
+							timestamp: Date.now(),
+						});
+					}
+				}
+			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			// A sent, non-aborted probe failure renews the cooldown: only a captured
 			// checkpoint proves store:true works again.
@@ -822,16 +889,17 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 	return stream;
 };
 
-export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOptions> = (
+export const streamSimple: StreamFunction<"openai-responses", SimpleResponsesOptions> = (
 	model: Model<"openai-responses">,
 	context: TranscriptContext,
-	options?: SimpleStreamOptions,
+	options?: SimpleResponsesOptions,
 ): AssistantMessageEventStream => {
 	getClientApiKey(model.provider, options?.apiKey, options?.headers);
 
 	const base = {
 		...buildBaseOptions(model, context, options, options?.apiKey),
 		toolChoice: options?.toolChoice,
+		responseReplay: options?.responseReplay,
 	} satisfies OpenAIResponsesOptions;
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
 	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
