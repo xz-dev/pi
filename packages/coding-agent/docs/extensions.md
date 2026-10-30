@@ -2158,6 +2158,32 @@ export default function (pi: ExtensionAPI) {
 
 Rebuild from `getBranch()`, not from every entry: abandoned branches represent alternative histories. Use [`pi.appendEntry()`](#piappendentrycustomtype-data) for durable data that should not reach the model.
 
+### Read message sources
+
+Use `event.origin` in `input` and `before_agent_start`, or `event.message.origin` for user/custom messages in message events. The same metadata is stored on user messages and custom-message entries, so plugins can inspect it through `ctx.sessionManager.getBranch()` after resume. Missing metadata means unrecorded; never treat `role: "user"` alone as proof of human input.
+
+```typescript
+pi.on("input", (event) => {
+  if (event.origin?.type !== "interactive") return;
+  // Handle terminal-submitted input only.
+});
+
+pi.on("message_end", (event) => {
+  const message = event.message;
+  if (message.role !== "user" && message.role !== "custom") return;
+  if (message.origin?.type === "extension") {
+    const { extensionId, extensionName } = message.origin;
+    // Identify the injecting extension without parsing its message text.
+  }
+});
+```
+
+Pi attributes `pi.sendUserMessage()`, `pi.sendMessage()`, `before_agent_start` custom messages and new boundary `custom_message` drafts to the producing extension. Command `withSession` callbacks retain their extension origin after session replacement. Plugins do not need to add their own textual prefix. Event scheduling is unchanged: context-only append paths remain inspectable through session history rather than creating an extra agent turn.
+
+`InputEvent.source` includes `interactive`, `extension`, `rpc`, `sdk`, and `cli`. Direct SDK prompts default to `sdk`; an SDK implementing an interactive host can explicitly supply `source: "interactive"`. Origin describes the entry boundary, not verified human identity or new authorization. See [MessageOrigin](message-types.md#messageorigin).
+
+The TUI's dequeue action retrieves only recorded terminal text drafts. Extension/custom messages and queued images remain queued rather than being silently discarded or relabeled as human input. SDK consumers can use `getQueuedInputs()` for structured user-input snapshots and `takeInteractiveDrafts()` for the same selective dequeue behavior; explicit `clearQueue()` remains a full clear.
+
 <a id="register-tools"></a>
 
 ## Custom Tools
