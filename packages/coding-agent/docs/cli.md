@@ -268,15 +268,15 @@ Add `--local` or `-l` to `install`, `remove`, `uninstall`, or `config` to use pr
 
 ### Update Pi or packages
 
-Running `pi update` without a target updates Pi itself.
+Bare `pi update` updates Pi itself, not packages. Package updates also refresh eligible installed runtime dependencies; see [Pi Packages](packages.md#install-and-manage-packages) for constraints and package-manager limits.
 
 | Task | Command |
 |---|---|
 | Update Pi | `pi update` |
-| Update all installed packages | `pi update --extensions` |
-| Update one installed package | `pi update <source>` |
+| Update installed packages and eligible dependencies | `pi update --extensions` |
+| Update one installed package and its eligible dependencies | `pi update <source>` |
 | Refresh model catalogs | `pi update --models` |
-| Update Pi and all installed packages | `pi update --all` |
+| Update Pi, installed packages, and eligible dependencies | `pi update --all` |
 
 Add `--force` to reinstall Pi when the selected update includes Pi.
 

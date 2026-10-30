@@ -14,7 +14,17 @@ pi install git:github.com/example/pi-tools@v1
 pi install ./local-package
 ```
 
-`pi list` shows configured packages. Use `pi remove <source>` to remove one and `pi update --extensions` to reconcile package installations. See [Command Line](cli.md#package-commands) for every package command and option.
+`pi list` shows configured packages. Use `pi remove <source>` to remove one. `pi update --extensions` updates installed packages and eligible runtime dependencies; `pi update <source>` limits that work to one package. `pi update --all` also updates Pi itself, while bare `pi update` updates only Pi. See [Command Line](cli.md#package-commands) for every package command and option.
+
+A plugin's version or pinned Git SHA can stay unchanged while its floating runtime dependencies refresh. This includes direct, indirect, and optional registry dependencies, plus Git dependencies following default HEAD or a named branch, even when their package version has not changed. Source pins are not permission to widen dependency constraints or run a broad latest-version update.
+
+Exact dependency versions, Git SHA/tag pins, effective author lockfiles, and shared constraints remain authoritative. Pi-generated installation locks can refresh. A dependency-only update does not clean or reset the plugin's Git checkout.
+
+npm and Bun support direct and indirect registry/Git runtime dependencies under managed npm and Git-plugin roots; Bun supports both hoisted and isolated layouts. pnpm supports direct and indirect registry dependencies. Its Git support is limited to unaliased dependencies declared directly in a Git plugin's `dependencies`: not `optionalDependencies` entries, peer-dependency locators, aliases, custom/global virtual stores, or unsupported lock formats. pnpm's default `blockExoticSubdeps` policy forbids indirect Git dependencies, including those inside managed npm plugins; Pi does not bypass it.
+
+Unsupported workspace/override contexts, bundled or opaque dependency subtrees, unknown locks/refs, and dependency target names beginning with `-` are skipped conservatively. Local development directories, development dependencies, and host-provided peers are not automatically maintained.
+
+Update checks leave installed files and checkouts unchanged and do not run Git hooks or package lifecycle scripts. Owned temporary Git metadata is cleaned up. Offline mode and project trust remain in effect. TUI package notices distinguish package updates, dependency refreshes, or both; they do not apply updates automatically. Run an existing update command to apply them.
 
 If a configured package fails to install at startup, for example because npm cannot reach the registry, Pi warns about it, skips that package's resources, and keeps running. Pi tries to install it again on the next start or `/reload`. `pi install` and `pi update --extensions` still report the failure and exit non-zero.
 
@@ -39,7 +49,7 @@ Pi caches `-e` packages under `~/.pi/agent/tmp/extensions/` and checks them on e
 | URL | `https://github.com/example/pi-tools` | Treated as a git source |
 | Local | `./pi-tools` | Loaded from the resolved path without copying |
 
-Versioned npm specifications are pinned. Git tags and commits are also pinned; package updates reconcile the checkout but do not move a configured ref.
+Exact npm versions are pinned. Git tags and commits are also pinned; package updates reconcile the checkout but do not move a configured ref.
 
 Only the **xz-dev Bun-compiled standalone distribution** defaults to its embedded Bun for package operations. It spawns the running executable itself (no public `pi` on `PATH` required), adding `BUN_BE_BUN=1` only to package-manager child processes. This default applies even when npm is installed. Other distributions and source/npm installations retain npm, including source runs under Bun. This selection does not change Pi self-update.
 
