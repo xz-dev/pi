@@ -49,6 +49,7 @@ Features:
 - [Update retries](docs/updating.md#automatic-retries) with 3, 6 and 12 second waits
 - [Verified downloads](docs/updating.md#verification-backups-and-managed-installs) (Sigstore signatures)
 - Install extensions without npm or Node
+- [Update extension dependencies](docs/updating.md#extension-dependencies) (available only in builds containing `patch/plugin-dependency-updates`; older binaries lack dependency refresh): compatible registry updates and eligible Git HEAD/branch changes even when the extension itself has not changed; manager-specific limits apply
 - English locale for tools, keeps your UI language
 - Quieter startup screen
 - Refresh provider catalogs from CLI (`pi --list-models --refresh`)
@@ -141,7 +142,7 @@ For the standalone executable:
 
 ```sh
 pi update --self        # Pi itself
-pi update --extensions  # Installed packages
+pi update --extensions  # Packages; dependency refresh requires patch/plugin-dependency-updates
 pi update --models      # Pi-managed model catalogs
 ```
 

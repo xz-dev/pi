@@ -141,6 +141,7 @@ PATCH_ORDER=(
 	preserve-tool-arguments-json
 	collapse-expanded-input
 	prompt-invocation-cards
+	plugin-dependency-updates
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip
@@ -153,6 +154,7 @@ PATCH_ORDER=(
 CHAIN_EDGES=(
 	model-refresh:single-executable
 	single-executable:process-ownership
+	single-executable:plugin-dependency-updates
 	agent-run-failure-seam:managed-tool-executions
 	managed-tool-executions:esc-abort
 	esc-abort:manual-retry

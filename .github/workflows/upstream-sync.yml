@@ -71,7 +71,8 @@ jobs:
             +refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures \
             +refs/heads/patch/preserve-tool-arguments-json:refs/remotes/origin/patch/preserve-tool-arguments-json \
             +refs/heads/patch/collapse-expanded-input:refs/remotes/origin/patch/collapse-expanded-input \
-            +refs/heads/patch/prompt-invocation-cards:refs/remotes/origin/patch/prompt-invocation-cards
+            +refs/heads/patch/prompt-invocation-cards:refs/remotes/origin/patch/prompt-invocation-cards \
+            +refs/heads/patch/plugin-dependency-updates:refs/remotes/origin/patch/plugin-dependency-updates
 
           # Driver source: the replay script comes
           # from the reviewed ci snapshot, never from a stale generated-main
@@ -124,6 +125,7 @@ jobs:
             preserve-tool-arguments-json \
             collapse-expanded-input \
             prompt-invocation-cards \
+            plugin-dependency-updates \
           ; do
             rebuild_args+=(--patch "$ref=$(git rev-parse "origin/patch/$ref")")
           done

@@ -35,6 +35,19 @@ The single-executable bundle, update verification, and packaging fixes. See the
   - Details: [Package-manager selection](../packages/coding-agent/docs/packages.md#choose-a-source)
   - Patch branch: [`patch/single-executable`](https://github.com/xz-dev/pi/tree/patch/single-executable)
 
+## Extension dependencies
+
+**Available only in builds containing `patch/plugin-dependency-updates`; older binaries lack dependency refresh.** Existing package update notifications and commands also detect
+and update floating runtime dependencies when the extension's npm version or Git
+commit has not changed.
+
+- Use case: Pick up an in-range library fix or eligible Git HEAD/named-branch change without waiting for the extension author to publish another version or commit.
+- Commands: `pi update --extensions`, `pi update <source>` and `pi update --all`. Bare `pi update` remains self-only; the existing notification distinguishes package, dependency and combined updates without installing them automatically.
+- Managers: npm/Bun cover direct and indirect registry dependencies and eligible Git HEAD/named branches in managed npm and Git-plugin roots, including Bun hoisted/isolated layouts. pnpm covers direct/indirect registry dependencies, but Git refresh is limited to direct, unaliased dependencies of Git-sourced extensions. Its default exotic-subdependency policy still blocks indirect Git, including managed npm-plugin paths; Pi does not disable it.
+- Limits: Exact dependency versions, Git SHAs/tags, effective author locks and shared constraints remain enforced. Pi-generated installation locks may refresh. Dependency-only planning skips unsupported refs/native locks, unsafe or unknown graphs, workspace/override contexts and bundled/author-locked subtrees rather than downgrade another instance or advertise an impossible update. Local development directories, development dependencies and host-provided peers are not maintained. Restart Pi after updating.
+- Details: [Extension dependencies](updating.md#extension-dependencies)
+- Patch branch: [`patch/plugin-dependency-updates`](https://github.com/xz-dev/pi/tree/patch/plugin-dependency-updates)
+
 ## Retry and recovery
 
 Manual and automatic retry of interrupted work, plus transport-level recovery.
