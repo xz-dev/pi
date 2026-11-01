@@ -48,14 +48,14 @@ function createAssistantMessage(
 describe("AssistantMessageComponent", () => {
 	afterEach(() => vi.restoreAllMocks());
 
-	test("reuses its Markdown across streaming and its end, and renders like a new component after a theme change", () => {
+	test.each(["text", "thinking"] as const)("reuses %s Markdown across streaming and theme changes", (kind) => {
 		initTheme("dark");
 		const highlight = vi.spyOn(syntaxHighlight, "highlight");
 		const streaming: boolean[] = [];
 		const code = "```ts\nconst a = 1;\n```";
 		const content = (text: string): AssistantMessage["content"] => [
-			{ type: "thinking", thinking: "Thinking with **bold** text" },
-			{ type: "text", text },
+			{ type: "thinking", thinking: kind === "thinking" ? text : "Thinking with **bold** text" },
+			{ type: "text", text: kind === "text" ? text : "Answer" },
 		];
 		const component = new AssistantMessageComponent(undefined, "expanded", undefined, "Thinking...", 1, [
 			(markdown, { isStreaming }) => {
