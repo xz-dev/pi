@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type CustomEntry, SessionManager } from "../../src/core/session-manager.ts";
 import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.ts";
 
@@ -80,21 +80,90 @@ describe("SessionManager append and tree traversal", () => {
 				cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
 			};
 			const compactionId = session.appendCompaction("summary", id1, 1000, undefined, false, usage);
-			const _id3 = session.appendMessage(userMsg("3"));
+			const id3 = session.appendMessage(userMsg("3"));
 
 			const entries = session.getEntries();
 			const compactionEntry = entries.find((e) => e.type === "compaction");
 			expect(compactionEntry).toBeDefined();
 			expect(compactionEntry?.id).toBe(compactionId);
-			expect(compactionEntry?.parentId).toBe(id2);
+			// Inserted before the first kept entry; the kept range continues below it.
+			expect(compactionEntry?.parentId).toBeNull();
+			expect(session.getEntry(id1)?.parentId).toBe(compactionId);
+			expect(session.getEntry(id3)?.parentId).toBe(id2);
 			if (compactionEntry?.type === "compaction") {
 				expect(compactionEntry.summary).toBe("summary");
 				expect(compactionEntry.firstKeptEntryId).toBe(id1);
 				expect(compactionEntry.tokensBefore).toBe(1000);
 				expect(compactionEntry.usage).toEqual(usage);
 			}
+		});
 
-			expect(entries[3].parentId).toBe(compactionId);
+		it.each(["inserted", "tail"] as const)(
+			"keeps the compaction clock floor monotonic after a %s compaction on another branch",
+			(position) => {
+				vi.useFakeTimers();
+				try {
+					vi.setSystemTime(new Date("2026-10-23T00:00:09.000Z"));
+					const session = SessionManager.inMemory();
+					const rootId = session.appendMessage(userMsg("root"));
+					vi.setSystemTime(new Date("2026-10-23T00:00:10.000Z"));
+					const keptId = session.appendMessage(userMsg("branch A kept"));
+					session.appendCompaction("branch A summary", keptId, 100);
+					session.branch(rootId);
+					vi.setSystemTime(new Date("2026-10-23T00:00:09.000Z"));
+					session.appendCompaction("branch B summary", position === "inserted" ? rootId : null, 100);
+					session.branch(keptId);
+					const laterId = session.appendMessage(userMsg("later branch A work"));
+					const latestCompaction = Math.max(
+						...session
+							.getEntries()
+							.filter((entry) => entry.type === "compaction")
+							.map((entry) => Date.parse(entry.timestamp)),
+					);
+					expect(Date.parse(session.getEntry(laterId)!.timestamp)).toBeGreaterThanOrEqual(latestCompaction);
+				} finally {
+					vi.useRealTimers();
+				}
+			},
+		);
+
+		it("appendCompaction inserts at the kept boundary so rollback to kept entries keeps the summary", () => {
+			const session = SessionManager.inMemory();
+			const oldId = session.appendMessage(userMsg("old"));
+			const keptId = session.appendMessage(userMsg("kept"));
+			// Recorded while a background summary was being generated.
+			const newerId = session.appendMessage(assistantMsg("newer"));
+
+			const compactionId = session.appendCompaction("summary of old", keptId, 1000);
+			const laterId = session.appendMessage(userMsg("later"));
+
+			expect(session.getEntry(compactionId)?.parentId).toBe(oldId);
+			expect(session.getEntry(laterId)?.parentId).toBe(newerId);
+			expect(session.buildContextEntries().map((entry) => entry.id)).toEqual([
+				compactionId,
+				keptId,
+				newerId,
+				laterId,
+			]);
+
+			session.branch(newerId);
+			expect(session.buildContextEntries().map((entry) => entry.id)).toEqual([compactionId, keptId, newerId]);
+			session.branch(oldId);
+			expect(session.buildContextEntries().map((entry) => entry.id)).toEqual([oldId]);
+		});
+
+		it("appendCompaction appends at the leaf when the kept entry is not on the current branch", () => {
+			const session = SessionManager.inMemory();
+			const rootId = session.appendMessage(userMsg("root"));
+			const abandonedId = session.appendMessage(userMsg("abandoned"));
+			session.branch(rootId);
+			const currentId = session.appendMessage(userMsg("current"));
+
+			const compactionId = session.appendCompaction("summary", abandonedId, 1000);
+
+			expect(session.getEntry(compactionId)?.parentId).toBe(currentId);
+			expect(session.getEntry(abandonedId)?.parentId).toBe(rootId);
+			expect(session.getLeafId()).toBe(compactionId);
 		});
 
 		it("appendCustomEntry integrates into tree", () => {
@@ -555,6 +624,33 @@ describe("createBranchedSession", () => {
 					}),
 				]),
 			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reopens an inserted compaction with the same tree, order, and leaf", () => {
+		const tempDir = join(tmpdir(), `session-compaction-insert-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+
+		try {
+			const session = SessionManager.create(tempDir, tempDir);
+			session.appendMessage(userMsg("old"));
+			session.appendMessage(assistantMsg("old answer"));
+			const keptId = session.appendMessage(userMsg("kept"));
+			const newerId = session.appendMessage(assistantMsg("newer"));
+			const compactionId = session.appendCompaction("summary", keptId, 1000);
+			const context = session.buildContextEntries().map((entry) => entry.id);
+			expect(context).toEqual([compactionId, keptId, newerId]);
+			expect(session.getLeafId()).toBe(newerId);
+
+			const reopened = SessionManager.open(session.getSessionFile()!, tempDir);
+			expect(reopened.getLeafId()).toBe(newerId);
+			expect(reopened.buildContextEntries().map((entry) => entry.id)).toEqual(context);
+
+			const laterId = reopened.appendMessage(userMsg("later"));
+			const again = SessionManager.open(session.getSessionFile()!, tempDir);
+			expect(again.buildContextEntries().map((entry) => entry.id)).toEqual([...context, laterId]);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
