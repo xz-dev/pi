@@ -29,6 +29,8 @@
 		"native/linux/src/**/*.{c,h}",
 		"native/linux/build.sh",
 		"native/linux/README.md",
+		"native/freebsd/prebuilds/**/*.node",
+		"native/freebsd/build.sh",
 		"README.md"
 	],
 	"keywords": [
