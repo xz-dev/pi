@@ -24,7 +24,6 @@ import {
 	getAgentDir,
 	getConfiguredSelfUpdateArgv,
 	getInstallDir,
-	getPackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	getXzDevSourceUpdateGuidance,
