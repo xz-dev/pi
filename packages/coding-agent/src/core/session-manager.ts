@@ -561,7 +561,14 @@ function projectContextEntry(entry: SessionEntry, edit: ContextEditEntry | undef
 	const messages = sessionEntryToContextMessages(entry);
 	if (!edit) return messages;
 	const replacement = edit.replacement;
-	if (replacement === null) return [];
+	if (replacement === null) {
+		// Omit content, not an applicable negative/unknown ancestry fact.
+		return messages.flatMap((message) =>
+			message.role === "assistant" && "responseAncestry" in message && message.responseAncestry !== "local"
+				? [{ ...message, content: [] }]
+				: [],
+		);
+	}
 
 	return messages.map((message) => {
 		if (
@@ -589,6 +596,22 @@ export function buildSessionProjection(
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
 	const contextEntries = buildContextEntries(entries, leafId, byId);
+	let boundary = -1;
+	for (let i = 0; i < path.length; i++) {
+		const entry = path[i];
+		if (entry.type === "compaction" || (entry.type === "branch_summary" && entry.summary)) boundary = i;
+	}
+	const adopted = new Set(path.slice(0, Math.max(0, boundary)).map((entry) => entry.id));
+	const boundaryEntry = path[boundary];
+	if (boundaryEntry?.type === "compaction" && path[boundary + 1]?.id === boundaryEntry.firstKeptEntryId) {
+		const compactedAt = Date.parse(boundaryEntry.timestamp);
+		// Summary-before-kept: firstKept starts a contiguous run strictly older than the summary; later entries are at/after it.
+		for (let i = boundary + 1; i < path.length; i++) {
+			const entry = path[i];
+			if (!(Date.parse(entry.timestamp) < compactedAt)) break;
+			adopted.add(entry.id);
+		}
+	}
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
@@ -602,7 +625,18 @@ export function buildSessionProjection(
 			messages:
 				sourceEntry.type === "compaction" && index > 0
 					? []
-					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
+					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)).map((message) => {
+							if (!adopted.has(sourceEntry.id) || (message.role !== "assistant" && message.role !== "user"))
+								return message;
+							// Summary + retained messages are new local input; stored history stays untouched.
+							if (message.role === "assistant") {
+								const { responseCheckpoint: _checkpoint, responseId: _responseId, ...rest } = message;
+								return { ...rest, responseAncestry: "local" as const };
+							}
+							return "responseAncestry" in message
+								? { ...message, responseAncestry: "local" as const }
+								: message;
+						}),
 		}),
 	);
 	return {
