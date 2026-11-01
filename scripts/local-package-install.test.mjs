@@ -24,7 +24,7 @@ function createArtifactSet(t) {
 	const root = join(temporaryRoot, "fixture with spaces");
 	const repoRoot = join(root, "repo");
 	mkdirSync(repoRoot, { recursive: true });
-	writeFileSync(join(repoRoot, "package.json"), '{"name":"fixture","private":true}\n');
+	writeFileSync(join(repoRoot, "package.json"), '{"name":"fixture","private":true,"workspaces":["packages/*"]}\n');
 	writePackage(
 		join(repoRoot, "packages", "shared"),
 		{
