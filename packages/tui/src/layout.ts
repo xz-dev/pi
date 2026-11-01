@@ -115,7 +115,10 @@ function layoutComponent(
 	const safeWidth = Math.max(1, Math.floor(width));
 	const node = getLayoutNode(component);
 	if (!node) {
-		const lines = renderCached(context, component, safeWidth);
+		const lines =
+			height !== undefined && component.renderInBounds
+				? component.renderInBounds(safeWidth, Math.max(0, Math.floor(height)))
+				: renderCached(context, component, safeWidth);
 		const allocatedHeight = height === undefined ? lines.length : Math.max(0, Math.floor(height));
 		let lineOffset = 0;
 		if (lines.length > allocatedHeight && allocatedHeight > 0) {
