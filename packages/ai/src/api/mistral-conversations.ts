@@ -19,6 +19,7 @@ import { AssistantMessageEventStream, emitTransport } from "../utils/event-strea
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
+import { encodeToolCallArguments } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
@@ -756,7 +757,7 @@ async function consumeChatStream(
 	finishCurrentBlock(currentBlock);
 	for (const open of toolCallsByKey.values()) {
 		const block = output.content[open.contentIndex] as ToolCall;
-		Object.assign(block, open.arguments.finish());
+		Object.assign(block, open.arguments.finish({ keepJson: true }));
 		stream.push({
 			type: "toolcall_end",
 			contentIndex: open.contentIndex,
@@ -852,7 +853,7 @@ function toChatMessages(messages: Message[], supportsImages: boolean): MistralCh
 				toolCalls.push({
 					id: block.id,
 					type: "function",
-					function: { name: block.name, arguments: JSON.stringify(block.arguments || {}) },
+					function: { name: block.name, arguments: encodeToolCallArguments(block) },
 					index: 0,
 				});
 			}
