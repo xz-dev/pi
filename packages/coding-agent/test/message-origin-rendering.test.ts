@@ -8,6 +8,7 @@ import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { CustomMessageEntryDraft, MessageRenderer } from "../src/core/extensions/types.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
 import { createChatViewport } from "../src/modes/interactive/chat-viewport.ts";
+import { keyHint, keyText } from "../src/modes/interactive/components/keybinding-hints.ts";
 import { OriginMessageComponent } from "../src/modes/interactive/components/origin-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -284,7 +285,11 @@ describe("message origin rendering", () => {
 	});
 
 	it("keeps the source visible even when a custom renderer supplies styled content", () => {
-		const render: MessageRenderer = () => new Text("\x1b[31m\x1b[3mcustom body\x1b[0m", 0, 0);
+		const render: MessageRenderer = (_message, options) => {
+			expect(options.keyText).toBe(keyText);
+			expect(options.keyHint).toBe(keyHint);
+			return new Text("\x1b[31m\x1b[3mcustom body\x1b[0m", 0, 0);
+		};
 		const component = new OriginMessageComponent(message, render);
 		component.setExpanded(true);
 		const output = component.render(80).join("\n");
