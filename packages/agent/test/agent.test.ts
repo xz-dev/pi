@@ -554,7 +554,7 @@ describe("Agent", () => {
 	}
 
 	it("should synthesize one aborted assistant after aborting a completed tool result", async () => {
-		const toolSchema = Type.Object({});
+		const toolSchema = obj({});
 		const tool: AgentTool<typeof toolSchema> = {
 			name: "tool",
 			label: "Tool",
