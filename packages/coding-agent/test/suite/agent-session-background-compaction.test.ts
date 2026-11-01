@@ -116,14 +116,16 @@ describe("AgentSession background compaction", () => {
 			},
 		});
 		harnesses.push(scenario.harness);
-		scenario.harness.session.subscribe(() => {
-			if (scenario.requestsDuringSummary() >= 2) release.resolve();
-		});
 
 		await scenario.harness.session.prompt("go");
+		expect(scenario.requestsDuringSummary()).toBeGreaterThanOrEqual(2);
+		expect(scenario.compactions()).toHaveLength(0);
+		release.resolve();
+		await vi.waitFor(() => expect(scenario.harness.session.isBackgroundCompacting).toBe(false));
+		// A summary can finish after the last tool turn; supply its adoption turn explicitly.
+		await scenario.harness.session.prompt("next");
 
 		const compactions = scenario.compactions();
-		expect(scenario.requestsDuringSummary()).toBeGreaterThanOrEqual(2);
 		expect(scenario.summaryCalls()).toBe(1);
 		expect(compactions).toHaveLength(1);
 		expect(compactions[0].summary).toContain("SUMMARY 1");
