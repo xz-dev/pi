@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { getModel, streamSimple } from "../src/compat.ts";
 import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
+import { getSupportedThinkingLevels } from "../src/models.ts";
+import type { Model } from "../src/types.ts";
 
 const originalBasetenApiKey = process.env.BASETEN_API_KEY;
 
@@ -16,6 +18,81 @@ describe("Baseten models", () => {
 	it("keeps both GLM 5.2 endpoints text-only", () => {
 		expect(getModel("baseten", "zai-org/GLM-5.2").input).toEqual(["text"]);
 		expect(getModel("baseten", "zai-org/GLM-5.2-Fast").input).toEqual(["text"]);
+	});
+
+	it("preserves custom Baseten off/on thinking without reasoning effort", async () => {
+		const model = {
+			...getModel("baseten", "zai-org/GLM-5.2"),
+			id: "test-baseten-off-on",
+			thinkingLevelMap: {
+				off: "off",
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: null,
+			},
+			compat: {
+				supportsReasoningEffort: false,
+				thinkingFormat: "baseten",
+				chatTemplateArgs: { enable_thinking: { $var: "thinking.enabled" } },
+			},
+		} satisfies Model<"openai-completions">;
+		let payload: Record<string, unknown> | undefined;
+
+		expect(getSupportedThinkingLevels(model)).toEqual(["off", "high"]);
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "test", timestamp: 0 }] },
+			{
+				apiKey: "test-baseten-key",
+				reasoning: "high",
+				onPayload: (value) => {
+					payload = value as Record<string, unknown>;
+					throw new Error("payload captured");
+				},
+			},
+		).result();
+
+		expect(payload?.chat_template_args).toEqual({ enable_thinking: true });
+		expect(payload?.reasoning_effort).toBeUndefined();
+	});
+
+	it("models Kimi K3 reasoning with the Baseten reasoning-effort controls", async () => {
+		const model = getModel("baseten", "moonshotai/Kimi-K3");
+		let payload: Record<string, unknown> | undefined;
+
+		expect(model.thinkingLevelMap).toEqual({
+			off: "none",
+			minimal: null,
+			low: "low",
+			medium: null,
+			high: "high",
+			xhigh: null,
+			max: "max",
+		});
+		expect(model.compat).toMatchObject({
+			supportsReasoningEffort: true,
+			thinkingFormat: "openai",
+		});
+		expect(getSupportedThinkingLevels(model)).toEqual(["off", "low", "high", "max"]);
+
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "test", timestamp: 0 }] },
+			{
+				apiKey: "test-baseten-key",
+				reasoning: "high",
+				onPayload: (value) => {
+					payload = value as Record<string, unknown>;
+					throw new Error("payload captured");
+				},
+			},
+		).result();
+
+		expect(payload?.chat_template_args).toBeUndefined();
+		expect(payload?.reasoning_effort).toBe("high");
 	});
 
 	it("sends Baseten chat_template_args with reasoning effort", async () => {
