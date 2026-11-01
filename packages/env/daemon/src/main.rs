@@ -10,9 +10,19 @@ mod list;
 mod output;
 mod pty;
 mod scan;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod supervise;
+#[cfg(target_os = "macos")]
+#[path = "supervise_darwin.rs"]
+mod supervise;
+#[cfg(windows)]
+#[path = "supervise_windows.rs"]
+mod supervise;
 mod sys;
 mod watch;
 mod window;
+#[cfg(any(windows, test))]
+mod windows_owner_protocol;
 
 use errors::Failure;
 use exec::Control;
@@ -76,7 +86,9 @@ struct Server {
     tmpdir: String,
     handles: Mutex<HashMap<u64, Handle>>,
     next_handle: AtomicU64,
-    controls: Mutex<HashMap<u32, Arc<Control>>>,
+    controls: Mutex<Registry>,
+    #[cfg(target_os = "linux")]
+    startup_env: Result<sys::owned::Snapshot, String>,
     groups: exec::Groups,
     terminals: pty::Terminals,
 }
@@ -104,7 +116,43 @@ fn flag(json: &Value, key: &str) -> bool {
     json[key].as_bool().unwrap_or(false)
 }
 
+#[derive(Default)]
+struct Registry {
+    stopping: bool,
+    entries: HashMap<u32, Arc<Control>>,
+}
+
 impl Server {
+    fn stop(&self) {
+        let mut controls = self.controls.lock().unwrap();
+        controls.stopping = true;
+        for control in controls.entries.values() {
+            control.cancel(true);
+        }
+        kill_all(&self.groups);
+    }
+
+    fn owned_available(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.startup_env
+                .as_ref()
+                .is_ok_and(sys::owned::Snapshot::qualified)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    fn features(&self) -> Vec<&'static str> {
+        let mut features = FEATURES.to_vec();
+        if self.owned_available() {
+            features.push("ownedExec1");
+        }
+        features
+    }
+
     fn file(&self, json: &Value) -> Result<Arc<FileHandle>, Failure> {
         match self.handles.lock().unwrap().get(&number(json, "handle")?) {
             Some(Handle::File(file)) => Ok(file.clone()),
@@ -156,7 +204,7 @@ impl Server {
                 "cwd": sys::cwd(),
                 "driveCwds": sys::drive_cwds(),
                 "pid": std::process::id(),
-                "features": FEATURES,
+                "features": self.features(),
             }))),
             "lstat" => plain(fs::lstat(field(json, "path")?)),
             "realpath" => plain(fs::realpath(field(json, "path")?)),
@@ -251,14 +299,31 @@ impl Server {
                     .remove(&number(json, "handle")?);
                 plain(Ok(json!({})))
             }
-            "exec" => plain(exec::run(
-                id,
-                exec::ExecRequest::from_json(json)?,
-                &self.tmpdir,
-                &self.output,
-                control,
-                &self.groups,
-            )),
+            "exec" => {
+                control.validate_owner()?;
+                if control.owned() {
+                    if !self.owned_available() {
+                        return Err(Failure::new("unknown", "owned exec target is not qualified").extra(json!({"ownerError":{"code":"ERR_PROCESS_OWNER_CLEANUP","message":"owned exec target is not qualified"}})));
+                    }
+                    #[cfg(target_os = "linux")]
+                    return plain(exec::owned::run(
+                        id,
+                        exec::ExecRequest::from_json(json)?,
+                        &self.tmpdir,
+                        &self.output,
+                        control,
+                        self.startup_env.as_ref().unwrap(),
+                    ));
+                }
+                plain(exec::run(
+                    id,
+                    exec::ExecRequest::from_json(json)?,
+                    &self.tmpdir,
+                    &self.output,
+                    control,
+                    &self.groups,
+                ))
+            }
             "watch" => plain(watch::run(id, json, &self.output, control)),
             "pty" => plain(pty::run(
                 id,
@@ -365,13 +430,14 @@ fn respond(server: &Server, id: u32, request: Frame, control: Arc<Control>) {
         Ok((json, payload)) => Frame::with_payload(RESULT, id, json, payload),
         Err(failure) => Frame::new(ERROR, id, failure.to_json()),
     };
-    server.controls.lock().unwrap().remove(&id);
+    let reply = control.terminal(reply);
     // A command's result follows its output; large payloads do not hold up pings and small replies.
     if is_exec || reply.payload.len() > CONTROL_PAYLOAD {
         server.output.bulk(reply, None);
     } else {
         server.output.control(reply);
     }
+    server.controls.lock().unwrap().entries.remove(&id);
 }
 
 /// Queue `job` behind the handle's earlier chunk writes; one pool job drains the queue.
@@ -427,20 +493,43 @@ fn serve_frames(server: &Arc<Server>, input: &mut impl Read) -> io::Result<()> {
             REQUEST => {
                 let id = request.id;
                 // Registered before the request runs, so a cancel right behind it is not lost.
-                let control = Arc::new(Control::default());
-                server.controls.lock().unwrap().insert(id, control.clone());
+                let control = Arc::new(Control::admitted(&request.json));
+                {
+                    let mut registry = server.controls.lock().unwrap();
+                    if registry.stopping {
+                        let reply = control.terminal(Frame::new(
+                            ERROR,
+                            id,
+                            Failure::new("unknown", "server stopping").to_json(),
+                        ));
+                        server.output.bulk(reply, None);
+                        continue;
+                    }
+                    if registry.entries.contains_key(&id) {
+                        let reply = control.terminal(Frame::new(
+                            ERROR,
+                            id,
+                            Failure::new("EINVAL", "request id already active").to_json(),
+                        ));
+                        server.output.bulk(reply, None);
+                        continue;
+                    }
+                    registry.entries.insert(id, control.clone());
+                }
                 // Commands and watchers last; they get their own threads (watchers recurse through trees).
                 if matches!(request.json["op"].as_str(), Some("exec" | "watch" | "pty")) {
                     let worker = server.clone();
+                    let outside = control.clone();
                     let spawned = thread::Builder::new()
                         .stack_size(16 * 1024 * 1024)
                         .spawn(move || respond(&worker, id, request, control));
                     if let Err(error) = spawned {
-                        server.controls.lock().unwrap().remove(&id);
                         let failure = Failure::new("spawn_error", error.to_string());
-                        server
-                            .output
-                            .bulk(Frame::new(ERROR, id, failure.to_json()), None);
+                        server.output.bulk(
+                            outside.terminal(Frame::new(ERROR, id, failure.to_json())),
+                            None,
+                        );
+                        server.controls.lock().unwrap().entries.remove(&id);
                     }
                 } else {
                     let worker = server.clone();
@@ -458,7 +547,13 @@ fn serve_frames(server: &Arc<Server>, input: &mut impl Read) -> io::Result<()> {
                 }
             }
             CANCEL => {
-                let control = server.controls.lock().unwrap().get(&request.id).cloned();
+                let control = server
+                    .controls
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .get(&request.id)
+                    .cloned();
                 if let Some(control) = control {
                     control.cancel(request.json["mode"].as_str() == Some("kill"));
                 }
@@ -470,6 +565,9 @@ fn serve_frames(server: &Arc<Server>, input: &mut impl Read) -> io::Result<()> {
 }
 
 fn serve(token: &str) -> io::Result<()> {
+    // SAFETY: before stdout setup or any serve thread; parent environ is never mutated.
+    #[cfg(target_os = "linux")]
+    let startup_env = unsafe { sys::owned::Snapshot::capture() }.map_err(|error| error.to_string());
     let groups: exec::Groups = Arc::new(Mutex::new(Default::default()));
     {
         // A client that stops the daemon (Node's `child.kill()`), or a hangup, leaves nothing running either.
@@ -496,7 +594,9 @@ fn serve(token: &str) -> io::Result<()> {
         tmpdir: sys::tmpdir(),
         handles: Mutex::new(HashMap::new()),
         next_handle: AtomicU64::new(1),
-        controls: Mutex::new(HashMap::new()),
+        controls: Mutex::new(Registry::default()),
+        #[cfg(target_os = "linux")]
+        startup_env,
         groups,
         terminals: Arc::new(Mutex::new(HashMap::new())),
     });
@@ -504,14 +604,14 @@ fn serve(token: &str) -> io::Result<()> {
     {
         let output = output.clone();
         let last_seen = last_seen.clone();
-        let groups = server.groups.clone();
+        let server = server.clone();
         thread::spawn(move || {
             loop {
                 thread::sleep(PING_INTERVAL);
                 output.control(Frame::new(PING, 0, json!({})));
                 // A client that went silent (a phone that lost its network) leaves nothing running.
                 if now_ms().saturating_sub(last_seen.load(Ordering::Relaxed)) > SILENCE_LIMIT_MS {
-                    kill_all(&groups);
+                    server.stop();
                     std::process::exit(0);
                 }
             }
@@ -526,13 +626,23 @@ fn serve(token: &str) -> io::Result<()> {
     );
     let result = serve_frames(&server, &mut input);
     // However input ended, the client is gone: stop everything it started.
-    kill_all(&server.groups);
+    server.stop();
     output.close();
     let _ = writer.join();
     result
 }
 
 fn main() {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos",
+        windows
+    ))]
+    if env::args_os().nth(1).is_some_and(|arg| arg == "supervise") {
+        let args: Vec<_> = env::args_os().skip(2).collect();
+        std::process::exit(supervise::run(&args));
+    }
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("serve") => {
@@ -556,5 +666,77 @@ fn main() {
             eprintln!("usage: pi-env serve --token <hex>");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod owned_admission_tests {
+    use super::*;
+
+    fn server() -> Server {
+        Server {
+            output: Arc::new(Output::default()),
+            tmpdir: String::new(),
+            handles: Mutex::new(HashMap::new()),
+            next_handle: AtomicU64::new(1),
+            controls: Mutex::new(Registry::default()),
+            startup_env: Err("synthetic snapshot failure".into()),
+            groups: Arc::new(Mutex::new(Default::default())),
+            terminals: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[test]
+    fn snapshot_failure_refuses_admission_and_feature() {
+        let server = server();
+        assert!(!server.features().contains(&"ownedExec1"));
+        let request = json!({"op":"exec","owner":{"v":1},"argv":["/missing"],"cwd":"/"});
+        let control = Control::admitted(&request);
+        let failure = server
+            .dispatch(1, &request, Vec::new(), &control)
+            .unwrap_err();
+        let frame = control.terminal(Frame::new(ERROR, 1, failure.to_json()));
+        assert_eq!(frame.json["code"], "unknown");
+        assert_eq!(frame.json["owner"]["state"], "not-started");
+        assert_eq!(
+            frame.json["ownerError"]["code"],
+            "ERR_PROCESS_OWNER_CLEANUP"
+        );
+    }
+
+    #[test]
+    fn malformed_intent_is_not_legacy_even_before_parse() {
+        let server = server();
+        for owner in [
+            Value::Null,
+            json!({}),
+            json!({"v":2}),
+            json!({"v":1,"extra":true}),
+        ] {
+            let request = json!({"op":"exec","owner":owner});
+            let control = Control::admitted(&request);
+            let failure = server
+                .dispatch(1, &request, Vec::new(), &control)
+                .unwrap_err();
+            let frame = control.terminal(Frame::new(ERROR, 1, failure.to_json()));
+            assert_eq!(frame.json["code"], "EINVAL");
+            assert_eq!(frame.json["owner"]["state"], "not-started");
+        }
+    }
+
+    #[test]
+    fn global_stop_is_sticky_and_reaches_registered_controls() {
+        let server = server();
+        let control = Arc::new(Control::admitted(&json!({"op":"exec","owner":{"v":1}})));
+        server
+            .controls
+            .lock()
+            .unwrap()
+            .entries
+            .insert(1, control.clone());
+        server.stop();
+        assert!(server.controls.lock().unwrap().stopping);
+        assert!(control.killed.load(Ordering::SeqCst));
+        assert!(server.groups.lock().unwrap().is_empty());
     }
 }

@@ -5,7 +5,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 import { createHost, ipcLink, isChordError } from "../src/index.ts";
-import { type ControlMessage, createHostManager, type Driver, forkDriver, processLock } from "../src/manager.ts";
+import {
+	type ControlMessage,
+	createHostManager,
+	type Driver,
+	forkDriver,
+	type Instance,
+	processLock,
+} from "../src/manager.ts";
 import { Echo } from "./fixtures/echo.ts";
 
 const entry = fileURLToPath(new URL("./fixtures/worker.ts", import.meta.url));
@@ -80,14 +87,17 @@ describe("host manager (real child processes)", () => {
 
 	it("a child-owned kernel lock admits one live process; replace waits for the exit before the next start", async () => {
 		const lock = `chord2-test-${process.pid}-lock`;
-		const pids: number[] = [];
+		const previous: Instance[] = [];
 		const base = driver({}, lock);
 		const watched: Driver = {
 			spawn() {
-				// Exit before replace: the previous child is gone when the next one spawns.
-				for (const pid of pids) assert.ok(!alive(pid), `pid ${pid} still alive`);
+				// Native startup fills the primary PID asynchronously; retain the instance, not its pre-ready sentinel.
+				for (const instance of previous) {
+					assert.ok(instance.pid > 0);
+					assert.ok(!alive(instance.pid), `pid ${instance.pid} still alive`);
+				}
 				const instance = base.spawn();
-				pids.push(instance.pid);
+				previous.push(instance);
 				return instance;
 			},
 		};
