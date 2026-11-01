@@ -26,7 +26,7 @@ function sleep(ms: number): void {
 }
 
 function capture(session: string): string {
-	return run("tmux", ["capture-pane", "-t", session, "-p", "-S", "-2000"]).stdout;
+	return run("tmux", ["capture-pane", "-t", session, "-p", "-J", "-S", "-2000"]).stdout;
 }
 
 function waitFor(session: string, predicate: (output: string) => boolean, label: string): string {
