@@ -2,6 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
+import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -11,10 +12,13 @@ import {
 	stream as streamOpenAICodexResponses,
 	streamSimple as streamSimpleOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
-import type { Api, Context, Model } from "../src/types.ts";
+import { processResponsesStream } from "../src/api/openai-responses-shared.ts";
+import type { Api, AssistantMessage, Context, Model } from "../src/types.ts";
+import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
 import { formatUserAgent } from "../src/utils/identity.ts";
 import { retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { waitForNativeIo } from "./utils/native-io.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
@@ -2552,7 +2556,7 @@ describe("openai-codex streaming", () => {
 			transport: "sse",
 			maxRetries: 1,
 		}).result();
-		await vi.advanceTimersByTimeAsync(0);
+		await waitForNativeIo(() => setTimeoutSpy.mock.calls.some((call) => call[1] === expectedDelay));
 		expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), expectedDelay);
 
 		await vi.advanceTimersToNextTimerAsync();
@@ -2736,13 +2740,15 @@ describe("openai-codex streaming", () => {
 			transport: "sse",
 			maxRetries: 3,
 		}).result();
-		await vi.advanceTimersByTimeAsync(0);
+		await waitForNativeIo(() => retryTimeoutDelays().length === 1);
 		expect(retryTimeoutDelays()).toEqual([1000]);
 
 		await vi.advanceTimersToNextTimerAsync();
+		await waitForNativeIo(() => retryTimeoutDelays().length === 2);
 		expect(retryTimeoutDelays()).toEqual([1000, 2000]);
 
 		await vi.advanceTimersToNextTimerAsync();
+		await waitForNativeIo(() => retryTimeoutDelays().length === 3);
 		expect(retryTimeoutDelays()).toEqual([1000, 2000, 4000]);
 
 		await vi.advanceTimersToNextTimerAsync();
@@ -2750,4 +2756,228 @@ describe("openai-codex streaming", () => {
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(codexRequests).toBe(4);
 	});
+});
+
+describe("buffered Codex SSE aborts", () => {
+	const model: Model<"openai-codex-responses"> = {
+		id: "gpt-5.1-codex",
+		name: "GPT-5.1 Codex",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 400000,
+		maxTokens: 128000,
+	};
+	const context = normalizeContext({ messages: [{ role: "user", content: "Say hello", timestamp: 1 }] });
+	const firstChunk = `${[
+		{
+			type: "response.output_item.added",
+			output_index: 0,
+			item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+		},
+		{ type: "response.content_part.added", output_index: 0, part: { type: "output_text", text: "" } },
+		{ type: "response.output_text.delta", output_index: 0, delta: "one" },
+	]
+		.map((event) => `data: ${JSON.stringify(event)}`)
+		.join("\n\n")}\n\n`;
+	const doneEvent = { type: "response.done", response: { status: "completed", end_turn: false } };
+	const doneChunk = `data: ${JSON.stringify(doneEvent)}\n\n`;
+
+	function bufferedSSE(...chunks: string[]): Response {
+		const encoder = new TextEncoder();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+				controller.close();
+			},
+		});
+		return new Response(body, { headers: { "content-type": "text/event-stream" } });
+	}
+
+	it.each(["consumer", "provider callback"])(
+		"stops buffered codex events and provider callbacks after %s abort",
+		async (abortAt) => {
+			const response = bufferedSSE(
+				firstChunk,
+				`data: ${JSON.stringify({ type: "response.output_text.delta", output_index: 0, delta: "two" })}\n\n${doneChunk}`,
+			);
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => response),
+			);
+			const controller = new AbortController();
+			const onProviderStreamEvent = vi.fn(async (event: unknown) => {
+				if (abortAt === "provider callback" && (event as { delta?: string }).delta === "one") {
+					await Promise.resolve();
+					controller.abort();
+				}
+			});
+			const resultStream = streamOpenAICodexResponses(model, context, {
+				apiKey: mockToken(),
+				transport: "sse",
+				signal: controller.signal,
+				onProviderStreamEvent,
+			});
+			const events: string[] = [];
+			for await (const event of resultStream) {
+				events.push(event.type === "text_delta" ? `text_delta:${event.delta}` : event.type);
+				if (abortAt === "consumer" && event.type === "text_delta" && event.delta === "one") controller.abort();
+			}
+			const result = await resultStream.result();
+			expect(result.stopReason).toBe("aborted");
+			expect(result.errorMessage).toBe("Request was aborted");
+			expect(events.includes("text_delta:one")).toBe(abortAt === "consumer");
+			expect.soft(events).not.toContain("text_delta:two");
+			expect
+				.soft(onProviderStreamEvent)
+				.not.toHaveBeenCalledWith(
+					expect.objectContaining({ type: "response.output_text.delta", delta: "two" }),
+					model,
+				);
+			expect(result.content.find((content) => content.type === "text")?.text).toBe(
+				abortAt === "consumer" ? "one" : "",
+			);
+		},
+	);
+
+	it("completes response.done in the same buffered chunk before abort", async () => {
+		const response = bufferedSSE(firstChunk + doneChunk);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => response),
+		);
+		const controller = new AbortController();
+		const onProviderStreamEvent = vi.fn();
+		const resultStream = streamOpenAICodexResponses(model, context, {
+			apiKey: mockToken(),
+			transport: "sse",
+			signal: controller.signal,
+			onProviderStreamEvent,
+		});
+		for await (const event of resultStream) {
+			if (event.type === "done") controller.abort();
+		}
+		const result = await resultStream.result();
+		expect(controller.signal.aborted).toBe(true);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.endTurn).toBe(false);
+		expect(onProviderStreamEvent).toHaveBeenCalledWith(doneEvent, model);
+	});
+
+	it("rejects abort during response.done callback without terminal mutation", async () => {
+		const response = bufferedSSE(firstChunk + doneChunk);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => response),
+		);
+		const controller = new AbortController();
+		const resultStream = streamOpenAICodexResponses(model, context, {
+			apiKey: mockToken(),
+			transport: "sse",
+			signal: controller.signal,
+			onProviderStreamEvent: async (event) => {
+				if ((event as { type?: string }).type === "response.done") {
+					await Promise.resolve();
+					controller.abort();
+				}
+			},
+		});
+		const result = await resultStream.result();
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("Request was aborted");
+		expect(result.endTurn).toBeUndefined();
+	});
+
+	it("ignores response.done arriving after abort", async () => {
+		const controller = new AbortController();
+		const encoder = new TextEncoder();
+		let doneArrivedAfterAbort = false;
+		const body = new ReadableStream<Uint8Array>({
+			start(bodyController) {
+				bodyController.enqueue(encoder.encode(firstChunk));
+				controller.signal.addEventListener(
+					"abort",
+					() => {
+						doneArrivedAfterAbort = controller.signal.aborted;
+						bodyController.enqueue(encoder.encode(doneChunk));
+						bodyController.close();
+					},
+					{ once: true },
+				);
+			},
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(body, { headers: { "content-type": "text/event-stream" } })),
+		);
+		const onProviderStreamEvent = vi.fn();
+		const resultStream = streamOpenAICodexResponses(model, context, {
+			apiKey: mockToken(),
+			transport: "sse",
+			signal: controller.signal,
+			onProviderStreamEvent,
+		});
+		for await (const event of resultStream) {
+			if (event.type === "text_delta" && event.delta === "one") controller.abort();
+		}
+		const result = await resultStream.result();
+		expect(doneArrivedAfterAbort).toBe(true);
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("Request was aborted");
+		expect(result.endTurn).toBeUndefined();
+		expect(onProviderStreamEvent).not.toHaveBeenCalledWith(doneEvent, model);
+	});
+
+	it.each(["before", "during"])(
+		"rejects shared processing abort %s provider callback without mutation",
+		async (abortAt) => {
+			const controller = new AbortController();
+			if (abortAt === "before") controller.abort();
+			const onProviderStreamEvent = vi.fn(async () => {
+				await Promise.resolve();
+				controller.abort();
+			});
+			const event: ResponseStreamEvent = {
+				type: "response.output_item.added",
+				sequence_number: 0,
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+			};
+			const events = (async function* () {
+				yield event;
+			})();
+			const output: AssistantMessage = {
+				role: "assistant",
+				content: [],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "pending",
+				timestamp: 1,
+			};
+			const stream = new AssistantMessageEventStream();
+			const push = vi.spyOn(stream, "push");
+			await expect(
+				processResponsesStream(events, output, stream, model, {
+					signal: controller.signal,
+					onProviderStreamEvent,
+				}),
+			).rejects.toThrow(/^Request was aborted$/);
+			expect(onProviderStreamEvent).toHaveBeenCalledTimes(abortAt === "before" ? 0 : 1);
+			expect(output.content).toEqual([]);
+			expect(push).not.toHaveBeenCalled();
+		},
+	);
 });

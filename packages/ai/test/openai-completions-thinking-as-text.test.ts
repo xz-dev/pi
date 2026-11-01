@@ -12,6 +12,7 @@ import type {
 	Usage,
 } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { jsonHttpRequestBody } from "./utils/request-body.ts";
 
 const emptyUsage: Usage = {
 	input: 0,
@@ -160,11 +161,7 @@ describe("openai-completions thinking-as-text replay", () => {
 				return;
 			}
 
-			let body = "";
-			for await (const chunk of req) {
-				body += chunk.toString();
-			}
-			requestBodies.push(JSON.parse(body) as ChatCompletionsRequestBody);
+			requestBodies.push((await jsonHttpRequestBody(req)) as unknown as ChatCompletionsRequestBody);
 
 			res.writeHead(200, {
 				"content-type": "text/event-stream",
