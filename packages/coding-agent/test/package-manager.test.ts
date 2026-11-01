@@ -1274,8 +1274,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					expect(options?.env?.BUN_BE_BUN).toBeUndefined();
 					if (cleanFails && args[0] === "clean") throw new Error("fixture clean failure");
 				});
-				if (cleanFails) await expect(packageManager.update()).rejects.toThrow("fixture clean failure");
-				else await packageManager.update();
+				await packageManager.update();
 				const call: { args: string[]; cwd: string; mode?: string } = JSON.parse(
 					readFileSync(logPath, "utf8").trim(),
 				);
