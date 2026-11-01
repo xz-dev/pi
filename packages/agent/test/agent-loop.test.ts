@@ -585,7 +585,7 @@ describe("agentLoop with AgentMessage", () => {
 	] as const)("should report a $name beforeToolCall failure with canonical text", async ({ abort, expected }) => {
 		const controller = new AbortController();
 		let executions = 0;
-		const toolSchema = Type.Object({});
+		const toolSchema = obj({});
 		const tool: AgentTool<typeof toolSchema> = {
 			name: "echo",
 			label: "Echo",
