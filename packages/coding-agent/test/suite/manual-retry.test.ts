@@ -10,7 +10,7 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createManualRetryRecoveryCue } from "../../src/core/messages.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "./harness.ts";
 
 const SYNTHETIC_RESULT_PATTERN =
@@ -445,7 +445,7 @@ describe("manual /retry continuation", () => {
 
 		expect(getAssistantTexts(created)).toEqual(["continued"]);
 		expect(getUserTexts(created)).toEqual(["retry once"]);
-		const persisted = readFileSync(created.sessionManager.getSessionFile()!, "utf8");
+		const persisted = JSON.stringify(loadEntriesFromFile(created.sessionManager.getSessionFile()!));
 		expect(persisted).not.toContain("manualRetryRecovery");
 		expect(persisted).not.toContain("The previous assistant response was interrupted");
 	});
@@ -684,6 +684,7 @@ describe("manual /retry continuation", () => {
 		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
 		const file = created.sessionManager.getSessionFile()!;
 		const beforeFile = readFileSync(file);
+		const beforeRecords = loadEntriesFromFile(file);
 		const beforeEntries = structuredClone(created.sessionManager.getEntries());
 		const beforeGeneration = created.sessionManager.getGeneration();
 		created.sessionManager.continuationFileWriter = () => {
@@ -697,17 +698,14 @@ describe("manual /retry continuation", () => {
 		// pre-existing byte and the entire conversation tree unchanged.
 		const afterFile = readFileSync(file);
 		expect(afterFile.subarray(0, beforeFile.length)).toEqual(beforeFile);
-		const runRecords = afterFile
-			.subarray(beforeFile.length)
-			.toString()
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line));
-		expect(runRecords.map((entry) => [entry.type, entry.state])).toEqual([
+		const runRecords = loadEntriesFromFile(file).slice(beforeRecords.length);
+		expect(runRecords.every((entry) => entry.type === "run_state")).toBe(true);
+		const runs = runRecords.filter((entry) => entry.type === "run_state");
+		expect(runs.map((entry) => [entry.type, entry.state])).toEqual([
 			["run_state", "started"],
 			["run_state", "finished"],
 		]);
-		expect(runRecords[1].runId).toBe(runRecords[0].runId);
+		expect(runs[1].runId).toBe(runs[0].runId);
 		expect(created.sessionManager.getEntries()).toEqual(beforeEntries);
 		expect(created.sessionManager.getGeneration()).toBe(beforeGeneration);
 		expect(created.sessionManager.getLeafId()).toBe(failureId);
