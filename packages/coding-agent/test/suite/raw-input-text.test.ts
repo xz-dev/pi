@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -8,7 +8,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/index.ts";
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { getRawInputText } from "../../src/core/raw-input-text.ts";
-import { type SessionEntry, SessionManager, type SessionMessageEntry } from "../../src/core/session-manager.ts";
+import {
+	loadEntriesFromFile,
+	parseSessionEntries,
+	type SessionEntry,
+	SessionManager,
+	type SessionMessageEntry,
+} from "../../src/core/session-manager.ts";
+import { encodeSessionTransaction, summarizeSession } from "../../src/core/session-storage.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { getSubmittedCommandText } from "../../src/modes/interactive/input-presentation.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
@@ -178,52 +185,60 @@ describe("__raw_inputText session metadata", () => {
 		for (const entry of entries) expect("__raw_inputText" in entry).toBe(false);
 	});
 
-	it("round-trips through JSONL and omits the key when absent", async () => {
+	it.each([false, true])(
+		"round-trips stored metadata and omits the key when absent (compressed=%s)",
+		async (compressSessions) => {
+			const harness = await setup({
+				sessionManagerFactory: (dir) =>
+					SessionManager.create(dir, dir, { id: "raw-input-roundtrip", compressSessions }),
+			});
+			harness.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b")]);
+			await harness.session.prompt("/review src/x.ts", { source: "interactive" });
+			await harness.session.prompt("plain", { source: "interactive" });
+
+			const file = harness.sessionManager.getSessionFile()!;
+			const stored = loadEntriesFromFile(file);
+			const raw = stored.filter((entry) => "__raw_inputText" in entry);
+			expect(raw).toHaveLength(1);
+			expect(raw[0]).toMatchObject({ __raw_inputText: "/review src/x.ts" });
+			expect(JSON.stringify(stored)).not.toMatch(/"__raw_inputText":(null|"")/);
+
+			const reopened = SessionManager.open(file, harness.tempDir);
+			const [template, plain] = userEntries(reopened.getEntries());
+			expect(template?.__raw_inputText).toBe("/review src/x.ts");
+			expect(getRawInputText(template!.message)).toBe("/review src/x.ts");
+			expect(getMessageText(template!.message)).toBe("Review this code: src/x.ts");
+			expect(getRawInputText(plain!.message)).toBeUndefined();
+
+			// Fork copies keep the field.
+			const forkFile = reopened.createBranchedSession(template!.id);
+			const forked = SessionManager.open(forkFile!, harness.tempDir);
+			expect(userEntries(forked.getEntries())[0]?.__raw_inputText).toBe("/review src/x.ts");
+		},
+	);
+
+	it.each([false, true])("ignores invalid stored metadata (compressed=%s)", async (compressSessions) => {
 		const harness = await setup({
-			sessionManagerFactory: (dir) => SessionManager.create(dir, dir, { id: "raw-input-roundtrip" }),
-		});
-		harness.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b")]);
-		await harness.session.prompt("/review src/x.ts", { source: "interactive" });
-		await harness.session.prompt("plain", { source: "interactive" });
-
-		const file = harness.sessionManager.getSessionFile()!;
-		const lines = readFileSync(file, "utf8").trim().split("\n");
-		const raw = lines.filter((line) => line.includes("__raw_inputText"));
-		expect(raw).toHaveLength(1);
-		expect(JSON.parse(raw[0]!).__raw_inputText).toBe("/review src/x.ts");
-		expect(lines.join("\n")).not.toMatch(/"__raw_inputText":(null|"")/);
-
-		const reopened = SessionManager.open(file, harness.tempDir);
-		const [template, plain] = userEntries(reopened.getEntries());
-		expect(template?.__raw_inputText).toBe("/review src/x.ts");
-		expect(getRawInputText(template!.message)).toBe("/review src/x.ts");
-		expect(getMessageText(template!.message)).toBe("Review this code: src/x.ts");
-		expect(getRawInputText(plain!.message)).toBeUndefined();
-
-		// Fork copies keep the field.
-		const forkFile = reopened.createBranchedSession(template!.id);
-		const forked = SessionManager.open(forkFile!, harness.tempDir);
-		expect(userEntries(forked.getEntries())[0]?.__raw_inputText).toBe("/review src/x.ts");
-	});
-
-	it("ignores invalid stored metadata", async () => {
-		const harness = await setup({
-			sessionManagerFactory: (dir) => SessionManager.create(dir, dir, { id: "raw-input-invalid" }),
+			sessionManagerFactory: (dir) => SessionManager.create(dir, dir, { id: "raw-input-invalid", compressSessions }),
 		});
 		harness.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b")]);
 		await harness.session.prompt("first", { source: "interactive" });
 		await harness.session.prompt("second", { source: "interactive" });
 		const file = harness.sessionManager.getSessionFile()!;
 		const invalid: unknown[] = [123, ""];
-		const lines = readFileSync(file, "utf8")
-			.trim()
-			.split("\n")
-			.map((line) => {
-				const entry = JSON.parse(line);
-				if (entry.type === "message" && entry.message.role === "user") entry.__raw_inputText = invalid.shift();
-				return JSON.stringify(entry);
-			});
-		writeFileSync(file, `${lines.join("\n")}\n`);
+		const text = `${loadEntriesFromFile(file)
+			.map((entry) =>
+				JSON.stringify(
+					entry.type === "message" && entry.message.role === "user"
+						? { ...entry, __raw_inputText: invalid.shift() }
+						: entry,
+				),
+			)
+			.join("\n")}\n`;
+		writeFileSync(
+			file,
+			compressSessions ? encodeSessionTransaction(text, summarizeSession(parseSessionEntries(text))) : text,
+		);
 
 		const reopened = SessionManager.open(file, harness.tempDir);
 		const messages: AgentMessage[] = userEntries(reopened.getEntries()).map((entry) => entry.message);
