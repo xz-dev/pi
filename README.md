@@ -41,6 +41,7 @@ Features:
 - Custom fail-fast patterns for terminal gateway errors
 - Actual connection and request mode beside Working (`SSE`, `WS/full`, `WS/continuation`, or another reported protocol)
 - Detach long tool calls, keep chatting (`tool_task`)
+- [Session disk compression](docs/downstream-changes.md#session-disk-compression): new sessions use lossless Zstandard; existing files change encoding only through explicit offline maintenance
 - Optional background compaction: keep working while summarizing (`/settings`, off by default)
 - Thinking shown as one preview line (`Ctrl+T` to expand)
 - Smaller input dock when reading fullscreen history

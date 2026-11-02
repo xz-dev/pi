@@ -62,6 +62,7 @@ jobs:
             +refs/heads/patch/cold-start-retry:refs/remotes/origin/patch/cold-start-retry \
             +refs/heads/patch/compaction-boundary-insert:refs/remotes/origin/patch/compaction-boundary-insert \
             +refs/heads/patch/async-compaction:refs/remotes/origin/patch/async-compaction \
+            +refs/heads/patch/session-compression:refs/remotes/origin/patch/session-compression \
             +refs/heads/patch/compact-input-dock:refs/remotes/origin/patch/compact-input-dock \
             +refs/heads/patch/responsive-selectors:refs/remotes/origin/patch/responsive-selectors \
             +refs/heads/patch/thinking-preview:refs/remotes/origin/patch/thinking-preview \
@@ -117,6 +118,7 @@ jobs:
             cold-start-retry \
             compaction-boundary-insert \
             async-compaction \
+            session-compression \
             compact-input-dock \
             responsive-selectors \
             thinking-preview \
@@ -308,6 +310,19 @@ jobs:
               test/interactive-mode-compaction.test.ts \
               test/status-indicator.test.ts \
               test/interactive-tui.test.ts
+          )
+          # Session storage encoding and its retry/compaction publication seams.
+          (
+            cd packages/coding-agent
+            PI_OFFLINE=1 node ../../node_modules/vitest/dist/cli.js --run \
+              test/session-compression.test.ts \
+              test/session-compression-cli.test.ts \
+              test/session-compression-integration.test.ts \
+              test/agent-session-runtime-events.test.ts \
+              test/session-manager \
+              test/suite/manual-retry.test.ts \
+              test/suite/agent-session-background-compaction.test.ts \
+              test/suite/background-compaction-boundaries.test.ts
           )
           # Deterministic origin attribution gates, independent of catalog exclusions.
           (

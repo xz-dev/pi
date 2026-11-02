@@ -500,6 +500,26 @@ test("recovery prerequisites replay as ordered ranges while presentation remains
 	}
 });
 
+test("session compression applies only its async-compaction range in the next step", () => {
+	const fixture = buildFixture();
+	const background = fixture.file("storage.txt", "usage-aware publication\n", "background", "patch/async-compaction");
+	const compression = fixture.file("storage.txt", "usage-aware publication\ncompressed publication\n", "compression", "patch/session-compression", "patch/async-compaction");
+	const { target } = replay(fixture, [
+		"--upstream", fixture.upstream, "--ci", fixture.ci,
+		"--patch", `async-compaction=${background}`,
+		"--patch", `session-compression=${compression}`,
+	]);
+	try {
+		assert.equal(readFileSync(join(target, "storage.txt"), "utf8"), "usage-aware publication\ncompressed publication\n");
+		assert.deepEqual(log(target), [
+			"base", "merge ci branch", "merge patch/async-compaction branch",
+			"merge patch/session-compression branch", "record upstream sync inputs (diagnostic subset)",
+		]);
+	} finally {
+		cleanup(fixture, target);
+	}
+});
+
 test("upstream websocket declarations support independent consumers without duplicate repair input", () => {
 	const fixture = buildFixture();
 	const deps = JSON.stringify({ devDependencies: { "@types/ws": "8.18.2", ws: "8.21.0" } });
@@ -563,6 +583,7 @@ for (const [ancestor, descendant] of [
 	["cold-start-retry", "compaction-boundary-insert"],
 	["compaction-boundary-insert", "message-origin"],
 	["compaction-boundary-insert", "async-compaction"],
+	["async-compaction", "session-compression"],
 	["message-origin", "collapse-expanded-input"],
 	["collapse-expanded-input", "prompt-invocation-cards"],
 	["retry-non-retryable-patterns", "ws-cached-empty-delta"],
@@ -658,7 +679,13 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 40);
+	assert.equal(order.length, 41);
+	assert.equal(order[order.indexOf("async-compaction") + 1], "session-compression");
+	assert.ok(sync.includes("refs/heads/patch/session-compression:refs/remotes/origin/patch/session-compression"));
+	assert.ok(sync.includes("            session-compression \\\n"));
+	for (const file of ["session-compression.test.ts", "session-compression-cli.test.ts", "session-compression-integration.test.ts", "agent-session-runtime-events.test.ts"]) {
+		assert.ok(sync.includes(`test/${file}`));
+	}
 	const downstreamChanges = readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8");
 	assert.equal(order[order.indexOf("single-executable") + 1], "process-ownership");
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));

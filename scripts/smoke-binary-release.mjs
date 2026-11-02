@@ -5,6 +5,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { cpus, platform, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { bunTarget, EMULATED_SMOKE_SLOWDOWN, smokeLimits } from "./lib/bun-targets.mjs";
+import { smokeSessionCompression } from "./lib/session-compression-smoke.mjs";
 import { cpuFeatures } from "./lib/cpu-features.mjs";
 import { collectMacosCrashReports } from "./lib/macos-crash-reports.mjs";
 import { operatingSystemArchitecture } from "./lib/runtime-architecture.mjs";
@@ -123,6 +124,8 @@ try {
 	if (version.stdout.trim() !== expectedVersion) throw new Error(`version mismatch: ${version.stdout.trim()}`);
 	const help = run("help", executable, ["--help"], { env, maxMs: SMOKE_LIMITS.helpMs });
 	if (!help.stdout.includes("Usage") && !help.stdout.includes("pi")) throw new Error("help output was not recognized");
+	// Separate mandatory migration probe; help timing and command inventory stay unchanged.
+	commands.find(({ name }) => name === "help").sessionCompression = smokeSessionCompression(executable, { env, timeoutMs: 30_000 * hangGuardScale });
 	const listModels = run("list-models", executable, ["--list-models"], { env, maxMs: SMOKE_LIMITS.listModelsMs });
 	if (!listModels.stdout.trim()) throw new Error("list-models produced no output");
 	// The owner probe provisions a standard CI user when this host token is privileged.

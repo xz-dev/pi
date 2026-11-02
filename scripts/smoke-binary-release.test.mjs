@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { sessionCompressionCliFixture } from "./fixtures/session-compression-cli.mjs";
+import { assertSessionCompressionEvidence } from "./lib/session-compression-smoke.mjs";
 import { bunTarget } from "./lib/bun-targets.mjs";
 import { assertOwnerLifecycle, smokeOwnerLifecycle } from "./smoke-owner-lifecycle.mjs";
 
@@ -240,6 +242,7 @@ register("./os-hooks.mjs", { parentURL: import.meta.url, data: { osSource } });
 });
 
 test("external TUI evidence contributes the authoritative pseudoterminal command", () => {
+	const compression = sessionCompressionCliFixture();
 	const root = mkdtempSync(join(tmpdir(), "pi-external-tui-"));
 	try {
 		const stage = join(root, "stage");
@@ -263,6 +266,7 @@ case "$1" in
   --version) echo 1.2.3;;
   --help) echo Usage: pi;;
   --list-models) echo model;;
+  --enable-compress-sessions=*|--session-dir) exec "${process.execPath}" "${compression.path}" normal "$@";;
   -p) exec "${process.execPath}" "${driver}" "$@";;
   *) exit 0;;
 esac
@@ -286,10 +290,11 @@ esac
 		assert.equal(record.clipboard.loadedAndCalled, true);
 		assert.equal(record.clipboard.textRead, true);
 		assert.equal(record.clipboard.imageRead, true);
+		assertSessionCompressionEvidence(record.commands.find(({ name }) => name === "help").sessionCompression);
 		assert.equal(record.ownerLifecycle.status, "passed");
 		assertOwnerLifecycle(record.ownerLifecycle, "linux");
 		assert.equal(record.timingsMs.interactive, 37);
-	} finally { rmSync(root, { recursive: true, force: true }); }
+	} finally { rmSync(root, { recursive: true, force: true }); rmSync(compression.root, { recursive: true, force: true }); }
 });
 
 test("owner lifecycle measures immediate normal/kill containment and same-user peer isolation", { skip: process.platform !== "linux" || process.getuid?.() === 0 }, async () => {
@@ -340,4 +345,25 @@ test("owner lifecycle acceptance rejects elevated identity, missing rows, peer l
 	assert.throws(() => assertOwnerLifecycle(evidence, "darwin"), /inventory/);
 	evidence.rows.push({ ...evidence.rows[0], name: "darwin-fast-escape", aliveAfter: true, status: "known-limitation", limitation: "unseen setsid reparent before sweep" });
 	assertOwnerLifecycle(evidence, "darwin");
+});
+
+test("binary smoke rejects successful help without actual session compression", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-smoke-no-compression-"));
+	try {
+		const pi = join(root, `pi-${target}`);
+		writeFileSync(pi, `#!/bin/sh
+if [ -n "$BUN_JSC_verboseDiskCache" ]; then echo "[Disk Cache] Cache hit for sourceCode" >&2; fi
+case "$1" in
+ --version) echo 1.2.3;;
+ --help) echo Usage: pi;;
+ *) exit 0;;
+esac
+`);
+		chmodSync(pi, 0o755);
+		const recordPath = join(root, "record.json");
+		const result = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-binary-release.mjs"), pi, target, "1.2.3", recordPath], { encoding: "utf8" });
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /compression did not change storage encoding/);
+		assert.equal(existsSync(recordPath), false);
+	} finally { rmSync(root, { recursive: true, force: true }); }
 });

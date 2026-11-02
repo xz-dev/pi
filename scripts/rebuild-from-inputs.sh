@@ -131,6 +131,7 @@ PATCH_ORDER=(
 	cold-start-retry
 	compaction-boundary-insert
 	async-compaction
+	session-compression
 	compact-input-dock
 	responsive-selectors
 	thinking-preview
@@ -173,6 +174,7 @@ CHAIN_EDGES=(
 	startup-submit-readiness:cold-start-retry
 	cold-start-retry:compaction-boundary-insert
 	compaction-boundary-insert:async-compaction
+	async-compaction:session-compression
 	compaction-boundary-insert:message-origin
 	message-origin:collapse-expanded-input
 	collapse-expanded-input:prompt-invocation-cards

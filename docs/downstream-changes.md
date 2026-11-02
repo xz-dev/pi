@@ -115,6 +115,19 @@ Losslessly reduce model-upload bytes without changing JSON or image data. HTTP s
 - Companion plugin: [Host requirements and bridge integration](https://github.com/xz-dev/openai-api-pi-extension/blob/main/docs/request-compression.md).
 - Patch branch: [`patch/request-compression`](https://github.com/xz-dev/pi/tree/patch/request-compression)
 
+## Session disk compression
+
+New sessions use lossless Zstandard storage by default (`enableCompressSessions: true`). Opening, resuming or extending an existing session preserves its encoding; this is disk compression, not model-context compaction.
+
+- Use case: Keep full session history with smaller cold files while retaining browsing, full-text search, branching, retry and export.
+- Maintenance: `pi --enable-compress-sessions=true` compresses existing plain sessions and enables the global new-session default; `pi --enable-compress-sessions=false` reverses it. Commands report results and exit before model or extension startup. The global preference is saved only after the batch succeeds; completed files are reported if a later file fails.
+- Scope: Without `--session-dir`, maintenance processes project directories under the default sessions root. `--session-dir <dir>` limits it to that flat directory, but still saves the global preference.
+- Safety: Close every other writer before migration. There is no session file lock. Replacements are atomic per file, not across the batch; errors preserve the affected source. Ordinary startup only warns on mixed formats.
+- Storage: Canonical `.jsonl` paths stay unchanged; bytes identify compression, and existing `.jsonl.zst` paths also remain readable. Bounded browsing metadata stays plaintext, without a duplicate plaintext transcript/search corpus. Full-text text loads on demand. Compression is not encryption.
+- Limits: Active append transactions can temporarily be larger than plain JSONL, especially after a crash; clean disposal best-effort consolidates already-compressed files. Indexed browsing still reads/hashes compressed bytes, while unindexed zstd and incomplete-tail validation may decode history. No physical-disk saving is guaranteed, including on compressed filesystems.
+- Details: [Session storage and commands](../packages/coding-agent/docs/sessions.md#disk-compression), [storage encoding](../packages/coding-agent/docs/session-format.md#storage-encoding). Direct JSONL consumers must use a plain export or a compression-aware reader.
+- Patch branch: [`patch/session-compression`](https://github.com/xz-dev/pi/tree/patch/session-compression)
+
 ## Process ownership
 
 Pi owns every subprocess tree it starts and stops it when the task or Pi ends, as an ordinary user, with no root, cgroups or setup.
