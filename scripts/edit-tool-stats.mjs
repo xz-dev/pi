@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 
-import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline";
+import { readSessionLines } from "./session-reader.ts";
 
 const DEFAULT_SESSIONS_DIR = path.join(homedir(), ".pi/agent/sessions");
 const DEFAULT_ACTIVE_EDIT_EXTENSION_PATH = path.join(homedir(), ".pi/agent/extensions/edit.ts");
@@ -121,7 +120,7 @@ async function* walkJsonlFiles(dir) {
 		const fullPath = path.join(dir, entry.name);
 		if (entry.isDirectory()) {
 			yield* walkJsonlFiles(fullPath);
-		} else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+		} else if (entry.isFile() && /\.jsonl(?:\.zst)?$/.test(entry.name)) {
 			yield fullPath;
 		}
 	}
@@ -718,10 +717,7 @@ async function scanSessions(sessionsDir, since) {
 		meta.sessionFilesIncluded++;
 		const pending = new Map();
 		let fileHadEditCall = false;
-		const input = createReadStream(sessionFile, { encoding: "utf8" });
-		const rl = createInterface({ input, crlfDelay: Infinity });
-
-		for await (const line of rl) {
+		for await (const line of readSessionLines(sessionFile)) {
 			if (!line.trim()) continue;
 			let entry;
 			try {
