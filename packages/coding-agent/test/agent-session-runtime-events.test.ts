@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -12,6 +12,7 @@ import {
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { isCompressedSession, readCompressedSession } from "../src/core/session-storage.ts";
 import type {
 	ExtensionFactory,
 	SessionBeforeForkEvent,
@@ -97,7 +98,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const runtimeHost = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir),
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
 		});
 		await runtimeHost.session.bindExtensions({});
 
@@ -155,6 +156,81 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			{ type: "session_start", reason: "resume", previousSessionFile: secondSessionFile },
 		]);
 	});
+
+	it("uses the saved default for new and forked runtimes without converting existing sessions", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		runtimeHost.services.settingsManager.setEnableCompressSessions(false);
+		await runtimeHost.services.settingsManager.flush();
+		await runtimeHost.newSession();
+		const entry = runtimeHost.session.sessionManager.appendMessage({
+			role: "user",
+			content: "plain new session",
+			timestamp: 1,
+		});
+		const plainPath = runtimeHost.session.sessionFile!;
+		const original = readFileSync(plainPath);
+		expect(isCompressedSession(plainPath)).toBe(false);
+		await runtimeHost.fork(entry, { position: "at" });
+		expect(isCompressedSession(runtimeHost.session.sessionFile!)).toBe(false);
+		runtimeHost.services.settingsManager.setEnableCompressSessions(true);
+		await runtimeHost.services.settingsManager.flush();
+		await runtimeHost.newSession();
+		runtimeHost.session.sessionManager.appendMessage({
+			role: "user",
+			content: "compressed new session",
+			timestamp: 2,
+		});
+		expect(isCompressedSession(runtimeHost.session.sessionFile!)).toBe(true);
+		expect(readFileSync(plainPath)).toEqual(original);
+	});
+
+	it.each(["resume", "import"])("can append after %s of the current compressed session", async (action) => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const manager = runtimeHost.session.sessionManager;
+		manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		const path = runtimeHost.session.sessionFile!;
+		expect(readCompressedSession(path).transactions).toBeGreaterThan(1);
+		const override = join(runtimeHost.cwd, "override");
+		mkdirSync(override);
+		const result =
+			action === "resume"
+				? await runtimeHost.switchSession(path, { cwdOverride: override })
+				: await runtimeHost.importFromJsonl(path, override);
+		expect(result).toEqual({ cancelled: false });
+		expect(runtimeHost.cwd).toBe(override);
+		runtimeHost.session.sessionManager.appendMessage({ role: "user", content: "third", timestamp: 3 });
+		expect(
+			SessionManager.open(path)
+				.getEntries()
+				.filter((entry) => entry.type === "message")
+				.map((entry) => entry.message),
+		).toMatchObject(["first", "second", "third"].map((content) => ({ role: "user", content })));
+	});
+
+	// Windows symlink creation requires permissions not guaranteed by the test host.
+	it.skipIf(process.platform === "win32")(
+		"refreshes self-resume and same-file import through a session alias",
+		async () => {
+			const { runtimeHost } = await createRuntimeHost(() => {});
+			const manager = runtimeHost.session.sessionManager;
+			manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+			manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
+			const path = runtimeHost.session.sessionFile!;
+			const alias = join(manager.getSessionDir(), "alias.jsonl");
+			symlinkSync(path, alias);
+			await runtimeHost.switchSession(alias);
+			runtimeHost.session.sessionManager.appendMessage({ role: "user", content: "third", timestamp: 3 });
+			await runtimeHost.importFromJsonl(alias);
+			runtimeHost.session.sessionManager.appendMessage({ role: "user", content: "fourth", timestamp: 4 });
+			expect(
+				SessionManager.open(alias)
+					.getEntries()
+					.filter((entry) => entry.type === "message")
+					.map((entry) => entry.message),
+			).toMatchObject(["first", "second", "third", "fourth"].map((content) => ({ role: "user", content })));
+		},
+	);
 
 	it("honors session_before_switch cancellation", async () => {
 		const events: RecordedSessionEvent[] = [];

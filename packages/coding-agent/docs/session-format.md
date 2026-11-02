@@ -1,6 +1,6 @@
 # Session File Format
 
-Sessions are stored as JSONL (JSON Lines) files. Each line is a JSON object with a `type` field. Session entries form a tree structure via `id`/`parentId` fields, enabling in-place branching without creating new files.
+Session history is logically JSONL (JSON Lines): each record is a JSON object with a `type` field. New native files use lossless Zstandard storage by default; existing plain JSONL remains supported. Pi detects the storage encoding by bytes and retains the `.jsonl` path in both cases. Session entries form a tree structure via `id`/`parentId` fields, enabling in-place branching without creating new files.
 
 For programmatic creation, persistence, and tree navigation, see the [`SessionManager` API](sdk.md#sessionmanager-api).
 
@@ -12,6 +12,16 @@ For programmatic creation, persistence, and tree navigation, see the [`SessionMa
 ```
 
 By default, `<session-id>` is a UUID. Callers can supply a custom ID through the SDK or `--session-id`. For `<path>`, Pi removes the leading path separator and replaces `/`, `\\`, and `:` with `-`.
+
+## Storage Encoding
+
+Compression does not change the session version or logical entries. Pi's compressed representation is a sequence of standard Zstandard skippable metadata frames and independently compressed JSONL payload frames. Metadata contains a bounded browsing summary, explicit payload length and integrity hashes. A standard Zstandard decoder reconstructs the JSONL history while skipping metadata.
+
+Complete transactions are validated when loading history. An incomplete final transaction after a valid prefix does not erase that prefix: readers report it without repairing the source, and the next write atomically repairs the tail. Complete invalid metadata or payloads fail. Clean disposal can atomically consolidate already-compressed transactions without changing IDs, branches or activity timestamps.
+
+No whole-transcript plaintext search index, shared dictionary or cross-session archive is stored. `SessionInfo.firstMessagePreview` is available for browsing without loading the full first message; `firstMessage` and `allMessagesText` retain complete text on demand. The metadata is plaintext and is not a confidentiality boundary.
+
+See [Disk compression](sessions.md#disk-compression) for the default, explicit-only migration commands, scope, offline requirement and third-party parser implications. Plain JSONL exports are unchanged.
 
 ## Deleting Sessions
 
@@ -262,6 +272,8 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 The compaction summary replaces entries before `firstKeptEntryId`. Pre-compaction system messages are folded into the complete checkpoint rather than replayed from the retained range. Retained non-system entries and all entries after the compaction remain available to the LLM.
 
 ## Parsing Example
+
+This raw-reader example applies to **plain JSONL exports**, not compressed native files. Use `SessionManager.open()` for either native storage encoding.
 
 ```typescript
 import { readFileSync } from "fs";

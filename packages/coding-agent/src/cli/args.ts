@@ -28,6 +28,7 @@ export interface Args {
 	sessionId?: string;
 	fork?: string;
 	sessionDir?: string;
+	compressSessions?: boolean;
 	models?: string[];
 	tools?: string[];
 	excludeTools?: string[];
@@ -173,6 +174,10 @@ export function parseArgs(args: string[]): Args {
 			} else {
 				result.diagnostics.push({ type: "error", message: "--name requires a value" });
 			}
+		} else if (arg === "--enable-compress-sessions" || arg.startsWith("--enable-compress-sessions=")) {
+			const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[++i];
+			if (value === "true" || value === "false") result.compressSessions = value === "true";
+			else result.diagnostics.push({ type: "error", message: "--enable-compress-sessions requires true or false" });
 		} else if (arg === "--no-session") {
 			result.noSession = true;
 		} else if (arg === "--session" && i + 1 < args.length) {
@@ -362,6 +367,8 @@ ${chalk.bold("Options:")}
   --fork <path|id>               Fork a session by file path or full/partial ID into the current directory
   --session-dir <dir>            Directory for session storage and lookup (overrides ${ENV_SESSION_DIR} and the sessionDir setting)
   --agent-dir <dir>              Config directory for settings, auth, and resources (overrides ${ENV_AGENT_DIR})
+  --enable-compress-sessions=true|false
+                                 Offline-only: migrate sessions, save global default, and exit
   --no-session                   Don't save session (ephemeral)
   --name, -n <name>              Set session display name
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
