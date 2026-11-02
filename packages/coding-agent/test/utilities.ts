@@ -21,7 +21,7 @@ import type {
 } from "../src/core/extensions/index.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { loadEntriesFromFile, SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createCodingTools } from "../src/index.ts";
 
@@ -157,13 +157,7 @@ export function assistantMsg(text: string) {
  * message entries, otherwise the entry type (e.g. "session", "model_change").
  */
 export function readSessionFileRoles(file: string): string[] {
-	return readFileSync(file, "utf-8")
-		.trim()
-		.split("\n")
-		.map((line) => {
-			const record = JSON.parse(line);
-			return record.message?.role ?? record.type;
-		});
+	return loadEntriesFromFile(file).map((record) => (record.type === "message" ? record.message.role : record.type));
 }
 
 /**
