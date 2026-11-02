@@ -19,7 +19,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 		// Note: codex models only support the responses API, not chat completions
 		it("should work with openai-responses", async () => {
 			const model = getModel("openai", "gpt-5.5");
-			const s = stream(model, makeContext(), { reasoningEffort: "xhigh" });
+			const s = stream(model, makeContext(), { reasoningEffort: "xhigh", transport: "sse" });
 			let hasThinking = false;
 
 			for await (const event of s) {
@@ -38,7 +38,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 	describe("gpt-5-mini (does not support xhigh)", () => {
 		it("should error with openai-responses when using xhigh", async () => {
 			const model = getModel("openai", "gpt-5-mini");
-			const s = stream(model, makeContext(), { reasoningEffort: "xhigh" });
+			const s = stream(model, makeContext(), { reasoningEffort: "xhigh", transport: "sse" });
 
 			for await (const _ of s) {
 				// drain events
@@ -56,7 +56,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 				...baseModel,
 				api: "openai-completions",
 			};
-			const s = stream(model, makeContext(), { reasoningEffort: "xhigh" });
+			const s = stream(model, makeContext(), { reasoningEffort: "xhigh", transport: "sse" });
 
 			for await (const _ of s) {
 				// drain events
