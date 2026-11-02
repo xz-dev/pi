@@ -1,6 +1,6 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, parse } from "node:path";
-import { pathsEqual, resolvePath } from "../utils/paths.ts";
+import { getFileRevision, pathsEqual, resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
 import type {
@@ -164,7 +164,9 @@ export class AgentSessionRuntime {
 		return { cancelled: result?.cancel === true };
 	}
 
-	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
+	private async teardownCurrent(reason: SessionShutdownEvent["reason"], target: SessionManager): Promise<void> {
+		const targetSessionFile = target.getSessionFile();
+		const revision = targetSessionFile ? getFileRevision(targetSessionFile) : undefined;
 		// Settle any active response first so the aborted turn (including tool
 		// results) is persisted to the outgoing session before it is replaced.
 		await this.session.abort();
@@ -175,6 +177,10 @@ export class AgentSessionRuntime {
 		});
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
+		// Disposal can consolidate a file already loaded by the incoming manager, including aliases.
+		if (targetSessionFile && revision !== getFileRevision(targetSessionFile)) {
+			target.setSessionFile(targetSessionFile);
+		}
 	}
 
 	private apply(result: CreateAgentSessionRuntimeResult): void {
@@ -209,7 +215,7 @@ export class AgentSessionRuntime {
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
-		await this.teardownCurrent("resume", sessionManager.getSessionFile());
+		await this.teardownCurrent("resume", sessionManager);
 		this.apply(
 			await this.createRuntime({
 				cwd: sessionManager.getCwd(),
@@ -242,7 +248,7 @@ export class AgentSessionRuntime {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
 
-		await this.teardownCurrent("new", sessionManager.getSessionFile());
+		await this.teardownCurrent("new", sessionManager);
 		this.apply(
 			await this.createRuntime({
 				cwd: this.cwd,
@@ -296,7 +302,7 @@ export class AgentSessionRuntime {
 			if (!targetLeafId) {
 				const sessionManager = SessionManager.create(this.cwd, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
-				await this.teardownCurrent("fork", sessionManager.getSessionFile());
+				await this.teardownCurrent("fork", sessionManager);
 				this.apply(
 					await this.createRuntime({
 						cwd: this.cwd,
@@ -313,11 +319,12 @@ export class AgentSessionRuntime {
 				throw new Error("This session has not been saved yet. Send a message before cloning or forking it.");
 			}
 			const sessionManager = SessionManager.open(currentSessionFile, sessionDir);
+			sessionManager.setCompressionEnabledForNewSessions(this.services.settingsManager.getEnableCompressSessions());
 			const forkedSessionPath = sessionManager.createBranchedSession(targetLeafId);
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
 			}
-			await this.teardownCurrent("fork", sessionManager.getSessionFile());
+			await this.teardownCurrent("fork", sessionManager);
 			this.apply(
 				await this.createRuntime({
 					cwd: sessionManager.getCwd(),
@@ -331,7 +338,7 @@ export class AgentSessionRuntime {
 		}
 
 		const sessionManager = this.session.sessionManager;
-		await this.teardownCurrent("fork", sessionManager.getSessionFile());
+		await this.teardownCurrent("fork", sessionManager);
 		if (!targetLeafId) {
 			sessionManager.newSession({ parentSession: previousSessionFile });
 		} else {
@@ -388,7 +395,7 @@ export class AgentSessionRuntime {
 
 		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
-		await this.teardownCurrent("resume", sessionManager.getSessionFile());
+		await this.teardownCurrent("resume", sessionManager);
 		this.apply(
 			await this.createRuntime({
 				cwd: sessionManager.getCwd(),
