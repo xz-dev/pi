@@ -36,15 +36,7 @@ import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
-import {
-	APP_NAME,
-	ENV_SESSION_DIR,
-	expandTildePath,
-	getAgentDir,
-	getPackageDir,
-	getSessionsDir,
-	VERSION,
-} from "./config.ts";
+import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
@@ -649,7 +641,6 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
-	resetTimings();
 	// Maintenance must run before auth migrations, package commands, models, or extensions.
 	const maintenanceArgs = parseArgs(args);
 	if (
@@ -668,7 +659,7 @@ export async function main(args: string[], options?: MainOptions) {
 			const settings = SettingsManager.create(process.cwd(), getAgentDir(), { projectTrusted: false });
 			const errors = settings.drainErrors();
 			if (errors.length) throw errors[0].error;
-			const root = maintenanceArgs.sessionDir ? resolvePath(maintenanceArgs.sessionDir) : getSessionsDir();
+			const root = maintenanceArgs.sessionDir ? resolvePath(maintenanceArgs.sessionDir) : undefined;
 			const result = await migrateSessionCompression(
 				root,
 				maintenanceArgs.compressSessions!,
@@ -690,6 +681,7 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 		return;
 	}
+	resetTimings();
 	// Commands and startup selectors can load user-authored themes before runtime creation.
 	setThemeJsonValidator(validateThemeJson);
 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
@@ -822,7 +814,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	if (!parsed.help && parsed.listModels === undefined && !parsed.noSession) {
-		warnMixedSessionCompression(sessionDir ?? getSessionsDir(), sessionDir ? "directory" : "projects");
+		warnMixedSessionCompression(sessionDir, sessionDir ? "directory" : "projects");
 	}
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	sessionManager.setCompressionEnabledForNewSessions(startupSettingsManager.getEnableCompressSessions());

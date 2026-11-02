@@ -1,6 +1,7 @@
 // Explicit offline conversion and read-only storage-format diagnostics.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { getSessionsDir } from "../config.ts";
 import { isSessionFileName, parseSessionEntries, readSessionHeaderForDiscovery } from "./session-manager.ts";
 import {
 	encodeSessionTransaction,
@@ -18,7 +19,10 @@ export interface SessionCompressionResult {
 }
 
 /** Enumerate only the chosen flat directory, or project directories under the default root. */
-export function sessionCompressionFiles(root: string, scope: "directory" | "projects" = "directory"): string[] {
+export function sessionCompressionFiles(
+	root: string = getSessionsDir(),
+	scope: "directory" | "projects" = "directory",
+): string[] {
 	if (!existsSync(root)) return [];
 	const entries = readdirSync(root, { withFileTypes: true });
 	if (scope === "projects")
@@ -32,7 +36,7 @@ export function sessionCompressionFiles(root: string, scope: "directory" | "proj
 
 /** Convert valid sessions atomically per file; report partial success without changing settings. */
 export async function migrateSessionCompression(
-	root: string,
+	root: string | undefined,
 	enabled: boolean,
 	scope: "directory" | "projects" = "directory",
 ): Promise<SessionCompressionResult> {
@@ -69,7 +73,10 @@ export async function migrateSessionCompression(
 }
 
 /** Warn about mixed formats without rewriting files, settings, or protocol stdout. */
-export function warnMixedSessionCompression(root: string, scope: "directory" | "projects" = "directory"): void {
+export function warnMixedSessionCompression(
+	root: string | undefined,
+	scope: "directory" | "projects" = "directory",
+): void {
 	let plain = false;
 	let compressed = false;
 	for (const path of sessionCompressionFiles(root, scope)) {
