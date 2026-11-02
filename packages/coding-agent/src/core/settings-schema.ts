@@ -440,6 +440,13 @@ export const SettingsSchema = Type.Object(
 		markdown: Type.Optional(MarkdownSettingsSchema),
 		warnings: Type.Optional(WarningSettingsSchema),
 		codemode: Type.Optional(CodemodeSettingsSchema),
+		enableCompressSessions: Type.Optional(
+			Type.Boolean({
+				description:
+					"Compress new sessions only. Global setting only; existing files change only through explicit offline migration.",
+				default: SETTINGS_DEFAULTS.enableCompressSessions,
+			}),
+		),
 		sessionDir: Type.Optional(
 			Type.String({
 				description: "Custom session storage directory, in the same format as the --session-dir CLI flag.",
