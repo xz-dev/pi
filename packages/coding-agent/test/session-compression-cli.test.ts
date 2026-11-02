@@ -129,6 +129,34 @@ describe("offline session compression CLI acceptance", () => {
 		expect(existsSync(sentinel)).toBe(false);
 	});
 
+	it.each(["missing", "equal-form", "empty", "whitespace", "unknown", "missing-before-flag"] as const)(
+		"rejects %s maintenance scope before changing sessions or settings",
+		(form) => {
+			const defaultPath = plain();
+			const custom = join(root, "custom");
+			const customPath = plain(custom);
+			const defaultBytes = readFileSync(defaultPath);
+			const customBytes = readFileSync(customPath);
+			const settings = readFileSync(join(agent, "settings.json"));
+			const argumentsByCase = {
+				missing: ["--enable-compress-sessions=true", "--session-dir"],
+				"equal-form": ["--enable-compress-sessions=true", `--session-dir=${custom}`],
+				empty: ["--enable-compress-sessions=true", "--session-dir", ""],
+				whitespace: ["--enable-compress-sessions=true", "--session-dir", "   "],
+				unknown: ["--enable-compress-sessions=true", "--unknown-maintenance-flag"],
+				"missing-before-flag": ["--session-dir", "--enable-compress-sessions=true"],
+			};
+			const result = run(argumentsByCase[form]);
+			expect(result.status, result.stderr).toBe(1);
+			expect(result.stderr).toContain("Error:");
+			expect(result.stdout).not.toContain("Session compression:");
+			expect(readFileSync(defaultPath)).toEqual(defaultBytes);
+			expect(readFileSync(customPath)).toEqual(customBytes);
+			expect(readFileSync(join(agent, "settings.json"))).toEqual(settings);
+			expect(existsSync(sentinel)).toBe(false);
+		},
+	);
+
 	it("ordinary mixed startup warns on stderr but never migrates files or preference", () => {
 		const path = plain();
 		const before = readFileSync(path);

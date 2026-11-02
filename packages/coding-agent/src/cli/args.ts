@@ -142,8 +142,14 @@ export function parseArgs(args: string[]): Args {
 			result.sessionId = args[++i];
 		} else if (arg === "--fork" && i + 1 < args.length) {
 			result.fork = args[++i];
-		} else if (arg === "--session-dir" && i + 1 < args.length) {
-			result.sessionDir = args[++i];
+		} else if (arg === "--session-dir") {
+			const directory = args[i + 1];
+			if (directory === undefined || !directory.trim() || directory.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--session-dir requires a non-empty directory" });
+			} else {
+				result.sessionDir = directory;
+				i++;
+			}
 		} else if (arg === "--models" && i + 1 < args.length) {
 			result.models = args[++i]
 				.split(",")
