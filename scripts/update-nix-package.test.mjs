@@ -96,12 +96,13 @@ test("pins the real package template from an authenticated manifest, idempotentl
 	const first = f.run(manifest, f.packageNix);
 	assert.equal(first.status, 0, first.stderr);
 	const pinned = readFileSync(f.packageNix, "utf8");
-	assert.match(pinned, new RegExp(`^[ \\t]*version \\? "${VERSION.replaceAll(".", "\\.")}",$`, "m"));
+	assert.match(pinned, new RegExp(`^[ \\t]*version = "${VERSION.replaceAll(".", "\\.")}";$`, "m"));
+	assert.match(pinned, new RegExp(`^[ \\t]*tag = "xz-v${VERSION.replaceAll(".", "\\.")}";$`, "m"));
 	for (const target of TARGETS) assert.ok(pinned.includes(`"${target}" = "${hexToSri(digest(target))}";`), target);
-	// Only the version default and the eight hash lines change.
+	// Only the version, tag and the eight hash lines change.
 	const pinnedLines = pinned.split("\n");
 	assert.equal(pinnedLines.length, template.split("\n").length);
-	assert.equal(template.split("\n").filter((line, index) => line !== pinnedLines[index]).length, 1 + TARGETS.length);
+	assert.equal(template.split("\n").filter((line, index) => line !== pinnedLines[index]).length, 2 + TARGETS.length);
 	assert.deepEqual(readFileSync(f.log, "utf8").trim().split("\n"), [
 		"attestation",
 		"verify",
@@ -224,13 +225,14 @@ test("accepts only [--check] <release-manifest.json> <package.nix>", (t) => {
 	assert.equal(existsSync(f.log), false);
 });
 
-test("refuses templates without exactly one version line and one marked hashes block", (t) => {
+test("refuses templates without exactly one version line, one tag line and one marked hashes block", (t) => {
 	const f = fixture(t);
 	const manifest = f.writeRelease(manifestFor());
 	const template = readFileSync(TEMPLATE, "utf8");
 	for (const content of [
 		template.replace("# Pre-built release archive checksums", "# Release archive checksums"),
-		template.replace(/^[ \t]*version \? .*$/m, (line) => `${line}\n${line}`),
+		template.replace(/^[ \t]*version = .*$/m, (line) => `${line}\n${line}`),
+		template.replace(/^[ \t]*tag = .*$/m, (line) => `${line}\n${line}`),
 	]) {
 		writeFileSync(f.packageNix, content);
 		const result = f.run(manifest, f.packageNix);

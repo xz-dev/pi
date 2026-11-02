@@ -74,43 +74,50 @@ export function readReleasePins(manifest) {
 		}
 		sriHashes[target] = hexToSri(bundle.sha256);
 	}
-	return { version: manifest.distributionVersion, commit: manifest.commit, sriHashes };
+	return { version: manifest.distributionVersion, tag: manifest.tag, commit: manifest.commit, sriHashes };
 }
 
-const VERSION_LINE = /^([ \t]*)version \? "[^"\n]*",$/gm;
+const VERSION_LINE = /^([ \t]*)version = "[^"\n]*";$/gm;
+const TAG_LINE = /^([ \t]*)tag = "[^"\n]*";$/gm;
 const HASHES_BLOCK =
 	/^([ \t]*)# Pre-built release archive checksums for each platform from xz-dev\/pi\n[ \t]*hashes = \{[^}]*\};$/gm;
 
-/** Rewrite the version default and the comment-marked hashes block; pins must come from readReleasePins. */
-export function patchPackageNix(content, version, sriHashes) {
+/** Rewrite the version, tag, and the comment-marked hashes block; pins must come from readReleasePins. */
+export function patchPackageNix(content, version, sriHashes, tag = `xz-v${version}`) {
 	if (content.match(VERSION_LINE)?.length !== 1) {
-		throw new Error('package.nix must contain exactly one `version ? "...",` line');
+		throw new Error('package.nix must contain exactly one `version = "...",` line');
+	}
+	if (content.match(TAG_LINE)?.length !== 1) {
+		throw new Error('package.nix must contain exactly one `tag = "...",` line');
 	}
 	if (content.match(HASHES_BLOCK)?.length !== 1) {
 		throw new Error("package.nix must contain exactly one comment-marked `hashes = { ... };` block");
 	}
-	return content.replace(VERSION_LINE, (_line, indent) => `${indent}version ? "${version}",`).replace(
-		HASHES_BLOCK,
-		(_block, indent) =>
-			[
-				`${indent}# Pre-built release archive checksums for each platform from xz-dev/pi`,
-				`${indent}hashes = {`,
-				...TARGETS.map((target) => `${indent}  "${target}" = "${sriHashes[target]}";`),
-				`${indent}};`,
-			].join("\n"),
-	);
+	return content
+		.replace(VERSION_LINE, (_line, indent) => `${indent}version = "${version}";`)
+		.replace(TAG_LINE, (_line, indent) => `${indent}tag = "${tag}";`)
+		.replace(
+			HASHES_BLOCK,
+			(_block, indent) =>
+				[
+					`${indent}# Pre-built release archive checksums for each platform from xz-dev/pi`,
+					`${indent}hashes = {`,
+					...TARGETS.map((target) => `${indent}  "${target}" = "${sriHashes[target]}";`),
+					`${indent}};`,
+				].join("\n"),
+		);
 }
 
 /** Pin packageNixPath to the authenticated Release; with checkOnly, throw instead of writing a stale file. */
 export function updateNixPackage(manifestPath, packageNixPath, { checkOnly = false } = {}) {
-	const { version, commit, sriHashes } = readReleasePins(JSON.parse(readFileSync(manifestPath, "utf8")));
+	const { version, tag, commit, sriHashes } = readReleasePins(JSON.parse(readFileSync(manifestPath, "utf8")));
 	verifyManifest(manifestPath, commit);
 	const current = readFileSync(packageNixPath, "utf8");
-	const pinned = patchPackageNix(current, version, sriHashes);
-	if (pinned === current) return { updated: false, version };
+	const pinned = patchPackageNix(current, version, sriHashes, tag);
+	if (pinned === current) return { updated: false, version, tag };
 	if (checkOnly) throw new Error(`${packageNixPath} is not pinned to ${version}`);
 	writeFileSync(packageNixPath, pinned);
-	return { updated: true, version };
+	return { updated: true, version, tag };
 }
 
 const SIGNER_IDENTITY = `https://github.com/${REPOSITORY}/${ATTESTATION_SIGNER_WORKFLOW}@${ATTESTATION_SIGNER_REF}`;
