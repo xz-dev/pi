@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import * as fs from "fs";
+import { readSessionText } from "./session-reader.ts";
 import * as path from "path";
 
 // Parse args
@@ -67,7 +68,7 @@ interface Stats {
 const stats: Stats = {};
 
 // Process session files
-const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith(".jsonl"));
+const files = fs.readdirSync(sessionsDir).filter((f) => /\.jsonl(?:\.zst)?$/.test(f));
 
 for (const file of files) {
 	// Extract timestamp from filename: <timestamp>_<uuid>.jsonl
@@ -80,7 +81,7 @@ for (const file of files) {
 	if (fileDate < cutoff) continue;
 
 	const filepath = path.join(sessionsDir, file);
-	const content = fs.readFileSync(filepath, "utf8");
+	const content = readSessionText(filepath);
 	const lines = content.trim().split("\n");
 
 	for (const line of lines) {

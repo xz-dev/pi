@@ -34,7 +34,7 @@ import { basename, dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
-import { normalizePath, pathsEqual, resolvePath } from "../utils/paths.ts";
+import { canonicalizePath, normalizePath, pathsEqual, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -1283,6 +1283,50 @@ export class SessionManager {
 		}
 	}
 
+	/** Read the verified persisted prefix before an atomic logical-history publication. */
+	private _readPublicationText(): string | undefined {
+		if (!this.sessionFile || !this.flushed || !existsSync(this.sessionFile)) return undefined;
+		if (isCompressedSession(this.sessionFile) !== this.compressed) {
+			throw new Error("Session storage format changed before publication");
+		}
+		if (!this.compressed) return readFileSync(this.sessionFile, "utf8");
+		let text = "";
+		const state = readCompressedSession(this.sessionFile, (part) => {
+			text += part;
+		});
+		if (state.incompleteTail) throw new Error("Incomplete session append; write to repair before publication");
+		if (state.committedBytes !== this.compressedState?.committedBytes) {
+			throw new Error("Session changed before publication");
+		}
+		return text;
+	}
+
+	/** Keep atomic retry/compaction writes on their existing fault-injection seam and encoding. */
+	private _publishFile(text: string, purpose: "continuation" | "compaction"): void {
+		if (!this.sessionFile) return;
+		const metadata = this.compressed ? summarizeSession(parseSessionEntries(text)) : undefined;
+		const bytes = metadata ? encodeSessionTransaction(text, metadata) : Buffer.from(text);
+		const destination = canonicalizePath(this.sessionFile);
+		const temporaryFile = `${destination}.${purpose}-${process.pid}-${randomUUID()}.tmp`;
+		try {
+			this.continuationFileWriter(temporaryFile, destination, bytes);
+		} catch (error) {
+			if (!(typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST")) {
+				rmSync(temporaryFile, { force: true });
+			}
+			throw error;
+		}
+		if (metadata) {
+			this.compressedState = {
+				metadata,
+				committedBytes: bytes.length,
+				incompleteTail: false,
+				transactions: 1,
+				format: "transactions",
+			};
+		}
+	}
+
 	/** Consolidate already-compressed persisted bytes without changing the logical session. */
 	consolidateStorage(): boolean {
 		if (!this.persist || !this.sessionFile || !this.flushed || !this.compressed) return false;
@@ -1537,22 +1581,13 @@ export class SessionManager {
 				: undefined;
 		const publishedEntries = cancellation ? [...entries, cancellation] : entries;
 		if (this.persist && this.sessionFile) {
-			const original = this.flushed && existsSync(this.sessionFile) ? readFileSync(this.sessionFile) : undefined;
-			const completeFile = original
-				? Buffer.concat([
-						original,
-						Buffer.from(publishedEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("")),
-					])
-				: Buffer.from(
-						[...this.fileEntries, ...publishedEntries].map((entry) => `${JSON.stringify(entry)}\n`).join(""),
-					);
-			const temporaryFile = `${this.sessionFile}.continuation-${process.pid}-${randomUUID()}.tmp`;
-			try {
-				this.continuationFileWriter(temporaryFile, this.sessionFile, completeFile);
-			} catch (error) {
-				rmSync(temporaryFile, { force: true });
-				throw error;
-			}
+			const original = this._readPublicationText();
+			const prefix = original ?? this.fileEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("");
+			const separator = prefix && !prefix.endsWith("\n") ? "\n" : "";
+			this._publishFile(
+				`${prefix}${separator}${publishedEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("")}`,
+				"continuation",
+			);
 		}
 
 		for (const entry of entries) {
@@ -1688,20 +1723,11 @@ export class SessionManager {
 		}
 
 		if (this.persist && this.sessionFile && this.flushed) {
+			this._readPublicationText();
 			const lines = this.fileEntries.map((fileEntry) =>
 				JSON.stringify(fileEntry === kept ? { ...kept, parentId: id } : fileEntry),
 			);
-			const temporaryFile = `${this.sessionFile}.compaction-${process.pid}-${randomUUID()}.tmp`;
-			try {
-				this.continuationFileWriter(
-					temporaryFile,
-					this.sessionFile,
-					Buffer.from([...lines, JSON.stringify(entry)].map((line) => `${line}\n`).join("")),
-				);
-			} catch (error) {
-				rmSync(temporaryFile, { force: true });
-				throw error;
-			}
+			this._publishFile([...lines, JSON.stringify(entry)].map((line) => `${line}\n`).join(""), "compaction");
 		}
 		// Re-parent in place only after the write succeeded; existing references stay valid.
 		kept.parentId = id;
@@ -2285,7 +2311,10 @@ export class SessionManager {
 		const manager = new SessionManager(resolvedTargetCwd, dir, undefined, true, { ...options, id: newSessionId });
 		manager.sessionFile = newSessionFile;
 		// Execution state belongs to the source process, not the forked conversation.
-		manager.fileEntries = [newHeader, ...sourceEntries.filter((entry) => entry.type !== "session" && entry.type !== "run_state")];
+		manager.fileEntries = [
+			newHeader,
+			...sourceEntries.filter((entry) => entry.type !== "session" && entry.type !== "run_state"),
+		];
 		manager._buildIndex();
 		manager._rewriteFile();
 		manager.flushed = true;
