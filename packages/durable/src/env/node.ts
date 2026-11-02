@@ -50,6 +50,8 @@ import { NodeFileWatcher, type NodeWatchOptions } from "./node-watch.ts";
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 const EXIT_STDIO_GRACE_MS = 100;
+const OWNER_REPORT_MAX_BYTES = 4096;
+
 const SPILL_HIGH_WATER_MARK = 1024 * 1024;
 /** Largest single read of a `BinaryReader`, so a huge `length` allocates only as much as the file yields. */
 const BINARY_READ_CHUNK = 1024 * 1024;
@@ -154,46 +156,299 @@ async function pathExists(path: string): Promise<boolean> {
 	}
 }
 
+interface OwnerExit {
+	code: number | null;
+	signal: number | null;
+}
+
+/** The private fd-3 stream reports S,X,C or E,C; C confirms completed cleanup. */
+type OwnerRecord =
+	| { kind: "startup" }
+	| { kind: "exit"; report: OwnerExit }
+	| { kind: "spawnError"; errno: number }
+	| { kind: "cleanup" };
+
+function parseOwnerLine(line: string): OwnerRecord {
+	if (line === "C") return { kind: "cleanup" };
+	const spawnFailure = /^E(\d+) [\s\S]*$/.exec(line);
+	if (spawnFailure) {
+		const errno = Number(spawnFailure[1]);
+		if (!Number.isSafeInteger(errno) || errno <= 0 || errno > 2_147_483_647)
+			throw new Error("Invalid process owner errno");
+		return { kind: "spawnError", errno };
+	}
+	if (line.startsWith("S") || line.startsWith("X")) {
+		const parsed: unknown = JSON.parse(line.slice(1));
+		if (!parsed || typeof parsed !== "object") throw new Error("Invalid process owner report");
+		if (line.startsWith("S")) {
+			if (
+				!("pid" in parsed) ||
+				typeof parsed.pid !== "number" ||
+				!Number.isSafeInteger(parsed.pid) ||
+				parsed.pid <= 0
+			)
+				throw new Error("Invalid process owner startup record");
+			return { kind: "startup" };
+		}
+		const code = "code" in parsed ? parsed.code : undefined;
+		const signal = "signal" in parsed ? parsed.signal : undefined;
+		if (
+			typeof code === "number" &&
+			Number.isInteger(code) &&
+			code >= 0 &&
+			code <= (process.platform === "win32" ? 0xffff_ffff : 255) &&
+			signal === null
+		)
+			return { kind: "exit", report: { code, signal } };
+		if (code === null && typeof signal === "number" && Number.isInteger(signal) && signal > 0 && signal <= 127)
+			return { kind: "exit", report: { code, signal } };
+		throw new Error("Invalid process owner exit record");
+	}
+	throw new Error("Invalid process owner report");
+}
+
+/** One native child and lease; completion requires C, helper close AND control EOF. */
+type Duplex = import("node:stream").Duplex;
+
+class OwnedProcess {
+	readonly child: ChildProcess;
+	private readonly lease: Duplex | undefined;
+	private report = "";
+	private started = false;
+	private primaryExit: OwnerExit | undefined;
+	private spawnErrno: number | undefined;
+	private cleanupConfirmed = false;
+	private cancelled = false;
+	private protocolError: Error | undefined;
+	private launchError: Error | undefined;
+	private stderrListener: ((chunk: Buffer) => void) | undefined;
+	// A readable listener keeps startup stderr paused, even during ChildProcess exit flushing.
+	private readonly holdStderr = () => {};
+	readonly completed: Promise<OwnerExit>;
+
+	constructor(child: ChildProcess, program: string, args: readonly string[]) {
+		this.child = child;
+		child.stderr?.on("readable", this.holdStderr);
+		// Bun can leave fd 3 null when the helper itself failed to spawn.
+		this.lease = (child.stdio[3] as Duplex | null) ?? undefined;
+		const controlFinished = this.lease
+			? new Promise<void>((resolve) => {
+					let readableEOF = false;
+					this.lease?.once("end", () => {
+						readableEOF = true;
+						if (this.report !== "" || !this.cleanupConfirmed)
+							this.fail(new Error("Incomplete process owner cleanup report"));
+						resolve();
+					});
+					this.lease?.once("close", () => {
+						if (!readableEOF) this.fail(new Error("Process owner control closed before EOF"));
+						resolve();
+					});
+				})
+			: Promise.resolve();
+		const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+			child.once("close", (code, signal) => resolve({ code, signal })),
+		);
+		child.on("error", (error) => {
+			this.launchError ??= error;
+			this.discardStderr();
+			this.kill();
+		});
+		this.lease?.on("data", (chunk: Buffer) => this.readControl(chunk));
+		this.lease?.on("error", (error) => this.fail(error));
+		this.completed = Promise.all([closed, controlFinished]).then(([helper]) => {
+			this.lease?.destroy();
+			if (this.launchError) throw this.launchError;
+			if (this.protocolError) throw this.protocolError;
+			const expectedCode = this.primaryExit ? (this.primaryExit.code ?? 128 + (this.primaryExit.signal ?? 0)) : 125;
+			const expectedHelper =
+				process.platform === "win32" && process.versions.bun ? expectedCode % 256 : expectedCode;
+			if (helper.signal !== null || helper.code !== expectedHelper) {
+				const failure = new Error(
+					`Process owner failed: expected exit ${expectedCode}, received ${helper.signal ?? helper.code}`,
+				);
+				this.fail(failure);
+				throw failure;
+			}
+			if (this.spawnErrno !== undefined) throw ownerSpawnError(program, args, this.spawnErrno);
+			if (!this.primaryExit) {
+				const failure = new Error("Incomplete process owner report");
+				this.fail(failure);
+				throw failure;
+			}
+			return this.primaryExit;
+		});
+	}
+
+	onStderr(listener: (chunk: Buffer) => void): void {
+		this.stderrListener = listener;
+		if (this.started) this.startStderr();
+	}
+
+	private startStderr(): void {
+		if (!this.stderrListener) return;
+		this.child.stderr?.removeListener("readable", this.holdStderr);
+		this.child.stderr?.on("data", this.stderrListener);
+	}
+
+	private discardStderr(): void {
+		if (this.started) return;
+		this.child.stderr?.removeListener("readable", this.holdStderr);
+		this.child.stderr?.resume();
+	}
+
+	private fail(error: Error): void {
+		this.protocolError ??= Object.assign(error, { code: "ERR_PROCESS_OWNER_CLEANUP" });
+		this.discardStderr();
+		this.kill();
+	}
+
+	private readControl(chunk: Buffer): void {
+		if (this.protocolError) return;
+		this.report += chunk.toString("utf8");
+		if (Buffer.byteLength(this.report) > OWNER_REPORT_MAX_BYTES) {
+			this.fail(new Error("Invalid process owner report"));
+			return;
+		}
+		while (true) {
+			const newline = this.report.indexOf("\n");
+			if (newline < 0) return;
+			const line = this.report.slice(0, newline);
+			this.report = this.report.slice(newline + 1);
+			try {
+				const record = parseOwnerLine(line);
+				if (this.cleanupConfirmed) throw new Error("Invalid process owner record after cleanup");
+				if (record.kind === "cleanup") {
+					if (!this.primaryExit && this.spawnErrno === undefined)
+						throw new Error("Invalid process owner cleanup order");
+					this.cleanupConfirmed = true;
+					continue;
+				}
+				if (this.primaryExit || this.spawnErrno !== undefined)
+					throw new Error("Invalid process owner record order");
+				if (record.kind === "startup") {
+					if (this.started) throw new Error("Invalid process owner record order");
+					this.started = true;
+					this.startStderr();
+				} else if (record.kind === "spawnError") {
+					if (this.started) throw new Error("Invalid process owner record order");
+					this.spawnErrno = record.errno;
+					this.discardStderr();
+				} else {
+					if (!this.started) throw new Error("Invalid process owner record order");
+					this.primaryExit = record.report;
+				}
+			} catch (error) {
+				this.fail(toError(error));
+				return;
+			}
+		}
+	}
+
+	/** K or lease EOF requests subtree cleanup; never signal the helper's process group. */
+	kill(): void {
+		if (this.lease?.writable && !this.lease.destroyed && !this.lease.writableEnded) {
+			if (process.platform === "win32") {
+				if (!this.cancelled) {
+					this.cancelled = true;
+					this.lease.write("K");
+				}
+			} else this.lease.end("K");
+		}
+	}
+}
+
+/** Spawn `program` through the host's process owner, adding the private fd-3 control stream. */
+function spawnOwned(owner: string, program: string, args: readonly string[], options: SpawnOptions): OwnedProcess {
+	const child = spawn(owner, ["supervise", "--control-fd", "3", "--", program, ...args], {
+		cwd: options.cwd,
+		env: options.env,
+		windowsHide: options.windowsHide,
+		stdio: [options.stdin, "pipe", "pipe", "pipe"],
+	});
+	return new OwnedProcess(child, program, args);
+}
+
+interface SpawnOptions {
+	cwd: string;
+	env: NodeJS.ProcessEnv;
+	stdin: "ignore" | "pipe";
+	windowsHide: boolean;
+}
+
+/** The `E<errno>` record, translated to the same fields a direct spawn error would carry. */
+function ownerSpawnError(program: string, args: readonly string[], errno: number): NodeJS.ErrnoException {
+	const code = Object.entries(osConstants.errno).find(([, value]) => value === errno)?.[0] ?? "UNKNOWN";
+	return Object.assign(new Error(`spawn ${program} ${code}`), {
+		code,
+		errno: -errno,
+		syscall: `spawn ${program}`,
+		path: program,
+		spawnargs: [...args],
+	});
+}
+
+interface ExecEntry {
+	stopping: boolean;
+	killTarget: (() => void) | undefined;
+	kill(): void;
+	done: Promise<void>;
+}
+
 async function runCommand(
 	command: string,
 	args: string[],
 	timeoutMs: number,
+	owner: string | undefined,
+	entry: ExecEntry,
 ): Promise<{ stdout: string; status: number | null }> {
-	return await new Promise((resolve) => {
-		let stdout = "";
-		let child: ReturnType<typeof spawn>;
-		try {
-			child = spawn(command, args, {
-				stdio: ["ignore", "pipe", "ignore"],
-				windowsHide: true,
-			});
-		} catch {
-			resolve({ stdout: "", status: null });
-			return;
-		}
-		const timeout = setTimeout(() => {
-			if (child.pid) killProcessTree(child.pid);
-		}, timeoutMs);
-		child.stdout?.setEncoding("utf8");
-		child.stdout?.on("data", (chunk: string) => {
-			stdout += chunk;
+	let stdout = "";
+	const owned =
+		owner === undefined
+			? undefined
+			: spawnOwned(owner, command, args, {
+					cwd: process.cwd(),
+					env: process.env,
+					stdin: "ignore",
+					windowsHide: true,
+				});
+	const child =
+		owned?.child ??
+		spawn(command, args, {
+			stdio: ["ignore", "pipe", "ignore"],
+			windowsHide: true,
 		});
-		child.on("error", () => {
-			clearTimeout(timeout);
-			resolve({ stdout: "", status: null });
+	owned?.onStderr(() => {});
+	const completion =
+		owned?.completed ??
+		new Promise<OwnerExit>((resolve) => {
+			child.once("error", () => resolve({ code: null, signal: null }));
+			child.once("close", (code) => resolve({ code, signal: null }));
 		});
-		child.on("close", (status) => {
-			clearTimeout(timeout);
-			resolve({ stdout, status });
-		});
+	entry.killTarget = () => {
+		if (owned) owned.kill();
+		else if (child.pid) killProcessTree(child.pid);
+	};
+	if (entry.stopping) entry.kill();
+	const timeout = setTimeout(() => entry.killTarget?.(), timeoutMs);
+	child.stdout?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk: string) => {
+		stdout += chunk;
 	});
+	try {
+		const result = await completion;
+		return { stdout, status: result.code };
+	} finally {
+		clearTimeout(timeout);
+		entry.killTarget = undefined;
+	}
 }
 
-async function findBashOnPath(): Promise<string | null> {
+async function findBashOnPath(owner: string | undefined, entry: ExecEntry): Promise<string | null> {
 	const result =
 		process.platform === "win32"
-			? await runCommand("where", ["bash.exe"], 5000)
-			: await runCommand("which", ["bash"], 5000);
+			? await runCommand("where", ["bash.exe"], 5000, owner, entry)
+			: await runCommand("which", ["bash"], 5000, owner, entry);
 	if (result.status !== 0 || !result.stdout) return null;
 	const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
 	return firstMatch && (await pathExists(firstMatch)) ? firstMatch : null;
@@ -223,7 +478,11 @@ function getBashShellConfig(shell: string): ShellConfig {
 	return isLegacyWslBashPath(shell) ? { shell, args: ["-s"], commandTransport: "stdin" } : { shell, args: ["-c"] };
 }
 
-async function getShellConfig(customShellPath?: string): Promise<Result<ShellConfig, ExecutionError>> {
+async function getShellConfig(
+	customShellPath: string | undefined,
+	owner: string | undefined,
+	entry: ExecEntry,
+): Promise<Result<ShellConfig, ExecutionError>> {
 	if (customShellPath) {
 		if (await pathExists(customShellPath)) {
 			return ok(getBashShellConfig(customShellPath));
@@ -241,7 +500,7 @@ async function getShellConfig(customShellPath?: string): Promise<Result<ShellCon
 				return ok(getBashShellConfig(candidate));
 			}
 		}
-		const bashOnPath = await findBashOnPath();
+		const bashOnPath = await findBashOnPath(owner, entry);
 		if (bashOnPath) {
 			return ok(getBashShellConfig(bashOnPath));
 		}
@@ -260,7 +519,7 @@ async function getShellConfig(customShellPath?: string): Promise<Result<ShellCon
 	if (await pathExists("/bin/bash")) {
 		return ok(getBashShellConfig("/bin/bash"));
 	}
-	const bashOnPath = await findBashOnPath();
+	const bashOnPath = await findBashOnPath(owner, entry);
 	if (bashOnPath) {
 		return ok(getBashShellConfig(bashOnPath));
 	}
@@ -616,7 +875,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	private shellPath?: string;
 	private shellEnv?: NodeJS.ProcessEnv;
 	private watchOptions: NodeWatchOptions;
-	private activeChildPids = new Set<number>();
+	/** Includes shell discovery and spawn-phase work, before any await. */
+	private activeExecs = new Set<ExecEntry>();
 
 	constructor(options: { cwd: string; shellPath?: string; shellEnv?: NodeJS.ProcessEnv; watch?: NodeWatchOptions }) {
 		this.cwd = options.cwd;
@@ -663,6 +923,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		options: ShellExecOptions | undefined,
 		context: Context,
 	): Promise<Result<ShellExecResult, ExecutionError>> {
+		// Ownership is a host decision, captured before shell discovery or cwd checks await.
+		const owner = process.env.PI_PROCESS_OWNER_BINARY;
 		const signal = context.abortSignal;
 		if (signal?.aborted) return err(new ExecutionError("aborted", "aborted"));
 		const timeoutMsResult = resolveTimeoutMs(options?.timeout);
@@ -670,20 +932,57 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		const timeoutMs = timeoutMsResult.value;
 
 		const cwd = options?.cwd ? resolvePath(this.cwd, options.cwd) : this.cwd;
+		// Registered before the first await so a concurrent cleanup() always joins this exec.
+		// `killTarget` is installed at spawn; a kill arriving earlier sets `stopping` so the
+		// freshly spawned child is killed immediately instead of outliving the cleanup.
+		let execDone: () => void = () => {};
+		const execEntry = {
+			stopping: false,
+			killTarget: undefined as (() => void) | undefined,
+			kill() {
+				this.stopping = true;
+				this.killTarget?.();
+			},
+			done: new Promise<void>((resolve) => {
+				execDone = resolve;
+			}),
+		};
+		this.activeExecs.add(execEntry);
 		// A string runs through the shell; an argv array runs its program directly, without shell parsing.
 		let program: string;
 		let args: readonly string[];
 		let stdinCommand: string | undefined;
+		const unregisterEarly = (result: Result<never, ExecutionError>) => {
+			this.activeExecs.delete(execEntry);
+			execDone();
+			return result;
+		};
 		if (typeof command === "string") {
-			const shellConfig = await getShellConfig(this.shellPath);
-			if (!shellConfig.ok) return shellConfig;
+			let shellConfig: Result<ShellConfig, ExecutionError>;
+			try {
+				shellConfig = await getShellConfig(this.shellPath, owner, execEntry);
+			} catch (error) {
+				const cause = toError(error);
+				return unregisterEarly(
+					err(
+						new ExecutionError(
+							isNodeError(cause) && cause.code === "ERR_PROCESS_OWNER_CLEANUP" ? "unknown" : "spawn_error",
+							cause.message,
+							cause,
+						),
+					),
+				);
+			}
+			if (!shellConfig.ok) return unregisterEarly(shellConfig);
 			const commandFromStdin = shellConfig.value.commandTransport === "stdin";
 			program = shellConfig.value.shell;
 			args = commandFromStdin ? shellConfig.value.args : [...shellConfig.value.args, command];
 			stdinCommand = commandFromStdin ? command : undefined;
 		} else {
 			const [first, ...rest] = command;
-			if (first === undefined) return err(new ExecutionError("spawn_error", "Empty argv: no program to run"));
+			if (first === undefined) {
+				return unregisterEarly(err(new ExecutionError("spawn_error", "Empty argv: no program to run")));
+			}
 			program = first;
 			args = rest;
 		}
@@ -691,11 +990,13 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			await access(cwd, constants.F_OK);
 		} catch (error) {
 			const cause = toError(error);
-			return err(
-				new ExecutionError(
-					"spawn_error",
-					`Working directory does not exist: ${cwd}\nCannot execute bash commands.`,
-					cause,
+			return unregisterEarly(
+				err(
+					new ExecutionError(
+						"spawn_error",
+						`Working directory does not exist: ${cwd}\nCannot execute bash commands.`,
+						cause,
+					),
 				),
 			);
 		}
@@ -706,6 +1007,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			let callbackError: ExecutionError | undefined;
 			let spillError: ExecutionError | undefined;
 			let child: ReturnType<typeof spawn> | undefined;
+			let owned: OwnedProcess | undefined;
 			let timeoutId: ReturnType<typeof setTimeout> | undefined;
 			const spillPrefix: SpillChunk[] = [];
 			let spillPath: string | undefined;
@@ -715,7 +1017,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			let spillBackpressured = false;
 
 			const onAbort = () => {
-				if (child?.pid) killProcessTree(child.pid);
+				execEntry.kill();
 			};
 			const failCallback = (error: unknown) => {
 				if (callbackError !== undefined) return;
@@ -744,15 +1046,17 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				settled = true;
 				if (timeoutId) clearTimeout(timeoutId);
 				if (signal) signal.removeEventListener("abort", onAbort);
-				if (child?.pid) this.activeChildPids.delete(child.pid);
+				this.activeExecs.delete(execEntry);
 				resolvePromise(result);
+				// cleanup() joins on execEntry.done; resolve only after the result reached the caller.
+				execDone();
 			};
 			const pauseOutput = () => {
 				child?.stdout?.pause();
 				child?.stderr?.pause();
 			};
 			const resumeOutput = () => {
-				if (callbackError || spillError || timedOut || signal?.aborted || spillBackpressured) return;
+				if (spillBackpressured || (spillStart !== undefined && spillStream === undefined && !spillError)) return;
 				child?.stdout?.resume();
 				child?.stderr?.resume();
 			};
@@ -766,6 +1070,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				);
 				spillBackpressured = false;
 				onAbort();
+				resumeOutput();
 			};
 			const writeSpill = (chunk: SpillChunk): void => {
 				if (spillStream === undefined || chunk.length === 0) return;
@@ -809,18 +1114,37 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			};
 
 			try {
-				child = spawn(program, args, {
-					cwd,
-					detached: process.platform !== "win32",
-					env: getShellEnv(this.shellEnv, options?.env, options?.inheritEnv),
-					stdio: [stdinCommand === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-					windowsHide: true,
-				});
-				if (child.pid) this.activeChildPids.add(child.pid);
-				if (stdinCommand !== undefined) {
-					child.stdin?.on("error", () => {});
-					child.stdin?.end(stdinCommand);
+				if (owner !== undefined) {
+					owned = spawnOwned(owner, program, args, {
+						cwd,
+						env: getShellEnv(this.shellEnv, options?.env, options?.inheritEnv),
+						stdin: stdinCommand === undefined ? "ignore" : "pipe",
+						windowsHide: true,
+					});
+					child = owned.child;
+					execEntry.killTarget = () => owned?.kill();
+					if (stdinCommand !== undefined) {
+						child.stdin?.on("error", () => {});
+						child.stdin?.end(stdinCommand);
+					}
+				} else {
+					child = spawn(program, args, {
+						cwd,
+						detached: process.platform !== "win32",
+						env: getShellEnv(this.shellEnv, options?.env, options?.inheritEnv),
+						stdio: [stdinCommand === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+						windowsHide: true,
+					});
+					execEntry.killTarget = () => {
+						if (child?.pid) killProcessTree(child.pid);
+					};
+					if (stdinCommand !== undefined) {
+						child.stdin?.on("error", () => {});
+						child.stdin?.end(stdinCommand);
+					}
 				}
+				// A cleanup() issued while shell config or cwd resolved lands here.
+				if (execEntry.stopping) execEntry.kill();
 			} catch (error) {
 				const cause = toError(error);
 				settle(err(new ExecutionError("spawn_error", cause.message, cause)));
@@ -843,7 +1167,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			const feed = (source: ShellOutputInfo["stream"], decoder: StreamDecoder) => (chunk: Uint8Array) => {
 				emit(decoder.decode(chunk), source);
 				const spill = options?.spill;
-				if (spill === undefined || chunk.length === 0) return;
+				if (spill === undefined || spillError !== undefined || chunk.length === 0) return;
 				if (spillStart !== undefined) {
 					startSpill(chunk);
 					return;
@@ -860,45 +1184,56 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				startSpill(chunk);
 			};
 			child.stdout?.on("data", feed("stdout", stdoutDecoder));
-			child.stderr?.on("data", feed("stderr", stderrDecoder));
+			if (owned) owned.onStderr(feed("stderr", stderrDecoder));
+			else child.stderr?.on("data", feed("stderr", stderrDecoder));
 
-			void waitForChildProcess(
-				child,
-				() =>
-					spillError === undefined &&
-					spillStart !== undefined &&
-					(spillStream === undefined || spillBackpressured),
-			).then(
-				async ({ code, signal: exitSignal }) => {
-					await finishSpill();
-					emit(stdoutDecoder.decode(), "stdout");
-					emit(stderrDecoder.decode(), "stderr");
-					if (callbackError) {
-						settle(err(callbackError));
-						return;
-					}
-					const interrupted = timedOut
-						? new ExecutionError("timeout", `timeout:${options?.timeout}`)
-						: signal?.aborted
-							? new ExecutionError("aborted", "aborted")
-							: undefined;
-					if (interrupted !== undefined) {
-						if (spillPath !== undefined) interrupted.spillPath = spillPath;
-						settle(err(interrupted));
-						return;
-					}
-					if (spillError) {
-						settle(err(spillError));
-						return;
-					}
-					// A process killed by a signal (e.g. OOM killer) has no exit code; map it
-					// to the conventional 128 + signal number so callers do not mistake it
-					// for a successful exit.
-					const exitCode = code ?? (exitSignal ? 128 + (osConstants.signals[exitSignal] ?? 0) : 1);
+			const completion =
+				owned?.completed ??
+				waitForChildProcess(
+					child,
+					() =>
+						spillError === undefined &&
+						spillStart !== undefined &&
+						(spillStream === undefined || spillBackpressured),
+				).then(({ code, signal: exitSignal }) => ({
+					code,
+					signal: exitSignal ? (osConstants.signals[exitSignal] ?? 0) : null,
+				}));
+			void (async () => {
+				let primary: OwnerExit | undefined;
+				let failure: Error | undefined;
+				try {
+					primary = await completion;
+				} catch (error) {
+					failure = toError(error);
+				}
+				await finishSpill();
+				emit(stdoutDecoder.decode(), "stdout");
+				emit(stderrDecoder.decode(), "stderr");
+				// Cleanup may follow primary side effects; never classify it as a retryable spawn failure.
+				if (isNodeError(failure) && failure.code === "ERR_PROCESS_OWNER_CLEANUP") {
+					settle(err(new ExecutionError("unknown", failure.message, failure)));
+					return;
+				}
+				if (callbackError) {
+					settle(err(callbackError));
+					return;
+				}
+				const interrupted = timedOut
+					? new ExecutionError("timeout", `timeout:${options?.timeout}`)
+					: signal?.aborted
+						? new ExecutionError("aborted", "aborted")
+						: undefined;
+				if (interrupted) {
+					if (spillPath !== undefined) interrupted.spillPath = spillPath;
+					settle(err(interrupted));
+				} else if (spillError) settle(err(spillError));
+				else if (failure) settle(err(new ExecutionError("spawn_error", failure.message, failure)));
+				else {
+					const exitCode = primary?.code ?? (primary?.signal ? 128 + primary.signal : 1);
 					settle(ok({ exitCode, ...(spillPath === undefined ? {} : { spillPath }) }));
-				},
-				(error: Error) => settle(err(new ExecutionError("spawn_error", error.message, error))),
-			);
+				}
+			})();
 		});
 	}
 
@@ -1228,8 +1563,10 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async cleanup(_context: Context): Promise<void> {
-		for (const pid of this.activeChildPids) killProcessTree(pid);
-		this.activeChildPids.clear();
+		// Kill execs still in their spawn phase, then wait for every in-flight exec to settle:
+		// C confirms cleanup, helper close and fd-3 EOF fence process and control bytes.
+		for (const exec of this.activeExecs) exec.kill();
+		await Promise.all([...this.activeExecs].map((exec) => exec.done));
 	}
 }
 export type { NodeWatchOptions } from "./node-watch.ts";
