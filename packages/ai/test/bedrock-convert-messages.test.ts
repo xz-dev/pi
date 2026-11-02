@@ -240,14 +240,15 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		expect(p.messages[0].content).toEqual([{ text: "<empty>" }]);
 	});
 
-	it("replaces blank user string content with a placeholder", async () => {
+	it("drops blank user string content upstream", async () => {
+		// transformMessages drops empty user messages before the converter runs,
+		// so the placeholder path is never reached.
 		const payload = await capturePayload({
 			messages: [{ role: "user", content: "   ", timestamp: Date.now() }],
 		});
 		expect(payload).toBeDefined();
 		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
-		expect(p.messages).toHaveLength(1);
-		expect(p.messages[0].content).toEqual([{ text: "<empty>" }]);
+		expect(p.messages).toHaveLength(0);
 	});
 
 	it("filters blank user text blocks when other content remains", async () => {
