@@ -1084,7 +1084,10 @@ fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({
   path: process.env.PATH, registry: process.env.npm_config_registry
 }) + "\\n");
 if (process.env.PI_TEST_PM_FAIL === "1") process.exit(37);
-if (args[0] === "info") console.log(JSON.stringify("1.1.0"));
+if (args[0] === "info") console.log(JSON.stringify(
+  args.includes("versions") ? { versions: ["1.0.0", "1.1.0"], "dist-tags": { latest: "1.1.0" } }
+    : args.includes("engines") ? { version: "1.1.0" } : "1.1.0"
+));
 if (args[0] === "pm") console.log(${JSON.stringify(legacyBin)});
 if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit root"))});
 `,
@@ -1156,6 +1159,48 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 					}),
 				);
 			});
+
+			it.each([
+				{ scope: "user", pinned: false },
+				{ scope: "project", pinned: false },
+				{ scope: "user", pinned: true },
+				{ scope: "project", pinned: true },
+			] as const)(
+				"checks $scope dependencies through the scoped self executable (pinned=$pinned)",
+				async ({ scope, pinned }) => {
+					const root = scope === "user" ? join(agentDir, "npm") : join(tempDir, ".pi", "npm");
+					for (const [directory, manifest] of [
+						[root, { dependencies: { fixture: "1.0.0" } }],
+						[
+							join(root, "node_modules", "fixture"),
+							{ name: "fixture", version: "1.0.0", dependencies: { leaf: "^1.0.0" } },
+						],
+						[join(root, "node_modules", "leaf"), { name: "leaf", version: "1.0.0" }],
+					] as const) {
+						mkdirSync(directory, { recursive: true });
+						writeFileSync(join(directory, "package.json"), JSON.stringify(manifest));
+					}
+					const source = `npm:fixture${pinned ? "@1.0.0" : ""}`;
+					if (scope === "user") settingsManager.setPackages([source]);
+					else settingsManager.setProjectPackages([source]);
+					const before = readFileSync(join(root, "package.json"), "utf8");
+					expect(await packageManager.checkForAvailableUpdates()).toEqual([
+						expect.objectContaining({ source, scope, reason: pinned ? "dependencies" : "both" }),
+					]);
+					const calls: Array<{ args: string[]; cwd: string; mode: string }> = readFileSync(logPath, "utf8")
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line));
+					expect(calls.map(({ args }) => args)).toEqual([
+						...(!pinned ? [["info", "fixture", "version", "--json"]] : []),
+						["info", "leaf", "versions", "dist-tags", "--json"],
+						["info", "leaf@1.1.0", "version", "os", "cpu", "engines", "--json"],
+					]);
+					expect(calls.every(({ cwd, mode }) => cwd === root && mode === "1")).toBe(true);
+					expect(readFileSync(join(root, "package.json"), "utf8")).toBe(before);
+					expect(process.env.BUN_BE_BUN).toBeUndefined();
+				},
+			);
 
 			it("does not inject mode into explicit pi and invalidates the legacy root cache", async () => {
 				const embeddedRoot = join(dirname(legacyBin), "install", "global", "node_modules");
@@ -3164,6 +3209,290 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 		});
 	});
 
+	describe("npm runtime dependency updates", () => {
+		let installRoot: string;
+		let modules: string;
+		let internals: PackageManagerInternals;
+		const source = "npm:plugin@1.0.0";
+
+		function writeManifest(directory: string, manifest: Record<string, unknown>): void {
+			mkdirSync(directory, { recursive: true });
+			writeFileSync(join(directory, "package.json"), JSON.stringify(manifest));
+		}
+
+		beforeEach(() => {
+			installRoot = join(agentDir, "npm");
+			modules = join(installRoot, "node_modules");
+			internals = packageManager as unknown as PackageManagerInternals;
+			writeManifest(installRoot, { dependencies: { plugin: "^1.0.0", other: "^1.0.0" } });
+			writeManifest(join(modules, "plugin"), {
+				name: "plugin",
+				version: "1.0.0",
+				dependencies: { bridge: "1.0.0", fixed: "1.0.0" },
+				devDependencies: { dev: "*" },
+				peerDependencies: { peer: "*" },
+			});
+			writeManifest(join(modules, "bridge"), {
+				name: "bridge",
+				version: "1.0.0",
+				optionalDependencies: { leaf: "^2.0.0" },
+			});
+			writeManifest(join(modules, "other"), { name: "other", version: "1.0.0", dependencies: { leaf: "^2.0.0" } });
+			for (const name of ["leaf", "fixed", "dev", "peer"]) {
+				writeManifest(join(modules, name), { name, version: name === "leaf" ? "2.0.0" : "1.0.0" });
+			}
+			settingsManager.setPackages([source, "npm:other@1.0.0"]);
+			vi.spyOn(internals, "runCommandCapture").mockImplementation(async (_command, args) =>
+				args.includes("versions")
+					? JSON.stringify({ versions: ["2.0.0", "2.1.0", "3.0.0"], "dist-tags": { latest: "3.0.0" } })
+					: JSON.stringify({ version: "2.1.0" }),
+			);
+		});
+
+		it("checks floating runtime edges read-only, excluding exact, development and peer dependencies", async () => {
+			writeFileSync(join(installRoot, "package-lock.json"), "Pi-generated installation lock");
+			const runCommand = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([
+				expect.objectContaining({ source, type: "npm", reason: "dependencies" }),
+				expect.objectContaining({ source: "npm:other@1.0.0", type: "npm", reason: "dependencies" }),
+			]);
+			expect(internals.runCommandCapture).toHaveBeenCalledTimes(2);
+			expect(internals.runCommandCapture).toHaveBeenCalledWith(
+				"npm",
+				["view", "leaf", "versions", "dist-tags", "--json"],
+				expect.objectContaining({ timeoutMs: expect.any(Number) }),
+			);
+			expect(internals.runCommandCapture).toHaveBeenCalledWith(
+				"npm",
+				["view", "leaf@2.1.0", "version", "os", "cpu", "engines", "--json"],
+				expect.objectContaining({ timeoutMs: expect.any(Number) }),
+			);
+			expect(runCommand).not.toHaveBeenCalled();
+		});
+
+		it.each(["2.0.0", "<2.1.0"])(
+			"does not repeatedly offer an update blocked by shared constraint %s",
+			async (range) => {
+				writeManifest(join(modules, "other"), { name: "other", version: "1.0.0", dependencies: { leaf: range } });
+				const runCommand = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+				expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+				await packageManager.update(source);
+				expect(runCommand).not.toHaveBeenCalled();
+				expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+			},
+		);
+
+		it.each(["plugin", "root"])(
+			"preserves %s author shrinkwraps, including shared dependencies",
+			async (location) => {
+				const directory = location === "root" ? installRoot : join(modules, "plugin");
+				writeFileSync(join(directory, "npm-shrinkwrap.json"), JSON.stringify({ lockfileVersion: 3 }));
+				const runCommand = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+				expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+				await packageManager.update();
+				expect(runCommand).not.toHaveBeenCalled();
+				expect(internals.runCommandCapture).not.toHaveBeenCalled();
+			},
+		);
+
+		it.each([
+			{ overrides: { leaf: "2.0.0" } },
+			{ resolutions: { leaf: "2.0.0" } },
+			{ pnpm: { overrides: { leaf: "2.0.0" } } },
+		])("skips constrained installation roots with %j", async (constraint) => {
+			writeManifest(installRoot, { dependencies: { plugin: "^1.0.0", other: "^1.0.0" }, ...constraint });
+			const runCommand = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+			await packageManager.update(source);
+			expect(runCommand).not.toHaveBeenCalled();
+			expect(internals.runCommandCapture).not.toHaveBeenCalled();
+		});
+
+		it("does not offer updates to bundled runtime dependencies", async () => {
+			writeManifest(join(modules, "plugin"), {
+				name: "plugin",
+				version: "1.0.0",
+				dependencies: { leaf: "^2.0.0" },
+				bundleDependencies: ["leaf"],
+			});
+
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+			expect(internals.runCommandCapture).not.toHaveBeenCalled();
+		});
+
+		it("resolves isolated package links and their private runtime dependencies", async () => {
+			const plugin = join(modules, ".store", "plugin", "node_modules", "plugin");
+			const leaf = join(modules, ".store", "leaf", "node_modules", "leaf");
+			writeManifest(plugin, { name: "plugin", version: "1.0.0", dependencies: { leaf: "^2.0.0" } });
+			writeManifest(leaf, { name: "leaf", version: "2.0.0" });
+			const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
+			symlinkSync(leaf, join(modules, ".store", "plugin", "node_modules", "leaf"), directoryLinkType);
+			rmSync(join(modules, "plugin"), { recursive: true });
+			symlinkSync(plugin, join(modules, "plugin"), directoryLinkType);
+
+			expect(await packageManager.checkForAvailableUpdates()).toEqual(
+				expect.arrayContaining([expect.objectContaining({ source })]),
+			);
+		});
+
+		it("retries only the failed dependency command, not planning or progress", async () => {
+			const events: ProgressEvent[] = [];
+			packageManager.setProgressCallback((event) => events.push(event));
+			const run = vi
+				.spyOn(internals, "runCommand")
+				.mockRejectedValueOnce(new Error("TLS EOF"))
+				.mockResolvedValue(undefined);
+
+			await packageManager.update(source);
+			expect(run).toHaveBeenCalledTimes(2);
+			expect(internals.runCommandCapture).toHaveBeenCalledTimes(2);
+			expect(vi.mocked(sleepModule.sleep).mock.calls.map(([delay]) => delay)).toEqual([3000]);
+			expect(events.map((event) => event.type)).toEqual(["start", "progress", "complete"]);
+		});
+
+		it("propagates dependency update failures instead of reporting completion", async () => {
+			const events: ProgressEvent[] = [];
+			packageManager.setProgressCallback((event) => events.push(event));
+			const run = vi.spyOn(internals, "runCommand").mockRejectedValue(new Error("dependency update failed"));
+
+			await expect(packageManager.update(source)).rejects.toThrow("dependency update failed");
+			expect(run).toHaveBeenCalledTimes(4);
+			expect(vi.mocked(sleepModule.sleep).mock.calls.map(([delay]) => delay)).toEqual([3000, 6000, 12000]);
+			expect(events.map((event) => event.type)).toEqual(["start", "progress", "progress", "progress", "error"]);
+		});
+	});
+
+	describe("Git workspace dependency boundary", () => {
+		it("skips workspace dependency checks and refreshes but still reconciles the configured source", async () => {
+			const path = join(agentDir, "git", "github.com", "example", "plugin");
+			mkdirSync(join(path, "node_modules", "leaf"), { recursive: true });
+			writeFileSync(
+				join(path, "package.json"),
+				JSON.stringify({ workspaces: ["packages/*"], dependencies: { leaf: "^2.0.0" } }),
+			);
+			writeFileSync(
+				join(path, "node_modules", "leaf", "package.json"),
+				JSON.stringify({ name: "leaf", version: "2.0.0" }),
+			);
+			const source = "git:github.com/example/plugin@v1";
+			settingsManager.setPackages([source]);
+			const internals = packageManager as unknown as PackageManagerInternals;
+			const capture = vi.spyOn(internals, "runCommandCapture").mockImplementation(async (command, args) => {
+				if (command === "git") return args[0] === "ls-files" ? "" : "same-head";
+				return JSON.stringify(
+					args.includes("versions")
+						? { versions: ["2.0.0", "2.1.0"], "dist-tags": { latest: "2.1.0" } }
+						: { version: "2.1.0" },
+				);
+			});
+			const run = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+			expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+			await packageManager.update(source);
+			expect(run).toHaveBeenCalledWith("git", ["fetch", "--depth=1", "--no-tags", "origin", "v1"], { cwd: path });
+			expect(run.mock.calls.every(([command]) => command === "git")).toBe(true);
+			expect(capture.mock.calls.every(([command]) => command === "git")).toBe(true);
+		});
+	});
+
+	describe("Git author lock detection", () => {
+		it.each(["package-lock.json", "npm-shrinkwrap.json", "bun.lock", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"])(
+			"does not inspect or apply dependency updates with tracked %s",
+			async (lockName) => {
+				const path = join(agentDir, "git", "github.com", "example", "plugin");
+				mkdirSync(path, { recursive: true });
+				writeFileSync(join(path, "package.json"), JSON.stringify({ dependencies: { leaf: "^2.0.0" } }));
+				settingsManager.setPackages(["git:github.com/example/plugin@v1"]);
+				const internals = packageManager as unknown as PackageManagerInternals;
+				const capture = vi.spyOn(internals, "runCommandCapture").mockResolvedValue(lockName);
+				const run = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+				expect(await packageManager.checkForAvailableUpdates()).toEqual([]);
+				expect(capture).toHaveBeenCalledTimes(1);
+				expect(capture).toHaveBeenCalledWith(
+					"git",
+					expect.arrayContaining(["ls-files", "--", lockName]),
+					expect.objectContaining({ cwd: path }),
+				);
+				expect(run).not.toHaveBeenCalled();
+			},
+		);
+	});
+
+	describe("Bun Git dependency manifest preservation", () => {
+		let installRoot: string;
+		let manifestPath: string;
+		const original = '{"dependencies":{"leaf":"^2.0.0"},"description":"original"}\n';
+		let runtime: {
+			refreshRuntimeDependencies(names: string[], root: string, preserveManifest: boolean): Promise<void>;
+		};
+
+		beforeEach(() => {
+			settingsManager.setNpmCommand(["bun"]);
+			installRoot = join(agentDir, "git-fixture");
+			mkdirSync(installRoot);
+			manifestPath = join(installRoot, "package.json");
+			writeFileSync(manifestPath, original);
+			runtime = packageManager as unknown as typeof runtime;
+		});
+
+		it("restores original bytes in finally and preserves the original update failure", async () => {
+			const failure = new Error("Bun update failed");
+			vi.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand").mockImplementation(async () => {
+				writeFileSync(manifestPath, '{"dependencies":{"leaf":"^2.1.0"},"description":"original"}');
+				throw failure;
+			});
+			await expect(runtime.refreshRuntimeDependencies(["leaf"], installRoot, true)).rejects.toBe(failure);
+			expect(readFileSync(manifestPath, "utf8")).toBe(original);
+		});
+
+		it("retries a failed Bun command before restoring the original manifest bytes", async () => {
+			let attempts = 0;
+			const run = vi
+				.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+				.mockImplementation(async () => {
+					writeFileSync(manifestPath, '{"dependencies":{"leaf":"^2.1.0"},"description":"original"}');
+					if (attempts++ === 0) throw new Error("TLS EOF");
+				});
+			await runtime.refreshRuntimeDependencies(["leaf"], installRoot, true);
+			expect(run).toHaveBeenCalledTimes(2);
+			expect(vi.mocked(sleepModule.sleep).mock.calls.map(([delay]) => delay)).toEqual([3000]);
+			expect(readFileSync(manifestPath, "utf8")).toBe(original);
+		});
+
+		it("does not overwrite unrelated manifest changes or retry restoration failures", async () => {
+			const changed = '{"dependencies":{"leaf":"^2.1.0"},"description":"external change"}';
+			const run = vi
+				.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+				.mockImplementation(async () => {
+					writeFileSync(manifestPath, changed);
+				});
+			await expect(runtime.refreshRuntimeDependencies(["leaf"], installRoot, true)).rejects.toThrow(
+				"changes outside targeted dependency ranges",
+			);
+			expect(run).toHaveBeenCalledTimes(1);
+			expect(sleepModule.sleep).not.toHaveBeenCalled();
+			expect(readFileSync(manifestPath, "utf8")).toBe(changed);
+		});
+
+		it("reports update and restoration failures together without dropping the original failure", async () => {
+			const failure = new Error("Bun update failed");
+			vi.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand").mockImplementation(async () => {
+				writeFileSync(manifestPath, '{"dependencies":{"leaf":"^2.1.0"},"description":"external change"}');
+				throw failure;
+			});
+			const error = await runtime
+				.refreshRuntimeDependencies(["leaf"], installRoot, true)
+				.catch((error: unknown) => error);
+			expect(error).toBeInstanceOf(AggregateError);
+			if (!(error instanceof AggregateError)) throw new Error("Expected both failures");
+			expect(error.errors[0]).toBe(failure);
+			expect(error.errors[1].message).toContain("changes outside targeted dependency ranges");
+		});
+	});
+
 	describe("offline mode and network timeouts", () => {
 		it("should update npm range packages using the configured spec", async () => {
 			const installedPath = join(tempDir, ".pi", "npm", "node_modules", "example");
@@ -3630,6 +3959,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			expect(updates).toEqual([
 				{
 					source: "npm:example",
+					reason: "package",
 					displayName: "example",
 					type: "npm",
 					scope: "project",
