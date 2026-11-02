@@ -175,7 +175,7 @@ CHAIN_EDGES=(
 	cold-start-retry:compaction-boundary-insert
 	compaction-boundary-insert:async-compaction
 	async-compaction:session-compression
-	compaction-boundary-insert:message-origin
+	session-compression:message-origin
 	message-origin:collapse-expanded-input
 	collapse-expanded-input:prompt-invocation-cards
 	compact-input-dock:responsive-selectors

@@ -470,6 +470,8 @@ test("recovery prerequisites replay as ordered ranges while presentation remains
 		"startup-submit-readiness",
 		"cold-start-retry",
 		"compaction-boundary-insert",
+		"async-compaction",
+		"session-compression",
 		"message-origin",
 	];
 	let predecessor = "upstream-main";
@@ -581,7 +583,7 @@ for (const [ancestor, descendant] of [
 	["defer-threshold-compaction", "startup-submit-readiness"],
 	["startup-submit-readiness", "cold-start-retry"],
 	["cold-start-retry", "compaction-boundary-insert"],
-	["compaction-boundary-insert", "message-origin"],
+	["session-compression", "message-origin"],
 	["compaction-boundary-insert", "async-compaction"],
 	["async-compaction", "session-compression"],
 	["message-origin", "collapse-expanded-input"],
