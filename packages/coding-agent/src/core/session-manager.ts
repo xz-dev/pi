@@ -713,7 +713,9 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(resolvedFilePath)) return [];
 	if (isCompressedSession(resolvedFilePath)) {
 		const entries: FileEntry[] = [];
-		readCompressedSession(resolvedFilePath, (text) => entries.push(...parseSessionEntries(text)));
+		readCompressedSession(resolvedFilePath, (text) => {
+			for (const entry of parseSessionEntries(text)) entries.push(entry);
+		});
 		return entries;
 	}
 
@@ -1212,6 +1214,11 @@ export class SessionManager {
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 
 		if (header) {
+			if (this.compressedState?.incompleteTail && (header.version ?? 1) < CURRENT_SESSION_VERSION) {
+				throw new Error(
+					"Cannot migrate a legacy compressed session with an incomplete append; source file unchanged",
+				);
+			}
 			this.fileEntries = entries;
 			this.sessionId = header.id;
 

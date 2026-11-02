@@ -647,6 +647,12 @@ export async function main(args: string[], options?: MainOptions) {
 		maintenanceArgs.compressSessions !== undefined ||
 		maintenanceArgs.diagnostics.some((d) => d.message.startsWith("--enable-compress-sessions"))
 	) {
+		for (const flag of maintenanceArgs.unknownFlags.keys()) {
+			maintenanceArgs.diagnostics.push({
+				type: "error",
+				message: `Unknown option --${flag} for session maintenance`,
+			});
+		}
 		if (maintenanceArgs.diagnostics.some((d) => d.type === "error")) {
 			for (const diagnostic of maintenanceArgs.diagnostics) console.error(`Error: ${diagnostic.message}`);
 			process.exitCode = 1;
