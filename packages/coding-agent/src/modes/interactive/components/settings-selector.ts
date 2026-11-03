@@ -73,6 +73,7 @@ export interface SettingsConfig {
 	autoResizeImages: boolean;
 	blockImages: boolean;
 	enableSkillCommands: boolean;
+	collapseExpandedInput: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	transport: Transport;
@@ -117,6 +118,7 @@ export interface SettingsCallbacks {
 	onAutoResizeImagesChange: (enabled: boolean) => void;
 	onBlockImagesChange: (blocked: boolean) => void;
 	onEnableSkillCommandsChange: (enabled: boolean) => void;
+	onCollapseExpandedInputChange: (enabled: boolean) => void;
 	onSteeringModeChange: (mode: "all" | "one-at-a-time") => void;
 	onFollowUpModeChange: (mode: "all" | "one-at-a-time") => void;
 	onTransportChange: (transport: Transport) => void;
@@ -836,9 +838,19 @@ export class SettingsSelectorComponent extends SelectorPanel {
 			values: ["true", "false"],
 		});
 
-		// Hardware cursor toggle (insert after skill-commands)
+		// Collapsed command display toggle (insert after skill-commands)
 		const skillCommandsIndex = items.findIndex((item) => item.id === "skill-commands");
 		items.splice(skillCommandsIndex + 1, 0, {
+			id: "collapse-expanded-input",
+			label: "Show submitted commands",
+			description: "Show prompt-template and skill commands instead of their expansion (the model still gets it)",
+			currentValue: config.collapseExpandedInput ? "true" : "false",
+			values: ["true", "false"],
+		});
+
+		// Hardware cursor toggle (insert after collapse-expanded-input)
+		const collapseInputIndex = items.findIndex((item) => item.id === "collapse-expanded-input");
+		items.splice(collapseInputIndex + 1, 0, {
 			id: "show-hardware-cursor",
 			label: "Show hardware cursor",
 			description: "Use the terminal cursor instead of Pi's drawn cursor",
@@ -936,6 +948,9 @@ export class SettingsSelectorComponent extends SelectorPanel {
 						break;
 					case "skill-commands":
 						callbacks.onEnableSkillCommandsChange(newValue === "true");
+						break;
+					case "collapse-expanded-input":
+						callbacks.onCollapseExpandedInputChange(newValue === "true");
 						break;
 					case "steering-mode":
 						callbacks.onSteeringModeChange(newValue as "all" | "one-at-a-time");
