@@ -48,6 +48,8 @@ Templates support these substitutions:
 
 Arguments follow shell-like quoting, so `/review "API compatibility"` supplies one argument containing a space.
 
+In the chat, a template you typed shows as a `[prompt]` card with the command and its arguments. Click the card, or use the tool-output expand key (`app.tools.expand`), to see the expanded text Pi sent at that time. The card is always used, and the `collapseExpandedInput` [setting](settings.md) does not change it. The setting controls only the plain-text forms in `/tree`, `/fork`, input history, and the queue. Messages saved before Pi recorded the typed command show their stored text.
+
 <a id="choose-where-it-loads"></a>
 
 ## Add it to Pi
