@@ -384,7 +384,19 @@ describe.each(PATHS)("$name tool-call argument streaming", (path) => {
 			});
 		})();
 		await collectGarbage();
-		expect(references.filter((reference) => reference.deref() !== undefined)).toHaveLength(0);
+		const retained = references.filter((reference) => reference.deref() !== undefined);
+		if (retained.length > 0) {
+			console.log(
+				"[retention42] live",
+				retained
+					.map((reference) => {
+						const index = references.indexOf(reference);
+						return index === 0 ? "0:stream" : `${index}:arguments:${index - 1}`;
+					})
+					.join(","),
+			);
+		}
+		expect(retained).toHaveLength(0);
 	});
 });
 

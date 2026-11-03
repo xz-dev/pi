@@ -1,31 +1,247 @@
-name: npm audit
+name: AI retention diagnostic
 
 on:
-  schedule:
-    - cron: '37 7 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
-jobs:
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+concurrency:
+  group: ai-retention42-${{ github.ref }}
+  cancel-in-progress: false
 
-      - name: Setup Node.js
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact diagnostic source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify bounded source and namespace prerequisites
+        id: prerequisites
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$GITHUB_REF" == refs/heads/diag/ai-retention42 ]]
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ "$(git rev-parse HEAD^)" == 1cc235c2d5689b0951288828971056e93bd1970b ]]
+          [[ "$(git rev-parse 'HEAD^^{tree}')" == 68e6fdd5367e5eb8fa389e06795690079c4b02d3 ]]
+          diff -u <(printf '%s\n' .github/workflows/npm-audit.yml packages/ai/test/streaming-tool-arguments.test.ts test.sh) \
+            <(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)
+          git diff --exit-code HEAD
+          command -v bwrap
+          command -v ip
+          # Fail before dependency preparation; never install or reconfigure runner prerequisites.
+          bwrap --unshare-user --unshare-net --unshare-pid --unshare-ipc --unshare-uts \
+            --die-with-parent --new-session --cap-drop ALL --clearenv \
+            --ro-bind /usr /usr --ro-bind /etc /etc \
+            --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --proc /proc --dev /dev --tmpfs /tmp -- /bin/true
+
+      - name: Setup exact failing-CI Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
-          cache: npm
+          node-version: 22.23.4
 
-      - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare exact-lock data and offline build closure
+        id: preparation
+        run: |
+          set -euo pipefail
+          [[ "$(node --version)" == v22.23.4 ]]
+          [[ "$(npm --version)" == 10.9.9 ]]
+          out="$RUNNER_TEMP/ai-retention42"
+          mkdir -m 700 "$out"
+          mkdir -p "$out/prehome" "$out/outtmp" "$out/preparation-home"
+          # Public data hydration only; no runner/provider environment or home is inherited.
+          env -i PATH="$PATH" HOME="$out/preparation-home" CI=1 GITHUB_ACTIONS=1 \
+            TMPDIR="$out/outtmp" AWS_EC2_METADATA_DISABLED=true \
+            /bin/bash --noprofile --norc -euo pipefail <<'PREPARE'
+          npm ci --ignore-scripts
+          npm run hydrate:model-data
+          git diff --exit-code HEAD
+          npm run build --workspace packages/telemetry
+          npm run build --workspace packages/schema
+          npm run build:offline --workspace packages/ai
+          git diff --exit-code HEAD
+          PREPARE
+          node --input-type=module - "$out" <<'FINGERPRINT'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          const out = process.argv[2];
+          const hash = path => createHash('sha256').update(fs.readFileSync(path)).digest('hex');
+          const dataRoot = 'packages/ai/src/providers/data';
+          const names = fs.readdirSync(dataRoot).sort();
+          assert.equal(names.length, 43);
+          const sourceFiles = ['package-lock.json', 'packages/ai/src/models.generated.ts',
+            'packages/ai/test/streaming-tool-arguments.test.ts', 'packages/ai/test/memory-helpers.ts',
+            'packages/ai/vitest.config.ts', 'scripts/catalog-drift-test-skips.txt', 'test.sh',
+            '.github/workflows/npm-audit.yml'];
+          const compiledFiles = ['packages/telemetry/dist/index.js', 'packages/schema/dist/index.js',
+            'packages/ai/dist/models.js', 'packages/ai/dist/providers/faux.js'];
+          const inventory = paths => paths.map(path => ({ path, sha256: hash(path) }));
+          const git = arg => execFileSync('git', ['rev-parse', arg], { encoding: 'utf8' }).trim();
+          const receipt = { head: git('HEAD'), tree: git('HEAD^{tree}'), base: git('HEAD^'),
+            source: inventory(sourceFiles), compiled: inventory(compiledFiles),
+            providerData: inventory(names.map(name => `${dataRoot}/${name}`)),
+            hydrationCommand: 'npm run hydrate:model-data', dependencyCommand: 'npm ci --ignore-scripts' };
+          fs.writeFileSync(`${out}/inputs.json`, JSON.stringify(receipt), { flag: 'wx', mode: 0o600 });
+          FINGERPRINT
 
-      - name: Audit production vulnerabilities
-        run: node scripts/npm-audit.mjs
+      - name: Guard sandbox and run official AI driver once
+        id: suite
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/ai-retention42"
+          node_root="$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")"
+          parent_net="$(readlink /proc/self/ns/net)"
+          ip_path="$(command -v ip)"
+          cat > "$out/run.mjs" <<'RUN'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import os from 'node:os';
+          import http from 'node:http';
+          import { pathToFileURL } from 'node:url';
+          import { spawnSync } from 'node:child_process';
+          import { stripVTControlCharacters } from 'node:util';
+          const [root, out, nodeRoot, parentNet, ipPath] = process.argv.slice(2);
+          const net = fs.readlinkSync('/proc/self/ns/net');
+          assert.notEqual(net, parentNet);
+          assert.equal(process.cwd(), root);
+          assert.equal(process.env.PWD, root);
+          assert.equal(process.version, 'v22.23.4');
+          assert.equal(process.versions.v8, '12.4.254.21-node.57');
+          assert.equal(process.execPath, `${nodeRoot}/bin/node`);
+          const keys = ['CI', 'GITHUB_ACTIONS', 'HOME', 'PATH', 'PI_TEST_WORKSPACE_GROUP', 'PWD', 'TEMP', 'TMP', 'TMPDIR'].sort();
+          assert.deepEqual(Object.keys(process.env).sort(), keys);
+          assert.equal(process.env.PATH, `${nodeRoot}/bin:/usr/bin:/bin`);
+          assert.equal(process.env.HOME, `${out}/prehome`);
+          assert.equal(process.env.PI_TEST_WORKSPACE_GROUP, 'ai');
+          assert.deepEqual(fs.readdirSync(process.env.HOME), []);
+          // /home/runner exists as a mount ancestor, not as a mounted personal home.
+          for (const path of ['/home/runner/.ssh', '/home/runner/.aws', '/home/runner/.config',
+            '/home/runner/.pi', '/home/runner/.agents', '/home/runner/.cache', '/home/runner/.gnupg',
+            '/root', '/run/user', '/run/dbus', '/run/sshd']) assert.equal(fs.existsSync(path), false, path);
+          const interfaces = os.networkInterfaces();
+          assert.deepEqual(Object.keys(interfaces), ['lo']);
+          for (const address of interfaces.lo) assert(address.internal && ['127.0.0.1', '::1'].includes(address.address));
+          const ip = (...args) => {
+            const result = spawnSync(ipPath, ['-j', ...args], { encoding: 'utf8' });
+            assert.equal(result.status, 0);
+            return JSON.parse(result.stdout);
+          };
+          const links = ip('link', 'show');
+          assert.deepEqual(links.map(link => link.ifname), ['lo']);
+          assert(links[0].flags.includes('UP'));
+          const routes = [...ip('-4', 'route', 'show', 'table', 'all'), ...ip('-6', 'route', 'show', 'table', 'all')];
+          for (const route of routes) {
+            assert.equal(route.dev, 'lo');
+            assert.notEqual(route.dst, 'default');
+            assert.equal(route.gateway, undefined);
+          }
+          const npm = spawnSync(`${nodeRoot}/bin/npm`, ['--version'], { encoding: 'utf8' });
+          assert.equal(npm.status, 0);
+          assert.equal(npm.stdout.trim(), '10.9.9');
+          const pkg = JSON.parse(fs.readFileSync(`${root}/packages/ai/package.json`, 'utf8'));
+          assert.equal(pkg.scripts.test, 'vitest --run');
+          assert.equal(pkg.scripts.pretest, undefined);
+          assert.equal(pkg.scripts.posttest, undefined);
+          await import(pathToFileURL(`${root}/node_modules/vitest/dist/config.js`).href);
+          for (const path of ['packages/schema/dist/index.js', 'packages/ai/dist/models.js', 'packages/ai/dist/providers/faux.js']) {
+            assert(fs.existsSync(`${root}/${path}`), path);
+          }
+          const server = http.createServer((_request, response) => response.end('isolated-loopback'));
+          try {
+            await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+            const response = await fetch(`http://127.0.0.1:${server.address().port}`);
+            assert.equal(await response.text(), 'isolated-loopback');
+          } finally {
+            server.closeAllConnections();
+            await new Promise(resolve => server.close(resolve));
+          }
+          const guard = { passed: true, node: process.version, v8: process.versions.v8, npm: npm.stdout.trim(),
+            networkNamespace: net, parentNetworkNamespace: parentNet, environmentKeyNames: keys,
+            loopbackOnly: true, hostCredentialPathsAbsent: true, freshHome: true, localFixtureClosed: true,
+            availableParallelism: os.availableParallelism(), totalMemoryBytes: os.totalmem() };
+          fs.writeFileSync(`${out}/guard.json`, JSON.stringify(guard), { flag: 'wx', mode: 0o600 });
+          const attempt = { command: '/bin/bash ./test.sh', workspaceGroup: 'ai', suiteAttemptCount: 1,
+            startedAt: new Date().toISOString() };
+          fs.writeFileSync(`${out}/attempt.json`, JSON.stringify(attempt), { flag: 'wx', mode: 0o600 });
+          // Keep raw output private and ephemeral; only numeric counts and primitive identities leave this step.
+          const log = fs.openSync(`${out}/private-suite.log`, 'wx', 0o600);
+          const result = spawnSync('/bin/bash', ['./test.sh'], { cwd: root, stdio: ['ignore', log, log], timeout: 1200000 });
+          fs.closeSync(log);
+          const text = stripVTControlCharacters(fs.readFileSync(`${out}/private-suite.log`, 'utf8'));
+          const counts = label => {
+            const lines = text.split('\n').filter(line => new RegExp(`^\\s*${label}\\s+`).test(line));
+            return lines.map(line => Object.fromEntries([...line.matchAll(/(\d+) (failed|passed|skipped|todo)/g)]
+              .map(match => [match[2], Number(match[1])])));
+          };
+          const liveIndices = [...text.matchAll(/\[retention42\] live ((?:\d+:(?:stream|arguments:\d+))(?:,\d+:(?:stream|arguments:\d+))*)/g)]
+            .map(match => match[1].split(','));
+          const failures = text.split('\n').filter(line => /^\s*FAIL\s+test\//.test(line));
+          const failureHeaders = failures.slice(0, 40).map(line => line.trim()
+            .replace(/https?:\/\/\S+/g, '[URL]').replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, 500));
+          const receipt = { ...attempt, endedAt: new Date().toISOString(), exit: result.status,
+            signal: result.signal, timedOut: result.error?.code === 'ETIMEDOUT',
+            testFiles: counts('Test Files'), tests: counts('Tests'), liveIndices,
+            failureHeaders, failureHeaderCount: failures.length, failureHeadersTruncated: failures.length > 40,
+            historicalFailureNotCleared: true, productFixClaimed: false };
+          fs.writeFileSync(`${out}/result.json`, JSON.stringify(receipt), { flag: 'wx', mode: 0o600 });
+          fs.unlinkSync(`${out}/private-suite.log`);
+          process.exit(result.status ?? 1);
+          RUN
+          bwrap --unshare-user --unshare-net --unshare-pid --unshare-ipc --unshare-uts \
+            --die-with-parent --new-session --cap-drop ALL --clearenv \
+            --ro-bind /usr /usr --ro-bind /etc /etc \
+            --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --proc /proc --dev /dev --tmpfs /tmp \
+            --bind "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" --bind "$out" "$out" \
+            --tmpfs "$out/prehome" --ro-bind "$node_root" "$node_root" \
+            --setenv PATH "$node_root/bin:/usr/bin:/bin" --setenv CI 1 --setenv GITHUB_ACTIONS 1 \
+            --setenv HOME "$out/prehome" --setenv TMPDIR "$out/outtmp" \
+            --setenv TMP "$out/outtmp" --setenv TEMP "$out/outtmp" \
+            --setenv PI_TEST_WORKSPACE_GROUP ai --chdir "$GITHUB_WORKSPACE" \
+            -- "$node_root/bin/node" "$out/run.mjs" "$GITHUB_WORKSPACE" "$out" "$node_root" "$parent_net" "$ip_path"
 
-      - name: Verify registry signatures
-        run: npm audit signatures --omit=dev
+      - name: Record sanitized primitive diagnostic receipt
+        if: always()
+        env:
+          PREREQUISITES_OUTCOME: ${{ steps.prerequisites.outcome }}
+          PREPARATION_OUTCOME: ${{ steps.preparation.outcome }}
+          SUITE_OUTCOME: ${{ steps.suite.outcome }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'SUMMARY'
+          import fs from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          const out = `${process.env.RUNNER_TEMP}/ai-retention42`;
+          const trackedClean = spawnSync('git', ['diff', '--quiet', 'HEAD']).status === 0;
+          const read = name => fs.existsSync(`${out}/${name}.json`) ? JSON.parse(fs.readFileSync(`${out}/${name}.json`, 'utf8')) : null;
+          const receipt = { workflow: 'AI retention diagnostic', event: process.env.GITHUB_EVENT_NAME,
+            ref: process.env.GITHUB_REF, sha: process.env.GITHUB_SHA, job: process.env.GITHUB_JOB,
+            runId: process.env.GITHUB_RUN_ID, runNumber: process.env.GITHUB_RUN_NUMBER, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            prerequisites: process.env.PREREQUISITES_OUTCOME, preparation: process.env.PREPARATION_OUTCOME,
+            suite: process.env.SUITE_OUTCOME, inputs: read('inputs'), guard: read('guard'),
+            attempt: read('attempt'), result: read('result'), trackedClean, historicalFailureNotCleared: true };
+          const json = JSON.stringify(receipt, null, 2);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\`\`\`json\n${json}\n\`\`\`\n`);
+          console.log('[diag42-receipt-begin]');
+          console.log(json);
+          console.log('[diag42-receipt-end]');
+          // No upload of raw logs, environment values, credentials, or heap data.
+          if (fs.existsSync(`${out}/private-suite.log`)) fs.unlinkSync(`${out}/private-suite.log`);
+          if (!trackedClean) process.exit(1);
+          SUMMARY

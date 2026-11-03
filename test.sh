@@ -87,6 +87,7 @@ skip_pattern="$(node scripts/catalog-drift-test-pattern.mjs)"
 workspace_args=(--workspaces)
 case "${PI_TEST_WORKSPACE_GROUP-}" in
 	"") ;;
+	ai) workspace_args=(--workspace 'packages/ai') ;;
 	coding-agent|durable) workspace_args=(--workspace "packages/$PI_TEST_WORKSPACE_GROUP") ;;
 	other)
 		workspace_args=()
