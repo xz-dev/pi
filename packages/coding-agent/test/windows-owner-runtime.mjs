@@ -37,14 +37,16 @@ function alive(pid) { if (!Number.isInteger(pid) || pid <= 0) throw new Error(`i
 function pids(directory) { return readdirSync(directory).filter((name) => name.endsWith(".pid")).map((name) => Number(name.slice(0, -4))); }
 function directory() { return mkdtempSync(join(root, "tree-")); }
 async function run(command, args, options = {}) {
+	const started = performance.now();
 	const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
 	const stdout = [], stderr = [];
 	child.stdout.on("data", (bytes) => stdout.push(bytes)); child.stderr.on("data", (bytes) => stderr.push(bytes));
-	const deadline = setTimeout(() => child.kill("SIGKILL"), 12000);
-	let code;
-	try { code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); }); }
+	let timerFired = false, killResult = null;
+	const deadline = setTimeout(() => { timerFired = true; killResult = child.kill("SIGKILL"); }, 12000);
+	let outcome;
+	try { outcome = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", (code, signal) => resolve({ code, signal })); }); }
 	finally { clearTimeout(deadline); }
-	return { code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
+	return { ...outcome, timerFired, killResult, elapsedMs: Math.round(performance.now() - started), stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
 }
 function supervise(args, flags = [], env = {}, context = {}) {
 	const child = spawn(owner, ["supervise", ...flags, "--control-fd", "3", ...args], {
@@ -88,6 +90,7 @@ before(async () => {
 	const compile = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
 		"Add-Type -TypeDefinition (Get-Content -Raw -LiteralPath $env:PI_OWNER_CS) -OutputAssembly $env:PI_OWNER_FIXTURE -OutputType ConsoleApplication"],
 		{ env: { ...process.env, PI_OWNER_CS: source, PI_OWNER_FIXTURE: fixture } });
+	console.error(JSON.stringify({ fixtureCompile: { ...compile, stdout: compile.stdout.toString().slice(-4000), stderr: compile.stderr.toString().slice(-4000) } }));
 	assert.equal(compile.code, 0, compile.stderr.toString());
 	const token = await run(fixture, ["identity"]);
 	console.log(`token=${token.stdout}`);
