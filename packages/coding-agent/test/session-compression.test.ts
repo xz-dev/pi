@@ -14,7 +14,7 @@ import {
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
+import { zstdCompressSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import { ENV_AGENT_DIR } from "../src/config.ts";
@@ -23,6 +23,7 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { compressedSessionInfo, readCompressedSession, replaceSessionFile } from "../src/core/session-storage.ts";
 import { filterAndSortSessions } from "../src/modes/interactive/components/session-selector-search.ts";
 import { createTestSession } from "./utilities.ts";
+import { decodeStandardZstd } from "./zstd-oracle.ts";
 
 function message(content: string) {
 	return { role: "user" as const, content, timestamp: 1 };
@@ -58,7 +59,7 @@ describe("session compression acceptance", () => {
 		session.appendMessage(message("keep every byte"));
 		const stored = readFileSync(session.getSessionFile()!);
 		expect(stored[0]).not.toBe("{".charCodeAt(0));
-		expect(zstdDecompressSync(stored).toString()).toContain("keep every byte");
+		expect(decodeStandardZstd(stored).toString()).toContain("keep every byte");
 		expect(SessionManager.open(session.getSessionFile()!).getEntries()).toEqual(session.getEntries());
 	});
 
@@ -78,13 +79,13 @@ describe("session compression acceptance", () => {
 		for (let i = 0; i < 1000; i++) session.appendMessage(message("short repeated record"));
 		const path = session.getSessionFile()!;
 		const before = readFileSync(path);
-		const transcript = zstdDecompressSync(before);
+		const transcript = decodeStandardZstd(before);
 		const time = new Date("2020-01-01T00:00:00Z");
 		utimesSync(path, time, time);
 		if (process.platform !== "win32") chmodSync(path, 0o640);
 		expect(session.consolidateStorage()).toBe(true);
 		expect(readFileSync(path).length).toBeLessThan(transcript.length / 4);
-		expect(zstdDecompressSync(readFileSync(path))).toEqual(transcript);
+		expect(decodeStandardZstd(readFileSync(path))).toEqual(transcript);
 		expect(statSync(path).mtimeMs).toBe(time.getTime());
 		if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o640);
 		expect(session.consolidateStorage()).toBe(false);
@@ -100,11 +101,11 @@ describe("session compression acceptance", () => {
 		try {
 			for (let i = 0; i < 100; i++) context.sessionManager.appendMessage(message("persisted before close"));
 			const path = context.sessionManager.getSessionFile()!;
-			const transcript = zstdDecompressSync(readFileSync(path));
+			const transcript = decodeStandardZstd(readFileSync(path));
 			expect(readCompressedSession(path).transactions).toBeGreaterThan(1);
 			context.session.dispose();
 			expect(readCompressedSession(path).transactions).toBe(1);
-			expect(zstdDecompressSync(readFileSync(path))).toEqual(transcript);
+			expect(decodeStandardZstd(readFileSync(path))).toEqual(transcript);
 		} finally {
 			context.cleanup();
 		}
@@ -155,10 +156,10 @@ describe("session compression acceptance", () => {
 		const target = session.getSessionFile()!;
 		const alias = join(root, "alias.jsonl");
 		symlinkSync(target, alias);
-		const transcript = zstdDecompressSync(readFileSync(target));
+		const transcript = decodeStandardZstd(readFileSync(target));
 		expect(SessionManager.open(alias).consolidateStorage()).toBe(true);
 		expect(lstatSync(alias).isSymbolicLink()).toBe(true);
-		expect(zstdDecompressSync(readFileSync(target))).toEqual(transcript);
+		expect(decodeStandardZstd(readFileSync(target))).toEqual(transcript);
 		expect(readFileSync(alias)).toEqual(readFileSync(target));
 	});
 
@@ -210,7 +211,7 @@ describe("session compression acceptance", () => {
 			restored.appendMessage(message("after interruption"));
 			expect(SessionManager.open(target).getEntries()).toEqual(restored.getEntries());
 			expect(restored.getEntries()).toHaveLength(2);
-			expect(zstdDecompressSync(readFileSync(target)).toString()).not.toContain('"content":"interrupted"');
+			expect(decodeStandardZstd(readFileSync(target)).toString()).not.toContain('"content":"interrupted"');
 		}
 	});
 
