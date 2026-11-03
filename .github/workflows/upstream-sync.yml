@@ -5,6 +5,11 @@ on:
     - cron: "28 5,17 * * *"
     # scheduled at 13:28 and 01:28 Asia/Shanghai (UTC+8)
   workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: "Optional locally verified upstream commit (full SHA); empty uses latest"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -25,6 +30,8 @@ jobs:
           persist-credentials: false
 
       - name: Rebuild main from upstream and squash branches
+        env:
+          REQUESTED_UPSTREAM_SHA: ${{ inputs.upstream_sha }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
@@ -33,6 +40,18 @@ jobs:
           git remote add upstream https://github.com/earendil-works/pi.git
           git fetch upstream main
           upstream_sha="$(git rev-parse upstream/main)"
+          # A manual run may replay its verified snapshot; schedules still use latest.
+          if [[ -n "$REQUESTED_UPSTREAM_SHA" ]]; then
+            [[ "$REQUESTED_UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo '::error::upstream_sha must be a full lowercase commit SHA'
+              exit 1
+            }
+            git merge-base --is-ancestor "$REQUESTED_UPSTREAM_SHA" upstream/main || {
+              echo '::error::upstream_sha must belong to fetched upstream/main history'
+              exit 1
+            }
+            upstream_sha="$REQUESTED_UPSTREAM_SHA"
+          fi
           git fetch origin \
             +refs/heads/ci:refs/remotes/origin/ci \
             +refs/heads/patch/model-refresh:refs/remotes/origin/patch/model-refresh \
@@ -237,7 +256,7 @@ jobs:
         run: |
           (
             cd packages/chord
-            node ../../node_modules/vitest/dist/cli.js --run test/websocket.test.ts
+            node ../../node_modules/vitest/dist/cli.js --run test/old/websocket.test.ts
           )
           (
             cd packages/coding-agent
