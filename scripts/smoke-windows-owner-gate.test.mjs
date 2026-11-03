@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 import { bunTarget } from "./lib/bun-targets.mjs";
 import { artifactBunFromOwnerRows } from "./smoke-owner-lifecycle.mjs";
@@ -27,6 +29,54 @@ function output(gate = passedWindowsOwnerGate(target.id, digest)) {
 		...runtime.tests.map(({ name, status }) => ({ type: status === "failed" ? "test:fail" : "test:pass", data: { name, ...(status === "skipped" ? { skip: "fixture unavailable" } : {}) } })),
 	].map((entry) => JSON.stringify(entry)).join("\n");
 }
+
+test("fixture diagnostics preserve close status, timer kill result, elapsed time and binary output", async () => {
+	// Load only the helper: importing this Windows-only suite would execute its platform/identity hooks.
+	const source = readFileSync(new URL("../packages/coding-agent/test/windows-owner-runtime.mjs", import.meta.url), "utf8");
+	const helper = source.slice(source.indexOf("async function run("), source.indexOf("\nfunction supervise("));
+	for (const [code, signal, timerFired, killResult] of [[0, null, false, null], [7, null, false, null], [null, "SIGTERM", false, null], [null, "SIGKILL", true, true], [null, "SIGKILL", true, false]]) {
+		const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: (signal) => { assert.equal(signal, "SIGKILL"); return killResult; } });
+		let timer, cleared = false, now = 100;
+		const run = runInNewContext(`${helper}\nrun`, { Buffer, spawn: () => child, performance: { now: () => now }, setTimeout: (callback, ms) => { assert.equal(ms, 12000); timer = callback; return 1; }, clearTimeout: (id) => { assert.equal(id, 1); cleared = true; } });
+		const pending = run("compiler", []);
+		child.stdout.emit("data", Buffer.from([0, 255]));
+		child.stderr.emit("data", Buffer.from("compiler diagnostic"));
+		if (timerFired) timer();
+		now = timerFired ? 12100 : 125;
+		child.emit("close", code, signal);
+		const outcome = await pending;
+		assert.deepEqual(JSON.parse(JSON.stringify(outcome)), { code, signal, timerFired, killResult, elapsedMs: now - 100, stdout: { type: "Buffer", data: [0, 255] }, stderr: { type: "Buffer", data: [...Buffer.from("compiler diagnostic")] } });
+		assert.equal(cleared, true);
+		const failed = run("compiler", []);
+		const error = new Error("spawn denied");
+		child.emit("error", error);
+		await assert.rejects(failed, (actual) => actual === error);
+	}
+});
+
+test("bounded compiler output survives Node reporter and Bun log parsing even on compilation failure", async () => {
+	const source = readFileSync(new URL("../packages/coding-agent/test/windows-owner-runtime.mjs", import.meta.url), "utf8");
+	const logging = source.split("\n").find((line) => line.includes("console.error(JSON.stringify({ fixtureCompile:"));
+	assert.ok(logging);
+	const compile = { code: null, signal: "SIGKILL", timerFired: true, killResult: true, elapsedMs: 12005, stdout: Buffer.from(`${"x".repeat(5000)}compiler stdout`), stderr: Buffer.from(`${"x".repeat(5000)}compiler stderr`) };
+	let logs = "";
+	runInNewContext(logging, { compile, console: { error: (line) => { logs += `${line}\n`; } } });
+	const diagnostic = JSON.parse(logs).fixtureCompile;
+	assert.deepEqual({ ...diagnostic, stdout: undefined, stderr: undefined }, { ...compile, stdout: undefined, stderr: undefined });
+	assert.equal(diagnostic.stdout.length, 4000);
+	assert.equal(diagnostic.stderr.length, 4000);
+	assert.ok(diagnostic.stdout.endsWith("compiler stdout"));
+	assert.ok(diagnostic.stderr.endsWith("compiler stderr"));
+	const { default: reporter } = await import("./smoke-windows-owner-gate.mjs");
+	async function* events() { yield { type: "test:stderr", data: { message: logs } }; }
+	let output = ""; for await (const chunk of reporter(events())) output += chunk;
+	assert.deepEqual(JSON.parse(parseWindowsOwnerGate(output).logs).fixtureCompile, diagnostic);
+	const gate = passedWindowsOwnerGate(target.id, digest), file = "C:/gate/windows-owner-runtime.mjs";
+	gate.runtimes[1].tests[0].status = "failed";
+	const parsed = parseBunOwnerGate(junit(gate, file), logs, file);
+	assert.equal(parsed.counts.failed, 1);
+	assert.deepEqual(JSON.parse(parsed.logs).fixtureCompile, diagnostic);
+});
 
 test("Windows gate command uses runner Node built-in type stripping and structured reporter, no dev loader", () => {
 	const command = windowsOwnerGateCommand("C:/isolated gate", "C:/node.exe");

@@ -1,0 +1,112 @@
+name: Diagnose Windows owner fixture compile
+
+on:
+  push:
+    branches: [diag/windows-owner-compile-zip-20261103]
+
+permissions: { contents: read }
+
+jobs:
+  diagnose:
+    if: github.repository == 'xz-dev/pi' && github.ref == 'refs/heads/diag/windows-owner-compile-zip-20261103' && github.event_name == 'push'
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ github.sha }}", fetch-depth: 2, persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22.23.4" }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with: { bun-version: "1.4.4" }
+      - name: Pin source, runtimes and published release 398 executable
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = Join-Path $env:RUNNER_TEMP 'windows-owner-diagnostic'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $pin = '53b911acb77b4de18a64fec557d5743687e6b3dc'
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA -or (git rev-parse HEAD^) -ne $pin) { throw 'Diagnostic commit must have exact release 398 source parent' }
+          if ($env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ARCH -ne 'X64') { throw 'Windows x64 runner required' }
+          $allowed = @('.github/workflows/diagnose-windows-owner-compile.yml', 'packages/coding-agent/test/windows-owner-runtime.mjs', 'scripts/smoke-windows-owner-gate.test.mjs')
+          $changed = @(git diff --name-only $pin HEAD)
+          if ($LASTEXITCODE -ne 0 -or @($changed | Where-Object { $_ -notin $allowed }).Count -gt 0) { throw 'Unexpected diagnostic source changes' }
+          $nodeVersion = (node -p 'process.versions.node')
+          $bunVersion = (bun --version)
+          if ($nodeVersion -ne '22.23.4' -or $bunVersion -ne '1.4.4') { throw 'Diagnostic runtime version mismatch' }
+          $fixture = 'packages/coding-agent/test/fixtures/windows-owner.cs'
+          $fixtureSha256 = (Get-FileHash $fixture -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($fixtureSha256 -ne 'a9f58dd4c5b343cd474bd57fc3708e32ff69956832d43dfd1f0db4cdb413c690') { throw 'Pinned compiler source differs' }
+          $pinnedRuntimeSha256 = node --input-type=module -e 'import {execFileSync} from "node:child_process"; import {createHash} from "node:crypto"; console.log(createHash("sha256").update(execFileSync("git", ["show", "53b911acb77b4de18a64fec557d5743687e6b3dc:packages/coding-agent/test/windows-owner-runtime.mjs"])).digest("hex"))'
+          if ($LASTEXITCODE -ne 0 -or $pinnedRuntimeSha256 -ne '2f1518c95f736f29228039edef10af9551b0b521a3e8cbb6aec0970d18ea1cb1') { throw 'Pinned runtime fixture differs' }
+          $url = 'https://github.com/xz-dev/pi/releases/download/xz-v1.4.0-xz.398.1.g53b911ac/pi-windows-x64-modern.zip'
+          $archive = Join-Path $out 'pi-windows-x64-modern.zip'
+          $asset = Join-Path $out 'pi.exe'
+          $expectedArchiveHash = '7f4d747d66b7ca458075214e120e55c033e6fb90ae4be61b20ecd0fd68f53339'
+          & curl.exe --fail --location --silent --show-error --output $archive $url 2> (Join-Path $out 'download.stderr.log')
+          $downloadExit = $LASTEXITCODE
+          $actualArchiveHash = if (Test-Path $archive) { (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+          if ($downloadExit -ne 0 -or $actualArchiveHash -ne $expectedArchiveHash -or (Get-Item $archive).Length -ne 74203524) { throw 'Published release ZIP download/hash/size mismatch' }
+          $bundle = Join-Path $out 'bundle'
+          Expand-Archive -LiteralPath $archive -DestinationPath $bundle
+          $executables = @(Get-ChildItem -LiteralPath $bundle -Recurse -File -Filter 'pi.exe')
+          if ($executables.Count -ne 1 -or $executables[0].Length -ne 155978752) { throw 'Published release ZIP executable inventory/size mismatch' }
+          Copy-Item -LiteralPath $executables[0].FullName -Destination $asset
+          $actualHash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          $identity = [ordered]@{
+            sourcePin = $pin; diagnosticCommit = $env:GITHUB_SHA; changedFiles = $changed
+            fixtureSourceSha256 = $fixtureSha256; pinnedRuntimeFixtureSha256 = $pinnedRuntimeSha256
+            diagnosticRuntimeFixtureSha256 = (Get-FileHash 'packages/coding-agent/test/windows-owner-runtime.mjs' -Algorithm SHA256).Hash.ToLowerInvariant()
+            node = $nodeVersion; bun = $bunVersion; target = 'windows-x64-modern'
+            imageOS = $env:ImageOS; imageVersion = $env:ImageVersion; runnerArch = $env:RUNNER_ARCH
+            release = 'xz-v1.4.0-xz.398.1.g53b911ac'; downloadUrl = $url; downloadExit = $downloadExit
+            expectedArchiveSha256 = $expectedArchiveHash; actualArchiveSha256 = $actualArchiveHash
+            archiveBytes = (Get-Item $archive).Length; executableBytes = (Get-Item $asset).Length
+            expectedCliSha256 = '104b9ba16dbfb0987fd8df0dc44fd73437100afe37fc7c8ebb28ada771a3bf4e'; actualCliSha256 = $actualHash
+            expectedOwnerSha256 = '35546bccf16fec3dd73571c65c31ee9108ebb5cd4b577dd0803e738276815b62'
+          }
+          $identity | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $out 'identity.json') -Encoding utf8NoBOM
+          if ($downloadExit -ne 0 -or $actualHash -ne $identity.expectedCliSha256) { throw 'Published release executable download/hash mismatch' }
+      - name: Run existing nonadmin lifecycle and complete Node/Bun owner gate once
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = Join-Path $env:RUNNER_TEMP 'windows-owner-diagnostic'
+          $identity = Get-Content -Raw (Join-Path $out 'identity.json') | ConvertFrom-Json
+          # Existing entry stages locked dependencies with --ignore-scripts and drops to dedicated standard user.
+          & node scripts/smoke-owner-lifecycle.mjs (Join-Path $out 'pi.exe') windows-x64-modern (Join-Path $out 'owner-lifecycle.json') 1> (Join-Path $out 'lifecycle.stdout.log') 2> (Join-Path $out 'lifecycle.stderr.log')
+          $gateExit = $LASTEXITCODE
+          $receipt = [ordered]@{ gateExit = $gateExit; verificationError = $null; fixtureCompile = @() }
+          try {
+            $evidence = Get-Content -Raw (Join-Path $out 'owner-lifecycle.json') | ConvertFrom-Json
+            if ($evidence.privilegeDrop.verifiedNonadmin -ne $true) { throw 'Existing privilege-drop gate did not verify standard-user token' }
+            $runtimes = @($evidence.windowsRuntimeGate.runtimes)
+            if ($runtimes.Count -ne 2) { throw 'Missing Node/Bun runtime evidence' }
+            foreach ($runtime in $runtimes) {
+              $logs = if ($runtime.logs) { $runtime.logs } else { $runtime.stderr }
+              foreach ($line in ($logs -split '\r?\n')) {
+                try { $entry = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                if ($null -ne $entry.fixtureCompile) { $receipt.fixtureCompile += @{ runtime = $runtime.name; outcome = $entry.fixtureCompile } }
+              }
+            }
+            if ($receipt.fixtureCompile.Count -ne 2) { throw 'Missing structured compiler outcome for Node or Bun' }
+            foreach ($runtime in $runtimes) {
+              if ($runtime.artifact.cliSha256 -ne $identity.expectedCliSha256 -or $runtime.artifact.ownerSha256 -ne $identity.expectedOwnerSha256) { throw 'Shipped CLI/materialized helper hash mismatch' }
+            }
+            if ($gateExit -eq 0 -and $evidence.status -ne 'passed') { throw 'Lifecycle status disagrees with exit code' }
+          } catch { $receipt.verificationError = $_.Exception.Message }
+          $receipt | ConvertTo-Json -Depth 30 | Set-Content (Join-Path $out 'diagnostic-outcome.json') -Encoding utf8NoBOM
+          Get-Content -Raw (Join-Path $out 'diagnostic-outcome.json')
+          if ($gateExit -ne 0) { exit $gateExit }
+          if ($null -ne $receipt.verificationError) { throw $receipt.verificationError }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: windows-owner-compile-diagnostic-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/windows-owner-diagnostic/*.json
+            ${{ runner.temp }}/windows-owner-diagnostic/*.log
+          if-no-files-found: error
+          retention-days: 30
