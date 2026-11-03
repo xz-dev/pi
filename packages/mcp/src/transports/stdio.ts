@@ -12,7 +12,7 @@ const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
 const STDIN_CLOSE_GRACE_MS = 500;
 const USE_PROCESS_GROUPS = process.platform !== "win32";
 
-/** Owned shutdown requests, retired when each child exits. */
+/** Owned shutdown requests, retired on exit except standalone POSIX groups retained until close. */
 const liveProcesses = new Set<() => void>();
 let exitHookInstalled = false;
 
@@ -73,6 +73,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 	private primaryPid: number | undefined;
 	private cleanup: Promise<void> | undefined;
 	private requestStop: ((force: boolean) => void) | undefined;
+	private standaloneProcessGroup = false;
 	private timers: ReturnType<typeof setTimeout>[] = [];
 
 	constructor(options: StdioTransportOptions) {
@@ -103,6 +104,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		const owner = process.env.PI_PROCESS_OWNER_BINARY;
 		if (owner !== undefined && !owner.trim()) throw new Error("Invalid MCP process owner binary");
 		const owned = owner !== undefined;
+		this.standaloneProcessGroup = !owned && USE_PROCESS_GROUPS;
 		const env = this.options.inheritEnv === false ? { ...this.options.env } : { ...process.env, ...this.options.env };
 		const args = [...(this.options.args ?? [])];
 		const child = crossSpawn(
@@ -181,7 +183,8 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 			for (const timer of this.timers) clearTimeout(timer);
 			this.timers = [];
 		};
-		child.once("exit", retire);
+		// Standalone descendants can retain pipes after primary exit; keep group cleanup until close.
+		child.once(this.standaloneProcessGroup ? "close" : "exit", retire);
 		const ownerDrained = lease
 			? new Promise<void>((resolve) => {
 					lease.once("end", resolve);
@@ -362,7 +365,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		if (!this.closed) {
 			this.closed = true;
 			const child = this.child;
-			if (child && child.exitCode === null && child.signalCode === null) {
+			if (child && (this.standaloneProcessGroup || (child.exitCode === null && child.signalCode === null))) {
 				// EOF grace, graceful TERM to owner, then private K; never SIGKILL the owner.
 				const timeout = this.options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
 				const grace = Math.min(STDIN_CLOSE_GRACE_MS, timeout);
