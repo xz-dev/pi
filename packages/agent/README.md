@@ -123,6 +123,8 @@ When you use the `Agent` class, assistant `message_end` processing is treated as
 
 ### Request preparation and turn finalization
 
+`prepareInput` runs for each non-empty batch of initial, prepared, steering, or follow-up messages, before their `message_start`/`message_end` events and context append. It receives `{ context, messages, model, thinkingLevel }` plus the abort signal, and may return replacement context, model, and thinking level. Use it to compact or route using pending input without recording that input first. Returned context excludes the pending batch; the loop appends it afterwards. Initial prompts are delivered before the startup steering poll. Startup steering is prepared as a separate batch, so it remains queued if initial input delivery fails. Steering queued during initial preparation can be picked up by that poll; later preparation keeps the normal queue timing.
+
 `prepareRequest` runs immediately before every conversational provider request, including the first. Use it to install canonical persisted context after pending input has been emitted:
 
 ```typescript
@@ -157,7 +159,8 @@ finishTurn: async (turn, signal) => {
 Each provider turn follows this lifecycle:
 
 ```text
-selected input events
+prepareInput (when input is selected)
+→ selected input events
 → prepareRequest
 → provider response
 → tool results
