@@ -712,6 +712,7 @@ mod owned_admission_tests {
             startup_env: Err("synthetic snapshot failure".into()),
             groups: Arc::new(Mutex::new(Default::default())),
             terminals: Arc::new(Mutex::new(HashMap::new())),
+            processes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
