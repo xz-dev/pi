@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { forkDriver } from "../../chord/src/manager.ts";
+import { forkDriver } from "../../chord/src/old/manager.ts";
 import { execCommand } from "../src/core/exec.ts";
 import { observeOwnedProcess } from "../src/utils/process-owner.ts";
 
