@@ -1,5 +1,4 @@
 // Append-only Zstandard session transactions with plaintext browsing metadata.
-import { constants as bufferConstants } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import {
 	appendFileSync,
@@ -18,8 +17,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
+import { constants, zstdCompressSync } from "node:zlib";
 import type { FileEntry, SessionHeader, SessionInfo } from "./session-manager.ts";
+import { decompressSessionZstd, decompressSessionZstdFrame } from "./session-zstd.ts";
 
 export interface CompressedSessionMetadata {
 	header: SessionHeader;
@@ -200,9 +200,7 @@ function scanCompressed(bytes: Buffer, path: string, onText?: (text: string) => 
 		if (payload.readUInt32LE(0) !== 0xfd2fb528 || !digest(payload).equals(descriptor.subarray(56, 88)))
 			return invalid(path);
 		if (onText) {
-			const text = zstdDecompressSync(payload, { maxOutputLength: bufferConstants.MAX_STRING_LENGTH }).toString(
-				"utf8",
-			);
+			const text = decompressSessionZstdFrame(payload).toString("utf8");
 			const entries: FileEntry[] = [];
 			for (const line of text.split("\n")) {
 				if (!line.trim()) continue;
@@ -240,8 +238,12 @@ function scanCompressed(bytes: Buffer, path: string, onText?: (text: string) => 
 /** Read committed transactions; incomplete EOF tails are never repaired by readers. */
 export function readCompressedSession(path: string, onText?: (text: string) => void): CompressedSessionState {
 	const bytes = readFileSync(path);
-	if (bytes.length >= 4 && bytes.readUInt32LE(0) === 0xfd2fb528) {
-		const text = zstdDecompressSync(bytes, { maxOutputLength: bufferConstants.MAX_STRING_LENGTH }).toString("utf8");
+	const magic = bytes.length >= 4 ? bytes.readUInt32LE(0) : undefined;
+	if (
+		magic === 0xfd2fb528 ||
+		(magic !== undefined && (magic & 0xfffffff0) === SKIP_MAGIC && !bytes.subarray(8, 16).equals(TAG))
+	) {
+		const text = decompressSessionZstd(bytes).toString("utf8");
 		const entries: FileEntry[] = [];
 		for (const line of text.split("\n")) {
 			try {
