@@ -61,6 +61,11 @@ type GitSourceForTest = {
 	ref?: string;
 };
 
+interface GitDependencyUpdateInternals {
+	getGitDependencyUpdates(source: string, installedPath: string): Promise<string[]>;
+	refreshRuntimeDependencies(names: string[], installRoot: string, preserveManifest: boolean): Promise<void>;
+}
+
 interface PackageManagerPathInternals {
 	parseSource(source: string): GitSourceForTest;
 	getGitInstallPath(source: GitSourceForTest, scope: "temporary"): string;
@@ -181,15 +186,6 @@ describe("DefaultPackageManager git update", () => {
 			packageManager.setProgressCallback((event) => {
 				if (event.type === "result" && event.action === "update" && event.message) updated.push(event.message);
 			});
-			expect(await packageManager.checkForAvailableUpdates()).toEqual([
-				{
-					source: gitSource,
-					displayName: "github.com/test/extension",
-					type: "git",
-					scope: "user",
-					reason: "package",
-				},
-			]);
 			await packageManager.update();
 
 			// Verify update succeeded
@@ -197,6 +193,37 @@ describe("DefaultPackageManager git update", () => {
 			expect(getCurrentCommit(installedDir)).toBe(newCommit);
 			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2");
 		});
+	});
+
+	it("reports source updates without replacing runtime dependency refresh", async () => {
+		setupRemoteAndInstall();
+		const oldCommit = getCurrentCommit(installedDir);
+		const newCommit = createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
+		expect(await packageManager.checkForAvailableUpdates()).toEqual([
+			{
+				source: gitSource,
+				displayName: "github.com/test/extension",
+				type: "git",
+				scope: "user",
+				reason: "package",
+			},
+		]);
+		const dependencyUpdates = vi
+			.spyOn(packageManager as unknown as GitDependencyUpdateInternals, "getGitDependencyUpdates")
+			.mockResolvedValue(["runtime-dependency"]);
+		const refresh = vi
+			.spyOn(packageManager as unknown as GitDependencyUpdateInternals, "refreshRuntimeDependencies")
+			.mockResolvedValue(undefined);
+		const updated: string[] = [];
+		packageManager.setProgressCallback((event) => {
+			if (event.type === "result" && event.message) updated.push(event.message);
+		});
+
+		await packageManager.update();
+
+		expect(dependencyUpdates).toHaveBeenCalledExactlyOnceWith("https://github.com/test/extension", installedDir);
+		expect(refresh).toHaveBeenCalledExactlyOnceWith(["runtime-dependency"], installedDir, true);
+		expect(updated).toEqual([`${gitSource} ${oldCommit.slice(0, 7)} -> ${newCommit.slice(0, 7)}`]);
 	});
 
 	describe("git clean failures", () => {
