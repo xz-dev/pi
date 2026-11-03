@@ -681,7 +681,7 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 41);
+	assert.equal(order.length, 43);
 	assert.equal(order[order.indexOf("async-compaction") + 1], "session-compression");
 	assert.ok(sync.includes("refs/heads/patch/session-compression:refs/remotes/origin/patch/session-compression"));
 	assert.ok(sync.includes("            session-compression \\\n"));
@@ -690,6 +690,8 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	}
 	const downstreamChanges = readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8");
 	assert.equal(order[order.indexOf("single-executable") + 1], "process-ownership");
+	assert.equal(order[order.indexOf("process-ownership") + 1], "env-process-output-drain");
+	assert.equal(order[order.indexOf("env-process-output-drain") + 1], "chord-registry-gc-observation");
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
 	assert.equal(order.at(-7), "env-native-test-fixtures");
@@ -699,7 +701,7 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.equal(order.at(-3), "collapse-expanded-input");
 	assert.equal(order.at(-2), "prompt-invocation-cards");
 	assert.equal(order.at(-1), "plugin-dependency-updates");
-	for (const name of ["collapse-expanded-input", "prompt-invocation-cards", "plugin-dependency-updates"]) {
+	for (const name of ["env-process-output-drain", "chord-registry-gc-observation", "collapse-expanded-input", "prompt-invocation-cards", "plugin-dependency-updates"]) {
 		assert.ok(sync.includes(`refs/heads/patch/${name}:refs/remotes/origin/patch/${name}`));
 		assert.ok(sync.includes(`            ${name} \\\n`));
 		assert.ok(downstreamChanges.includes(`patch/${name}`));

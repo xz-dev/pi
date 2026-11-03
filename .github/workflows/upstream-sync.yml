@@ -60,6 +60,8 @@ jobs:
             +refs/heads/patch/freebsd-support:refs/remotes/origin/patch/freebsd-support \
             +refs/heads/patch/single-executable:refs/remotes/origin/patch/single-executable \
             +refs/heads/patch/process-ownership:refs/remotes/origin/patch/process-ownership \
+            +refs/heads/patch/env-process-output-drain:refs/remotes/origin/patch/env-process-output-drain \
+            +refs/heads/patch/chord-registry-gc-observation:refs/remotes/origin/patch/chord-registry-gc-observation \
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
             +refs/heads/patch/managed-tool-executions:refs/remotes/origin/patch/managed-tool-executions \
             +refs/heads/patch/esc-abort:refs/remotes/origin/patch/esc-abort \
@@ -116,6 +118,8 @@ jobs:
             freebsd-support \
             single-executable \
             process-ownership \
+            env-process-output-drain \
+            chord-registry-gc-observation \
             agent-run-failure-seam \
             managed-tool-executions \
             esc-abort \

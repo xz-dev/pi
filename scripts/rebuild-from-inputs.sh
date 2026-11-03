@@ -109,6 +109,8 @@ PATCH_ORDER=(
 	startup-benchmark-exit
 	single-executable
 	process-ownership
+	env-process-output-drain
+	chord-registry-gc-observation
 	agent-run-failure-seam
 	managed-tool-executions
 	esc-abort

@@ -242,9 +242,17 @@ Extension tooling, skills, and subprocess environment.
   - Use case: Keep tool output the model reads in English on a non-English desktop.
   - Patch branch: [`patch/env-overrides`](https://github.com/xz-dev/pi/tree/patch/env-overrides)
 
+- Drain already-queued output before ending native process collection at the post-exit silence deadline.
+  - Use case: Preserve final protocol bytes when the process runner resumes after its deadline with output already queued.
+  - Limits: The existing 100 ms silence grace is unchanged; silent descendant-held pipes still stop after that grace.
+  - Patch branch: [`patch/env-process-output-drain`](https://github.com/xz-dev/pi/tree/patch/env-process-output-drain)
+
 ## Internal and CI-only
 
 Patches with no direct user-facing surface: test stability, fork CI plumbing, benchmark bounds.
+
+- Capture registry-test WeakRefs while the reader is still held, before release permits collection; the original nonempty and collected assertions remain unchanged.
+  - Patch branch: [`patch/chord-registry-gc-observation`](https://github.com/xz-dev/pi/tree/patch/chord-registry-gc-observation)
 
 
 - Diagnose native environment tests with an independent build-target architecture oracle, retained-output tool fixtures, per-stream output equality, real foreground-job readiness and monotonic cold listing cancellation/recovery observations.
