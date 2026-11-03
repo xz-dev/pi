@@ -268,11 +268,25 @@ for (const scenario of ["unchanged", "formatted", "check fails"]) {
   });
 }
 
-test("upstream sync uses current fetched refs without fixed-input dispatch pins", () => {
+test("upstream sync defaults to fetched latest and permits only an optional verified upstream ancestor", () => {
   const step = syncWorkflow.jobs["sync-main-with-squash-branches"].steps.find((step) => step.name === "Rebuild main from upstream and squash branches");
-  assert.deepEqual(syncWorkflow.on.workflow_dispatch, null);
+  assert.deepEqual(syncWorkflow.on.workflow_dispatch, {
+    inputs: {
+      upstream_sha: {
+        description: "Optional locally verified upstream commit (full SHA); empty uses latest",
+        required: false,
+        type: "string",
+      },
+    },
+  });
+  assert.deepEqual(step.env, { REQUESTED_UPSTREAM_SHA: "${{ inputs.upstream_sha }}" });
   assert.doesNotMatch(step.run, /PINNED_UPSTREAM_SHA|EXPECTED_INPUTS_SHA256|Fetched inputs differ from the approved vector/);
+  assert.doesNotMatch(step.run, /\$\{\{\s*inputs\./);
   assert.match(step.run, /upstream_sha="\$\(git rev-parse upstream\/main\)"/);
+  assert.match(step.run, /if \[\[ -n "\$REQUESTED_UPSTREAM_SHA" \]\]; then/);
+  assert.ok(step.run.includes('[[ "$REQUESTED_UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || {'));
+  assert.match(step.run, /git merge-base --is-ancestor "\$REQUESTED_UPSTREAM_SHA" upstream\/main \|\| \{/);
+  assert.match(step.run, /upstream_sha="\$REQUESTED_UPSTREAM_SHA"/);
   assert.match(step.run, /--upstream "\$upstream_sha"/);
 });
 
