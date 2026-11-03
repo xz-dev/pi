@@ -1314,8 +1314,6 @@ export class DefaultPackageManager implements PackageManager {
 						if (from !== to) {
 							gitUpdates.push({ source: entry.source, type: "git", scope: entry.scope, from, to });
 						}
-						const names = await this.getGitDependencyUpdates(entry.source, targetDir);
-						await this.refreshRuntimeDependencies(names, targetDir, true);
 					}),
 			);
 			tasks.push(this.runWithConcurrency(gitTasks, GIT_UPDATE_CONCURRENCY).then(() => {}));
@@ -2599,21 +2597,23 @@ export class DefaultPackageManager implements PackageManager {
 		const updateRetries = scope !== "temporary";
 		if (!existsSync(targetDir)) {
 			await this.installGit(source, scope, updateRetries);
-			return;
-		}
-
-		if (source.ref) {
+		} else if (source.ref) {
 			await this.ensureGitRef(
 				targetDir,
 				["fetch", "--depth=1", "--no-tags", "origin", source.ref],
 				"FETCH_HEAD",
 				updateRetries,
 			);
-			return;
+		} else {
+			const target = await this.getLocalGitUpdateTarget(targetDir);
+			await this.ensureGitRef(targetDir, target.fetchArgs, target.ref, updateRetries);
 		}
 
-		const target = await this.getLocalGitUpdateTarget(targetDir);
-		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref, updateRetries);
+		// Temporary startup refresh keeps its existing dependency policy.
+		if (scope !== "temporary") {
+			const names = await this.getGitDependencyUpdates(source.repo, targetDir);
+			await this.refreshRuntimeDependencies(names, targetDir, true);
+		}
 	}
 
 	private hasMissingGitDependencies(targetDir: string): boolean {
