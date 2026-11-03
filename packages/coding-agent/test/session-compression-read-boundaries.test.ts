@@ -86,7 +86,7 @@ describe("compressed session read boundaries", () => {
 		},
 	);
 
-	it("loads every raw concatenated and skippable frame without normalizing JSONL bytes", () => {
+	it("loads every standard-leading concatenated frame and interleaved skip without normalizing JSONL bytes", () => {
 		const header: FileEntry = {
 			type: "session",
 			version: 3,
@@ -97,14 +97,13 @@ describe("compressed session read boundaries", () => {
 		const first = `${JSON.stringify(header)}\r\n`;
 		const second = `${JSON.stringify({ type: "custom", id: "x", parentId: null, timestamp: header.timestamp, customType: "raw", data: "漢字" })}\n`;
 		const skip = Buffer.from([0x5f, 0x2a, 0x4d, 0x18, 0, 0, 0, 0]);
-		for (const prefix of [Buffer.alloc(0), skip]) {
+		for (const separator of [Buffer.alloc(0), skip]) {
 			const path = join(root, "raw-frames.jsonl");
 			writeFileSync(
 				path,
 				Buffer.concat([
-					prefix,
 					zstdCompressSync(Buffer.from(first)),
-					skip,
+					separator,
 					zstdCompressSync(Buffer.from(second)),
 					skip,
 				]),
@@ -115,6 +114,21 @@ describe("compressed session read boundaries", () => {
 			});
 			expect(text).toBe(first + second);
 			expect(loadEntriesFromFile(path)).toHaveLength(2);
+		}
+	});
+
+	it("rejects corrupted PI tags and descriptor lengths without falling through to standard decoding", () => {
+		const entries: FileEntry[] = [
+			{ type: "session", version: 3, id: "bad-descriptor", cwd: root, timestamp: "2020-01-01T00:00:00Z" },
+		];
+		const transaction = encodeSessionTransaction(`${JSON.stringify(entries[0])}\n`, summarizeSession(entries));
+		for (const index of [4, 8, 15]) {
+			const bytes = Buffer.from(transaction);
+			bytes[index] ^= 1;
+			const path = join(root, "bad-descriptor.jsonl");
+			writeFileSync(path, bytes);
+			expect(() => SessionManager.open(path)).toThrow();
+			expect(readFileSync(path)).toEqual(bytes);
 		}
 	});
 

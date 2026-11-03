@@ -238,11 +238,7 @@ function scanCompressed(bytes: Buffer, path: string, onText?: (text: string) => 
 /** Read committed transactions; incomplete EOF tails are never repaired by readers. */
 export function readCompressedSession(path: string, onText?: (text: string) => void): CompressedSessionState {
 	const bytes = readFileSync(path);
-	const magic = bytes.length >= 4 ? bytes.readUInt32LE(0) : undefined;
-	if (
-		magic === 0xfd2fb528 ||
-		(magic !== undefined && (magic & 0xfffffff0) === SKIP_MAGIC && !bytes.subarray(8, 16).equals(TAG))
-	) {
+	if (bytes.length >= 4 && bytes.readUInt32LE(0) === 0xfd2fb528) {
 		const text = decompressSessionZstd(bytes).toString("utf8");
 		const entries: FileEntry[] = [];
 		for (const line of text.split("\n")) {
