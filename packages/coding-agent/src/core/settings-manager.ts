@@ -787,6 +787,17 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/** One-time startup hint about transparent disk compression; also the global switch for it. */
+	getSessionDiskCompressionHint(): boolean {
+		return this.globalSettings.sessionDiskCompressionHint ?? SETTINGS_DEFAULTS.sessionDiskCompressionHint;
+	}
+
+	setSessionDiskCompressionHint(enabled: boolean): void {
+		this.globalSettings.sessionDiskCompressionHint = enabled;
+		this.markModified("sessionDiskCompressionHint");
+		this.save();
+	}
+
 	getSessionDir(): string | undefined {
 		const sessionDir = this.settings.sessionDir;
 		return sessionDir ? normalizePath(sessionDir) : sessionDir;
