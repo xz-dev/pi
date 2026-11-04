@@ -774,13 +774,13 @@ export class SettingsManager {
 	}
 
 	/** One-time startup hint about transparent disk compression; also the global switch for it. */
-	getSessionDiskCompressionHint(): boolean {
-		return this.globalSettings.sessionDiskCompressionHint ?? SETTINGS_DEFAULTS.sessionDiskCompressionHint;
+	getSessionDiskCompressionWarning(): boolean {
+		return this.globalSettings.sessionDiskCompressionWarning ?? SETTINGS_DEFAULTS.sessionDiskCompressionWarning;
 	}
 
-	setSessionDiskCompressionHint(enabled: boolean): void {
-		this.globalSettings.sessionDiskCompressionHint = enabled;
-		this.markModified("sessionDiskCompressionHint");
+	setSessionDiskCompressionWarning(enabled: boolean): void {
+		this.globalSettings.sessionDiskCompressionWarning = enabled;
+		this.markModified("sessionDiskCompressionWarning");
 		this.save();
 	}
 
