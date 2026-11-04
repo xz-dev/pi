@@ -740,6 +740,11 @@
         }
       }
     },
+    "sessionDiskCompressionHint": {
+      "type": "boolean",
+      "description": "Show the one-time startup hint about transparent disk compression for session files. Pi sets it to false after showing the hint. Global setting only.",
+      "default": true
+    },
     "sessionDir": {
       "type": "string",
       "description": "Custom session storage directory, in the same format as the --session-dir CLI flag."
