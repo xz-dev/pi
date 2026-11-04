@@ -71,6 +71,14 @@ By default, Pi stores sessions under `~/.pi/agent/sessions/`, grouped by working
 
 Use `--no-session` for an ephemeral run. An ephemeral session cannot be resumed after Pi exits.
 
+### Disk compression
+
+Pi stores sessions as plain JSONL and does not compress them itself. To save disk space, use transparent compression provided by your operating system or filesystem, such as NTFS compression, btrfs or ZFS. Readers, extensions and external tools keep seeing plain text.
+
+Run `/session-disk-compression [folder]` to have the agent inspect the session folder and recommend a setup. It changes nothing without your approval. Pi shows a one-time startup tip about this command; the global setting [`sessionDiskCompressionHint`](settings.md#sessions-and-context) controls it and is set to `false` after the tip is shown. Pi never inspects the filesystem for this tip.
+
+Sessions that downstream releases from 1.5.0-xz.399 until this change wrote in compressed form are standard Zstandard frames plus skippable frames. Pi no longer reads them; recover one with `zstd -dc FILE > FILE.plain`, then replace the original with the plain file.
+
 ## Export or share a session
 
 Use `/export` to write the current session as HTML or JSONL. Use `/share` to upload it and get a viewer link. By default, Pi uses a Radius artifact when Radius authentication is configured; otherwise, it uses a private GitHub gist. Set [`sessionShareDestination`](settings.md#sessions-and-context) to `gist` or `radius` to force one destination.
