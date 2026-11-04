@@ -9,6 +9,7 @@ import {
 import type { Model, TranscriptContext } from "../src/types.ts";
 import { type RetryPolicy, retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { waitForNativeIo } from "./utils/native-io.ts";
 
 const model: Model<"openai-codex-responses"> = {
 	id: "gpt-5.1-codex",
@@ -165,6 +166,10 @@ describe("Codex retry policy", () => {
 				},
 			});
 			await vi.advanceTimersByTimeAsync(100);
+			await waitForNativeIo(() => fetchMock.mock.calls.length >= 1);
+			await vi.advanceTimersByTimeAsync(100);
+			if (enabled) await waitForNativeIo(() => fetchMock.mock.calls.length >= 2);
+			await vi.advanceTimersByTimeAsync(0);
 			expect((await request).stopReason).toBe("error");
 			expect(sent).toHaveLength(4);
 			expect(fetchMock).toHaveBeenCalledTimes(enabled ? 2 : 1);
@@ -180,7 +185,13 @@ describe("Codex retry policy", () => {
 		fetchMock.mockImplementation(async () => new Response("Service unavailable", { status: 503 }));
 		const policy = { enabled: true, maxRetries: 2, baseDelayMs: 300_000, maxAgentDelayMs: 300_000 };
 		const request = retryAssistantCall(() => run(), policy, undefined);
-		await vi.advanceTimersByTimeAsync(1_500_010);
+		await vi.advanceTimersByTimeAsync(900_000);
+		await waitForNativeIo(() => fetchMock.mock.calls.length >= 1);
+		await vi.advanceTimersByTimeAsync(300_000);
+		await waitForNativeIo(() => fetchMock.mock.calls.length >= 2);
+		await vi.advanceTimersByTimeAsync(300_000);
+		await waitForNativeIo(() => fetchMock.mock.calls.length >= 3);
+		await vi.advanceTimersByTimeAsync(0);
 		expect((await request).stopReason).toBe("error");
 		expect(sent).toHaveLength(6); // Four initial WS attempts, then two single probes.
 		expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -223,7 +234,7 @@ describe("Codex transport recovery", () => {
 			});
 			const fallback = await recover(options, secondContext);
 			expect(fallback.stopReason).toBe("stop");
-			expect(transports.at(-1)).toBe("SSE");
+			expect(transports.at(-1)).toBe("SSE Zstd");
 			expect(sent).toHaveLength(5);
 			expect(fetchMock).toHaveBeenCalledTimes(1);
 			const recoveryContext = normalizeContext({
@@ -624,11 +635,16 @@ describe("Codex transport recovery", () => {
 
 	it("keeps explicitly requested provider-level SSE retries within the same request", async () => {
 		vi.useFakeTimers();
+		const timers = vi.spyOn(globalThis, "setTimeout");
 		const { run, recover, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementation((socket) => socket.fail());
 		fetchMock.mockResolvedValueOnce(new Response("temporarily unavailable", { status: 503 }));
 		const request = recover({ maxRetries: 1 });
-		await vi.advanceTimersByTimeAsync(2000);
+		await vi.advanceTimersByTimeAsync(100);
+		await waitForNativeIo(() => timers.mock.calls.some((call) => call[1] === 1000));
+		await vi.advanceTimersByTimeAsync(1000);
+		await waitForNativeIo(() => fetchMock.mock.calls.length >= 2);
+		await vi.advanceTimersByTimeAsync(0);
 		expect((await request).stopReason).toBe("stop");
 		expect(sent).toHaveLength(4);
 		expect(fetchMock).toHaveBeenCalledTimes(2);
