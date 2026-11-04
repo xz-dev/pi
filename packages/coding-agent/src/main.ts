@@ -370,6 +370,20 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string,
 	}
 }
 
+/** The disk-compression warning, shown at every start until /session-disk-compression runs. Pi never inspects or changes the filesystem itself. */
+export function sessionDiskCompressionWarning(
+	settings: Pick<SettingsManager, "getSessionDiskCompressionWarning">,
+): AgentSessionRuntimeDiagnostic[] {
+	if (!settings.getSessionDiskCompressionWarning()) return [];
+	return [
+		{
+			type: "warning",
+			message:
+				'Sessions are plain JSONL files. Run /session-disk-compression to set up transparent disk compression for them. Shown until you run it, or set "sessionDiskCompressionWarning": false in settings.json.',
+		},
+	];
+}
+
 export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
@@ -733,6 +747,10 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
+	// Rendered with the other startup diagnostics inside the TUI; plain stderr would sit behind the alternate screen.
+	if (appMode === "interactive" && !parsed.help && parsed.listModels === undefined && !parsed.noSession) {
+		startupSettingsDiagnostics.push(...sessionDiskCompressionWarning(startupSettingsManager));
+	}
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
