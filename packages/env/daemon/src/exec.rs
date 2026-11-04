@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -44,6 +44,22 @@ pub fn wait_for_link(
         output.wait_for_room(stop);
     }
 }
+
+/// Receive a reader or control message, waiting at most `wait` and, after the program exited, until the silence deadline
+/// `idle_until`. An expired deadline is not silence while messages are already queued: a loop that resumes late still
+/// gets the reader's last output, or a cancel. A loop ends at the deadline only when this times out.
+pub fn receive(
+    receiver: &Receiver<Message>,
+    wait: Duration,
+    idle_until: Option<Instant>,
+) -> Result<Message, RecvTimeoutError> {
+    let wait = match idle_until {
+        Some(idle) => wait.min(idle.saturating_duration_since(Instant::now())),
+        None => wait,
+    };
+    receiver.recv_timeout(wait)
+}
+
 /// How often a delivery waiting for the link to drain looks again.
 const UNSENT_POLL: Duration = Duration::from_millis(20);
 
@@ -605,10 +621,6 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        if idle_until.is_some_and(|idle| now >= idle) {
-            // A descendant may hold the pipes open after the process exited; stop waiting for it.
-            break;
-        }
         if let Some(pending) = &mut pending
             && !pending.is_empty()
             && now >= pending.next_send()
@@ -620,9 +632,6 @@ pub fn run(
         if let Some(deadline) = deadline.filter(|_| !timed_out) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
-        if let Some(idle) = idle_until {
-            wait = wait.min(idle.saturating_duration_since(now));
-        }
         if let Some(pending) = pending.as_ref().filter(|pending| !pending.is_empty()) {
             wait = wait.min(if unsent.load(Ordering::SeqCst) > 0 {
                 UNSENT_POLL
@@ -630,7 +639,7 @@ pub fn run(
                 pending.next_send().saturating_duration_since(now)
             });
         }
-        match receiver.recv_timeout(wait) {
+        match receive(&receiver, wait, idle_until) {
             Ok(Message::Data(stream, bytes)) => {
                 emit(&mut pending, stream, decoders[stream].decode(&bytes, false));
                 if let Some(spill) = &mut spill {
@@ -659,6 +668,12 @@ pub fn run(
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
+            // A descendant may hold the pipes open after the process exited; stop waiting for it.
+            Err(RecvTimeoutError::Timeout)
+                if idle_until.is_some_and(|idle| Instant::now() >= idle) =>
+            {
+                break;
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }

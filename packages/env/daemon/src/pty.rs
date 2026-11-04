@@ -5,7 +5,7 @@
 use crate::errors::Failure;
 use crate::exec::{Control, Groups, running};
 #[cfg(unix)]
-use crate::exec::{EXITED_UNPACED, Message, kill_group, start_waiter, wait_for_link};
+use crate::exec::{EXITED_UNPACED, Message, kill_group, receive, start_waiter, wait_for_link};
 #[cfg(unix)]
 use crate::frame::{EVENT, Frame};
 use crate::output::Output;
@@ -144,7 +144,7 @@ pub fn run(
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     let (sender, receiver) = mpsc::channel();
     control.attach(sender.clone());
@@ -246,7 +246,7 @@ pub fn run(
         if status.is_some() && ended {
             break;
         }
-        match crate::process::receive(&receiver, idle_until) {
+        match receive(&receiver, Duration::from_secs(3600), idle_until) {
             Ok(Message::Data(_, bytes)) => {
                 output.bulk(
                     Frame::with_payload(EVENT, id, json!({ "kind": "output" }), bytes),

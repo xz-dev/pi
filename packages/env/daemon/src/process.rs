@@ -4,7 +4,8 @@
 
 use crate::errors::Failure;
 use crate::exec::{
-    Control, Groups, Launch, Message, kill_group, running, spawn, spawn_reader, start_waiter,
+    Control, Groups, Launch, Message, kill_group, receive, running, spawn, spawn_reader,
+    start_waiter,
 };
 use crate::frame::{EVENT, Frame};
 use crate::output::Output;
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -197,7 +198,7 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        match receive(&receiver, idle_until) {
+        match receive(&receiver, Duration::from_secs(3600), idle_until) {
             Ok(Message::Data(stream, bytes)) => {
                 output.bulk(
                     Frame::with_payload(
@@ -252,19 +253,6 @@ pub fn run(
     }
 }
 
-/// Receive output until the post-exit silence deadline; a live descendant may keep a pipe open.
-pub fn receive(
-    receiver: &Receiver<Message>,
-    idle_until: Option<Instant>,
-) -> Result<Message, RecvTimeoutError> {
-    let wait = match idle_until {
-        // An expired deadline is not silence while reader messages are already queued.
-        Some(idle) => idle.saturating_duration_since(Instant::now()),
-        None => Duration::from_secs(3600),
-    };
-    receiver.recv_timeout(wait)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,15 +265,23 @@ mod tests {
         sender.send(Message::Eof(0)).unwrap();
         sender.send(Message::Eof(1)).unwrap();
         let expired = Some(Instant::now() - EXIT_STDIO_GRACE);
-        let Ok(Message::Data(stream, bytes)) = receive(&receiver, expired) else {
+        let Ok(Message::Data(stream, bytes)) =
+            receive(&receiver, Duration::from_secs(3600), expired)
+        else {
             panic!("queued final 64 KiB was discarded as silence");
         };
         assert_eq!(stream, 0);
         assert_eq!(bytes, vec![120; 64 * 1024]);
-        assert!(matches!(receive(&receiver, expired), Ok(Message::Eof(0))));
-        assert!(matches!(receive(&receiver, expired), Ok(Message::Eof(1))));
         assert!(matches!(
-            receive(&receiver, expired),
+            receive(&receiver, Duration::from_secs(3600), expired),
+            Ok(Message::Eof(0))
+        ));
+        assert!(matches!(
+            receive(&receiver, Duration::from_secs(3600), expired),
+            Ok(Message::Eof(1))
+        ));
+        assert!(matches!(
+            receive(&receiver, Duration::from_secs(3600), expired),
             Err(RecvTimeoutError::Timeout)
         ));
     }
@@ -415,12 +411,183 @@ mod tests {
         assert_eq!(stdout_bytes(&sent.lock().unwrap()), PAST_PIPE);
     }
 
+    /// Run `start` on a program that exits while a descendant that outlives it writes `tail` (and then `done`), with the
+    /// output's lock held from when `ready` holds until well after that: the loop handles the exit and then cannot go on
+    /// past its silence deadline while the tail is queued, as when it is descheduled. Returns what request 1 output.
+    /// The three commands' loops are tested here together, on this module's link.
+    #[cfg(target_os = "linux")]
+    fn tail_behind_late_loop(
+        ready: impl Fn() -> bool + Send + 'static,
+        start: impl FnOnce(&Arc<Output>, String) -> Result<Value, Failure>,
+    ) -> Vec<u8> {
+        let done = std::env::temp_dir().join(format!(
+            "pi-env-late-loop-{}-{:?}",
+            std::process::id(),
+            thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&done);
+        let output = Arc::new(Output::default());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut link = Link {
+            open_at: Instant::now() + Duration::from_secs(3),
+            sent: sent.clone(),
+        };
+        // More unsent output than the limit, so holding the lock below is possible through `wait_for_room_until`.
+        for _ in 0..2 {
+            output.bulk(
+                Frame::with_payload(EVENT, 99, json!({}), vec![0; 4 * 1024 * 1024 + 1]),
+                None,
+            );
+        }
+        let writer = output.clone();
+        thread::spawn(move || writer.run(&mut link));
+        let holder = {
+            let output = output.clone();
+            let done = done.clone();
+            thread::spawn(move || {
+                while !ready() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                thread::sleep(Duration::from_millis(50));
+                output.wait_for_room_until(|| {
+                    let limit = Instant::now() + Duration::from_secs(5);
+                    while !done.exists() && Instant::now() < limit {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    thread::sleep(Duration::from_millis(300));
+                    true
+                });
+            })
+        };
+        // The terminal's hangup at the program's exit must not end the descendant; ignored before it starts.
+        let script = format!(
+            "trap '' HUP; sleep 0.3; (sleep 0.15; printf tail; : > '{}') & exit 0",
+            done.display()
+        );
+        assert_eq!(start(&output, script).unwrap()["exitCode"], 0);
+        holder.join().unwrap();
+        let _ = std::fs::remove_file(&done);
+        output.close();
+        let limit = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&output) > 1 && Instant::now() < limit {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let sent = sent.lock().unwrap();
+        let mut input = std::io::Cursor::new(&sent[..]);
+        let mut delivered = Vec::new();
+        while let Some(frame) = crate::frame::read_frame(&mut input).unwrap() {
+            if frame.kind == EVENT && frame.id == 1 && frame.json["kind"] == "output" {
+                delivered.extend_from_slice(&frame.payload);
+            }
+        }
+        delivered
+    }
+
+    #[cfg(target_os = "linux")]
+    fn has_tail(delivered: &[u8]) -> bool {
+        delivered.windows(4).any(|window| window == b"tail")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_delivers_output_queued_while_its_loop_was_late() {
+        let delivered = tail_behind_late_loop(
+            || true,
+            |output, script| {
+                let request = crate::exec::ExecRequest::from_json(&json!({
+                    "argv": ["sh", "-c", script],
+                    "cwd": std::env::temp_dir().to_str().unwrap(),
+                }))
+                .unwrap();
+                crate::exec::run(
+                    1,
+                    request,
+                    "/nonexistent",
+                    output,
+                    &Control::default(),
+                    &Groups::default(),
+                )
+            },
+        );
+        assert!(
+            has_tail(&delivered),
+            "delivered {:?}",
+            String::from_utf8_lossy(&delivered)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_delivers_output_queued_while_its_loop_was_late() {
+        let processes = Processes::default();
+        let started = processes.clone();
+        let delivered = tail_behind_late_loop(
+            move || started.lock().unwrap().contains_key(&1),
+            |output, script| {
+                let request = ProcessRequest::from_json(&json!({
+                    "argv": ["sh", "-c", script],
+                    "cwd": std::env::temp_dir().to_str().unwrap(),
+                }))
+                .unwrap();
+                run(
+                    1,
+                    request,
+                    output,
+                    &Control::default(),
+                    &Groups::default(),
+                    &processes,
+                )
+            },
+        );
+        assert!(
+            has_tail(&delivered),
+            "delivered {:?}",
+            String::from_utf8_lossy(&delivered)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pty_delivers_output_queued_while_its_loop_was_late() {
+        let terminals = crate::pty::Terminals::default();
+        let started = terminals.clone();
+        let delivered = tail_behind_late_loop(
+            move || started.lock().unwrap().contains_key(&1),
+            |output, script| {
+                let request = crate::pty::PtyRequest::from_json(&json!({
+                    "argv": ["sh", "-c", script],
+                    "cwd": std::env::temp_dir().to_str().unwrap(),
+                    "cols": 80,
+                    "rows": 24,
+                }))
+                .unwrap();
+                crate::pty::run(
+                    1,
+                    request,
+                    output,
+                    &Control::default(),
+                    &Groups::default(),
+                    &terminals,
+                )
+            },
+        );
+        assert!(
+            has_tail(&delivered),
+            "delivered {:?}",
+            String::from_utf8_lossy(&delivered)
+        );
+    }
+
     #[test]
     fn receives_cancel_after_exit_deadline() {
         let (sender, receiver) = mpsc::channel();
         sender.send(Message::Cancel).unwrap();
         assert!(matches!(
-            receive(&receiver, Some(Instant::now() - EXIT_STDIO_GRACE)),
+            receive(
+                &receiver,
+                Duration::from_secs(3600),
+                Some(Instant::now() - EXIT_STDIO_GRACE)
+            ),
             Ok(Message::Cancel)
         ));
     }
