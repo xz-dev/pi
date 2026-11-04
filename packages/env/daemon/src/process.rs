@@ -273,7 +273,7 @@ pub fn run(
 }
 
 /// Receive output until the post-exit silence deadline; a live descendant may keep a pipe open.
-fn receive(
+pub fn receive(
     receiver: &Receiver<Message>,
     idle_until: Option<Instant>,
 ) -> Result<Message, RecvTimeoutError> {

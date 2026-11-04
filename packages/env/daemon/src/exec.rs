@@ -23,7 +23,27 @@ const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 /// After the program exited, a reader reads this much more without waiting for the link, so what the program left in its
 /// pipe is not held back past the grace. 1 MiB is Linux's unprivileged pipe-max-size default; a privileged program can
 /// enlarge its pipe beyond it, and output past the allowance (also descendants') waits again under the silence rule.
-const EXITED_UNPACED: usize = 1024 * 1024;
+pub const EXITED_UNPACED: usize = 1024 * 1024;
+
+/// Wait for the link after a reader passed on `read` bytes. The exit grace is silence of the pipe; waiting for a slow
+/// link here would let it pass with the program's last output still unread, so after `exited` up to `unpaced` more bytes
+/// are read without waiting.
+pub fn wait_for_link(
+    output: &Output,
+    stop: &AtomicBool,
+    exited: &AtomicBool,
+    unpaced: &mut usize,
+    read: usize,
+) {
+    if exited.load(Ordering::SeqCst) {
+        *unpaced = unpaced.saturating_sub(read);
+    }
+    if *unpaced > 0 {
+        output.wait_for_room_until(|| stop.load(Ordering::SeqCst) || exited.load(Ordering::SeqCst));
+    } else {
+        output.wait_for_room(stop);
+    }
+}
 /// How often a delivery waiting for the link to drain looks again.
 const UNSENT_POLL: Duration = Duration::from_millis(20);
 
@@ -316,18 +336,7 @@ pub fn spawn_reader(
         sys::read_pipe(pipe, &stop, |bytes| {
             let delivered = sender.send(Message::Data(stream, bytes.to_vec())).is_ok();
             if let Some(output) = &output {
-                if exited.load(Ordering::SeqCst) {
-                    unpaced = unpaced.saturating_sub(bytes.len());
-                }
-                // The exit grace is silence of the pipe; waiting for a slow link here would let it pass with the
-                // program's last output still unread.
-                if unpaced > 0 {
-                    output.wait_for_room_until(|| {
-                        stop.load(Ordering::SeqCst) || exited.load(Ordering::SeqCst)
-                    });
-                } else {
-                    output.wait_for_room(&stop);
-                }
+                wait_for_link(output, &stop, &exited, &mut unpaced, bytes.len());
             }
             delivered
         });
