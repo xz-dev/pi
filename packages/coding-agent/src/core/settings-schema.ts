@@ -440,11 +440,11 @@ export const SettingsSchema = Type.Object(
 		markdown: Type.Optional(MarkdownSettingsSchema),
 		warnings: Type.Optional(WarningSettingsSchema),
 		codemode: Type.Optional(CodemodeSettingsSchema),
-		enableCompressSessions: Type.Optional(
+		sessionDiskCompressionHint: Type.Optional(
 			Type.Boolean({
 				description:
-					"Compress new sessions only. Global setting only; existing files change only through explicit offline migration.",
-				default: SETTINGS_DEFAULTS.enableCompressSessions,
+					"Show the one-time startup hint about transparent disk compression for session files. Pi sets it to false after showing the hint. Global setting only.",
+				default: SETTINGS_DEFAULTS.sessionDiskCompressionHint,
 			}),
 		),
 		sessionDir: Type.Optional(
