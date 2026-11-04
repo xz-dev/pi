@@ -64,6 +64,36 @@ describe("SettingsSelectorComponent", () => {
 		expect(onWheelScrollLinesChange.mock.calls.flat()).toEqual([10, "auto", 1]);
 	});
 
+	it("response checkpoint mode selector persists the chosen value", () => {
+		const onResponseCheckpointModeChange = vi.fn();
+		const config = {
+			fullscreenExitOutput: "transcript",
+			fullscreenScrollbar: "auto",
+			fullscreenCopyOnSelect: true,
+			fullscreenWheelScrollLines: 7,
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+			responseCheckpointMode: "always",
+		} as unknown as SettingsConfig;
+		const callbacks = {
+			onResponseCheckpointModeChange,
+		} as unknown as SettingsCallbacks;
+
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		for (const character of "Response checkpoints") list.handleInput(character);
+		list.handleInput("\r");
+		expect(onResponseCheckpointModeChange.mock.calls.flat()).toEqual(["auto"]);
+		list.handleInput("\r");
+		expect(onResponseCheckpointModeChange.mock.calls.flat()).toEqual(["auto", "declared"]);
+		list.handleInput("\r");
+		// The cycle wraps back to always.
+		expect(onResponseCheckpointModeChange.mock.calls.flat()).toEqual(["auto", "declared", "always"]);
+	});
+
 	it("cycles through share destinations", () => {
 		const onSessionShareDestinationChange = vi.fn();
 		const config = {
