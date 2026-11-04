@@ -77,6 +77,7 @@ function requestCatalog(
 	catalogBaseUrl: string,
 	signal: AbortSignal,
 	validator?: string,
+	disableImmediateRetries?: boolean,
 ): Promise<Response> {
 	const url = new URL(`/api/models/providers/${encodeURIComponent(providerId)}`, catalogBaseUrl);
 	url.searchParams.set("types", REMOTE_CATALOG_MODEL_TYPES.join(","));
@@ -90,7 +91,7 @@ function requestCatalog(
 			},
 			signal,
 		},
-		{ attemptTimeoutMs: REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS },
+		{ attemptTimeoutMs: REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS, ...(disableImmediateRetries ? { maxRetries: 0 } : {}) },
 	);
 }
 
@@ -144,7 +145,13 @@ export function withRemoteCatalog(
 			// Only revalidate when a cached body backs the validator, so a 304 can never
 			// leave the overlay empty.
 			const validator = stored && stored.models.length > 0 ? stored.etag : undefined;
-			const response = await requestCatalog(provider.id, catalogBaseUrl, context.signal, validator);
+			const response = await requestCatalog(
+				provider.id,
+				catalogBaseUrl,
+				context.signal,
+				validator,
+				context.disableImmediateRetries,
+			);
 			if (context.signal.aborted) return;
 			const checkedAt = Date.now();
 			// Unchanged: dynamicModels already holds the stored overlay, so only the
@@ -219,7 +226,13 @@ export function withPersonalizedCatalog(
 			}
 			if (!context.allowNetwork || context.signal.aborted) return;
 
-			const response = await requestCatalog(provider.id, catalogBaseUrl, context.signal);
+			const response = await requestCatalog(
+				provider.id,
+				catalogBaseUrl,
+				context.signal,
+				undefined,
+				context.disableImmediateRetries,
+			);
 			if (context.signal.aborted) return;
 			let remote: readonly AnyModel[] = [];
 			if (response.status !== 404 && response.status !== 501) {
