@@ -38,6 +38,7 @@ export const SETTINGS_DEFAULTS = {
 	enableInstallTelemetry: true,
 	enableAnalytics: false,
 	enableSkillCommands: true,
+	collapseExpandedInput: true,
 	terminal: {
 		showImages: true,
 		imageWidthCells: 60,
