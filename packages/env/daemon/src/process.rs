@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -194,18 +194,7 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        let wait = match idle_until {
-            Some(idle) => {
-                let now = Instant::now();
-                if now >= idle {
-                    // A descendant may hold the pipes open after the program exited; stop waiting for it.
-                    break;
-                }
-                idle - now
-            }
-            None => Duration::from_secs(3600),
-        };
-        match receiver.recv_timeout(wait) {
+        match receive(&receiver, idle_until) {
             Ok(Message::Data(stream, bytes)) => {
                 output.bulk(
                     Frame::with_payload(
@@ -234,6 +223,8 @@ pub fn run(
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
+            // A descendant may hold silent pipes open after the program exited.
+            Err(RecvTimeoutError::Timeout) if idle_until.is_some() => break,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -253,5 +244,54 @@ pub fn run(
             "spawn_error",
             "process did not report its exit",
         )),
+    }
+}
+
+/// Receive output until the post-exit silence deadline; a live descendant may keep a pipe open.
+fn receive(
+    receiver: &Receiver<Message>,
+    idle_until: Option<Instant>,
+) -> Result<Message, RecvTimeoutError> {
+    let wait = match idle_until {
+        // An expired deadline is not silence while reader messages are already queued.
+        Some(idle) => idle.saturating_duration_since(Instant::now()),
+        None => Duration::from_secs(3600),
+    };
+    receiver.recv_timeout(wait)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drains_queued_tail_and_eof_after_exit_deadline() {
+        let (sender, receiver) = mpsc::channel();
+        // The runner can resume after its deadline with the final reader chunk already queued.
+        sender.send(Message::Data(0, vec![120; 64 * 1024])).unwrap();
+        sender.send(Message::Eof(0)).unwrap();
+        sender.send(Message::Eof(1)).unwrap();
+        let expired = Some(Instant::now() - EXIT_STDIO_GRACE);
+        let Ok(Message::Data(stream, bytes)) = receive(&receiver, expired) else {
+            panic!("queued final 64 KiB was discarded as silence");
+        };
+        assert_eq!(stream, 0);
+        assert_eq!(bytes, vec![120; 64 * 1024]);
+        assert!(matches!(receive(&receiver, expired), Ok(Message::Eof(0))));
+        assert!(matches!(receive(&receiver, expired), Ok(Message::Eof(1))));
+        assert!(matches!(
+            receive(&receiver, expired),
+            Err(RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn receives_cancel_after_exit_deadline() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Message::Cancel).unwrap();
+        assert!(matches!(
+            receive(&receiver, Some(Instant::now() - EXIT_STDIO_GRACE)),
+            Ok(Message::Cancel)
+        ));
     }
 }
