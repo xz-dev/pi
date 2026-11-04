@@ -1,11 +1,13 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { takeSessionDiskCompressionHint } from "../src/main.ts";
+import { sessionDiskCompressionWarning } from "../src/main.ts";
+import { createHarness } from "./suite/harness.ts";
 
 describe("session disk compression guidance", () => {
 	let root: string;
@@ -63,20 +65,34 @@ describe("session disk compression guidance", () => {
 		expect(diagnostics).toEqual([]);
 	});
 
-	it("returns the tip as one info diagnostic once and persists the setting as false", async () => {
+	it("warns at every start until the setting is false", () => {
+		const warning = [{ type: "warning", message: expect.stringContaining("/session-disk-compression") }];
 		const settings = SettingsManager.create(cwd, agentDir);
-		const first = takeSessionDiskCompressionHint(settings);
-		expect(first).toEqual([{ type: "info", message: expect.stringContaining("/session-disk-compression") }]);
-		expect(takeSessionDiskCompressionHint(settings)).toEqual([]);
-		await settings.flush();
-		expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).sessionDiskCompressionHint).toBe(false);
-		expect(takeSessionDiskCompressionHint(SettingsManager.create(cwd, agentDir))).toEqual([]);
-	});
-
-	it("returns nothing when the setting is false", () => {
-		expect(takeSessionDiskCompressionHint(SettingsManager.inMemory({ sessionDiskCompressionHint: false }))).toEqual(
+		expect(sessionDiskCompressionWarning(settings)).toEqual(warning);
+		expect(sessionDiskCompressionWarning(settings)).toEqual(warning);
+		expect(sessionDiskCompressionWarning(SettingsManager.inMemory({ sessionDiskCompressionWarning: false }))).toEqual(
 			[],
 		);
+	});
+
+	// The removed one-shot tip wrote sessionDiskCompressionWarning=false without the command ever running.
+	it("still warns when only the old one-shot tip key is false", () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ sessionDiskCompressionHint: false }));
+		expect(sessionDiskCompressionWarning(SettingsManager.create(cwd, agentDir))).toHaveLength(1);
+	});
+
+	it("stops the warning once /session-disk-compression runs", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage("ok"), fauxAssistantMessage("ok")]);
+			await harness.session.prompt("/session-disk-compressionx");
+			expect(harness.settingsManager.getSessionDiskCompressionWarning()).toBe(true);
+			await harness.session.prompt("/session-disk-compression ~/sessions");
+			expect(harness.settingsManager.getSessionDiskCompressionWarning()).toBe(false);
+			expect(sessionDiskCompressionWarning(harness.settingsManager)).toEqual([]);
+		} finally {
+			harness.cleanup();
+		}
 	});
 
 	// Directory permissions do not block writes on Windows or for root.
@@ -85,7 +101,7 @@ describe("session disk compression guidance", () => {
 		async () => {
 			const settings = SettingsManager.create(cwd, agentDir);
 			chmodSync(agentDir, 0o500);
-			expect(takeSessionDiskCompressionHint(settings)).toHaveLength(1);
+			settings.setSessionDiskCompressionWarning(false);
 			await settings.flush();
 			expect(settings.drainErrors()).toEqual([expect.objectContaining({ scope: "global" })]);
 		},
