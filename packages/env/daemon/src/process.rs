@@ -107,6 +107,7 @@ pub fn run(
     let pid = child.id();
     groups.lock().unwrap().insert(pid);
     let stop = Arc::new(AtomicBool::new(false));
+    let exited = Arc::new(AtomicBool::new(false));
     // A thread that cannot start (a task limit) fails the request; the started program is killed and reaped. Threads
     // already running see `stop` within 100 ms.
     let abandon = |mut child: Child, error: std::io::Error| {
@@ -126,6 +127,7 @@ pub fn run(
         sender.clone(),
         stop.clone(),
         Some(output.clone()),
+        exited.clone(),
     ) {
         return Err(abandon(child, error));
     }
@@ -136,6 +138,7 @@ pub fn run(
         sender.clone(),
         stop.clone(),
         Some(output.clone()),
+        exited.clone(),
     ) {
         return Err(abandon(child, error));
     }
@@ -213,6 +216,8 @@ pub fn run(
             Ok(Message::Exit(exit)) => {
                 status = Some(Ok(exit));
                 idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
+                exited.store(true, Ordering::SeqCst);
+                output.wake();
             }
             Ok(Message::WaitFailed(error)) => {
                 status = Some(Err(error));
@@ -283,6 +288,131 @@ mod tests {
             receive(&receiver, expired),
             Err(RecvTimeoutError::Timeout)
         ));
+    }
+
+    /// A link that accepts nothing until `open_at`, like a client that stops reading; it keeps what it was sent.
+    #[cfg(target_os = "linux")]
+    struct Link {
+        open_at: Instant,
+        sent: Arc<Mutex<Vec<u8>>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl std::io::Write for Link {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            thread::sleep(self.open_at.saturating_duration_since(Instant::now()));
+            self.sent.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run `script` through `run` with output going to a link closed for `closed_for`, behind more unsent output than
+    /// the limit, so reading waits for the link after the first chunk. Returns how long `run` took, the output, and
+    /// what reached the link.
+    #[cfg(target_os = "linux")]
+    fn run_behind_closed_link(
+        script: &str,
+        closed_for: Duration,
+    ) -> (Duration, Arc<Output>, Arc<Mutex<Vec<u8>>>) {
+        let output = Arc::new(Output::default());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut link = Link {
+            open_at: Instant::now() + closed_for,
+            sent: sent.clone(),
+        };
+        // The writer takes the first and waits on the closed link; the second stays unsent.
+        for _ in 0..2 {
+            output.bulk(
+                Frame::with_payload(EVENT, 99, json!({}), vec![0; 4 * 1024 * 1024 + 1]),
+                None,
+            );
+        }
+        let writer = output.clone();
+        thread::spawn(move || writer.run(&mut link));
+        let request = ProcessRequest::from_json(&json!({
+            "argv": ["sh", "-c", script],
+            "cwd": std::env::temp_dir().to_str().unwrap(),
+        }))
+        .unwrap();
+        let started = Instant::now();
+        let reply = run(
+            1,
+            request,
+            &output,
+            &Control::default(),
+            &Groups::default(),
+            &Processes::default(),
+        );
+        assert_eq!(reply.unwrap()["exitCode"], 0);
+        (started.elapsed(), output, sent)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stdout_bytes(sent: &[u8]) -> usize {
+        let mut input = std::io::Cursor::new(sent);
+        let mut total = 0;
+        while let Some(frame) = crate::frame::read_frame(&mut input).unwrap() {
+            if frame.kind == EVENT
+                && frame.json["kind"] == "output"
+                && frame.json["stream"] == "stdout"
+            {
+                total += frame.payload.len();
+            }
+        }
+        total
+    }
+
+    /// One byte more than a Linux pipe holds: the program exits with its last bytes in the pipe while the reader waits.
+    #[cfg(target_os = "linux")]
+    const PAST_PIPE: usize = 64 * 1024 + 1;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn delivers_output_left_in_the_pipe_when_the_link_is_slower_than_the_exit_grace() {
+        let closed_for = Duration::from_millis(500);
+        let (_, output, sent) =
+            run_behind_closed_link(&format!("head -c {PAST_PIPE} /dev/zero"), closed_for);
+        output.close();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&output) > 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stdout_bytes(&sent.lock().unwrap()), PAST_PIPE);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ends_and_stops_reading_when_the_link_never_drains() {
+        let (took, output, _) = run_behind_closed_link(
+            &format!("head -c {PAST_PIPE} /dev/zero"),
+            Duration::from_secs(30),
+        );
+        assert!(took < Duration::from_secs(2), "run took {took:?}");
+        // The readers end and release the output: only this test and the stuck writer hold it.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Arc::strong_count(&output) > 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(Arc::strong_count(&output), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ends_after_the_silence_while_a_descendant_holds_the_pipe() {
+        let (took, output, sent) = run_behind_closed_link(
+            &format!("sleep 5 & head -c {PAST_PIPE} /dev/zero"),
+            Duration::from_millis(500),
+        );
+        assert!(took < Duration::from_secs(2), "run took {took:?}");
+        output.close();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&output) > 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stdout_bytes(&sent.lock().unwrap()), PAST_PIPE);
     }
 
     #[test]

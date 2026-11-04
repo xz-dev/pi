@@ -6,7 +6,7 @@
 use crate::frame::{self, Frame};
 use std::collections::VecDeque;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -48,16 +48,22 @@ impl Output {
         self.queued.notify_one();
     }
 
-    /// Wait while more than the bulk limit is unsent, unless `stop` is set.
-    pub fn wait_for_room(&self, stop: &AtomicBool) {
+    /// Wait while more than the bulk limit is unsent, until `released` returns true.
+    pub fn wait_for_room(&self, released: impl Fn() -> bool) {
         let mut queues = self.queues.lock().unwrap();
-        while queues.bulk_bytes > BULK_LIMIT && !queues.closed && !stop.load(Ordering::SeqCst) {
+        while queues.bulk_bytes > BULK_LIMIT && !queues.closed && !released() {
             queues = self
                 .drained
                 .wait_timeout(queues, Duration::from_millis(100))
                 .unwrap()
                 .0;
         }
+    }
+
+    /// Wake waiting readers, so they look at their condition again.
+    pub fn wake(&self) {
+        let _queues = self.queues.lock().unwrap();
+        self.drained.notify_all();
     }
 
     pub fn close(&self) {

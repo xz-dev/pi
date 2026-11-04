@@ -196,7 +196,7 @@ pub fn run(
             unix::read(&master, &stop, |bytes| {
                 let delivered = sender.send(Message::Data(0, bytes.to_vec())).is_ok();
                 // Like a full pipe: a program that writes faster than the link waits.
-                output.wait_for_room(&stop);
+                output.wait_for_room(|| stop.load(Ordering::SeqCst));
                 delivered
             });
             let _ = sender.send(Message::Eof(0));
