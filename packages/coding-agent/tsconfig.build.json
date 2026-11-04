@@ -2,6 +2,8 @@
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
 		"outDir": "./dist",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
 		"paths": {
 			"@earendil-works/pi-agent-core": ["../agent/dist/index.d.ts"],
 			"@earendil-works/pi-agent-core/*": ["../agent/dist/*.d.ts"],
