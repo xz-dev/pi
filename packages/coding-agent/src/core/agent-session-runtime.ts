@@ -1,5 +1,6 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, parse } from "node:path";
+import type { MessageOrigin } from "@earendil-works/pi-ai";
 import { getFileRevision, pathsEqual, resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
@@ -190,12 +191,15 @@ export class AgentSessionRuntime {
 		this._modelFallbackMessage = result.modelFallbackMessage;
 	}
 
-	private async finishSessionReplacement(withSession?: (ctx: ReplacedSessionContext) => Promise<void>): Promise<void> {
+	private async finishSessionReplacement(
+		withSession?: (ctx: ReplacedSessionContext) => Promise<void>,
+		origin?: MessageOrigin,
+	): Promise<void> {
 		if (this.rebindSession) {
 			await this.rebindSession(this.session);
 		}
 		if (withSession) {
-			await withSession(this.session.createReplacedSessionContext());
+			await withSession(this.session.createReplacedSessionContext(origin));
 		}
 	}
 
@@ -203,6 +207,7 @@ export class AgentSessionRuntime {
 		sessionPath: string,
 		options?: {
 			cwdOverride?: string;
+			origin?: MessageOrigin;
 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 			projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
 		},
@@ -225,11 +230,12 @@ export class AgentSessionRuntime {
 				projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
 			}),
 		);
-		await this.finishSessionReplacement(options?.withSession);
+		await this.finishSessionReplacement(options?.withSession, options?.origin);
 		return { cancelled: false };
 	}
 
 	async newSession(options?: {
+		origin?: MessageOrigin;
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
@@ -261,13 +267,17 @@ export class AgentSessionRuntime {
 			await options.setup(this.session.sessionManager);
 			this.session.refreshContext();
 		}
-		await this.finishSessionReplacement(options?.withSession);
+		await this.finishSessionReplacement(options?.withSession, options?.origin);
 		return { cancelled: false };
 	}
 
 	async fork(
 		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+		options?: {
+			position?: "before" | "at";
+			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+			origin?: MessageOrigin;
+		},
 	): Promise<{ cancelled: boolean; selectedText?: string }> {
 		const position = options?.position ?? "before";
 		const beforeResult = await this.emitBeforeFork(entryId, { position });
@@ -311,7 +321,7 @@ export class AgentSessionRuntime {
 						sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
 					}),
 				);
-				await this.finishSessionReplacement(options?.withSession);
+				await this.finishSessionReplacement(options?.withSession, options?.origin);
 				return { cancelled: false, selectedText };
 			}
 
@@ -333,7 +343,7 @@ export class AgentSessionRuntime {
 					sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
 				}),
 			);
-			await this.finishSessionReplacement(options?.withSession);
+			await this.finishSessionReplacement(options?.withSession, options?.origin);
 			return { cancelled: false, selectedText };
 		}
 
@@ -352,7 +362,7 @@ export class AgentSessionRuntime {
 				sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
 			}),
 		);
-		await this.finishSessionReplacement(options?.withSession);
+		await this.finishSessionReplacement(options?.withSession, options?.origin);
 		return { cancelled: false, selectedText };
 	}
 
