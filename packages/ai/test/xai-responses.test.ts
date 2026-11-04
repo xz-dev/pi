@@ -8,6 +8,7 @@ import { xaiProvider } from "../src/providers/xai.ts";
 import type { Context, Model } from "../src/types.ts";
 import { formatUserAgent } from "../src/utils/identity.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { jsonRequestBody } from "./utils/request-body.ts";
 
 const PI_USER_AGENT = formatUserAgent();
 
@@ -97,7 +98,7 @@ async function captureRequest(
 		captured = {
 			url: request.url,
 			headers: request.headers,
-			body: JSON.parse(await request.clone().text()) as Record<string, unknown>,
+			body: jsonRequestBody({ headers: request.headers, body: new Uint8Array(await request.clone().arrayBuffer()) }),
 		};
 		return completedResponse();
 	});

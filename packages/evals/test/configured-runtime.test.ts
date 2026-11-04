@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { brotliCompressSync, deflateSync, gzipSync, zstdCompressSync } from "node:zlib";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -89,6 +90,42 @@ function probe(content: string, apiKey: string) {
 }
 
 describe("inspectProvider", () => {
+	it.each([
+		["zstd", zstdCompressSync],
+		["gzip", gzipSync],
+		["deflate", deflateSync],
+		["br", brotliCompressSync],
+	] as const)("accepts %s JSON uploads at the actual fixture boundary", async (encoding, compress) => {
+		const body = JSON.stringify({
+			model: OPENAI_MODEL_ID,
+			stream: true,
+			messages: [{ role: "user", content: OPENAI_PROBE_PROMPT }],
+		});
+		const response = await fetch(`${server.baseUrl()}/chat/completions`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"content-encoding": encoding,
+				authorization: "Bearer resolved-acme-key",
+			},
+			body: new Uint8Array(compress(body)),
+		});
+		expect(response.status).toBe(200);
+		await response.text();
+		expect(server.validRequestReceived()).toBe(true);
+	});
+
+	it("rejects unknown request encoding before parsing JSON", async () => {
+		const response = await fetch(`${server.baseUrl()}/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json", "content-encoding": "lz4" },
+			body: "{}",
+		});
+		expect(response.status).toBe(415);
+		expect(response.headers.get("accept-encoding")).toContain("zstd");
+		await response.text();
+		expect(server.validRequestReceived()).toBe(false);
+	});
 	it("probes a models.json provider through ModelRuntime", async () => {
 		const runtime = await runtimeWith(acmeModelsJson());
 		await expect(inspectProvider(runtime, probe(OPENAI_PROBE_PROMPT, "resolved-acme-key"))).resolves.toEqual({
