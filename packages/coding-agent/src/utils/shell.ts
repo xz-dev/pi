@@ -197,10 +197,10 @@ export function sanitizeBinaryOutput(str: string): string {
  * Detached child processes must be tracked so they can be killed on parent
  * shutdown signals (SIGHUP/SIGTERM).
  */
-const trackedDetachedChildPids = new Set<number>();
+const trackedDetachedChildPids = new Map<number, () => void>();
 
-export function trackDetachedChildPid(pid: number): void {
-	trackedDetachedChildPids.add(pid);
+export function trackDetachedChildPid(pid: number, stop: () => void = () => killProcessTree(pid)): void {
+	trackedDetachedChildPids.set(pid, stop);
 }
 
 export function untrackDetachedChildPid(pid: number): void {
@@ -208,8 +208,8 @@ export function untrackDetachedChildPid(pid: number): void {
 }
 
 export function killTrackedDetachedChildren(): void {
-	for (const pid of trackedDetachedChildPids) {
-		killProcessTree(pid);
+	for (const stop of trackedDetachedChildPids.values()) {
+		stop();
 	}
 	trackedDetachedChildPids.clear();
 }
