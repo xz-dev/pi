@@ -48,6 +48,7 @@ export type RpcCommand =
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
 
 	// Retry
+	| { id?: string; type: "retry" }
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
 	| { id?: string; type: "abort_retry" }
 
