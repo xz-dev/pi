@@ -96,6 +96,13 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 
+	// Orca supports Kitty graphics but only advertises it through ORCA_IMAGE_PROTOCOL. Require
+	// both signals so Orca releases predating that advertisement keep the text fallback instead
+	// of reserving image rows that nothing renders.
+	if (termProgram === "orca" && process.env.ORCA_IMAGE_PROTOCOL === "kitty") {
+		return { images: "kitty", trueColor: true, hyperlinks: true };
+	}
+
 	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
@@ -121,7 +128,10 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 		return { images: null, trueColor: true, hyperlinks: true };
 	}
 
-	if (termProgram === "alacritty" || termProgram === "vscode" || termProgram === "zed") {
+	// Alacritty does not set TERM_PROGRAM. It sets TERM=alacritty when its terminfo entry is
+	// installed (otherwise xterm-256color) and ALACRITTY_WINDOW_ID on Unix and macOS.
+	const isAlacritty = termProgram === "alacritty" || term.startsWith("alacritty") || process.env.ALACRITTY_WINDOW_ID;
+	if (isAlacritty || termProgram === "vscode" || termProgram === "zed") {
 		return { images: null, trueColor: true, hyperlinks: true };
 	}
 

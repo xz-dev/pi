@@ -1,4 +1,4 @@
-export type { NativeWatchCall, WatchCall, WatchEnd, WatchHandle } from "@earendil-works/chord";
+export type { NativeWatchCall, WatchCall, WatchEnd, WatchHandle } from "@earendil-works/chord/watch";
 export { defineDoc, defineDocFamily } from "./documents.ts";
 export {
 	AssistantEntry,
@@ -147,6 +147,7 @@ export type {
 	CommitOptions,
 	CommitPersistence,
 	CommitPublication,
+	CommitResult,
 	CommonDocDefinition,
 	ContextEdit,
 	ConversationDocFamilyToken,

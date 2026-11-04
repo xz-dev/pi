@@ -756,9 +756,7 @@ export async function main(args: string[], options?: MainOptions) {
 			parsed.projectTrustOverride === undefined && cachedProjectTrust === undefined && hasTrustRequiringResources;
 		const projectTrusted = shouldResolveProjectTrust
 			? false
-			: (cachedProjectTrust ??
-				parsed.projectTrustOverride ??
-				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
+			: (cachedProjectTrust ?? parsed.projectTrustOverride ?? trustStore.get(cwd) ?? !hasTrustRequiringResources);
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
 		const services = await createAgentSessionServices({
 			cwd,
@@ -981,6 +979,7 @@ export async function main(args: string[], options?: MainOptions) {
 			// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
 			await new Promise((resolve) => setTimeout(resolve, 150));
 			interactiveMode.stop();
+			await runtime.dispose();
 			stopThemeWatcher();
 			printTimings();
 			if (process.stdout.writableLength > 0) {

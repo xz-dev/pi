@@ -49,6 +49,7 @@ import type {
 	Component,
 	EditorComponent,
 	EditorTheme,
+	Keybinding,
 	KeyId,
 	OverlayHandle,
 	OverlayOptions,
@@ -142,6 +143,19 @@ export interface WorkingIndicatorOptions {
 /** Wrap the current autocomplete provider with additional behavior. */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
+
+/**
+ * Formats the host's configured keybindings for display.
+ * Extensions should use these instead of importing `keyText`/`keyHint`: an import may resolve to another copy of
+ * pi-coding-agent, which does not see the host's keybindings.
+ */
+export interface KeybindingHints {
+	/** Configured keys for a keybinding id, for example `"ctrl+o"`. Empty when the id has no keys. */
+	keyText(keybinding: Keybinding): string;
+
+	/** Configured keys followed by a description, styled as a hint, for example `"ctrl+o to expand"`. */
+	keyHint(keybinding: Keybinding, description: string): string;
+}
 
 /**
  * UI context for extensions to request interactive UI.
@@ -470,7 +484,7 @@ export interface ToolRenderResultOptions {
 }
 
 /** Context passed to tool renderers. */
-export interface ToolRenderContext<TState = any, TArgs = any> {
+export interface ToolRenderContext<TState = any, TArgs = any> extends KeybindingHints {
 	/** Current tool call arguments. Shared across call/result renders for the same tool call. */
 	args: TArgs;
 	/** Unique id for this tool execution. Stable across call/result renders for the same tool call. */
@@ -1538,14 +1552,24 @@ export interface SessionBeforeTreeResult {
 // Message and Entry Rendering
 // ============================================================================
 
-export interface MessageRenderOptions {
+export interface MessageRenderOptions extends KeybindingHints {
 	expanded: boolean;
 	/** Horizontal padding configured by the outputPad setting. */
 	outputPad: number;
 }
 
+/**
+ * Markdown surface a transformer runs on.
+ * - `user`, `assistant`, `assistant-thinking`: transcript messages (the default types of a transformer)
+ * - `custom`: custom messages without a custom renderer, and expanded skill blocks (their content, without Pi's header)
+ * - `summary`: expanded branch and compaction summaries (the summary, without Pi's header)
+ * - `changelog`: Pi's changelog ("What's New" and `/changelog`), the "Extension Updates" notice, and the release note of
+ *   the "Update Available" notice
+ */
+export type MarkdownMessageType = "user" | "assistant" | "assistant-thinking" | "custom" | "summary" | "changelog";
+
 export interface MarkdownTransformContext {
-	messageType: "user" | "assistant" | "assistant-thinking";
+	messageType: MarkdownMessageType;
 	isStreaming: boolean;
 	availableWidth: number;
 	/** Persisted session-entry id. Undefined for live messages or live rendering; available when rendering from persisted session entries. */
@@ -1556,7 +1580,18 @@ export interface MarkdownTransformContext {
 
 export type MarkdownTransformer = (markdown: string, context: MarkdownTransformContext) => string;
 
-export interface EntryRenderOptions {
+export interface MarkdownTransformerOptions {
+	/** Surfaces the transformer runs on. Default: `["user", "assistant", "assistant-thinking"]`. */
+	messageTypes?: readonly MarkdownMessageType[];
+}
+
+/** A registered Markdown transformer and the surfaces it runs on. */
+export interface MarkdownTransformerRegistration {
+	transformer: MarkdownTransformer;
+	messageTypes: ReadonlySet<MarkdownMessageType>;
+}
+
+export interface EntryRenderOptions extends KeybindingHints {
 	expanded: boolean;
 }
 
@@ -1724,8 +1759,11 @@ export interface ExtensionAPI {
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
 
-	/** Register a transformer for user and assistant Markdown before Pi renders it in the interactive transcript. */
-	registerMarkdownTransformer(transformer: MarkdownTransformer): void;
+	/**
+	 * Register a transformer for Markdown before Pi renders it in interactive mode. By default it runs on user,
+	 * assistant and thinking Markdown; `options.messageTypes` selects the surfaces instead.
+	 */
+	registerMarkdownTransformer(transformer: MarkdownTransformer, options?: MarkdownTransformerOptions): void;
 
 	/** Register a custom renderer for CustomEntry. Custom entries do not participate in LLM context. */
 	registerEntryRenderer<T = unknown>(customType: string, renderer: EntryRenderer<T>): void;
@@ -2286,7 +2324,7 @@ export interface Extension {
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	toolRenderers?: ToolRendererResolver[];
-	markdownTransformer?: MarkdownTransformer;
+	markdownTransformer?: MarkdownTransformerRegistration;
 	entryRenderers?: Map<string, EntryRenderer>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;

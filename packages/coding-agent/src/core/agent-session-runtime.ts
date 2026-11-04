@@ -1,6 +1,6 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
-import { basename, join, parse, resolve } from "node:path";
-import { resolvePath } from "../utils/paths.ts";
+import { basename, join, parse } from "node:path";
+import { pathsEqual, resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
 import type {
@@ -368,7 +368,7 @@ export class AgentSessionRuntime {
 		}
 
 		let destinationPath = join(sessionDir, basename(resolvedPath));
-		const sourceAlreadyStored = resolve(destinationPath) === resolvedPath;
+		const sourceAlreadyStored = pathsEqual(destinationPath, resolvedPath);
 		if (!sourceAlreadyStored) {
 			const { name, ext } = parse(destinationPath);
 			let suffix = 1;
@@ -401,13 +401,20 @@ export class AgentSessionRuntime {
 		return { cancelled: false };
 	}
 
+	/**
+	 * Dispose the session for process exit. Also waits for credential writes in progress: an OAuth
+	 * refresh may already have spent the old single-use refresh token, so exiting before the new one
+	 * is saved would lose the login (#11692).
+	 */
 	async dispose(): Promise<void> {
+		await this.session.abort();
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
 			reason: "quit",
 		});
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
+		await this.services.modelRuntime.settleCredentialWrites();
 	}
 }
 
