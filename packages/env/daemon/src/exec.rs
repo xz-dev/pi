@@ -409,10 +409,13 @@ pub fn spawn_reader(
                 }
                 // The exit grace is silence of the pipe; waiting for a slow link here would let it pass with the
                 // program's last output still unread.
-                let release = unpaced > 0;
-                output.wait_for_room_until(|| {
-                    stop.load(Ordering::SeqCst) || (release && exited.load(Ordering::SeqCst))
-                });
+                if unpaced > 0 {
+                    output.wait_for_room_until(|| {
+                        stop.load(Ordering::SeqCst) || exited.load(Ordering::SeqCst)
+                    });
+                } else {
+                    output.wait_for_room(&stop);
+                }
             }
             delivered
         });
