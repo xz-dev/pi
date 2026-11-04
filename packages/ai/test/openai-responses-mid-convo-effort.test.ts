@@ -80,6 +80,7 @@ async function runOpenAI(
 		return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
 	};
 	const message = await streamOpenAIResponses(options.model ?? openAIModel(), normalizeContext({ messages }), {
+		transport: "sse",
 		apiKey: options.apiKey ?? "sk-test",
 		reasoningEffort,
 		fetch: fetchMock as typeof globalThis.fetch,
