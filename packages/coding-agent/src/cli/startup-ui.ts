@@ -17,6 +17,7 @@ import {
 	FirstTimeSetupComponent,
 	type FirstTimeSetupResult,
 } from "../modes/interactive/components/first-time-setup.ts";
+import { SelectorHost } from "../modes/interactive/components/selector-host.ts";
 import { SYSTEM_THEME_NAME } from "../modes/interactive/theme/system-theme.ts";
 import {
 	getTerminalTheme,
@@ -172,7 +173,9 @@ export async function showStartupSelector<T>(
 			() => void finish(undefined),
 			{ tui: ui },
 		);
-		ui.addChild(selector);
+		const host = new SelectorHost(ui, () => []);
+		host.addChild(selector);
+		ui.addChild(host);
 		ui.setFocus(selector);
 		startStartupTui(ui, settingsManager);
 	});
