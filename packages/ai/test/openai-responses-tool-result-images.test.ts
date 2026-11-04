@@ -162,8 +162,8 @@ describe("Responses API tool result images", () => {
 		});
 	});
 
-	describe("GitHub Copilot Responses Provider (gpt-6-luna)", () => {
-		const model = getModel("github-copilot", "gpt-6-luna");
+	describe.each(["gpt-6-luna", "gpt-5.4-nano"] as const)("GitHub Copilot Responses Provider (%s)", (modelId) => {
+		const model = getModel("github-copilot", modelId);
 
 		it.skipIf(!githubCopilotToken)(
 			"should send tool result images in function_call_output",
