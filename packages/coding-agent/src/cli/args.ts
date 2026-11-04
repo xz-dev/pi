@@ -28,7 +28,6 @@ export interface Args {
 	sessionId?: string;
 	fork?: string;
 	sessionDir?: string;
-	compressSessions?: boolean;
 	models?: string[];
 	tools?: string[];
 	excludeTools?: string[];
@@ -174,10 +173,6 @@ export function parseArgs(args: string[]): Args {
 			} else {
 				result.diagnostics.push({ type: "error", message: "--name requires a value" });
 			}
-		} else if (arg === "--enable-compress-sessions" || arg.startsWith("--enable-compress-sessions=")) {
-			const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[++i];
-			if (value === "true" || value === "false") result.compressSessions = value === "true";
-			else result.diagnostics.push({ type: "error", message: "--enable-compress-sessions requires true or false" });
 		} else if (arg === "--no-session") {
 			result.noSession = true;
 		} else if (arg === "--session" && i + 1 < args.length) {
@@ -186,14 +181,8 @@ export function parseArgs(args: string[]): Args {
 			result.sessionId = args[++i];
 		} else if (arg === "--fork" && i + 1 < args.length) {
 			result.fork = args[++i];
-		} else if (arg === "--session-dir") {
-			const directory = args[i + 1];
-			if (directory === undefined || !directory.trim() || directory.startsWith("-")) {
-				result.diagnostics.push({ type: "error", message: "--session-dir requires a non-empty directory" });
-			} else {
-				result.sessionDir = directory;
-				i++;
-			}
+		} else if (arg === "--session-dir" && i + 1 < args.length) {
+			result.sessionDir = args[++i];
 		} else if (arg === "--models" && i + 1 < args.length) {
 			result.models = args[++i]
 				.split(",")
@@ -373,8 +362,6 @@ ${chalk.bold("Options:")}
   --fork <path|id>               Fork a session by file path or full/partial ID into the current directory
   --session-dir <dir>            Directory for session storage and lookup (overrides ${ENV_SESSION_DIR} and the sessionDir setting)
   --agent-dir <dir>              Config directory for settings, auth, and resources (overrides ${ENV_AGENT_DIR})
-  --enable-compress-sessions=true|false
-                                 Offline-only: migrate sessions, save global default, and exit
   --no-session                   Don't save session (ephemeral)
   --name, -n <name>              Set session display name
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling

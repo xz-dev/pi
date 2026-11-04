@@ -1,0 +1,23 @@
+// Built-in prompt templates embedded in code so they ship identically in source, npm and binary builds.
+export const SESSION_DISK_COMPRESSION_TEMPLATE = [
+	"---",
+	"description: Inspect the Pi session folder and recommend transparent disk compression",
+	'argument-hint: "[session folder]"',
+	"---",
+	"Inspect transparent filesystem compression for the Pi session folder and recommend the highest practical compression ratio. Do not change anything until I explicitly approve each command.",
+	"",
+	`Folder: \${1:-the Pi sessions directory: the --session-dir option, else PI_CODING_AGENT_SESSION_DIR, else the sessionDir setting in settings.json, else PI_CODING_AGENT_DIR/sessions (default ~/.pi/agent/sessions)}.`,
+	"",
+	"Data profile: mostly JSONL text (JSON-heavy chat transcripts and tool output), some embedded base64 images, files that keep growing by appends while a session is active, and then rarely change.",
+	"",
+	"1. Identify the OS, the filesystem and mount options of this folder, whether it sits on a network drive, a WSL /mnt path, a cloud-synced folder, or an encrypted volume, and the current compression state. Use read-only commands. If permissions are insufficient, say what you could not check.",
+	"2. Measure the folder's size, file count and current on-disk size (for example `compsize` on btrfs, `compact /q` on Windows, `zfs get compressratio`). Estimate the achievable ratio on a copied sample in a temporary directory, never on the originals, and delete the copy afterwards because transcripts can contain secrets.",
+	"3. Recommend the option with the best ratio that stays safe for growing files. Explain the trade-off of each option for this data profile:",
+	"   - Windows: NTFS compression (LZNT1, works for files that keep changing) versus WOF `compact /exe:lzx` (higher ratio, but a file loses compression when it is modified, so it suits only closed sessions). Note the Explorer, antivirus and backup effects.",
+	"   - Linux btrfs: `compress-force=zstd:N` mount option versus `btrfs property set ... compression zstd` / `chattr +c`, and that existing files need `btrfs filesystem defragment -r -czstd` to be recompressed, which breaks reflinks and snapshot sharing and can increase space use.",
+	"   - ZFS: `compression=zstd-N` on a dataset; it applies only to new writes.",
+	"   - macOS APFS: there is no folder-level setting; per-file compression (`ditto --hfsCompression`, afsctool) is lost when a file is rewritten.",
+	"   - ext4 and other filesystems without compression: say so and suggest alternatives (a compressed subvolume or dataset, or a separate compressed volume).",
+	"4. Give exact commands, the expected ratio, how to verify the result, and how to undo it. Wait for my approval before running anything that writes.",
+	"",
+].join("\n");
