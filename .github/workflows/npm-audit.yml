@@ -1,19 +1,39 @@
-name: npm audit
+# Diagnostic only (leader seq18): the pty exit-grace fix on top of main cc8bbf2e (tree d70c9d33), run in the Environments
+# tests job on ubuntu-24.04-arm, ubuntu-latest, macos-latest and windows-latest. Original commands and assertions; the
+# Windows OpenSSH service steps are not run. No publish, push, secrets or write permissions.
+name: diag env-tail44-pty
 
 on:
-  schedule:
-    - cron: '37 7 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: diag-env-tail44-pty
+  cancel-in-progress: false
+
 jobs:
-  audit:
-    runs-on: ubuntu-latest
+  env-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Diagnostic boundary
+        id: guard
+        run: bash .github/diag-tail44-guard.sh
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -21,11 +41,40 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
 
-      - name: Audit production vulnerabilities
-        run: node scripts/npm-audit.mjs
+      # Original installs openssh-server when missing; the diagnostic only checks (no system writes).
+      - name: Check the SSH server for the bootstrap tests
+        if: runner.os == 'Linux'
+        run: |
+          command -v sshd || test -x /usr/sbin/sshd || { echo "sshd absent, original install step not executed"; exit 1; }
 
-      - name: Verify registry signatures
-        run: npm audit signatures --omit=dev
+      - name: Daemon format, lint and unit tests
+        working-directory: packages/env/daemon
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
+      - name: Build the daemon
+        working-directory: packages/env
+        run: npm run build:daemon
+
+      - name: Durable env tests
+        working-directory: packages/durable
+        run: npx vitest --run test/env-node.test.ts test/env-node-spill.test.ts test/env-node-conformance.test.ts test/env-line-scan.test.ts test/tools.test.ts test/tools-read-differential.test.ts
+
+      - name: pi-env tests
+        working-directory: packages/env
+        run: npx vitest --run --reporter=verbose --disableConsoleIntercept
+
+      # Byte counts and timing only: the original large-output program behind a client that is slow after 7 MiB.
+      - name: Slow client probe
+        if: always() && steps.guard.outcome == 'success'
+        working-directory: packages/env
+        run: |
+          cp ../../.github/diag-tail44-probe.ts test/tail44-probe.ts
+          node test/tail44-probe.ts 0 3 0
+          node test/tail44-probe.ts 120 3 7340032
+
