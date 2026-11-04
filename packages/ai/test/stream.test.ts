@@ -1410,13 +1410,23 @@ describe("Generate E2E Tests", () => {
 			await handleStreaming(llm, { apiKey: githubCopilotToken });
 		});
 
-		it.skipIf(!githubCopilotToken)("should handle thinking", { retry: 2 }, async () => {
-			await handleThinking(llm, { apiKey: githubCopilotToken, reasoningEffort: "high" });
-		});
+		it.skipIf(!githubCopilotToken).each(["gpt-6-luna", "gpt-5.4-nano"] as const)(
+			"%s should handle thinking",
+			{ retry: 2 },
+			async (modelId) => {
+				const thinkingModel = getModel("github-copilot", modelId);
+				await handleThinking(thinkingModel, { apiKey: githubCopilotToken, reasoningEffort: "high" });
+			},
+		);
 
-		it.skipIf(!githubCopilotToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
-			await multiTurn(llm, { apiKey: githubCopilotToken, reasoningEffort: "high" });
-		});
+		it.skipIf(!githubCopilotToken).each(["gpt-6-luna", "gpt-5.4-nano"] as const)(
+			"%s should handle multi-turn with thinking and tools",
+			{ retry: 3 },
+			async (modelId) => {
+				const thinkingModel = getModel("github-copilot", modelId);
+				await multiTurn(thinkingModel, { apiKey: githubCopilotToken, reasoningEffort: "high" });
+			},
+		);
 
 		it.skipIf(!githubCopilotToken)("should handle image input", { retry: 3 }, async () => {
 			await handleImage(llm, { apiKey: githubCopilotToken });
