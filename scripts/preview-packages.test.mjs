@@ -65,6 +65,7 @@ function publish(server, dir) {
 
 test("pack points internal dependencies at the commit's builds and restores package.json", async (t) => {
 	const repo = temporaryDirectory(t);
+	writeFileSync(join(repo, "package.json"), JSON.stringify({ private: true, workspaces: ["packages/*"] }));
 	writePackage(repo, "a", { name: "@scope/a", version: "1.0.0", dependencies: { "@scope/b": "1.0.0", other: "2.0.0" } });
 	writePackage(repo, "b", { name: "@scope/b", version: "1.0.0" });
 	writePackage(repo, "internal", { name: "@scope/internal", version: "1.0.0", private: true });
