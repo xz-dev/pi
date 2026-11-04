@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { BUN_TARGET_IDS, bunTarget, smokeLimits } from "./lib/bun-targets.mjs";
-import { assertSessionCompressionEvidence } from "./lib/session-compression-smoke.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 import { assertOwnerLifecycle } from "./smoke-owner-lifecycle.mjs";
 import { assertWindowsOwnerGate } from "./smoke-windows-owner-gate.mjs";
@@ -34,7 +33,6 @@ for (const id of BUN_TARGET_IDS) {
 	const commands = record.commands ?? [];
 	if (JSON.stringify(commands.map(({ name }) => name)) !== JSON.stringify(descriptor.requiredCommands)) throw new Error(`${id} command inventory does not match authoritative descriptor`);
 	for (const command of commands) if (command.status !== 0 || !Number.isSafeInteger(command.elapsedMs) || command.elapsedMs < 0) throw new Error(`${id} invalid command evidence: ${command.name}`);
-	assertSessionCompressionEvidence(commands.find(({ name }) => name === "help")?.sessionCompression);
 	assertLimit(id, "assetBytes", record.asset.bytes, SMOKE_LIMITS.assetBytes);
 	assertLimit(id, "coldVersionMs", record.timingsMs?.coldVersion, SMOKE_LIMITS.coldVersionMs);
 	assertLimit(id, "versionMs", record.timingsMs?.version, SMOKE_LIMITS.versionMs);

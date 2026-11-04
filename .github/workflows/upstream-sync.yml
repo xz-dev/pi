@@ -334,13 +334,11 @@ jobs:
               test/status-indicator.test.ts \
               test/interactive-tui.test.ts
           )
-          # Session storage encoding and its retry/compaction publication seams.
+          # Plain session storage, disk-compression guidance and retry/compaction publication seams.
           (
             cd packages/coding-agent
             PI_OFFLINE=1 node ../../node_modules/vitest/dist/cli.js --run \
-              test/session-compression.test.ts \
-              test/session-compression-cli.test.ts \
-              test/session-compression-integration.test.ts \
+              test/session-disk-compression.test.ts \
               test/agent-session-runtime-events.test.ts \
               test/session-manager \
               test/suite/manual-retry.test.ts \

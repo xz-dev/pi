@@ -117,15 +117,13 @@ Losslessly reduce model-upload bytes without changing JSON or image data. HTTP s
 
 ## Session disk compression
 
-New sessions use lossless Zstandard storage by default (`enableCompressSessions: true`). Opening, resuming or extending an existing session preserves its encoding; this is disk compression, not model-context compaction.
+Pi stores sessions as plain JSONL, exactly as upstream writes them, and does not compress them itself. Extensions, forks, `grep` and child processes keep reading ordinary text, and no compression work runs while the agent works.
 
-- Use case: Keep full session history with smaller cold files while retaining browsing, full-text search, branching, retry and export.
-- Maintenance: `pi --enable-compress-sessions=true` compresses existing plain sessions and enables the global new-session default; `pi --enable-compress-sessions=false` reverses it. Commands report results and exit before model or extension startup. The global preference is saved only after the batch succeeds; completed files are reported if a later file fails.
-- Scope: Without `--session-dir`, maintenance processes project directories under the default sessions root. `--session-dir <dir>` limits it to that flat directory, but still saves the global preference.
-- Safety: Close every other writer before migration. There is no session file lock. Replacements are atomic per file, not across the batch; errors preserve the affected source. Ordinary startup only warns on mixed formats.
-- Storage: Canonical `.jsonl` paths stay unchanged; bytes identify compression, and existing `.jsonl.zst` paths also remain readable. Bounded browsing metadata stays plaintext, without a duplicate plaintext transcript/search corpus. Full-text text loads on demand. Compression is not encryption.
-- Limits: Active append transactions can temporarily be larger than plain JSONL, especially after a crash; clean disposal best-effort consolidates already-compressed files. Indexed browsing still reads/hashes compressed bytes, while unindexed zstd and incomplete-tail validation may decode history. No physical-disk saving is guaranteed, including on compressed filesystems.
-- Details: [Session storage and commands](../packages/coding-agent/docs/sessions.md#disk-compression), [storage encoding](../packages/coding-agent/docs/session-format.md#storage-encoding). Direct JSONL consumers must use a plain export or a compression-aware reader.
+- Use case: Save disk space with transparent compression from the operating system or filesystem (for example NTFS compression, btrfs or ZFS) instead of a Pi-specific format.
+- Guidance: The built-in `/session-disk-compression [folder]` prompt has the agent inspect the session folder, measure it read-only and recommend the best transparent compression setup. It changes nothing without explicit approval. A same-named user or project prompt overrides it.
+- Tip: The first interactive start shows a one-time tip about the prompt, then saves the global setting `sessionDiskCompressionHint` as `false`. Pi never inspects the filesystem for it.
+- Compatibility: Sessions that earlier downstream releases (1.5.0-xz.399 until this change) wrote in compressed form are no longer read. They are standard Zstandard frames plus skippable frames; recover one with `zstd -dc FILE > FILE.plain`, then replace the original. The `--enable-compress-sessions` maintenance flag and the `enableCompressSessions` setting are removed.
+- Details: [Disk compression](../packages/coding-agent/docs/sessions.md#disk-compression).
 - Patch branch: [`patch/session-compression`](https://github.com/xz-dev/pi/tree/patch/session-compression)
 
 ## Process ownership

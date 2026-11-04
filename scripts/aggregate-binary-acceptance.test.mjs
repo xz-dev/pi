@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BUN_TARGETS, binaryArchiveName, releaseArchiveName, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
-import { SESSION_COMPRESSION_CHECKS } from "./lib/session-compression-smoke.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 
@@ -41,7 +40,7 @@ function record(target, assetIdentity) {
 			...(target.os === "windows" ? { windowsRuntimeGate: passedWindowsOwnerGate(target.id, assetIdentity.sha256) } : {}),
 			rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid", ...(target.os === "darwin" ? ["darwin-fast-escape"] : [])].map((name) => ({ name, pi: { bun: "1.3.14" }, status: name === "darwin-fast-escape" ? "known-limitation" : "passed", limitation: name === "darwin-fast-escape" ? "unseen setsid escape" : undefined, aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })),
 		},
-		commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1, ...(name === "help" ? { sessionCompression: { status: "passed", checks: [...SESSION_COMPRESSION_CHECKS], commands: ["compress-default-root", "decompress-custom-dir", "decompress-default-root", "invalid-boolean", "invalid-source"].map((name, index) => ({ name, status: index < 3 ? 0 : 1 })) } } : {}) })),
+		commands: target.requiredCommands.map((name) => ({ name, status: 0, elapsedMs: 1 })),
 		tui: {
 			harness: target.os === "windows" ? "Bun.Terminal ConPTY" : "Bun.Terminal PTY",
 			elapsedMs: 1,
@@ -280,24 +279,3 @@ for (const [label, mutate] of [
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 
-for (const target of BUN_TARGETS) test(`aggregator requires untampered offline compression evidence for ${target.id}`, () => {
-	const value = fixture();
-	try {
-		const path = join(value.records, `${target.id}.json`);
-		const original = JSON.parse(readFileSync(path, "utf8"));
-		for (const mutate of [
-			command => { delete command.sessionCompression; },
-			command => { command.sessionCompression.status = "failed"; },
-			command => { command.sessionCompression.checks.pop(); },
-			command => { command.sessionCompression.commands.pop(); },
-			command => { command.sessionCompression.commands[4].status = 0; },
-		]) {
-			const changed = structuredClone(original);
-			mutate(changed.commands.find(({ name }) => name === "help"));
-			writeFileSync(path, JSON.stringify(changed));
-			const result = runAggregator(value);
-			assert.notEqual(result.status, 0);
-			assert.match(result.stderr, /offline session compression acceptance/);
-		}
-	} finally { rmSync(value.root, { recursive: true, force: true }); }
-});

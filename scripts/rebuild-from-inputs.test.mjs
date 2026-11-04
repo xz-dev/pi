@@ -685,8 +685,11 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.equal(order[order.indexOf("async-compaction") + 1], "session-compression");
 	assert.ok(sync.includes("refs/heads/patch/session-compression:refs/remotes/origin/patch/session-compression"));
 	assert.ok(sync.includes("            session-compression \\\n"));
-	for (const file of ["session-compression.test.ts", "session-compression-cli.test.ts", "session-compression-integration.test.ts", "agent-session-runtime-events.test.ts"]) {
+	for (const file of ["session-disk-compression.test.ts", "agent-session-runtime-events.test.ts"]) {
 		assert.ok(sync.includes(`test/${file}`));
+	}
+	for (const file of ["session-compression.test.ts", "session-compression-cli.test.ts", "session-compression-integration.test.ts"]) {
+		assert.ok(!sync.includes(`test/${file}`));
 	}
 	const downstreamChanges = readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8");
 	assert.equal(order[order.indexOf("single-executable") + 1], "process-ownership");
