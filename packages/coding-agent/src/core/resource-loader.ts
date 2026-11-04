@@ -32,7 +32,7 @@ import {
 	type ResolvedResource,
 } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
-import { loadPromptTemplates } from "./prompt-templates.ts";
+import { loadBuiltinPromptTemplates, loadPromptTemplates } from "./prompt-templates.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
@@ -912,8 +912,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 				includeDefaults: false,
 			});
 			const deduped = this.dedupePrompts(loaded.templates);
+			const names = new Set(deduped.prompts.map((prompt) => prompt.name));
 			promptsResult = {
-				prompts: deduped.prompts,
+				// Built-ins have the lowest precedence and yield silently to same-named templates.
+				prompts: [
+					...deduped.prompts,
+					...(this.noPromptTemplates ? [] : loadBuiltinPromptTemplates()).filter(
+						(prompt) => !names.has(prompt.name),
+					),
+				],
 				diagnostics: [...loaded.diagnostics, ...deduped.diagnostics],
 			};
 		}

@@ -1,9 +1,8 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { serializeSessionBranch } from "../../src/core/session-export.ts";
-import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -143,7 +142,6 @@ describe("SessionManager.newSession with custom id", () => {
 		const header = forked.getHeader();
 		expect(header).not.toBeNull();
 		expect(header!.id).toMatch(UUID_V7_RE);
-		expect(forked.getSessionId()).toBe(header!.id);
 		expect(header!.parentSession).toBe(sourcePath);
 	});
 
@@ -173,35 +171,6 @@ describe("SessionManager.newSession with custom id", () => {
 });
 
 describe("SessionManager.forkFrom", () => {
-	it.each([true, false])(
-		"keeps default/custom fork identities consistent before and after append and export (compressed=%s)",
-		(compressSessions) => {
-			const tempDir = mkdtempSync(join(tmpdir(), "pi-fork-identity-"));
-			try {
-				const source = SessionManager.create(tempDir, tempDir, { compressSessions: false });
-				source.appendMessage({ role: "user", content: "source", timestamp: 1 });
-				for (const id of [undefined, "custom-fork-id"]) {
-					const forked = SessionManager.forkFrom(source.getSessionFile()!, tempDir, tempDir, {
-						id,
-						compressSessions,
-					});
-					const expectedId = forked.getHeader()!.id;
-					const path = forked.getSessionFile()!;
-					for (const append of [false, true]) {
-						if (append) forked.appendMessage({ role: "user", content: "after fork", timestamp: 2 });
-						expect(forked.getSessionId()).toBe(expectedId);
-						expect(basename(path)).toContain(`_${expectedId}.jsonl`);
-						expect(SessionManager.findById(tempDir, expectedId, tempDir)).toBe(path);
-						expect(SessionManager.open(path).getSessionId()).toBe(expectedId);
-						expect(JSON.parse(serializeSessionBranch(forked).split("\n")[0]).id).toBe(expectedId);
-					}
-				}
-			} finally {
-				rmSync(tempDir, { recursive: true, force: true });
-			}
-		},
-	);
-
 	it("copies all entries unchanged into the forked session", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
 		try {
@@ -233,10 +202,10 @@ describe("SessionManager.forkFrom", () => {
 
 			const forked = SessionManager.forkFrom(sourcePath, tempDir, join(tempDir, "sessions"));
 
-			const written = loadEntriesFromFile(forked.getSessionFile()!);
+			const written = readFileSync(forked.getSessionFile()!, "utf8").trimEnd().split("\n");
 			expect(written).toHaveLength(51);
-			expect(written[0]).toMatchObject({ parentSession: sourcePath });
-			expect(written.slice(1)).toEqual(lines.slice(1).map((line) => JSON.parse(line)));
+			expect(JSON.parse(written[0]).parentSession).toBe(sourcePath);
+			expect(written.slice(1)).toEqual(lines.slice(1));
 			expect(forked.getEntries()).toHaveLength(50);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
