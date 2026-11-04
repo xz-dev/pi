@@ -209,7 +209,10 @@ describe("--list-models --refresh", () => {
 	it("keeps update --models extension-free", async () => {
 		let extensionLoaded = false;
 		const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
-		vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh } as unknown as ModelRuntime);
+		vi.spyOn(ModelRuntime, "create").mockResolvedValue({
+			getProviders: () => [{ id: "openai" }],
+			refresh,
+		} as unknown as ModelRuntime);
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
 		await expect(
@@ -223,11 +226,13 @@ describe("--list-models --refresh", () => {
 		).rejects.toThrow("process.exit(0)");
 
 		expect(extensionLoaded).toBe(false);
-		expect(refresh).toHaveBeenCalledWith({
-			allowNetwork: true,
-			force: true,
-			signal: expect.any(AbortSignal),
-		});
+		expect(refresh).toHaveBeenCalledWith(
+			expect.objectContaining({
+				allowNetwork: true,
+				force: true,
+				signal: expect.any(AbortSignal),
+			}),
+		);
 		expect(log.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Model catalogs refreshed");
 	});
 
