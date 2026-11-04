@@ -787,6 +787,17 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/** Global default for new sessions; never changes an existing session's format. */
+	getEnableCompressSessions(): boolean {
+		return this.globalSettings.enableCompressSessions ?? SETTINGS_DEFAULTS.enableCompressSessions;
+	}
+
+	setEnableCompressSessions(enabled: boolean): void {
+		this.globalSettings.enableCompressSessions = enabled;
+		this.markModified("enableCompressSessions");
+		this.save();
+	}
+
 	getSessionDir(): string | undefined {
 		const sessionDir = this.settings.sessionDir;
 		return sessionDir ? normalizePath(sessionDir) : sessionDir;

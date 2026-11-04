@@ -1,9 +1,8 @@
-import { readFileSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getAssistantTexts, type Harness } from "./harness.ts";
 
 describe("persisted agent run state", () => {
@@ -54,10 +53,7 @@ describe("persisted agent run state", () => {
 		expect(reopen(created).hasUnfinishedWork()).toBe(false);
 		expect(created.sessionManager.getLeafEntry()).toMatchObject({ type: "message", message: { role: "assistant" } });
 		expect(created.session.canRetry).toBe(false);
-		const records = readFileSync(created.sessionManager.getSessionFile()!, "utf8")
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line));
+		const records = loadEntriesFromFile(created.sessionManager.getSessionFile()!);
 		const runRecords = records.filter((entry) => entry.type === "run_state");
 		expect(runRecords.map((entry) => [entry.state, entry.working])).toEqual([
 			["started", "start"],

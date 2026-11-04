@@ -15,6 +15,7 @@ import { createInterface } from "node:readline";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { parseSessionEntries, type SessionMessageEntry } from "../packages/coding-agent/src/core/session-manager.ts";
+import { readSessionText } from "./session-reader.ts";
 import chalk from "chalk";
 
 const MAX_CHARS_PER_FILE = 100_000; // ~20k tokens, leaving room for prompt + analysis + output
@@ -35,7 +36,7 @@ function extractTextContent(content: string | Array<{ type: string; text?: strin
 }
 
 function parseSession(filePath: string): string[] {
-	const content = readFileSync(filePath, "utf8");
+	const content = readSessionText(filePath);
 	const entries = parseSessionEntries(content);
 	const messages: string[] = [];
 
@@ -173,7 +174,7 @@ async function main() {
 	}
 
 	const sessionFiles = readdirSync(sessionDir)
-		.filter((f) => f.endsWith(".jsonl"))
+		.filter((f) => /\.jsonl(?:\.zst)?$/.test(f))
 		.sort();
 
 	console.log(`Found ${sessionFiles.length} session files in ${sessionDir}`);
