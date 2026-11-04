@@ -254,7 +254,9 @@ Prompt content.`,
 			await loader.reload();
 
 			const { prompts, diagnostics } = loader.getPrompts();
-			expect(prompts.map((prompt) => prompt.name)).toEqual(["valid"]);
+			expect(
+				prompts.filter((prompt) => prompt.sourceInfo.source !== "builtin").map((prompt) => prompt.name),
+			).toEqual(["valid"]);
 			expect(diagnostics).toEqual([
 				expect.objectContaining({
 					type: "warning",

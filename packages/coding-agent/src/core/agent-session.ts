@@ -2026,14 +2026,6 @@ export class AgentSession {
 			this._cacheWarmer.cancel();
 		}
 		cleanupSessionResources(this.sessionId);
-		try {
-			// Read persisted bytes, not a potentially still-settling in-memory transcript.
-			this.sessionManager.consolidateStorage();
-		} catch (error) {
-			console.error(
-				`Warning: Session storage consolidation failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
 	}
 
 	// =========================================================================

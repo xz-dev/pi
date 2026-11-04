@@ -73,24 +73,11 @@ Use `--no-session` for an ephemeral run. An ephemeral session cannot be resumed 
 
 ### Disk compression
 
-New sessions use lossless Zstandard compression by default (`enableCompressSessions: true`). Opening or resuming an existing session preserves its current storage encoding. Decoding history in memory does not migrate the file.
+Pi stores sessions as plain JSONL and does not compress them itself. To save disk space, use transparent compression provided by your operating system or filesystem, such as NTFS compression, btrfs or ZFS. Readers, extensions and external tools keep seeing plain text.
 
-Only these explicit maintenance commands convert existing files:
+Run `/session-disk-compression [folder]` to have the agent inspect the session folder and recommend a setup. It changes nothing without your approval. Pi shows a one-time startup tip about this command; the global setting [`sessionDiskCompressionHint`](settings.md#sessions-and-context) controls it and is set to `false` after the tip is shown. Pi never inspects the filesystem for this tip.
 
-```bash
-pi --enable-compress-sessions=true
-pi --enable-compress-sessions=false
-```
-
-Both commands exit after migration without starting a model or extension runtime. `true` compresses plain sessions and saves the global new-session default as enabled; `false` decompresses compressed sessions and saves it as disabled. Without `--session-dir`, they process the project directories under the default sessions root, regardless of the normal session-directory setting or environment override. With `--session-dir <dir>`, they process only that directory and still save the global default.
-
-Close all other Pi processes that can write the target sessions before migration. This is offline maintenance: session file locking is not provided. Replacements are atomic per file, not for the entire batch. A failure preserves the affected source and leaves the global preference unchanged; already completed files are reported and are not rolled back. Repeating the command is safe for files already in the requested encoding.
-
-Mixed directories remain readable. Ordinary startup warns on stderr with the two commands above but never converts files or changes the preference. Compression is detected from file bytes, not the filename. Existing `.jsonl.zst` paths are also recognized and retained even after explicit decompression. Direct JSONL parsers must use a plain export, `SessionManager`, or explicitly decompress first; third-party extensions that read session files as UTF-8 need the same adaptation.
-
-Compressed sessions keep bounded browsing metadata uncompressed, including the title, ID, working directory, activity time and first-message preview. For complete files with Pi's index metadata, browsing does not decode transcript payloads; the current implementation still reads and verifies the compressed file bytes. Ordinary zstd files without that metadata and interrupted tails require decoding to recover or validate their summary. Full-text search loads transcript text on demand. Compression is not encryption.
-
-Active sessions append independent compressed transactions. On clean session disposal, Pi best-effort consolidates already-compressed persisted history into one snapshot; it never converts a plain session this way. A crash can leave a larger transaction layout. Incomplete final transactions are read without modifying the source and repaired only before a subsequent write. A corrupt complete transaction is an error, not an empty session. Individual decoded frames are bounded by the runtime's maximum string length.
+Sessions that downstream releases from 1.5.0-xz.399 until this change wrote in compressed form are standard Zstandard frames plus skippable frames. Pi no longer reads them; recover one with `zstd -dc FILE > FILE.plain`, then replace the original with the plain file.
 
 ## Export or share a session
 

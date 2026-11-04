@@ -689,9 +689,9 @@
         }
       }
     },
-    "enableCompressSessions": {
+    "sessionDiskCompressionHint": {
       "type": "boolean",
-      "description": "Compress new sessions only. Global setting only; existing files change only through explicit offline migration.",
+      "description": "Show the one-time startup hint about transparent disk compression for session files. Pi sets it to false after showing the hint. Global setting only.",
       "default": true
     },
     "sessionDir": {

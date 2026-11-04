@@ -773,14 +773,14 @@ export class SettingsManager {
 		this.save();
 	}
 
-	/** Global default for new sessions; never changes an existing session's format. */
-	getEnableCompressSessions(): boolean {
-		return this.globalSettings.enableCompressSessions ?? SETTINGS_DEFAULTS.enableCompressSessions;
+	/** One-time startup hint about transparent disk compression; also the global switch for it. */
+	getSessionDiskCompressionHint(): boolean {
+		return this.globalSettings.sessionDiskCompressionHint ?? SETTINGS_DEFAULTS.sessionDiskCompressionHint;
 	}
 
-	setEnableCompressSessions(enabled: boolean): void {
-		this.globalSettings.enableCompressSessions = enabled;
-		this.markModified("enableCompressSessions");
+	setSessionDiskCompressionHint(enabled: boolean): void {
+		this.globalSettings.sessionDiskCompressionHint = enabled;
+		this.markModified("sessionDiskCompressionHint");
 		this.save();
 	}
 

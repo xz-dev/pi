@@ -34,7 +34,7 @@ import { basename, dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
-import { canonicalizePath, normalizePath, pathsEqual, resolvePath } from "../utils/paths.ts";
+import { normalizePath, pathsEqual, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -42,16 +42,6 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
-import {
-	appendCompressedSession,
-	type CompressedSessionState,
-	compressedSessionInfo,
-	encodeSessionTransaction,
-	isCompressedSession,
-	readCompressedSession,
-	replaceSessionFile,
-	summarizeSession,
-} from "./session-storage.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
 export interface SessionHeader {
@@ -64,8 +54,6 @@ export interface SessionHeader {
 }
 
 export interface NewSessionOptions {
-	/** Storage default for new sessions only; existing files retain their format. */
-	compressSessions?: boolean;
 	id?: string;
 	parentSession?: string;
 }
@@ -302,8 +290,6 @@ export interface SessionInfo {
 	modified: Date;
 	messageCount: number;
 	firstMessage: string;
-	/** Bounded uncompressed preview for browsing without loading transcript text. */
-	firstMessagePreview?: string;
 	allMessagesText: string;
 }
 
@@ -325,10 +311,6 @@ export type ReadonlySessionManager = Pick<
 	| "getTree"
 	| "getSessionName"
 >;
-
-export function isSessionFileName(file: string): boolean {
-	return /\.jsonl(?:\.zst)?$/.test(file);
-}
 
 function createSessionId(): string {
 	return uuidv7();
@@ -711,13 +693,6 @@ function parseSessionEntryLine(line: string): FileEntry | null {
 export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	const resolvedFilePath = normalizePath(filePath);
 	if (!existsSync(resolvedFilePath)) return [];
-	if (isCompressedSession(resolvedFilePath)) {
-		const entries: FileEntry[] = [];
-		readCompressedSession(resolvedFilePath, (text) => {
-			for (const entry of parseSessionEntries(text)) entries.push(entry);
-		});
-		return entries;
-	}
 
 	const entries: FileEntry[] = [];
 	let pending = "";
@@ -774,7 +749,6 @@ function parseSessionHeaderCandidate(line: string): SessionHeader | null | undef
 }
 
 function readSessionHeader(filePath: string): SessionHeader | null {
-	if (isCompressedSession(filePath)) return readCompressedSession(filePath).metadata.header;
 	const fd = openSync(filePath, "r");
 	try {
 		const decoder = new StringDecoder("utf8");
@@ -818,7 +792,7 @@ function readSessionHeader(filePath: string): SessionHeader | null {
 	}
 }
 
-export function readSessionHeaderForDiscovery(filePath: string): SessionHeader | null {
+function readSessionHeaderForDiscovery(filePath: string): SessionHeader | null {
 	try {
 		return readSessionHeader(filePath);
 	} catch {
@@ -843,7 +817,7 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 	const resolvedCwd = cwd ? resolvePath(cwd) : undefined;
 	try {
 		const files = readdirSync(resolvedSessionDir)
-			.filter(isSessionFileName)
+			.filter((file) => file.endsWith(".jsonl"))
 			.map((file) => join(resolvedSessionDir, file))
 			.map((path) => ({ path, mtime: statSync(path).mtimeMs }))
 			.sort((a, b) => b.mtime - a.mtime);
@@ -894,27 +868,6 @@ async function buildSessionInfo(
 	fileStats?: Stats,
 ): Promise<SessionInfo | null> {
 	try {
-		if (isCompressedSession(filePath)) {
-			return compressedSessionInfo(filePath, () => {
-				const messages = loadEntriesFromFile(filePath).filter(
-					(entry): entry is SessionMessageEntry =>
-						entry.type === "message" &&
-						isMessageWithContent(entry.message) &&
-						(entry.message.role === "user" || entry.message.role === "assistant"),
-				);
-				return {
-					allMessagesText: messages
-						.map((entry) => extractTextContent(entry.message as Message))
-						.filter(Boolean)
-						.join(" "),
-					firstMessage:
-						messages
-							.filter((entry) => entry.message.role === "user")
-							.map((entry) => extractTextContent(entry.message as Message))
-							.find(Boolean) ?? "(no messages)",
-				};
-			});
-		}
 		const stats = fileStats ?? (await stat(filePath));
 		let header: SessionHeader | null = null;
 		let messageCount = 0;
@@ -1027,7 +980,6 @@ async function mapWithConcurrency<T, R>(
 		}
 	};
 	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
-	signal?.throwIfAborted();
 	return results;
 }
 
@@ -1063,7 +1015,7 @@ async function listSessionsFromDir(
 	try {
 		const dirEntries = await readdir(dir);
 		const files = dirEntries
-			.filter(isSessionFileName)
+			.filter((file) => file.endsWith(".jsonl"))
 			.sort((a, b) => b.localeCompare(a))
 			.map((file) => ({ path: join(dir, file) }));
 		const total = files.length;
@@ -1115,9 +1067,6 @@ export class SessionManager {
 	private latestCompactionTime = 0;
 	/** @internal Fault-injection seam for continuation publication tests. */
 	continuationFileWriter: ContinuationFileWriter = writeContinuationFile;
-	private compressNewSessions = true;
-	private compressed = true;
-	private compressedState: CompressedSessionState | undefined;
 
 	private constructor(
 		cwd: string,
@@ -1130,7 +1079,6 @@ export class SessionManager {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
-		this.compressNewSessions = newSessionOptions?.compressSessions ?? true;
 		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
 			mkdirSync(this.sessionDir, { recursive: true });
 		}
@@ -1152,8 +1100,6 @@ export class SessionManager {
 	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			this.compressed = isCompressedSession(this.sessionFile);
-			this.compressedState = this.compressed ? readCompressedSession(this.sessionFile, () => {}) : undefined;
 			const entries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
 
 			// If file was empty, initialize it with a valid session header. If it was
@@ -1163,7 +1109,7 @@ export class SessionManager {
 				if (statSync(explicitPath).size > 0) {
 					throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
 				}
-				this.newSession({ compressSessions: this.compressed });
+				this.newSession();
 				this.sessionFile = explicitPath;
 				this._rewriteFile();
 				this.flushed = true;
@@ -1200,8 +1146,6 @@ export class SessionManager {
 		this.leafId = null;
 		this.flushed = false;
 		this.generation++;
-		this.compressed = options?.compressSessions ?? this.compressNewSessions;
-		this.compressedState = undefined;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1214,11 +1158,6 @@ export class SessionManager {
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 
 		if (header) {
-			if (this.compressedState?.incompleteTail && (header.version ?? 1) < CURRENT_SESSION_VERSION) {
-				throw new Error(
-					"Cannot migrate a legacy compressed session with an incomplete append; source file unchanged",
-				);
-			}
 			this.fileEntries = entries;
 			this.sessionId = header.id;
 
@@ -1273,85 +1212,14 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const text = this.fileEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("");
-		if (this.compressed) {
-			const metadata = summarizeSession(this.fileEntries);
-			const bytes = encodeSessionTransaction(text, metadata);
-			replaceSessionFile(this.sessionFile, bytes);
-			this.compressedState = {
-				metadata,
-				committedBytes: bytes.length,
-				incompleteTail: false,
-				transactions: 1,
-				format: "transactions",
-			};
-		} else {
-			replaceSessionFile(this.sessionFile, Buffer.from(text));
-		}
-	}
-
-	/** Read the verified persisted prefix before an atomic logical-history publication. */
-	private _readPublicationText(): string | undefined {
-		if (!this.sessionFile || !this.flushed || !existsSync(this.sessionFile)) return undefined;
-		if (isCompressedSession(this.sessionFile) !== this.compressed) {
-			throw new Error("Session storage format changed before publication");
-		}
-		if (!this.compressed) return readFileSync(this.sessionFile, "utf8");
-		let text = "";
-		const state = readCompressedSession(this.sessionFile, (part) => {
-			text += part;
-		});
-		if (state.incompleteTail) throw new Error("Incomplete session append; write to repair before publication");
-		if (state.committedBytes !== this.compressedState?.committedBytes) {
-			throw new Error("Session changed before publication");
-		}
-		return text;
-	}
-
-	/** Keep atomic retry/compaction writes on their existing fault-injection seam and encoding. */
-	private _publishFile(text: string, purpose: "continuation" | "compaction"): void {
-		if (!this.sessionFile) return;
-		const metadata = this.compressed ? summarizeSession(parseSessionEntries(text)) : undefined;
-		const bytes = metadata ? encodeSessionTransaction(text, metadata) : Buffer.from(text);
-		const destination = canonicalizePath(this.sessionFile);
-		const temporaryFile = `${destination}.${purpose}-${process.pid}-${randomUUID()}.tmp`;
+		const fd = openSync(this.sessionFile, "w");
 		try {
-			this.continuationFileWriter(temporaryFile, destination, bytes);
-		} catch (error) {
-			if (!(typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST")) {
-				rmSync(temporaryFile, { force: true });
+			for (const entry of this.fileEntries) {
+				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
 			}
-			throw error;
+		} finally {
+			closeSync(fd);
 		}
-		if (metadata) {
-			this.compressedState = {
-				metadata,
-				committedBytes: bytes.length,
-				incompleteTail: false,
-				transactions: 1,
-				format: "transactions",
-			};
-		}
-	}
-
-	/** Consolidate already-compressed persisted bytes without changing the logical session. */
-	consolidateStorage(): boolean {
-		if (!this.persist || !this.sessionFile || !this.flushed || !this.compressed) return false;
-		let text = "";
-		const state = readCompressedSession(this.sessionFile, (part) => {
-			text += part;
-		});
-		if (state.incompleteTail || state.transactions < 2) return false;
-		const bytes = encodeSessionTransaction(text, state.metadata);
-		replaceSessionFile(this.sessionFile, bytes, true);
-		this.compressedState = { ...state, committedBytes: bytes.length, transactions: 1 };
-		return true;
-	}
-
-	/** Change only the default used by subsequent new/branched sessions. */
-	setCompressionEnabledForNewSessions(enabled: boolean): void {
-		this.compressNewSessions = enabled;
-		if (!this.flushed) this.compressed = enabled;
 	}
 
 	isPersisted(): boolean {
@@ -1399,24 +1267,7 @@ export class SessionManager {
 
 		if (!this.flushed) {
 			if (!this._hasConversation()) return;
-			if (this.compressed) {
-				const metadata = summarizeSession(this.fileEntries);
-				const bytes = encodeSessionTransaction(
-					this.fileEntries.map((e) => `${JSON.stringify(e)}\n`).join(""),
-					metadata,
-				);
-				writeFileSync(this.sessionFile, bytes, { flag: "wx", mode: 0o600 });
-				this.compressedState = {
-					metadata,
-					committedBytes: bytes.length,
-					incompleteTail: false,
-					transactions: 1,
-					format: "transactions",
-				};
-				this.flushed = true;
-				return;
-			}
-			const fd = openSync(this.sessionFile, "wx", 0o600);
+			const fd = openSync(this.sessionFile, "wx");
 			try {
 				for (const e of this.fileEntries) {
 					writeFileSync(fd, `${JSON.stringify(e)}\n`);
@@ -1425,13 +1276,6 @@ export class SessionManager {
 				closeSync(fd);
 			}
 			this.flushed = true;
-		} else if (this.compressed && this.compressedState) {
-			this.compressedState = appendCompressedSession(
-				this.sessionFile,
-				`${JSON.stringify(entry)}\n`,
-				[entry],
-				this.compressedState,
-			);
 		} else {
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
@@ -1588,13 +1432,22 @@ export class SessionManager {
 				: undefined;
 		const publishedEntries = cancellation ? [...entries, cancellation] : entries;
 		if (this.persist && this.sessionFile) {
-			const original = this._readPublicationText();
-			const prefix = original ?? this.fileEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("");
-			const separator = prefix && !prefix.endsWith("\n") ? "\n" : "";
-			this._publishFile(
-				`${prefix}${separator}${publishedEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("")}`,
-				"continuation",
-			);
+			const original = this.flushed && existsSync(this.sessionFile) ? readFileSync(this.sessionFile) : undefined;
+			const completeFile = original
+				? Buffer.concat([
+						original,
+						Buffer.from(publishedEntries.map((entry) => `${JSON.stringify(entry)}\n`).join("")),
+					])
+				: Buffer.from(
+						[...this.fileEntries, ...publishedEntries].map((entry) => `${JSON.stringify(entry)}\n`).join(""),
+					);
+			const temporaryFile = `${this.sessionFile}.continuation-${process.pid}-${randomUUID()}.tmp`;
+			try {
+				this.continuationFileWriter(temporaryFile, this.sessionFile, completeFile);
+			} catch (error) {
+				rmSync(temporaryFile, { force: true });
+				throw error;
+			}
 		}
 
 		for (const entry of entries) {
@@ -1730,11 +1583,20 @@ export class SessionManager {
 		}
 
 		if (this.persist && this.sessionFile && this.flushed) {
-			this._readPublicationText();
 			const lines = this.fileEntries.map((fileEntry) =>
 				JSON.stringify(fileEntry === kept ? { ...kept, parentId: id } : fileEntry),
 			);
-			this._publishFile([...lines, JSON.stringify(entry)].map((line) => `${line}\n`).join(""), "compaction");
+			const temporaryFile = `${this.sessionFile}.compaction-${process.pid}-${randomUUID()}.tmp`;
+			try {
+				this.continuationFileWriter(
+					temporaryFile,
+					this.sessionFile,
+					Buffer.from([...lines, JSON.stringify(entry)].map((line) => `${line}\n`).join("")),
+				);
+			} catch (error) {
+				rmSync(temporaryFile, { force: true });
+				throw error;
+			}
 		}
 		// Re-parent in place only after the write succeeded; existing references stay valid.
 		kept.parentId = id;
@@ -2170,8 +2032,6 @@ export class SessionManager {
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
-			this.compressed = this.compressNewSessions;
-			this.compressedState = undefined;
 			this._buildIndex();
 			this.generation++;
 
@@ -2315,17 +2175,20 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		const manager = new SessionManager(resolvedTargetCwd, dir, undefined, true, { ...options, id: newSessionId });
-		manager.sessionFile = newSessionFile;
-		// Execution state belongs to the source process, not the forked conversation.
-		manager.fileEntries = [
-			newHeader,
-			...sourceEntries.filter((entry) => entry.type !== "session" && entry.type !== "run_state"),
-		];
-		manager._buildIndex();
-		manager._rewriteFile();
-		manager.flushed = true;
-		return manager;
+		// Write the header and conversation through one fd; omit the source process's execution state.
+		const fd = openSync(newSessionFile, "wx");
+		try {
+			writeFileSync(fd, `${JSON.stringify(newHeader)}\n`);
+			for (const entry of sourceEntries) {
+				if (entry.type !== "session" && entry.type !== "run_state") {
+					writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+				}
+			}
+		} finally {
+			closeSync(fd);
+		}
+
+		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 	}
 
 	/**
@@ -2341,7 +2204,7 @@ export class SessionManager {
 
 		try {
 			for (const file of readdirSync(dir)) {
-				if (!isSessionFileName(file)) continue;
+				if (!file.endsWith(".jsonl")) continue;
 				const path = join(dir, file);
 				const header = readSessionHeaderForDiscovery(path);
 				if (header?.id !== id) continue;
@@ -2423,7 +2286,7 @@ export class SessionManager {
 				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
 				async (dir) => {
 					try {
-						return (await readdir(dir)).filter(isSessionFileName).map((file) => join(dir, file));
+						return (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
 					} catch {
 						return [];
 					}

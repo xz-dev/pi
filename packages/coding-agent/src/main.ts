@@ -53,14 +53,13 @@ import { ModelRuntime } from "./core/model-runtime.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
-import { migrateSessionCompression, warnMixedSessionCompression } from "./core/session-compression.ts";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
-import { assertValidSessionId, isSessionFileName, SessionManager } from "./core/session-manager.ts";
+import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
 import { collectSettingsDiagnostics, deduplicateDiagnostics } from "./core/settings-diagnostics.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
@@ -299,7 +298,7 @@ function findLocalSessionByExactId(
 
 async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: string): Promise<ResolvedSession> {
 	// If it looks like a file path, resolve it before handing it to the session manager.
-	if (sessionArg.includes("/") || sessionArg.includes("\\") || isSessionFileName(sessionArg)) {
+	if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
 		return { type: "path", path: resolvePath(sessionArg, cwd) };
 	}
 
@@ -393,20 +392,29 @@ function openSessionOrExit(path: string, sessionDir?: string): SessionManager {
 	}
 }
 
-function forkSessionOrExit(
-	sourcePath: string,
-	cwd: string,
-	sessionDir?: string,
-	sessionId?: string,
-	compressSessions = true,
-): SessionManager {
+function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string, sessionId?: string): SessionManager {
 	try {
-		return SessionManager.forkFrom(sourcePath, cwd, sessionDir, { id: sessionId, compressSessions });
+		return SessionManager.forkFrom(sourcePath, cwd, sessionDir, { id: sessionId });
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(chalk.red(`Error: ${message}`));
 		process.exit(1);
 	}
+}
+
+/** Return the one-time disk-compression tip and mark it shown. Pi never inspects or changes the filesystem itself. */
+export function takeSessionDiskCompressionHint(
+	settings: Pick<SettingsManager, "getSessionDiskCompressionHint" | "setSessionDiskCompressionHint">,
+): AgentSessionRuntimeDiagnostic[] {
+	if (!settings.getSessionDiskCompressionHint()) return [];
+	settings.setSessionDiskCompressionHint(false);
+	return [
+		{
+			type: "info",
+			message:
+				'Tip: sessions are plain JSONL files. Run /session-disk-compression to set up transparent disk compression for them. Shown once; controlled by "sessionDiskCompressionHint" in settings.json.',
+		},
+	];
 }
 
 export async function createSessionManager(
@@ -434,13 +442,7 @@ export async function createSessionManager(
 			case "path":
 			case "local":
 			case "global":
-				return forkSessionOrExit(
-					resolved.path,
-					cwd,
-					sessionDir,
-					parsed.sessionId,
-					settingsManager.getEnableCompressSessions(),
-				);
+				return forkSessionOrExit(resolved.path, cwd, sessionDir, parsed.sessionId);
 
 			case "not_found":
 				console.error(chalk.red(`No session found matching '${resolved.arg}'`));
@@ -463,13 +465,7 @@ export async function createSessionManager(
 					console.log(chalk.dim("Aborted."));
 					process.exit(0);
 				}
-				return forkSessionOrExit(
-					resolved.path,
-					cwd,
-					sessionDir,
-					undefined,
-					settingsManager.getEnableCompressSessions(),
-				);
+				return forkSessionOrExit(resolved.path, cwd, sessionDir);
 			}
 
 			case "not_found":
@@ -511,10 +507,7 @@ export async function createSessionManager(
 		);
 	}
 
-	return SessionManager.create(cwd, sessionDir, {
-		id: parsed.sessionId,
-		compressSessions: settingsManager.getEnableCompressSessions(),
-	});
+	return SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
 }
 
 function buildSessionOptions(
@@ -641,52 +634,6 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
-	// Maintenance must run before auth migrations, package commands, models, or extensions.
-	const maintenanceArgs = parseArgs(args);
-	if (
-		maintenanceArgs.compressSessions !== undefined ||
-		maintenanceArgs.diagnostics.some((d) => d.message.startsWith("--enable-compress-sessions"))
-	) {
-		for (const flag of maintenanceArgs.unknownFlags.keys()) {
-			maintenanceArgs.diagnostics.push({
-				type: "error",
-				message: `Unknown option --${flag} for session maintenance`,
-			});
-		}
-		if (maintenanceArgs.diagnostics.some((d) => d.type === "error")) {
-			for (const diagnostic of maintenanceArgs.diagnostics) console.error(`Error: ${diagnostic.message}`);
-			process.exitCode = 1;
-			return;
-		}
-		console.error(
-			"Offline-only session maintenance: close all other session writers before continuing. No session file locking is provided.",
-		);
-		try {
-			const settings = SettingsManager.create(process.cwd(), getAgentDir(), { projectTrusted: false });
-			const errors = settings.drainErrors();
-			if (errors.length) throw errors[0].error;
-			const root = maintenanceArgs.sessionDir ? resolvePath(maintenanceArgs.sessionDir) : undefined;
-			const result = await migrateSessionCompression(
-				root,
-				maintenanceArgs.compressSessions!,
-				maintenanceArgs.sessionDir ? "directory" : "projects",
-			);
-			console.log(
-				`Session compression: ${result.converted} converted, ${result.unchanged} unchanged, ${result.skipped} non-session files skipped, ${result.failed.length} failed.`,
-			);
-			if (result.failed.length > 0)
-				throw new Error(`Partial migration; global preference unchanged.\n${result.failed.join("\n")}`);
-			settings.setEnableCompressSessions(maintenanceArgs.compressSessions!);
-			await settings.flush();
-			const writeErrors = settings.drainErrors();
-			if (writeErrors.length) throw writeErrors[0].error;
-			console.log(`Global enableCompressSessions=${maintenanceArgs.compressSessions} saved.`);
-		} catch (error) {
-			console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-			process.exitCode = 1;
-		}
-		return;
-	}
 	resetTimings();
 	// Commands and startup selectors can load user-authored themes before runtime creation.
 	setThemeJsonValidator(validateThemeJson);
@@ -819,11 +766,11 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	if (!parsed.help && parsed.listModels === undefined && !parsed.noSession) {
-		warnMixedSessionCompression(sessionDir, sessionDir ? "directory" : "projects");
+	// Rendered with the other startup diagnostics inside the TUI; plain stderr would sit behind the alternate screen.
+	if (appMode === "interactive" && !parsed.help && parsed.listModels === undefined && !parsed.noSession) {
+		startupSettingsDiagnostics.push(...takeSessionDiskCompressionHint(startupSettingsManager));
 	}
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
-	sessionManager.setCompressionEnabledForNewSessions(startupSettingsManager.getEnableCompressSessions());
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
