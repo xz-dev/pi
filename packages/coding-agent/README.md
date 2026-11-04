@@ -40,7 +40,7 @@ The installer pins all dependencies and updates Pi with `pi update`. Alternative
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
-Pi requires Node.js 22.19 or newer. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
+Pi source/npm execution in this fork requires Node.js 22.22.2+ within 22.x, 24.15.0+ within 24.x, or 26+ (`^22.22.2 || ^24.15.0 || >=26.0.0`). Standalone xz-dev Release executables use embedded Bun and do not require Node.js. Pi does not require dependency lifecycle scripts for a normal npm installation.
 
 On macOS and Linux, Nix users can install the latest release with `nix profile add github:earendil-works/pi/stable`. See the [quickstart](docs/quickstart.md#1-install-pi) for updating and pinning releases.
 
