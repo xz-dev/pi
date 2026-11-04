@@ -33,6 +33,7 @@ import type {
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
+import { encodeToolCallArguments } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
@@ -394,7 +395,7 @@ export function convertResponsesMessages<TApi extends Api>(
 							id: itemId,
 							call_id: callId,
 							name: toolCall.name,
-							arguments: JSON.stringify(toolCall.arguments),
+							arguments: encodeToolCallArguments(toolCall),
 							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
 						});
 					}
@@ -781,7 +782,7 @@ export async function processResponsesStream<TApi extends Api>(
 				outputSlots.delete(event.output_index);
 			} else if (item.type === "function_call" && slot?.type === "toolCall" && slot.input.kind === "json") {
 				if (item.arguments) slot.input.arguments.replace(item.arguments);
-				Object.assign(slot.block, slot.input.arguments.finish());
+				Object.assign(slot.block, slot.input.arguments.finish({ keepJson: true }));
 				if (item.namespace !== undefined) slot.block.namespace = item.namespace;
 				unfinishedToolCalls.delete(slot.block);
 				stream.push({
