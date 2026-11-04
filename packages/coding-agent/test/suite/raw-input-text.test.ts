@@ -10,12 +10,10 @@ import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { getRawInputText } from "../../src/core/raw-input-text.ts";
 import {
 	loadEntriesFromFile,
-	parseSessionEntries,
 	type SessionEntry,
 	SessionManager,
 	type SessionMessageEntry,
 } from "../../src/core/session-manager.ts";
-import { encodeSessionTransaction, summarizeSession } from "../../src/core/session-storage.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { getSubmittedCommandText } from "../../src/modes/interactive/input-presentation.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
@@ -185,41 +183,37 @@ describe("__raw_inputText session metadata", () => {
 		for (const entry of entries) expect("__raw_inputText" in entry).toBe(false);
 	});
 
-	it.each([false, true])(
-		"round-trips stored metadata and omits the key when absent (compressed=%s)",
-		async (compressSessions) => {
-			const harness = await setup({
-				sessionManagerFactory: (dir) =>
-					SessionManager.create(dir, dir, { id: "raw-input-roundtrip", compressSessions }),
-			});
-			harness.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b")]);
-			await harness.session.prompt("/review src/x.ts", { source: "interactive" });
-			await harness.session.prompt("plain", { source: "interactive" });
-
-			const file = harness.sessionManager.getSessionFile()!;
-			const stored = loadEntriesFromFile(file);
-			const raw = stored.filter((entry) => "__raw_inputText" in entry);
-			expect(raw).toHaveLength(1);
-			expect(raw[0]).toMatchObject({ __raw_inputText: "/review src/x.ts" });
-			expect(JSON.stringify(stored)).not.toMatch(/"__raw_inputText":(null|"")/);
-
-			const reopened = SessionManager.open(file, harness.tempDir);
-			const [template, plain] = userEntries(reopened.getEntries());
-			expect(template?.__raw_inputText).toBe("/review src/x.ts");
-			expect(getRawInputText(template!.message)).toBe("/review src/x.ts");
-			expect(getMessageText(template!.message)).toBe("Review this code: src/x.ts");
-			expect(getRawInputText(plain!.message)).toBeUndefined();
-
-			// Fork copies keep the field.
-			const forkFile = reopened.createBranchedSession(template!.id);
-			const forked = SessionManager.open(forkFile!, harness.tempDir);
-			expect(userEntries(forked.getEntries())[0]?.__raw_inputText).toBe("/review src/x.ts");
-		},
-	);
-
-	it.each([false, true])("ignores invalid stored metadata (compressed=%s)", async (compressSessions) => {
+	it("round-trips stored metadata and omits the key when absent", async () => {
 		const harness = await setup({
-			sessionManagerFactory: (dir) => SessionManager.create(dir, dir, { id: "raw-input-invalid", compressSessions }),
+			sessionManagerFactory: (dir) => SessionManager.create(dir, dir, { id: "raw-input-roundtrip" }),
+		});
+		harness.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b")]);
+		await harness.session.prompt("/review src/x.ts", { source: "interactive" });
+		await harness.session.prompt("plain", { source: "interactive" });
+
+		const file = harness.sessionManager.getSessionFile()!;
+		const stored = loadEntriesFromFile(file);
+		const raw = stored.filter((entry) => "__raw_inputText" in entry);
+		expect(raw).toHaveLength(1);
+		expect(raw[0]).toMatchObject({ __raw_inputText: "/review src/x.ts" });
+		expect(JSON.stringify(stored)).not.toMatch(/"__raw_inputText":(null|"")/);
+
+		const reopened = SessionManager.open(file, harness.tempDir);
+		const [template, plain] = userEntries(reopened.getEntries());
+		expect(template?.__raw_inputText).toBe("/review src/x.ts");
+		expect(getRawInputText(template!.message)).toBe("/review src/x.ts");
+		expect(getMessageText(template!.message)).toBe("Review this code: src/x.ts");
+		expect(getRawInputText(plain!.message)).toBeUndefined();
+
+		// Fork copies keep the field.
+		const forkFile = reopened.createBranchedSession(template!.id);
+		const forked = SessionManager.open(forkFile!, harness.tempDir);
+		expect(userEntries(forked.getEntries())[0]?.__raw_inputText).toBe("/review src/x.ts");
+	});
+
+	it("ignores invalid stored metadata", async () => {
+		const harness = await setup({
+			sessionManagerFactory: (dir) => SessionManager.create(dir, dir, { id: "raw-input-invalid" }),
 		});
 		harness.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b")]);
 		await harness.session.prompt("first", { source: "interactive" });
@@ -235,10 +229,7 @@ describe("__raw_inputText session metadata", () => {
 				),
 			)
 			.join("\n")}\n`;
-		writeFileSync(
-			file,
-			compressSessions ? encodeSessionTransaction(text, summarizeSession(parseSessionEntries(text))) : text,
-		);
+		writeFileSync(file, text);
 
 		const reopened = SessionManager.open(file, harness.tempDir);
 		const messages: AgentMessage[] = userEntries(reopened.getEntries()).map((entry) => entry.message);
