@@ -2882,6 +2882,10 @@ export class AgentSession {
 		// Expand skill commands (/skill:name args) and prompt templates (/template args)
 		let expandedText = currentText;
 		if (expandPromptTemplates) {
+			// Running the command ends the startup warning about session disk compression.
+			if (/^\/session-disk-compression(?:\s|$)/.test(currentText)) {
+				this.settingsManager.setSessionDiskCompressionWarning(false);
+			}
 			expandedText = this._expandSkillCommand(expandedText);
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 		}

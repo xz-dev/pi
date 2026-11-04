@@ -402,17 +402,16 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string,
 	}
 }
 
-/** Return the one-time disk-compression tip and mark it shown. Pi never inspects or changes the filesystem itself. */
-export function takeSessionDiskCompressionHint(
-	settings: Pick<SettingsManager, "getSessionDiskCompressionHint" | "setSessionDiskCompressionHint">,
+/** The disk-compression warning, shown at every start until /session-disk-compression runs. Pi never inspects or changes the filesystem itself. */
+export function sessionDiskCompressionWarning(
+	settings: Pick<SettingsManager, "getSessionDiskCompressionWarning">,
 ): AgentSessionRuntimeDiagnostic[] {
-	if (!settings.getSessionDiskCompressionHint()) return [];
-	settings.setSessionDiskCompressionHint(false);
+	if (!settings.getSessionDiskCompressionWarning()) return [];
 	return [
 		{
-			type: "info",
+			type: "warning",
 			message:
-				'Tip: sessions are plain JSONL files. Run /session-disk-compression to set up transparent disk compression for them. Shown once; controlled by "sessionDiskCompressionHint" in settings.json.',
+				'Sessions are plain JSONL files. Run /session-disk-compression to set up transparent disk compression for them. Shown until you run it, or set "sessionDiskCompressionWarning": false in settings.json.',
 		},
 	];
 }
@@ -768,7 +767,7 @@ export async function main(args: string[], options?: MainOptions) {
 		startupSettingsManager.getSessionDir();
 	// Rendered with the other startup diagnostics inside the TUI; plain stderr would sit behind the alternate screen.
 	if (appMode === "interactive" && !parsed.help && parsed.listModels === undefined && !parsed.noSession) {
-		startupSettingsDiagnostics.push(...takeSessionDiskCompressionHint(startupSettingsManager));
+		startupSettingsDiagnostics.push(...sessionDiskCompressionWarning(startupSettingsManager));
 	}
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);

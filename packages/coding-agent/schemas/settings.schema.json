@@ -689,9 +689,9 @@
         }
       }
     },
-    "sessionDiskCompressionHint": {
+    "sessionDiskCompressionWarning": {
       "type": "boolean",
-      "description": "Show the one-time startup hint about transparent disk compression for session files. Pi sets it to false after showing the hint. Global setting only.",
+      "description": "Show the startup warning about transparent disk compression for session files. Pi sets it to false when /session-disk-compression runs. Global setting only.",
       "default": true
     },
     "sessionDir": {
