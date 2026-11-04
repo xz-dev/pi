@@ -71,6 +71,27 @@ By default, Pi stores sessions under `~/.pi/agent/sessions/`, grouped by working
 
 Use `--no-session` for an ephemeral run. An ephemeral session cannot be resumed after Pi exits.
 
+### Disk compression
+
+New sessions use lossless Zstandard compression by default (`enableCompressSessions: true`). Opening or resuming an existing session preserves its current storage encoding. Decoding history in memory does not migrate the file.
+
+Only these explicit maintenance commands convert existing files:
+
+```bash
+pi --enable-compress-sessions=true
+pi --enable-compress-sessions=false
+```
+
+Both commands exit after migration without starting a model or extension runtime. `true` compresses plain sessions and saves the global new-session default as enabled; `false` decompresses compressed sessions and saves it as disabled. Without `--session-dir`, they process the project directories under the default sessions root, regardless of the normal session-directory setting or environment override. With `--session-dir <dir>`, they process only that directory and still save the global default.
+
+Close all other Pi processes that can write the target sessions before migration. This is offline maintenance: session file locking is not provided. Replacements are atomic per file, not for the entire batch. A failure preserves the affected source and leaves the global preference unchanged; already completed files are reported and are not rolled back. Repeating the command is safe for files already in the requested encoding.
+
+Mixed directories remain readable. Ordinary startup warns on stderr with the two commands above but never converts files or changes the preference. Compression is detected from file bytes, not the filename. Existing `.jsonl.zst` paths are also recognized and retained even after explicit decompression. Direct JSONL parsers must use a plain export, `SessionManager`, or explicitly decompress first; third-party extensions that read session files as UTF-8 need the same adaptation.
+
+Compressed sessions keep bounded browsing metadata uncompressed, including the title, ID, working directory, activity time and first-message preview. For complete files with Pi's index metadata, browsing does not decode transcript payloads; the current implementation still reads and verifies the compressed file bytes. Ordinary zstd files without that metadata and interrupted tails require decoding to recover or validate their summary. Full-text search loads transcript text on demand. Compression is not encryption.
+
+Active sessions append independent compressed transactions. On clean session disposal, Pi best-effort consolidates already-compressed persisted history into one snapshot; it never converts a plain session this way. A crash can leave a larger transaction layout. Incomplete final transactions are read without modifying the source and repaired only before a subsequent write. A corrupt complete transaction is an error, not an empty session. Individual decoded frames are bounded by the runtime's maximum string length.
+
 ## Export or share a session
 
 Use `/export` to write the current session as HTML or JSONL. Use `/share` to upload it and get a viewer link. By default, Pi uses a Radius artifact when Radius authentication is configured; otherwise, it uses a private GitHub gist. Set [`sessionShareDestination`](settings.md#sessions-and-context) to `gist` or `radius` to force one destination.
