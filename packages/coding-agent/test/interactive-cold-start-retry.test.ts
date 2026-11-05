@@ -70,6 +70,7 @@ describe("cold-start retry", () => {
 		let rebind = async () => {};
 		const runtime = {
 			session: harness.session,
+			services: { modelRuntime: { settleCredentialWrites: async () => {} } },
 			setBeforeSessionInvalidate: () => {},
 			setRebindSession: (fn: () => Promise<void>) => {
 				rebind = fn;
