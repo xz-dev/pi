@@ -163,11 +163,6 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private loadModelsFromSnapshot(): void {
-		// Preserve the highlighted item by identity across catalog refreshes so a
-		// background refresh never yanks the cursor back to the confirmed model
-		// while the user is browsing. On the first load there is no highlight yet,
-		// so fall back to anchoring on the current model.
-		const highlightedModel = this.filteredModels[this.selectedIndex]?.model;
 		const models = this.modelRuntime.getAvailableSnapshot().map((model: Model<any>) => ({
 			provider: model.provider,
 			id: model.id,
@@ -185,15 +180,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}));
 		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
 		this.filteredModels = this.activeModels;
-		const anchorModel = highlightedModel ?? this.currentModel;
-		let anchorIndex = this.filteredModels.findIndex((item) => modelsAreEqual(anchorModel, item.model));
-		// If the browsed model vanished in the refresh, fall back to the confirmed
-		// model instead of an arbitrary row at the same index.
-		if (anchorIndex < 0 && highlightedModel) {
-			anchorIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
-		}
+		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
 		this.selectedIndex =
-			anchorIndex >= 0 ? anchorIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+			currentIndex >= 0 ? currentIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 	}
 
 	private async refreshModels(): Promise<void> {
@@ -223,7 +212,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const selectedModel = this.filteredModels[this.selectedIndex]?.model;
 			this.loadModelsFromSnapshot();
 			// The user may have moved while the refresh was in flight, and the refresh can shift rows.
-			this.filterModels(this.searchInput.getValue(), selectedModel);			this.tui.requestRender();
+			this.filterModels(this.searchInput.getValue(), selectedModel);
+			this.tui.requestRender();
 		} catch (error) {
 			if (this.closed) return;
 			this.refreshStatusMessage = "";
@@ -292,8 +282,6 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 	}
 
-	// Preferred (typing-time) wins; otherwise keep the highlighted item by identity so a
-	// background refresh never yanks the cursor while browsing.
 	private filterModels(query: string, preferredModel?: Model<any>): void {
 		if (query) {
 			const filtered = fuzzyFilter(this.activeModels, query, (item) => {
@@ -313,20 +301,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		} else {
 			this.filteredModels = this.activeModels;
 		}
-		// A preferred model (typing-time) wins. Otherwise keep the highlighted item by
-		// identity if it is still listed; else top row under a query, else clamp.
+		// Keep the preferred model selected if it is still listed. Otherwise, when filtering
+		// by a query, move the selector to the top row so the best match is highlighted.
+		// When the query is cleared, keep the current position clamped to the (restored) list length.
 		const preferredIndex = preferredModel
 			? this.filteredModels.findIndex((item) => modelsAreEqual(preferredModel, item.model))
 			: -1;
 		if (preferredIndex >= 0) this.selectedIndex = preferredIndex;
-		else {
-			const highlightedModel = this.filteredModels[this.selectedIndex]?.model;
-			const highlightedIndex = highlightedModel
-				? this.filteredModels.findIndex((item) => modelsAreEqual(highlightedModel, item.model))
-				: -1;
-			if (highlightedIndex >= 0) this.selectedIndex = highlightedIndex;
-			else this.selectedIndex = query ? 0 : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
-		}
+		else this.selectedIndex = query ? 0 : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 		this.updateList();
 	}
 
