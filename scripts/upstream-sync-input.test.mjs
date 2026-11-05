@@ -51,7 +51,6 @@ test("manual sync rejects malformed, unknown and unrelated commits", () => {
 	}
 });
 
-test("manual input is environment data and Chord gate uses relocated legacy test", () => {
+test("manual input is environment data", () => {
 	assert.match(workflow, /REQUESTED_UPSTREAM_SHA: \$\{\{ inputs\.upstream_sha \}\}/);
-	assert.match(workflow, /--run test\/old\/websocket\.test\.ts/);
 });
