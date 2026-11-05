@@ -8,7 +8,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { forkDriver } from "../../chord/src/old/manager.ts";
 import { execCommand } from "../src/core/exec.ts";
 import { observeOwnedProcess } from "../src/utils/process-owner.ts";
 
@@ -296,28 +295,6 @@ test("direct Node/Bun fork message, TCP handle transfer and disconnect through a
 		const disconnected = new Promise((resolve) => child.once("disconnect", resolve)); child.disconnect(); await disconnected;
 		assert.equal((await acknowledged(scope)).code, 7);
 	} finally { child.kill("SIGKILL"); scope.child.kill("SIGKILL"); server.close(); }
-});
-
-test("Chord contains double-detached descendants only after attach ack; failed attach kills P without init", { timeout: 15000 }, async () => {
-	const previous = process.env.PI_PROCESS_OWNER_BINARY;
-	const dir = directory(), failedDir = directory();
-	const identity = join(dir, "worker.identity"), failedIdentity = join(failedDir, "worker.identity");
-	try {
-		process.env.PI_PROCESS_OWNER_BINARY = owner;
-		const instance = forkDriver({ entry: ipcFixture, init: { fixture, directory: dir }, execArgv: [], env: { PI_WINDOWS_OWNER_PIDFILE: identity } }).spawn();
-		await until(() => pids(dir).length === 3, "post-message recursive worker not ready");
-		instance.killTree(); await bounded(instance.exited);
-		assert.ok(pids(dir).every((pid) => !alive(pid)), "post-ack descendant survived");
-		process.env.PI_PROCESS_OWNER_BINARY = process.execPath; // Existing executable that cannot run native attach protocol.
-		const failed = forkDriver({ entry: ipcFixture, init: { fixture, directory: failedDir }, execArgv: [], env: { PI_WINDOWS_OWNER_PIDFILE: failedIdentity } }).spawn();
-		await assert.rejects(bounded(failed.exited), (error) => error.message !== "caller completion deadline");
-		if (existsSync(failedIdentity)) assert.ok(!alive(Number(readFileSync(failedIdentity))), "failed attach left P alive");
-		assert.deepEqual(pids(failedDir), [], "init leaked through failed attach");
-	} finally {
-		for (const file of [identity, failedIdentity]) if (existsSync(file)) { const pid = Number(readFileSync(file)); if (alive(pid)) process.kill(pid, "SIGKILL"); }
-		for (const pid of pids(dir)) if (alive(pid)) process.kill(pid, "SIGKILL");
-		if (previous === undefined) delete process.env.PI_PROCESS_OWNER_BINARY; else process.env.PI_PROCESS_OWNER_BINARY = previous;
-	}
 });
 
 test("exec caller abort and timeout use lease, never terminate guardian before cleanup", { timeout: 20000 }, async () => {

@@ -468,6 +468,9 @@ mod tests {
         }
         // SAFETY: as above.
         assert_ne!(unsafe { libc::kill(sleeper, 0) }, 0);
+    }
+}
+
 /// Linux owned-exec handoff. Startup bytes are immutable after the sole-thread capture.
 #[cfg(target_os = "linux")]
 pub mod owned {
@@ -990,7 +993,7 @@ pub mod owned {
 }
 
 #[cfg(test)]
-mod tests {
+mod signal_mask_tests {
     #[test]
     fn exit_signal_thread_keeps_the_inherited_mask_for_owned_commands() {
         // cargo runs each test on its own thread, so blocking here does not leak into other tests.

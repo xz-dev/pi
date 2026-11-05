@@ -139,7 +139,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		const holdStderr = () => {};
 		const startStderr = () => {
 			child.stderr?.removeListener("readable", holdStderr);
-			child.stderr?.on("data", (chunk: Buffer | string) => this.handleStderr(chunk));
+			child.stderr?.on("data", (chunk: Buffer) => this.lines.readStderr(chunk));
 		};
 		if (owned) child.stderr?.on("readable", holdStderr);
 		else startStderr();
@@ -223,10 +223,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 			if (!ready && !failure) failure = new Error("Process owner did not report MCP server startup");
 			resolveStart();
 			if (cleanupError) this.emitError(cleanupError);
-			if (this.stdoutBuffer.toString("utf8").trim()) {
-				this.emitError(new Error("MCP stdio server closed with an incomplete JSON-RPC message"));
-			}
-			this.stdoutBuffer = Buffer.alloc(0);
+			this.lines.end();
 			this.emitClose();
 			if (cleanupError) throw cleanupError;
 		});
@@ -339,7 +336,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 				fail(error);
 			} else if (!this.closed) this.emitError(error);
 		});
-		child.stdout?.on("data", (chunk: Buffer | string) => this.handleStdout(chunk));
+		child.stdout?.on("data", (chunk: Buffer) => this.lines.readStdout(chunk));
 		child.stdout?.on("error", (error) => this.emitError(error));
 		child.stdin?.on("error", (error) => {
 			if (!this.closed) this.emitError(error);
