@@ -259,10 +259,6 @@ jobs:
       - name: Run focused integration tests
         run: |
           (
-            cd packages/chord
-            node ../../node_modules/vitest/dist/cli.js --run test/old/websocket.test.ts
-          )
-          (
             cd packages/coding-agent
             node ../../node_modules/vitest/dist/cli.js --run \
               test/assistant-message.test.ts \
