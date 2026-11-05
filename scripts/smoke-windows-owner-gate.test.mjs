@@ -70,7 +70,7 @@ test("runtime staging installs exact locked closure only in CI, verifies version
 		assert.deepEqual(JSON.parse(readFileSync(join(work, "windows-gate-runtime-inputs.json"), "utf8")), { runnerBunVersion: "1.3.14", runnerBunError: null, runnerBunPath: join(work, "bun.exe"), runnerBunSha256: digest });
 		assert.equal(createHash("sha256").update(readFileSync(join(work, "bun.exe"))).digest("hex"), digest);
 		assert.deepEqual(JSON.parse(readFileSync(join(work, "windows-gate-dependencies.json"), "utf8")), dependencies);
-		for (const path of ["packages/chord/src/old/manager.ts", "packages/coding-agent/src/utils/process-owner.ts", "packages/coding-agent/test/windows-owner-runtime.mjs", "packages/coding-agent/test/fixtures/windows-owner.cs"]) assert.equal(readFileSync(join(work, path), "utf8"), readFileSync(new URL(`../${path}`, import.meta.url), "utf8"));
+		for (const path of ["packages/coding-agent/src/utils/process-owner.ts", "packages/coding-agent/test/windows-owner-runtime.mjs", "packages/coding-agent/test/fixtures/windows-owner.cs"]) assert.equal(readFileSync(join(work, path), "utf8"), readFileSync(new URL(`../${path}`, import.meta.url), "utf8"));
 		const runtime = join(work, "packages", "coding-agent", "test", "windows-owner-runtime.mjs");
 		const imports = [...readFileSync(runtime, "utf8").matchAll(/\bfrom\s+["'](\.[^"']+)["']/g)];
 		assert.ok(imports.length > 0, "runtime gate must exercise staged relative imports");

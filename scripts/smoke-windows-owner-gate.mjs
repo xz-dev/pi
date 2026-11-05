@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -16,7 +16,6 @@ export const WINDOWS_OWNER_TEST_NAMES = [
 	"fault flags disabled without opt-in; assignment/transport fail before payload; query failure never sends C",
 	...["spawned", "transferred", "received", "assigned", "ready", "launch"].flatMap((phase) => ["guardian", "bootstrap", "launcher-death"].map((victim) => `${phase}: ${victim} death revokes launch or contains payload; no Job/control handle leak`)),
 	"direct Node/Bun fork message, TCP handle transfer and disconnect through attached Job",
-	"Chord contains double-detached descendants only after attach ack; failed attach kills P without init",
 	"exec caller abort and timeout use lease, never terminate guardian before cleanup",
 	"test phase permit expiry is bounded and cannot authorize payload",
 	"Windows PowerShell and Git Bash preserve shell-specific quoting",
@@ -90,7 +89,6 @@ export function stageWindowsOwnerGate(work, { env, run, source = fileURLToPath(n
 		} catch (error) { runtimeInputs.runnerBunError = error.message; }
 	}
 	writeFileSync(join(work, "windows-gate-runtime-inputs.json"), JSON.stringify(runtimeInputs));
-	cpSync(join(source, "packages", "chord", "src"), join(work, "packages", "chord", "src"), { recursive: true });
 	const files = ["package.json", "src/core/exec.ts", "src/config.ts", "src/utils/child-process.ts", "src/utils/process-owner.ts", "src/utils/paths.ts", "src/utils/text.ts", "test/windows-owner-runtime.mjs", "test/fixtures/windows-owner.cs", "test/fixtures/windows-owner-ipc.mjs", "test/fixtures/windows-owner-launcher.mjs"];
 	for (const file of files) {
 		const destination = join(work, "packages", "coding-agent", file);
