@@ -171,7 +171,10 @@ function isUserBashEventResult(value: unknown): value is UserBashEventResult {
 
 /** The message that starts a run: the before_agent_start event without its prompt fields. */
 export type BeforeAgentStartTrigger =
-	| Pick<BeforeAgentStartUserEvent, "messageType" | "prompt" | "images" | "origin">
+	| (Pick<BeforeAgentStartUserEvent, "messageType" | "prompt" | "images" | "origin"> & {
+			/** Typed interactive text before template expansion; undefined for non-interactive or expanded input. */
+			rawInputText?: string;
+	  })
 	| Pick<BeforeAgentStartCustomEvent, "messageType" | "message" | "origin">;
 
 /** Combined result from all before_agent_start handlers. */
