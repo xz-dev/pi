@@ -146,7 +146,8 @@ test("upstream sync runs the full CI test suite before publication", () => {
   const daemon = steps.findIndex((step) => step.name === "Build the pi-env daemon");
   const push = steps.findIndex((step) => step.name === "Push rebuilt main");
   assert.ok(daemon >= 0 && full > daemon && push > full);
-  assert.equal(steps[full].run.trim(), "./test.sh");
+  // The same workspace groups as ci.yml and upstream CI; ungrouped ./test.sh would also gate apps/*.
+  assert.equal(steps[full].run.trim(), "for group in coding-agent durable other; do\n  PI_TEST_WORKSPACE_GROUP=$group ./test.sh\ndone");
   assert.match(workflowText, /run: \.\/test\.sh/);
 });
 
