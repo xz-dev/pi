@@ -51,7 +51,10 @@ jobs:
       - run: npm run hydrate:model-data && npm run build && bash scripts/check-allow-model-catalog-drift.sh
       - name: Build the pi-env daemon for tests
         run: npm run build:daemon --workspace packages/env
-      - run: ./test.sh
+      - run: |
+          for group in coding-agent durable other; do
+            PI_TEST_WORKSPACE_GROUP=$group ./test.sh
+          done
       - name: Verify exact clean source
         shell: bash
         run: |

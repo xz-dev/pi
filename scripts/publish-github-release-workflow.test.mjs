@@ -148,7 +148,9 @@ test("upstream sync runs the full CI test suite before publication", () => {
   assert.ok(daemon >= 0 && full > daemon && push > full);
   // The same workspace groups as ci.yml and upstream CI; ungrouped ./test.sh would also gate apps/*.
   assert.equal(steps[full].run.trim(), "for group in coding-agent durable other; do\n  PI_TEST_WORKSPACE_GROUP=$group ./test.sh\ndone");
-  assert.match(workflowText, /run: \.\/test\.sh/);
+  // Publication validates the source with the same workspace groups.
+  const groupedTestRun = "for group in coding-agent durable other; do\n  PI_TEST_WORKSPACE_GROUP=$group ./test.sh\ndone";
+  assert.ok(workflow.jobs["validate-source"].steps.some((step) => step.run?.trim() === groupedTestRun));
 });
 
 test("upstream sync requires formatter-stable rebuilt sources", () => {
