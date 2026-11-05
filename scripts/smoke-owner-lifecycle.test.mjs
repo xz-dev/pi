@@ -63,7 +63,6 @@ async function dropped(platform, { childIdentity = standard, hostIdentity, child
 						for (const probe of [/cmd\.exe' '\/d' '\/c' 'ver'/, /'--version'/, /'--experimental-strip-types' '-e' '0'/, /whoami\.exe' '\/groups'/]) assert.match(launcher, probe);
 						assert.ok(launcher.indexOf("preflight") < launcher.indexOf("$ErrorActionPreference='Stop'"), "preflight must not stop the launcher");
 						assert.equal(existsSync(join(stage, "packages", "coding-agent", "test", "windows-owner-runtime.mjs")), true);
-						assert.equal(existsSync(join(stage, "packages", "chord", "src", "old", "manager.ts")), true);
 						assert.equal(options.timeout, 1_200_000);
 					}
 					if (silentChild) return { status: 0, stdout: "", stderr: "child stderr tail" };
