@@ -176,7 +176,6 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				signal?.removeEventListener("abort", onAbort);
 			};
 			if (child.pid) trackDetachedChildPid(child.pid, stop);
-			child.once("exit", retire);
 
 			try {
 				// Set timeout if provided.
@@ -235,7 +234,6 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				return { exitCode: resolvedExitCode };
 			} finally {
 				retire();
-				child.removeListener("exit", retire);
 				if (owner) child.stdio[3]?.destroy();
 			}
 		},
