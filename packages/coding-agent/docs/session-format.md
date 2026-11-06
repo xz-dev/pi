@@ -46,6 +46,8 @@ A `message` entry stores an [`AgentMessage`](message-types.md). Message content 
 
 Session entry timestamps are ISO 8601 strings. The nested message timestamp is a Unix timestamp in milliseconds.
 
+User messages can contain optional [`origin`](message-types.md#messageorigin) metadata. Custom-message entries store it at the entry's top level. It survives JSONL export, resume, branching and context-edit projection without changing the raw content. Existing entries without it remain unrecorded; no migration infers their author.
+
 ## Entry Base
 
 All entries (except `SessionHeader`) extend `SessionEntryBase`:
@@ -183,7 +185,8 @@ Extension-injected messages that DO participate in LLM context.
 
 Fields:
 - `content`: String or `(TextContent | ImageContent)[]` (same as UserMessage)
-- `display`: `true` = show in TUI with distinct styling, `false` = hidden
+- `display`: `true` = visible body; `false` = source heading with an initially folded body for nonempty context. Empty control markers remain invisible.
+- `origin`: Optional [input provenance](message-types.md#messageorigin), automatically recorded for extension API messages and hook-created custom messages
 - `details`: Optional extension-specific metadata (not sent to LLM)
 
 ### LabelEntry
