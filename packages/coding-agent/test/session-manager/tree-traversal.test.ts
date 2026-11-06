@@ -449,8 +449,10 @@ describe("createBranchedSession", () => {
 		const _id5 = session.appendMessage(userMsg("5"));
 
 		// Create branched session from id2 (should only have 1 -> 2)
+		const generationBeforeBranch = session.getGeneration();
 		const result = session.createBranchedSession(id2);
 		expect(result).toBeUndefined(); // in-memory returns null
+		expect(session.getGeneration()).toBeGreaterThan(generationBeforeBranch);
 
 		// Session should now only have entries 1 and 2
 		const entries = session.getEntries();
