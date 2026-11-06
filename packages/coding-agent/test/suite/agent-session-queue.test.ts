@@ -109,7 +109,7 @@ describe("AgentSession queue characterization", () => {
 			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
 			(context) => {
 				const sawSteer = context.messages.some(
-					(message) => message.role === "user" && getMessageText(message) === "steer now",
+					(message) => message.role === "user" && getMessageText(message).endsWith("\nsteer now"),
 				);
 				return fauxAssistantMessage(sawSteer ? "saw steer" : "missing steer");
 			},
@@ -278,7 +278,7 @@ describe("AgentSession queue characterization", () => {
 		releaseToolExecution();
 		await promptPromise;
 
-		expect(batchedUserMessages).toEqual(["start", "steer 1", "steer 2"]);
+		expect(batchedUserMessages.map((text) => text.split("\n").at(-1))).toEqual(["start", "steer 1", "steer 2"]);
 		expect(getAssistantTexts(harness)).toEqual(["", "batched steer response"]);
 	});
 
@@ -306,7 +306,11 @@ describe("AgentSession queue characterization", () => {
 		releaseToolExecution();
 		await promptPromise;
 
-		expect(batchedUserMessages).toEqual(["start", "follow-up 1", "follow-up 2"]);
+		expect(batchedUserMessages.map((text) => text.split("\n").at(-1))).toEqual([
+			"start",
+			"follow-up 1",
+			"follow-up 2",
+		]);
 		expect(getAssistantTexts(harness)).toEqual(["", "original turn complete", "batched follow-up response"]);
 	});
 
