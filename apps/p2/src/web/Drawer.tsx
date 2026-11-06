@@ -8,6 +8,8 @@ export type SessionSummary = Session & {
 	subagents: Child[];
 	/** `unread`: a finished answer the owner has not read on any device (see `SessionReads`). */
 	worker: { busy: number[]; error?: string; unread?: boolean };
+	/** A lifecycle operation of the session: running (`label` only), or failed with its error and a Dismiss. */
+	operation?: { readonly label: string; readonly error?: string; readonly dismiss?: () => void };
 };
 
 import { requestReveal } from "./Chat.tsx";
@@ -15,6 +17,7 @@ import {
 	BranchIcon,
 	ChevronIcon,
 	FolderIcon,
+	LockIcon,
 	MoonIcon,
 	PencilIcon,
 	PinIcon,
@@ -225,6 +228,19 @@ function SessionRow({
 					</button>
 				)}
 			</div>
+			{session.operation && (
+				<div className={`session-operation ${session.operation.error === undefined ? "" : "failed"}`}>
+					<span title={session.operation.error}>
+						{session.operation.label}
+						{session.operation.error === undefined ? "" : `: ${session.operation.error}`}
+					</span>
+					{session.operation.dismiss && (
+						<button type="button" className="text-action" onClick={session.operation.dismiss}>
+							Dismiss
+						</button>
+					)}
+				</div>
+			)}
 			{branches && (
 				<BranchRows
 					session={session}
@@ -264,7 +280,6 @@ function SessionRow({
 export const Drawer = memo(function Drawer({
 	onSearch,
 	onRestore,
-	onError,
 	footer,
 	sessions,
 	activeId,
@@ -274,15 +289,17 @@ export const Drawer = memo(function Drawer({
 	onBranch,
 	onRenameBranch,
 	onNew,
+	onNewIn,
 	onCollapse,
 	onProviders,
 	onEnvs,
 	onOwnerLink,
 	guest,
+	sandboxes,
 }: {
 	onSearch?: (query: string, archived: boolean) => Promise<SearchResults>;
-	onRestore: (id: string) => Promise<unknown>;
-	onError: (error: string) => void;
+	/** Restores an archived session and opens it (at `conversationId`, a message hit's). */
+	onRestore: (id: string, conversationId?: number) => void;
 	footer?: ReactNode;
 	sessions: SessionSummary[];
 	activeId?: string;
@@ -294,11 +311,15 @@ export const Drawer = memo(function Drawer({
 	/** Asks for a new label of one of a session's `/tree` branches (the owner's). */
 	onRenameBranch?: (id: string, conversationId: number) => void;
 	onNew: () => void;
+	/** Starts a new session in a sidebar folder's location; absent: folders have no "+". */
+	onNewIn?: (env: string | null, cwd: string) => void;
 	onCollapse: () => void;
 	onProviders: () => void;
 	onEnvs: () => void;
 	onOwnerLink: () => void;
 	guest?: Grant;
+	/** Environments that are sandboxes (the owner's view): their groups show a lock. */
+	sandboxes?: ReadonlySet<string>;
 }) {
 	const [query, setQuery] = useState("");
 	const [archived, setArchived] = useState(false);
@@ -337,10 +358,6 @@ export const Drawer = memo(function Drawer({
 	const ordered = [...groups].sort(([a], [b]) => (latest.get(b) ?? 0) - (latest.get(a) ?? 0));
 	for (const [, list] of ordered)
 		list.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
-	const restore = (id: string, conversationId?: number) =>
-		void onRestore(id)
-			.then(() => onOpen(id, conversationId))
-			.catch((error: Error) => onError(error.message));
 	if (guest)
 		return (
 			<nav className="drawer-content" aria-label="Shared session">
@@ -412,45 +429,67 @@ export const Drawer = memo(function Drawer({
 				/>
 			</label>
 			<div className="session-scroll">
-				{ordered.map(([location, list]) => (
-					<section key={location} className="group">
-						<h3 title={list[0] ? `${list[0].env ? `${list[0].env}:` : ""}${list[0].cwd}` : location}>
-							<FolderIcon /> {location}
-						</h3>
-						{list.map((session) => (
-							<SessionRow
-								key={session.id}
-								session={session}
-								archived={archived}
-								conversationId={session.id === activeId ? conversationId : session.main}
-								onOpen={onOpen}
-								onBranch={onBranch}
-								onRenameBranch={onRenameBranch}
-								active={session.id === activeId}
-							>
-								<button
-									type="button"
-									className={`session-main ${session.id === activeId && conversationId === session.main ? "active" : ""}`}
-									onClick={() => (archived ? restore(session.id) : onOpen(session.id))}
+				{ordered.map(([location, list]) => {
+					// A group holds at least one session; its first names the folder's location.
+					const first = list[0];
+					return (
+						<section key={location} className="group">
+							<h3 title={first ? `${first.env ? `${first.env}:` : ""}${first.cwd}` : location}>
+								<FolderIcon />
+								{first?.env && sandboxes?.has(first.env) && (
+									<span className="group-lock" title="Sandbox">
+										<LockIcon size={12} />
+									</span>
+								)}
+								<span className="group-label">{location}</span>
+								{onNewIn && !archived && first && (
+									<button
+										type="button"
+										className="group-new"
+										aria-label={`New session in ${location}`}
+										title={`New session in ${location}`}
+										disabled={!connected}
+										onClick={() => onNewIn(first.env ?? null, first.cwd)}
+									>
+										<PlusIcon size={14} />
+									</button>
+								)}
+							</h3>
+							{list.map((session) => (
+								<SessionRow
+									key={session.id}
+									session={session}
+									archived={archived}
+									conversationId={session.id === activeId ? conversationId : session.main}
+									onOpen={onOpen}
+									onBranch={onBranch}
+									onRenameBranch={onRenameBranch}
+									active={session.id === activeId}
 								>
-									<span className="session-title">
-										{session.pinned && <PinIcon size={12} />}
-										{session.title}
-									</span>
-									<span className="session-meta">
-										{session.worker.error && (
-											<span className="error session-worker-error" title={session.worker.error}>
-												Worker failed
-											</span>
-										)}
-										<SessionDot worker={session.worker} />
-										{archived ? "Tap to restore" : ago(session.updatedAt)}
-									</span>
-								</button>
-							</SessionRow>
-						))}
-					</section>
-				))}
+									<button
+										type="button"
+										className={`session-main ${session.id === activeId && conversationId === session.main ? "active" : ""}`}
+										onClick={() => (archived ? onRestore(session.id) : onOpen(session.id))}
+									>
+										<span className="session-title">
+											{session.pinned && <PinIcon size={12} />}
+											{session.title}
+										</span>
+										<span className="session-meta">
+											{session.worker.error && (
+												<span className="error session-worker-error" title={session.worker.error}>
+													Worker failed
+												</span>
+											)}
+											<SessionDot worker={session.worker} />
+											{archived ? "Tap to restore" : ago(session.updatedAt)}
+										</span>
+									</button>
+								</SessionRow>
+							))}
+						</section>
+					);
+				})}
 				{results && results.messages.length > 0 && (
 					<section className="group">
 						<h3>Messages</h3>
@@ -462,7 +501,7 @@ export const Drawer = memo(function Drawer({
 								// p2 indexes subagent messages too: a hit opens the conversation it was found in, at the message.
 								onClick={() => {
 									requestReveal(hit.session, hit.conversationId, hit.entryId);
-									if (archived) restore(hit.session, hit.conversationId);
+									if (archived) onRestore(hit.session, hit.conversationId);
 									else onOpen(hit.session, hit.conversationId);
 								}}
 							>

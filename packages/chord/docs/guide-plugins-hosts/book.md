@@ -45,8 +45,8 @@ This book builds the app in that order. Each chapter adds one concept and shows 
    server, workers and tabs load the scripts for their kind.
 6. **Plugins meet through types and registries.** One plugin uses another's objects through its contract, or
    contributes to a registry another defines. Nothing else crosses between plugins.
-7. **An edit is a rollout.** Change a file, build, roll out: the server, then every worker, swap the plugin's objects in
-   place; a broken edit keeps the old code running and reports why.
+7. **An edit is a rollout.** Change a file, build, roll out: the server, then every worker, restart the plugin's
+   objects (running work finishes on the old code); a broken edit keeps the old code running and reports why.
 :::
 
 :::flow wide animate | How it all fits: plugins on disk are built once on the server; each host evaluates the facets of its kind; tabs and the TUI are clients that reach workers' objects through the server.
@@ -225,9 +225,9 @@ self.onLive(async (ctx) => {                                  // a routine start
 });
 ```
 
-Natives are why some objects restart when their plugin changes: an open connection cannot be moved to new code, so
-Chord closes it and opens it again. Objects without natives are swapped in place. A first read of a table is no
-native: declare it as a live query, not with `self.open`, or the object restarts at every change of its plugin.
+Every live object restarts when its plugin changes; natives close (`reload`) and open again with the new code, since
+an open connection cannot be moved to new code. A first read of a table needs no native: declare it as a live query,
+not with `self.open`.
 
 **Await what you start in a root or a handler.** What is started with a context ends with it. Code outside objects
 gets its `ctx` from `host.root(fn, ctx)`, and that scope seals when `fn` returns; a handler's context ends when its
@@ -404,6 +404,62 @@ const { t } = useMessages(messages);                       // re-renders when th
 // plugins/notes/worker.ts: a notice as data; every client renders it with t.render(notice)
 draft.notice = messages.message("empty");
 ```
+
+## Optimistic UI
+
+A user renames a session. The call goes from the tab through the server to the session's worker, which renames it and
+reports the new title to the server's index of sessions, then answers. That round trip takes a moment, and the title
+should change at once. React's `useOptimistic` shows a value while a transition runs, and Chord's references fit it:
+
+```tsx
+// plugins/sessions/web.tsx
+function SessionName({ id }: { id: string }) {
+	const sessions = useHold(Sessions, {});                       // the server's index, which every list shows
+	const session = useHold(SessionTitle, { id });                // on the session's worker
+	const title = useWatch(sessions?.titles)?.[id] ?? "";
+	const [shown, showOptimistic] = useOptimistic(title);
+	const rename = (next: string) =>
+		startTransition(async () => {
+			showOptimistic(next);                                    // drawn at once
+			await session?.rename(next, BACKGROUND_CONTEXT);         // settles once the index has `next`
+		});
+	return <TitleField value={shown} onRename={rename} />;
+}
+```
+
+When the transition ends, React drops the optimistic value and draws `title` again. That is only right if `title` is
+already the new name by then. **Chord guarantees it:** a call settles in the page only after every change its answering
+host committed before answering is applied there, and so does every change a host that relays the answer committed
+before it forwarded it. Here the worker's own changes travel before its answer, and the server sends its index change
+for this tab before it forwards the worker's answer, even on a slow connection whose window of unacknowledged state is
+full (design §3). Without that, the answer could overtake the index change and the old title flickered back.
+
+**What it does not cover:**
+
+- Changes committed after the answer: a method that starts work and returns before it lands (a `void` call, a job, a
+  routine) answers first; the optimistic value goes and the old one shows until the change arrives.
+- Changes on a host that neither answers nor relays the answer. A server method that calls a worker and then answers
+  the tab orders only the server's own changes before its answer; what the worker changed for the tab travels on its
+  own and may come later.
+
+So the rule for a method that should feel instant: it awaits its own changes, the pushes to other hosts included (the
+worker's `rename` awaits its report to the index), and keeps them on the host that answers or relays the answer.
+
+A terminal UI does the same with its component scope: `scope.optimistic(read, reduce?)` wraps a reader and returns
+it with `add(action, call)` and `pending()`, as React's `useOptimistic`: while calls are in flight the reader shows
+`reduce(current, action)` over each action, in order (without a reducer the last action is the value), until every
+call added settles. `add` returns the call; a rejection is the caller's to handle.
+
+```ts
+const titles = scope.watch(sessions.titles);
+const [title, add] = scope.optimistic(() => titles()?.[id]);
+await add(next, session.rename(next, ctx));               // title() is `next` at once, the real one when it settles
+
+const [rows, change] = scope.optimistic(() => list() ?? [], (rows, id: string) => rows.filter((row) => row.id !== id));
+change(id, store.remove({ id }, ctx)).catch(fail);        // gone at once; back with the error if refused
+```
+
+`test/examples/63-optimistic-answers.ts` runs this with a stalled terminal client and prints what each redraw showed.
 
 # Plugins {#plugins lede="Move the code into a directory that can be added, edited and removed while the app runs."}
 
@@ -647,11 +703,12 @@ then gives every object of the changed plugin its fate:
 
 | The object | What happens |
 | --- | --- |
-| holds no natives (open files, sockets), the new code neither | **swapped** in place: new methods, same documents; running calls finish on the old code |
-| holds natives | **restarted**: calls wait, running ones finish, natives close and reopen with the new code |
+| live | **restarted**: running calls, and the calls they make with their `ctx`, finish on the old code; new calls wait for the new code; same documents; natives close and reopen |
+| not live (failed, parked) | **retried** on the new code |
 | its type was removed | **ended**; its users wait until something serves it again |
 
-The tab's reference follows the new object and gets one frame with the difference. Nothing reconnects. If the edit
+The tab's reference stays live while the old code drains, shows `loading` for a moment, then follows the new object
+with one frame of difference. Nothing reconnects. If the edit
 is broken (a syntax error, a factory that throws), that plugin keeps its old code on that host and the report says why;
 every other plugin of the rollout applies.
 

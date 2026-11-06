@@ -452,6 +452,10 @@ textarea.input {
 	flex-direction: column;
 	min-height: 0;
 }
+/* The place of a screen's transcript in the chat (plugins/chat): the scroller is .chat's flex item. */
+.chat-view {
+	display: contents;
+}
 .drop-overlay {
 	position: absolute;
 	inset: var(--s2);
@@ -2826,6 +2830,25 @@ button.diff-number:hover {
 	letter-spacing: 0;
 	white-space: nowrap;
 }
+.group-label {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.group-new {
+	display: inline-flex;
+	flex: none;
+	align-items: center;
+	justify-content: center;
+	width: var(--control-sm);
+	height: var(--control-sm);
+	margin: calc(-1 * var(--s1)) 0;
+	color: var(--faint);
+}
+.group-new:hover:not(:disabled) {
+	color: var(--text);
+}
 .session-main {
 	min-height: var(--control);
 	padding-top: var(--s1);
@@ -2853,6 +2876,23 @@ button.diff-number:hover {
 	gap: var(--s1);
 	color: var(--faint);
 	font-size: var(--fs-xs);
+}
+/* A lifecycle operation of the session (a move, a copy, an archive) running, or failed with Dismiss. */
+.session-operation {
+	display: flex;
+	align-items: center;
+	gap: var(--s1);
+	padding: 0 0 var(--s1);
+	color: var(--muted);
+	font-size: var(--fs-xs);
+}
+.session-operation.failed {
+	color: var(--error);
+}
+.session-operation > span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .session-header {
 	display: flex;
@@ -3746,4 +3786,14 @@ button.history-edge:disabled {
 .history-snippet {
 	color: var(--muted);
 	overflow-wrap: anywhere;
+}
+
+/* The lock of a sandboxed location: in the top bar's location line and on sidebar groups. */
+.title-lock {
+	display: inline-flex;
+	margin-right: 3px;
+	vertical-align: -1px;
+}
+.group-lock {
+	display: inline-flex;
 }

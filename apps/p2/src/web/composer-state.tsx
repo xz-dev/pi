@@ -4,12 +4,13 @@ import {
 	type Dispatch,
 	type ReactNode,
 	type SetStateAction,
+	useCallback,
 	useContext,
 	useEffect,
 	useRef,
 	useState,
 } from "react";
-import { useRoute } from "../runtime/web.tsx";
+import { errorText, useRoute } from "../runtime/web.tsx";
 export type PickedFile = { key: string; file: File; preview?: string; uploaded?: string; session?: string };
 /** The message the next send answers: an entry of the current conversation, and whose it is (for display only). */
 export type ReplyTarget = { entryId: number; name: string };
@@ -20,13 +21,12 @@ type State = {
 	setFiles: Dispatch<SetStateAction<PickedFile[]>>;
 	steer: boolean;
 	setSteer: Dispatch<SetStateAction<boolean>>;
-	sending: boolean;
-	setSending: Dispatch<SetStateAction<boolean>>;
 	error: string | undefined;
 	setError: Dispatch<SetStateAction<string | undefined>>;
+	/** Shows a failed call's error in the app's toast (an optimistic guess rolled back, an action refused). */
+	fail: (error: unknown) => void;
 	stopped: { sessionId: string; conversationId: number } | undefined;
 	setStopped: Dispatch<SetStateAction<{ sessionId: string; conversationId: number } | undefined>>;
-	submission: { current: { key: string; id: string } | undefined };
 	viewer: string;
 	addFiles: (files: File[]) => void;
 	replyTo: ReplyTarget | undefined;
@@ -44,10 +44,9 @@ export function ComposerState({ children }: { children: ReactNode }) {
 	const [draft, setDraft] = useState("");
 	const [files, setFiles] = useState<PickedFile[]>([]);
 	const [steer, setSteer] = useState(true);
-	const [sending, setSending] = useState(false);
 	const [error, setError] = useState<string>();
+	const fail = useCallback((failure: unknown) => setError(errorText(failure)), []);
 	const [stopped, setStopped] = useState<State["stopped"]>();
-	const submission = useRef<{ key: string; id: string } | undefined>(undefined);
 	const viewer = useRef(crypto.randomUUID());
 	const [replyTo, setReplyTo] = useState<ReplyTarget>();
 	const [canReply, setCanReply] = useState(false);
@@ -98,13 +97,11 @@ export function ComposerState({ children }: { children: ReactNode }) {
 				setFiles,
 				steer,
 				setSteer,
-				sending,
-				setSending,
 				error,
 				setError,
+				fail,
 				stopped,
 				setStopped,
-				submission,
 				viewer: viewer.current,
 				addFiles,
 				replyTo,

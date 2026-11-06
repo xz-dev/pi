@@ -110,7 +110,8 @@ test(
 		const browser = fixture.browser();
 		const envs = browser.hold(Envs, {}, BACKGROUND_CONTEXT);
 		await envs.save({ name: "gpu", config }, BACKGROUND_CONTEXT);
-		await until(envs.envs, (entries) => entries?.[0]?.name === "gpu");
+		// The answer follows its state: the saved environment is listed when the call resolves.
+		assert.equal(envs.envs.value[0]?.name, "gpu");
 		await writeFile(join(fixture.dataDir, "envs.json"), JSON.stringify({ gpu: { ...config, host: "changed" } }));
 		await until(envs.envs, (entries) => entries?.[0]?.config.host === "changed");
 		await writeFile(join(fixture.dataDir, "envs.json"), "{");
@@ -281,7 +282,7 @@ test(
 		assert(trusted.ok, trusted.ok ? "" : trusted.error);
 		assert.equal(trusted.home, home);
 		// The folder picker warms every environment's connection first (Pi Mobile's `envs` with `warm`).
-		assert.equal(await envs.warm(BACKGROUND_CONTEXT), undefined);
+		assert.equal(await envs.warm(BACKGROUND_CONTEXT), null);
 		assert.equal((await envs.listDirectory({ env: "box", path: "~" }, BACKGROUND_CONTEXT)).path, home);
 		const uploadedKey = await envs.uploadKey(
 			{ name: "copy", key: readFileSync(key.identityFile, "utf8") },
@@ -293,6 +294,7 @@ test(
 		);
 		assert.equal((await stat(uploadedKey.identityFile)).mode & 0o777, 0o600);
 		await envs.delete({ name: "copy" }, BACKGROUND_CONTEXT);
+		assert(!envs.envs.value.some((entry) => entry.name === "copy"), "the deleted environment is gone at the answer");
 		const sessions = await holdIn(owner, Sessions, {}, "owner");
 		const session = await sessions.create(
 			{ env: "box", cwd: "~/project", createDirectory: true },
@@ -409,9 +411,10 @@ test(
 		await chat.send({ text: "slow-tool", requestId: "ssh-busy-edit" }, BACKGROUND_CONTEXT);
 		await until(chat.view, (view) => JSON.stringify(view).includes("tool-running"));
 		await until(status.statuses, (statuses) => (statuses?.[session.id]?.tasks ?? 0) > 0);
-		const saved = (await envs.list(BACKGROUND_CONTEXT))[0]!;
+		const saved = (await envs.list(BACKGROUND_CONTEXT))[0]!.config;
+		assert.equal(saved.type, "ssh");
 		await envs.save(
-			{ name: "box", config: { ...saved.config, shellEnv: { P2_TEST_ENV_REVISION: "edited" } } },
+			{ name: "box", config: { ...saved, shellEnv: { P2_TEST_ENV_REVISION: "edited" } } },
 			BACKGROUND_CONTEXT,
 		);
 		await until(chat.view, (view) => results(view, "bash").some((text) => text.includes("tool-finished")), 60000);

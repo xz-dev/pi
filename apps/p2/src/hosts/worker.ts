@@ -3,8 +3,10 @@
 // facet, which owns the session's Durable Harness.
 
 import { isChordError } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
-import { workerMain } from "@earendil-works/chord/workers";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { workerMain } from "@earendil-works/chord/workers/child";
+import { registerLazyBedrockProvider } from "@earendil-works/pi-ai/lazy-bedrock-provider";
+import { registerLazyOAuthFlows } from "@earendil-works/pi-ai/lazy-oauth";
 import { createHost, hostErrorText } from "../runtime/chord.ts";
 import { configureFetch } from "../runtime/fetch.ts";
 import { captureProcessLogs, processLogs } from "../runtime/logs.ts";
@@ -19,10 +21,14 @@ import {
 	type WorkerInit,
 	workerCore,
 } from "../runtime/worker.ts";
-import { WORKER_PACKAGES } from "./plugins.ts";
+import { WORKER_PACKAGES } from "./host-packages.ts";
 
 // Before any provider request: see configureFetch (Node 26 HTTP/2 sessions can wedge an origin).
 configureFetch();
+// OAuth flows and Bedrock through literal dynamic imports: chunks of the worker base, loaded on first use. pi-ai's
+// default variable-specifier imports would load them from pi-ai's source files, outside the snapshot.
+registerLazyOAuthFlows();
+registerLazyBedrockProvider();
 
 workerMain(
 	async ({ address, start, parent, plugins, onClose }, context) => {
@@ -56,9 +62,7 @@ workerMain(
 				core: [
 					{
 						name: "@p2/core",
-						facet: workerCore(init, liveness, location, (fn, signal) =>
-							host.root(fn, signal ? withAbortSignal(signal, context) : context),
-						),
+						facet: workerCore(init, liveness, location, (fn, rootContext) => host.root(fn, rootContext)),
 					},
 				],
 			},

@@ -46,6 +46,15 @@ type RegistryHost = { registry<C, V>(registry: Registry<C, V>, context: Context)
 const registryValues = new WeakMap<RegistryHost, Map<Registry<unknown, unknown>, RegistryValue<unknown>>>();
 
 /**
+ * Registry `registry`'s composed value on `host` if it was followed before (`followRegistry`): what a UI's first render
+ * shows, before its follower starts.
+ */
+export function knownRegistry<C, V>(host: RegistryHost, registry: Registry<C, V>): V | undefined {
+	const known = registryValues.get(host)?.get(registry as Registry<unknown, unknown>) as RegistryValue<V> | undefined;
+	return known?.value;
+}
+
+/**
  * `follow` for registry `registry`'s composed value on `host`, once the host published it; at once (synchronously)
  * when this host's value of it was followed before.
  */
@@ -117,7 +126,7 @@ export function errorOf(ref: HeldRef): Error | undefined {
 
 /**
  * Releases held references later: a chat stays held for a while after its screen is left, so that switching back is
- * instant (v1's client linger), at most `cap` of them at once (the oldest goes first).
+ * instant, at most `cap` of them at once (the oldest goes first).
  */
 export class Lingering {
 	readonly #delays: Readonly<Record<string, number>>;

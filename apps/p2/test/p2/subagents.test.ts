@@ -11,7 +11,7 @@ import { Mcp } from "../../plugins/mcp/contract.ts";
 import { Sessions } from "../../plugins/sessions/contract.ts";
 import { Sharing } from "../../plugins/sharing/contract.ts";
 import { SessionStatus } from "../../plugins/status/contract.ts";
-import { type Child, SubagentControl, Subagents } from "../../plugins/subagents/contract.ts";
+import { type Child, ChildStore, SubagentControl, Subagents } from "../../plugins/subagents/contract.ts";
 import { Workspace } from "../../plugins/workspace/contract.ts";
 import { startServer } from "../../src/hosts/server.ts";
 import type { Host, RefIn } from "../../src/runtime/chord.ts";
@@ -70,7 +70,7 @@ describe("subagents (fake provider)", () => {
 		await chat.send({ text: "subagent", requestId: "spawn" }, BACKGROUND_CONTEXT);
 		const view = await until(chat.view, (value) =>
 			texts(value).some(
-				(text) => text.startsWith("[subagent helper answered") && text.includes("Echo: hello helper"),
+				(text) => text.startsWith("[answered, no reply needed]") && text.includes("Echo: hello helper"),
 			),
 		);
 		const spawned = result(view, "spawn");
@@ -93,7 +93,7 @@ describe("subagents (fake provider)", () => {
 		await chat.send({ text: "subagent-answer", requestId: "answer" }, BACKGROUND_CONTEXT);
 		const answered = await until(chat.view, (value) => Boolean(result(value, "answer")));
 		assert.deepEqual(result(answered, "answer")?.content, [{ type: "text", text: "Echo: hello helper" }]);
-		assert.equal(texts(answered).filter((text) => text.startsWith("[subagent helper answered")).length, 1);
+		assert.equal(texts(answered).filter((text) => text.startsWith("[answered, no reply needed]")).length, 1);
 	});
 
 	it("configures tools and opens a child's independent transcript", async () => {
@@ -127,7 +127,12 @@ describe("subagents (fake provider)", () => {
 			{ type: "text", text: "1 archived (status with a name shows one)." },
 		]);
 		const control = owner.hold(SubagentControl, { session }, BACKGROUND_CONTEXT);
+		// The worker pushes the sidebar's flag to the server before it answers: the server's index has it then.
+		const store = fixture.server.host.hold(ChildStore, {}, BACKGROUND_CONTEXT);
+		await whenLive(store);
 		await control.archive({ conversation: child.conversationId, archived: false }, BACKGROUND_CONTEXT);
+		assert.equal(store.children.value[session]?.[0]?.archived, undefined, "pushed before the answer");
+		store.release();
 		await until(children.children, (value) => value?.[session]?.[0]?.archived === undefined);
 		await assert.rejects(
 			control.archive({ conversation: 999, archived: true }, BACKGROUND_CONTEXT),
@@ -165,7 +170,7 @@ describe("subagents (fake provider)", () => {
 		const listed = await until(children.children, (value) => value?.[session]?.[0]?.lastEntryId !== undefined);
 		assert.equal(listed?.[session]?.[0]?.name, "helper");
 		chat = await holdIn(owner, Chat, { session, conversation: 1 }, "participant");
-		await until(chat.view, (view) => texts(view).some((text) => text.startsWith("[subagent helper answered")));
+		await until(chat.view, (view) => texts(view).some((text) => text.startsWith("[answered, no reply needed]")));
 		await chat.send({ text: "subagent-answer", requestId: "answer-again" }, BACKGROUND_CONTEXT);
 		await until(chat.view, (view) => texts(view).some((text) => text.startsWith("Echo: slow child")));
 		await until(status.statuses, (value) => value?.[session]?.tasks === 0);
@@ -260,7 +265,7 @@ describe("a subagent spawned with its own cwd (fake provider)", () => {
 		await spawn({ action: "spawn", name: "wt", message: "bash", cwd: "worktree", tools: ["bash"] }, "spawn");
 		const view = await until(
 			chat.view,
-			(value) => texts(value).some((text) => text.startsWith("[subagent wt answered")),
+			(value) => texts(value).includes('<sender kind="subagent" name="wt"/>'),
 			20_000,
 		);
 		assert.equal((result(view, "spawn")?.details as { cwd?: string }).cwd, join(project, "worktree"));
@@ -343,7 +348,7 @@ describe("subagents with code mode (fake provider)", () => {
 		until(
 			chat.view,
 			(view) =>
-				texts(view).some((each) => each.startsWith(`Echo: [subagent ${name} answered`)) &&
+				texts(view).includes(`<sender kind="subagent" name="${name}"/>`) &&
 				!(view?.docs["pi.live"] as { run?: unknown } | undefined)?.run,
 		);
 	const results = (view: ConversationView | null | undefined) =>

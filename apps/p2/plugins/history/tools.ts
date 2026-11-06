@@ -15,8 +15,8 @@ import {
 	type Tx,
 } from "@earendil-works/pi-durable";
 import { arr, int, obj, opt, str, union } from "@earendil-works/pi-schema";
-import type { JsonValue } from "@p2/app/v1";
-import { literal, messageData, peerMessage, SHELL_ENTRY, shellData } from "@p2/app/v1";
+import type { Context, JsonValue } from "@p2/app/v1";
+import { agentMessage, literal, messageData, peerMessage, SHELL_ENTRY, shellData } from "@p2/app/v1";
 import type { HistoryHits } from "../search/contract.ts";
 
 export const HISTORY_SEARCH = "history_search";
@@ -27,16 +27,17 @@ export const HISTORY_HANDOFF = "history_handoff";
 export const READ_BUDGET = 50_000;
 /** A rendered entry's text in a card's list. */
 const PREVIEW = 200;
-/** Subagents' messages (plugins/subagents `AGENT_MESSAGE_ENTRY`), read without depending on that plugin. */
-const AGENT_MESSAGE = "p2.agent-message";
 
 /** Searches the calling conversation in the server's index (the search plugin's worker feed). */
-export type HistorySearch = (query: {
-	query: string;
-	conversation: number;
-	before?: number;
-	limit: number;
-}) => Promise<HistoryHits>;
+export type HistorySearch = (
+	query: {
+		query: string;
+		conversation: number;
+		before?: number;
+		limit: number;
+	},
+	context: Context,
+) => Promise<HistoryHits>;
 
 export type HistoryRole = "user" | "assistant" | "marker";
 /** An entry as the history tools show it. */
@@ -75,16 +76,14 @@ export function renderEntry(entry: EntryRecord, results: ReadonlyMap<string, boo
 			? { entry: id, role: "user", author: shell.author.name, text: `[shell: ${shell.command}]` }
 			: undefined;
 	}
-	if (entry.kind === AGENT_MESSAGE) {
-		const data = entry.data as { from?: { name?: unknown }; intent?: unknown; text?: unknown } | undefined;
-		if (typeof data?.text === "string")
-			return {
-				entry: id,
-				role: "user",
-				author: `subagent ${String(data.from?.name ?? "")}`.trim(),
-				text: `${data.intent === "question" ? "[asks] " : data.intent === "note" ? "[notes] " : ""}${data.text}`,
-			};
-	}
+	const fromAgent = agentMessage(entry.kind, entry.data);
+	if (fromAgent)
+		return {
+			entry: id,
+			role: "user",
+			author: `subagent ${fromAgent.from.name}`,
+			text: `${fromAgent.intent === "question" ? "[asks] " : fromAgent.intent === "note" ? "[notes] " : ""}${fromAgent.text}`,
+		};
 	if (!message) return undefined;
 	if (message.role === "user") {
 		const peer = peerMessage(entry.kind, entry.data);
@@ -296,12 +295,10 @@ export function createHistoryExtension(search: HistorySearch, label: (conversati
 				context,
 			);
 			const before = args.before ?? boundary;
-			const result = await search({
-				query: args.query,
-				conversation,
-				...(before === undefined ? {} : { before }),
-				limit: args.limit ?? 10,
-			});
+			const result = await search(
+				{ query: args.query, conversation, ...(before === undefined ? {} : { before }), limit: args.limit ?? 10 },
+				context,
+			);
 			// Authors from the entries themselves (the index keeps roles only).
 			const hits = await api.commit(async (tx) => {
 				const out: { entry: number; role: "user" | "assistant"; author?: string; snippet: string }[] = [];

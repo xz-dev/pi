@@ -21,6 +21,7 @@ import {
 	rawWorkers,
 	rejection,
 	relayed,
+	SERVER_ADDRESS,
 	Server,
 	Session,
 	serveNotes,
@@ -63,10 +64,14 @@ async function rawRelay(options: { readonly principal?: TestPrincipal; readonly 
 	return { ...relay, workers, raw: tab };
 }
 
-/** A raw tab on a new link the server accepts as `principal` (owner by default). */
-function rawTab(server: Awaited<ReturnType<typeof relayed>>["server"], principal?: TestPrincipal): RawPeer {
+/** A raw tab on a new link the server accepts as `principal` (owner by default), trusted when `trusted`. */
+function rawTab(
+	server: Awaited<ReturnType<typeof relayed>>["server"],
+	principal?: TestPrincipal,
+	trusted = false,
+): RawPeer {
 	const [a, b] = memoryLinkPair();
-	server.accept(a, { principal: principal ?? { kind: "owner" }, codec: testCodec() }, context);
+	server.accept(a, { principal: principal ?? { kind: "owner" }, codec: testCodec(), trusted }, context);
 	return new RawPeer(b);
 }
 
@@ -147,6 +152,22 @@ forEachCodec(() => {
 			raw.send({ kind: "retry", hold: 7, hops: 5 });
 			// Forwarded with its budget as it is: a relay visits no object.
 			expect(await worker.next("retry")).toEqual({ kind: "retry", origin: 1, hold: 7, hops: 5 });
+		});
+
+		it("forward a call's old-work flag from a trusted downstream link only (a page cannot claim old work)", async () => {
+			const { raw, server, workers } = await rawRelay();
+			holdPlaced(raw, 0);
+			const worker = await workerAt(workers);
+			bindPlaced(worker, await worker.next("hold"));
+			await raw.next("bound");
+			raw.send({ kind: "call", call: 0, hold: 0, method: wait, old: true });
+			expect((await worker.next("call")).old).toBeUndefined();
+			const trusted = rawTab(server, undefined, true);
+			holdPlaced(trusted, 0);
+			bindPlaced(worker, await worker.next("hold"));
+			await trusted.next("bound");
+			trusted.send({ kind: "call", call: 0, hold: 0, method: wait, old: true });
+			expect(await worker.next("call")).toMatchObject({ call: 0, origin: 2, old: true });
 		});
 
 		it("give each downstream link its own origin, never reused", async () => {
@@ -334,6 +355,48 @@ forEachCodec(() => {
 			expect(slow.kinds).toEqual(["state", "state", "state"]);
 			expect(seen.every((pair) => pair.split("/")[0] === pair.split("/")[1])).toBe(true);
 			expect(relay.errors.server).toEqual([]);
+		});
+	});
+
+	describe("a relayed answer after the relay's own state (decision \"A call's answer follows its state\")", () => {
+		it("forwards a worker's result after the state the relay's own objects keep waiting for the tab; every ack reaches its sender", async () => {
+			const workers: RawPeer[] = [];
+			const relay = await relayed({
+				server: (h) => void serveNotes(h),
+				resolve: rawWorkers(workers, { ack: false }),
+			});
+			const [a, b] = memoryLinkPair();
+			relay.server.accept(a, { principal: { kind: "owner" }, codec: testCodec() }, context);
+			const tab = new RawPeer(b, { ack: false });
+			const { name: type, version, fingerprint } = Notes;
+			const params = jsonPart({ session: "S1" });
+			tab.send({ kind: "hold", hold: 0, type, version, fingerprint, params, address: SERVER_ADDRESS });
+			await tab.next("bound");
+			holdPlaced(tab, 1);
+			const worker = await workerAt(workers);
+			const held = await worker.next("hold");
+			bindPlaced(worker, held);
+			await tab.next("bound");
+			// The relay's own window for the tab: its bound and this state; the next commit waits.
+			await addNote(relay.server, "S1", "a");
+			await addNote(relay.server, "S1", "b");
+			tab.send({ kind: "call", call: 0, hold: 1, method: add, args: jsonPart({ text: "x" }) });
+			const forwarded = await worker.next("call");
+			worker.send({ kind: "result", ...originOf(held), call: forwarded.call, value: jsonPart(1) });
+			await transported();
+			expect(tab.kinds()).toEqual(["hello", "state", "state", "result"]);
+			const waited = tab.received.filter((message) => message.kind === "state").at(-1)!;
+			expect(waited.holds.map(({ hold, members }) => [hold, EDITOR.named(members).count])).toEqual([
+				[0, [["r", 2]]],
+			]);
+			// Four messages in flight to the tab, one of them the worker's: its ack goes to the worker, the others free the
+			// relay's own window (the state past it included).
+			for (const _ of [0, 1, 2, 3]) tab.ack();
+			await transported();
+			expect(worker.kinds().filter((kind) => kind === "ack")).toEqual(["ack"]);
+			for (const text of ["c", "d", "e"]) await addNote(relay.server, "S1", text);
+			await transported();
+			expect(tab.kinds().filter((kind) => kind === "state")).toHaveLength(4);
 		});
 	});
 
