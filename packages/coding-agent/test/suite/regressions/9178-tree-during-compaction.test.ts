@@ -59,10 +59,9 @@ describe("issue #9178: tree navigation during manual compaction", () => {
 		}
 		await compactionPromise;
 
-		expect(harness.sessionManager.getEntries().at(-1)).toMatchObject({
-			type: "compaction",
-			parentId: originalLeafId,
-		});
+		expect(harness.sessionManager.getEntries().at(-1)).toMatchObject({ type: "compaction" });
+		// The compaction is inserted at its kept boundary; the leaf stays where it was.
+		expect(harness.sessionManager.getLeafId()).toBe(originalLeafId);
 		expect(harness.session.messages.map(getMessageText)).toContain("second assistant");
 	});
 
