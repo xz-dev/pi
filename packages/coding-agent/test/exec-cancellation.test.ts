@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -43,8 +43,11 @@ async function waitUntilReady(path: string): Promise<void> {
 	const deadline = Date.now() + 2000;
 	while (Date.now() < deadline) {
 		try {
-			expect(Number(readFileSync(path, "utf8"))).toBeGreaterThan(0);
-			return;
+			const contents = readFileSync(path, "utf8");
+			if (contents.length > 0) {
+				expect(Number(contents)).toBeGreaterThan(0);
+				return;
+			}
 		} catch (error) {
 			if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
 		}
@@ -77,6 +80,16 @@ afterEach(async () => {
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
+});
+
+describe("readiness fixture", () => {
+	it("waits for the child PID after the readiness file is created (#7864)", async () => {
+		const readyFile = join(directory, "partial-ready");
+		writeFileSync(readyFile, "");
+		const ready = waitUntilReady(readyFile);
+		writeFileSync(readyFile, String(process.pid));
+		await ready;
+	});
 });
 
 for (const nativeOwner of [false, true]) {
