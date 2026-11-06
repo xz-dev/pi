@@ -3,18 +3,23 @@ import {
 	resetOpenAICodexWebSocketDebugStats,
 	stream,
 } from "@earendil-works/pi-ai/api/openai-codex-responses";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { waitForNativeIo } from "../../../ai/test/utils/native-io.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const apiKey = `aaa.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "offline-test" } })).toString("base64")}.bbb`;
 const harnesses: Harness[] = [];
 
+beforeEach(() => {
+	vi.spyOn(Math, "random").mockReturnValue(0);
+});
+
 afterEach(() => {
 	for (const harness of harnesses.splice(0)) harness.cleanup();
 	closeOpenAICodexWebSocketSessions();
 	resetOpenAICodexWebSocketDebugStats();
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 	vi.useRealTimers();
 });
 
@@ -76,6 +81,32 @@ function installFailingTransport(harness: Harness, partial: boolean, protocolRep
 }
 
 describe("Codex retries through Pi settings", () => {
+	it("reports and cancels one jittered WS wait without sampling the eligibility preview", async () => {
+		const harness = await createHarness({
+			settings: { transport: "auto", retry: { enabled: false, baseDelayMs: 2000, maxAgentDelayMs: 10_000 } },
+		});
+		harnesses.push(harness);
+		const { sent, fetchMock } = installFailingTransport(harness, false);
+		const random = vi
+			.mocked(Math.random)
+			.mockReturnValue(1375 / 5001)
+			.mockClear();
+		vi.useFakeTimers();
+		const request = harness.session.prompt("Retry once");
+		await waitForNativeIo(() => harness.eventsOfType("auto_retry_start").length === 1);
+		expect(harness.eventsOfType("auto_retry_start")[0]?.delayMs).toBe(3375);
+		expect(random).toHaveBeenCalledTimes(1);
+		expect(harness.eventsOfType("agent_end")[0]?.willRetry).toBe(true);
+		await vi.advanceTimersByTimeAsync(3374);
+		expect(sent).toHaveLength(1);
+		harness.session.abortRetry();
+		await request;
+		expect(sent).toHaveLength(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(random).toHaveBeenCalledTimes(1);
+		expect(harness.eventsOfType("auto_retry_end").at(-1)?.success).toBe(false);
+	});
+
 	it.each([false, true])(
 		"uses fixed auto WS retries and an independent SSE budget with enabled=%s",
 		async (enabled) => {
