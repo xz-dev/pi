@@ -4,7 +4,7 @@
 
 use crate::errors::Failure;
 use crate::exec::{
-    Control, Ending, Groups, Launch, Message, kill_group, running, spawn, spawn_reader,
+    Control, Ending, Groups, Launch, Message, kill_group, receive, running, spawn, spawn_reader,
     start_waiter,
 };
 use crate::frame::{EVENT, Frame};
@@ -108,6 +108,7 @@ pub fn run(
     let pid = child.id();
     groups.lock().unwrap().insert(pid);
     let stop = Arc::new(AtomicBool::new(false));
+    let exited = Arc::new(AtomicBool::new(false));
     // A thread that cannot start (a task limit) fails the request; the started program is killed and reaped. Threads
     // already running see `stop` within 100 ms.
     let abandon = |mut child: Child, error: std::io::Error| {
@@ -133,6 +134,7 @@ pub fn run(
         sender.clone(),
         stop.clone(),
         Some(output.clone()),
+        exited.clone(),
     ) {
         return Err(abandon(child, error));
     }
@@ -143,6 +145,7 @@ pub fn run(
         sender.clone(),
         stop.clone(),
         Some(output.clone()),
+        exited.clone(),
     ) {
         return Err(abandon(child, error));
     }
@@ -212,18 +215,7 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        let wait = match idle_until {
-            Some(idle) => {
-                let now = Instant::now();
-                if now >= idle {
-                    // A descendant may hold the pipes open after the program exited; stop waiting for it.
-                    break;
-                }
-                idle - now
-            }
-            None => Duration::from_secs(3600),
-        };
-        match receiver.recv_timeout(wait) {
+        match receive(&receiver, Duration::from_secs(3600), idle_until) {
             Ok(Message::Data(stream, bytes)) => {
                 output.bulk(
                     Frame::with_payload(
@@ -244,6 +236,8 @@ pub fn run(
                 killed = true;
                 status = Some(Ok(exit));
                 idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
+                exited.store(true, Ordering::SeqCst);
+                output.wake();
             }
             Ok(Message::WaitFailed(error)) => {
                 status = Some(Err(error));
@@ -254,6 +248,8 @@ pub fn run(
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
+            // A descendant may hold silent pipes open after the program exited.
+            Err(RecvTimeoutError::Timeout) if idle_until.is_some() => break,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -273,5 +269,411 @@ pub fn run(
             "spawn_error",
             "process did not report its exit",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drains_queued_tail_and_eof_after_exit_deadline() {
+        let (sender, receiver) = mpsc::channel();
+        // The runner can resume after its deadline with the final reader chunk already queued.
+        sender.send(Message::Data(0, vec![120; 64 * 1024])).unwrap();
+        sender.send(Message::Eof(0)).unwrap();
+        sender.send(Message::Eof(1)).unwrap();
+        let expired = Some(Instant::now() - EXIT_STDIO_GRACE);
+        let Ok(Message::Data(stream, bytes)) =
+            receive(&receiver, Duration::from_secs(3600), expired)
+        else {
+            panic!("queued final 64 KiB was discarded as silence");
+        };
+        assert_eq!(stream, 0);
+        assert_eq!(bytes, vec![120; 64 * 1024]);
+        assert!(matches!(
+            receive(&receiver, Duration::from_secs(3600), expired),
+            Ok(Message::Eof(0))
+        ));
+        assert!(matches!(
+            receive(&receiver, Duration::from_secs(3600), expired),
+            Ok(Message::Eof(1))
+        ));
+        assert!(matches!(
+            receive(&receiver, Duration::from_secs(3600), expired),
+            Err(RecvTimeoutError::Timeout)
+        ));
+    }
+
+    /// A link that accepts nothing until `open_at`, like a client that stops reading; it keeps what it was sent.
+    #[cfg(target_os = "linux")]
+    struct Link {
+        open_at: Instant,
+        sent: Arc<Mutex<Vec<u8>>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl std::io::Write for Link {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            thread::sleep(self.open_at.saturating_duration_since(Instant::now()));
+            self.sent.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run `script` through `run` with output going to a link closed for `closed_for`, behind more unsent output than
+    /// the limit, so reading waits for the link after the first chunk. Returns how long `run` took, the output, and
+    /// what reached the link.
+    #[cfg(target_os = "linux")]
+    fn run_behind_closed_link(
+        script: &str,
+        closed_for: Duration,
+    ) -> (Duration, Arc<Output>, Arc<Mutex<Vec<u8>>>) {
+        let output = Arc::new(Output::default());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut link = Link {
+            open_at: Instant::now() + closed_for,
+            sent: sent.clone(),
+        };
+        // The writer takes the first and waits on the closed link; the second stays unsent.
+        for _ in 0..2 {
+            output.bulk(
+                Frame::with_payload(EVENT, 99, json!({}), vec![0; 4 * 1024 * 1024 + 1]),
+                None,
+            );
+        }
+        let writer = output.clone();
+        thread::spawn(move || writer.run(&mut link));
+        let request = ProcessRequest::from_json(&json!({
+            "argv": ["sh", "-c", script],
+            "cwd": std::env::temp_dir().to_str().unwrap(),
+        }))
+        .unwrap();
+        let started = Instant::now();
+        let reply = run(
+            1,
+            request,
+            &output,
+            &Control::default(),
+            &Groups::default(),
+            &Processes::default(),
+        );
+        assert_eq!(reply.unwrap()["exitCode"], 0);
+        (started.elapsed(), output, sent)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stdout_bytes(sent: &[u8]) -> usize {
+        let mut input = std::io::Cursor::new(sent);
+        let mut total = 0;
+        while let Some(frame) = crate::frame::read_frame(&mut input).unwrap() {
+            if frame.kind == EVENT
+                && frame.json["kind"] == "output"
+                && frame.json["stream"] == "stdout"
+            {
+                total += frame.payload.len();
+            }
+        }
+        total
+    }
+
+    /// One byte more than a Linux pipe holds: the program exits with its last bytes in the pipe while the reader waits.
+    #[cfg(target_os = "linux")]
+    const PAST_PIPE: usize = 64 * 1024 + 1;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn delivers_output_left_in_the_pipe_when_the_link_is_slower_than_the_exit_grace() {
+        let closed_for = Duration::from_millis(500);
+        let (_, output, sent) =
+            run_behind_closed_link(&format!("head -c {PAST_PIPE} /dev/zero"), closed_for);
+        output.close();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&output) > 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stdout_bytes(&sent.lock().unwrap()), PAST_PIPE);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ends_and_stops_reading_when_the_link_never_drains() {
+        let (took, output, _) = run_behind_closed_link(
+            &format!("head -c {PAST_PIPE} /dev/zero"),
+            Duration::from_secs(30),
+        );
+        assert!(took < Duration::from_secs(2), "run took {took:?}");
+        // The readers end and release the output: only this test and the stuck writer hold it.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Arc::strong_count(&output) > 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(Arc::strong_count(&output), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ends_after_the_silence_while_a_descendant_holds_the_pipe() {
+        let (took, output, sent) = run_behind_closed_link(
+            &format!("sleep 5 & head -c {PAST_PIPE} /dev/zero"),
+            Duration::from_millis(500),
+        );
+        assert!(took < Duration::from_secs(2), "run took {took:?}");
+        output.close();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&output) > 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stdout_bytes(&sent.lock().unwrap()), PAST_PIPE);
+    }
+
+    /// Run `start` on a program that exits while a descendant that outlives it writes `tail` (and then `done`), with the
+    /// output's lock held from when `ready` holds until well after that: the loop handles the exit and then cannot go on
+    /// past its silence deadline while the tail is queued, as when it is descheduled. Returns what request 1 output.
+    /// The three commands' loops are tested here together, on this module's link.
+    #[cfg(target_os = "linux")]
+    fn tail_behind_late_loop(
+        ready: impl Fn() -> bool + Send + 'static,
+        start: impl FnOnce(&Arc<Output>, String) -> Result<Value, Failure>,
+    ) -> Vec<u8> {
+        let done = std::env::temp_dir().join(format!(
+            "pi-env-late-loop-{}-{:?}",
+            std::process::id(),
+            thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&done);
+        let output = Arc::new(Output::default());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut link = Link {
+            open_at: Instant::now() + Duration::from_secs(3),
+            sent: sent.clone(),
+        };
+        // More unsent output than the limit, so holding the lock below is possible through `wait_for_room_until`.
+        for _ in 0..2 {
+            output.bulk(
+                Frame::with_payload(EVENT, 99, json!({}), vec![0; 4 * 1024 * 1024 + 1]),
+                None,
+            );
+        }
+        let writer = output.clone();
+        thread::spawn(move || writer.run(&mut link));
+        let holder = {
+            let output = output.clone();
+            let done = done.clone();
+            thread::spawn(move || {
+                while !ready() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                thread::sleep(Duration::from_millis(50));
+                output.wait_for_room_until(|| {
+                    let limit = Instant::now() + Duration::from_secs(5);
+                    while !done.exists() && Instant::now() < limit {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    thread::sleep(Duration::from_millis(300));
+                    true
+                });
+            })
+        };
+        // The terminal's hangup at the program's exit must not end the descendant; ignored before it starts.
+        let script = format!(
+            "trap '' HUP; sleep 0.3; (sleep 0.15; printf tail; : > '{}') & exit 0",
+            done.display()
+        );
+        assert_eq!(start(&output, script).unwrap()["exitCode"], 0);
+        holder.join().unwrap();
+        let _ = std::fs::remove_file(&done);
+        output.close();
+        let limit = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&output) > 1 && Instant::now() < limit {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let sent = sent.lock().unwrap();
+        let mut input = std::io::Cursor::new(&sent[..]);
+        let mut delivered = Vec::new();
+        while let Some(frame) = crate::frame::read_frame(&mut input).unwrap() {
+            if frame.kind == EVENT && frame.id == 1 && frame.json["kind"] == "output" {
+                delivered.extend_from_slice(&frame.payload);
+            }
+        }
+        delivered
+    }
+
+    #[cfg(target_os = "linux")]
+    fn has_tail(delivered: &[u8]) -> bool {
+        delivered.windows(4).any(|window| window == b"tail")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_delivers_output_queued_while_its_loop_was_late() {
+        let delivered = tail_behind_late_loop(
+            || true,
+            |output, script| {
+                let request = crate::exec::ExecRequest::from_json(&json!({
+                    "argv": ["sh", "-c", script],
+                    "cwd": std::env::temp_dir().to_str().unwrap(),
+                }))
+                .unwrap();
+                crate::exec::run(
+                    1,
+                    request,
+                    "/nonexistent",
+                    output,
+                    &Control::default(),
+                    &Groups::default(),
+                )
+            },
+        );
+        assert!(
+            has_tail(&delivered),
+            "delivered {:?}",
+            String::from_utf8_lossy(&delivered)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    /// Like `tail_behind_late_loop`, but for `process` after upstream 032656b6c: the group ends when the program
+    /// exits, so nothing of the program can write after that. Instead the program writes `tail` itself before exiting,
+    /// and it must still be delivered once the loop resumes past the deadline with `tail` queued behind it.
+    fn tail_before_exit_behind_late_loop(
+        ready: impl Fn() -> bool + Send + 'static,
+        start: impl FnOnce(&Arc<Output>, String) -> Result<Value, Failure>,
+    ) -> Vec<u8> {
+        let done = std::env::temp_dir().join(format!(
+            "pi-env-late-loop-exit-{}-{:?}",
+            std::process::id(),
+            thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&done);
+        let output = Arc::new(Output::default());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut link = Link {
+            open_at: Instant::now() + Duration::from_secs(3),
+            sent: sent.clone(),
+        };
+        for _ in 0..2 {
+            output.bulk(
+                Frame::with_payload(EVENT, 99, json!({}), vec![0; 4 * 1024 * 1024 + 1]),
+                None,
+            );
+        }
+        let writer = output.clone();
+        thread::spawn(move || writer.run(&mut link));
+        let holder = {
+            let output = output.clone();
+            let done = done.clone();
+            thread::spawn(move || {
+                while !ready() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                thread::sleep(Duration::from_millis(50));
+                output.wait_for_room_until(|| {
+                    let limit = Instant::now() + Duration::from_secs(5);
+                    while !done.exists() && Instant::now() < limit {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    thread::sleep(Duration::from_millis(300));
+                    true
+                });
+            })
+        };
+        let script = format!("sleep 0.3; printf tail; : > '{}'; exit 0", done.display());
+        assert_eq!(start(&output, script).unwrap()["exitCode"], 0);
+        holder.join().unwrap();
+        let _ = std::fs::remove_file(&done);
+        output.close();
+        let limit = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&output) > 1 && Instant::now() < limit {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let sent = sent.lock().unwrap();
+        let mut input = std::io::Cursor::new(&sent[..]);
+        let mut delivered = Vec::new();
+        while let Some(frame) = crate::frame::read_frame(&mut input).unwrap() {
+            if frame.kind == EVENT && frame.id == 1 && frame.json["kind"] == "output" {
+                delivered.extend_from_slice(&frame.payload);
+            }
+        }
+        delivered
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_delivers_output_queued_while_its_loop_was_late() {
+        let processes = Processes::default();
+        let started = processes.clone();
+        let delivered = tail_before_exit_behind_late_loop(
+            move || started.lock().unwrap().contains_key(&1),
+            |output, script| {
+                let request = ProcessRequest::from_json(&json!({
+                    "argv": ["sh", "-c", script],
+                    "cwd": std::env::temp_dir().to_str().unwrap(),
+                }))
+                .unwrap();
+                run(
+                    1,
+                    request,
+                    output,
+                    &Control::default(),
+                    &Groups::default(),
+                    &processes,
+                )
+            },
+        );
+        assert!(
+            has_tail(&delivered),
+            "delivered {:?}",
+            String::from_utf8_lossy(&delivered)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pty_delivers_output_queued_while_its_loop_was_late() {
+        let terminals = crate::pty::Terminals::default();
+        let started = terminals.clone();
+        let delivered = tail_behind_late_loop(
+            move || started.lock().unwrap().contains_key(&1),
+            |output, script| {
+                let request = crate::pty::PtyRequest::from_json(&json!({
+                    "argv": ["sh", "-c", script],
+                    "cwd": std::env::temp_dir().to_str().unwrap(),
+                    "cols": 80,
+                    "rows": 24,
+                }))
+                .unwrap();
+                crate::pty::run(
+                    1,
+                    request,
+                    output,
+                    &Control::default(),
+                    &Groups::default(),
+                    &terminals,
+                )
+            },
+        );
+        assert!(
+            has_tail(&delivered),
+            "delivered {:?}",
+            String::from_utf8_lossy(&delivered)
+        );
+    }
+
+    #[test]
+    fn receives_cancel_after_exit_deadline() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Message::Cancel).unwrap();
+        assert!(matches!(
+            receive(
+                &receiver,
+                Duration::from_secs(3600),
+                Some(Instant::now() - EXIT_STDIO_GRACE)
+            ),
+            Ok(Message::Cancel)
+        ));
     }
 }
