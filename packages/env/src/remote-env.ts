@@ -63,6 +63,14 @@ export interface RemoteExecutionEnvOptions {
 /** An info record from the daemon. */
 type RemoteFileInfo = { name: string; kind: FileKind | "other"; size: number; mtimeSec: number; mtimeNsec: number };
 type RemoteDirEntry = { name: string; raw?: number[]; info?: RemoteFileInfo; error?: Json };
+type OwnedEntry = {
+	controller: AbortController;
+	stopping: boolean;
+	id?: number;
+	session?: number;
+	done: Promise<void>;
+	outcome?: { failure: ExecutionError | undefined; unconfirmed: boolean };
+};
 
 /** Node's path rules of the remote system. */
 export async function remotePath(connection: Connection): Promise<PlatformPath> {
@@ -360,6 +368,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 	readonly #watchOptions: RemoteWatchOptions;
 	/** Running commands this environment started, for `cleanup()`. */
 	readonly #running = new Map<number, number>();
+	readonly #ownedEntries = new Set<OwnedEntry>();
+	#cleanupFailure: ExecutionError | undefined;
 
 	constructor(options: RemoteExecutionEnvOptions) {
 		this.id = options.id;
@@ -854,6 +864,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 		options: ShellExecOptions | undefined,
 		context: Context,
 	): Promise<Result<ShellExecResult, ExecutionError>> {
+		const owned = process.env.PI_PROCESS_OWNER_BINARY !== undefined;
 		const signal = context.abortSignal;
 		if (signal?.aborted) return err(new ExecutionError("aborted", "aborted"));
 		const timeout = options?.timeout;
@@ -865,30 +876,53 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 				return err(new ExecutionError("timeout", `Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`));
 			}
 		}
-		const inheritEnv = options?.inheritEnv ?? true;
-		let cwd: string;
-		try {
-			cwd = options?.cwd ? await this.#resolve(options.cwd) : this.cwd;
-		} catch (error) {
-			return err(new ExecutionError("unknown", error instanceof Error ? error.message : String(error)));
-		}
-		if (signal?.aborted) return err(new ExecutionError("aborted", "aborted"));
-		const env: Record<string, string> = {};
-		for (const [key, value] of Object.entries(
-			inheritEnv ? { ...this.#shellEnv, ...options?.env } : { ...options?.env },
-		)) {
-			if (value !== undefined) env[key.toWellFormed()] = value;
-		}
+		const controller = new AbortController();
+		let done!: () => void;
+		const entry: OwnedEntry | undefined = owned
+			? {
+					controller,
+					stopping: false,
+					done: new Promise<void>((resolve) => {
+						done = resolve;
+					}),
+				}
+			: undefined;
+		if (entry) this.#ownedEntries.add(entry);
+		let failure: ExecutionError | undefined;
+		let unconfirmed = false;
 		let callbackError: ExecutionError | undefined;
 		let settled = false;
 		let running: number | undefined;
-		const controller = new AbortController();
 		const onAbort = () => controller.abort();
-		signal?.addEventListener("abort", onAbort, { once: true });
+		if (owned) signal?.addEventListener("abort", onAbort, { once: true });
 		try {
+			const inheritEnv = options?.inheritEnv ?? true;
+			let cwd: string;
+			try {
+				cwd = options?.cwd ? await this.#resolve(options.cwd) : this.cwd;
+			} catch (error) {
+				failure = new ExecutionError(
+					"unknown",
+					error instanceof Error ? error.message : String(error),
+					error instanceof Error ? error : undefined,
+				);
+				return err(failure);
+			}
+			if (signal?.aborted || entry?.stopping) {
+				failure = new ExecutionError("aborted", "aborted");
+				return err(failure);
+			}
+			const env: Record<string, string> = {};
+			for (const [key, value] of Object.entries(
+				inheritEnv ? { ...this.#shellEnv, ...options?.env } : { ...options?.env },
+			)) {
+				if (value !== undefined) env[key.toWellFormed()] = value;
+			}
+			if (!owned) signal?.addEventListener("abort", onAbort, { once: true });
 			const { json } = await this.connection.request(
 				"exec",
 				{
+					...(owned ? { owner: { v: 1 } } : {}),
 					...(typeof command === "string" ? { command } : { argv: [...command] }),
 					cwd,
 					env,
@@ -901,8 +935,14 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 				{
 					signal: controller.signal,
 					onStart: (requestId, session) => {
-						running = requestId;
-						this.#running.set(requestId, session);
+						if (entry) {
+							entry.id = requestId;
+							entry.session = session;
+							if (entry.stopping) this.connection.kill(requestId, session);
+						} else {
+							running = requestId;
+							this.#running.set(requestId, session);
+						}
 					},
 					onEvent: (event, payload) => {
 						if (settled || callbackError !== undefined || event.kind !== "output") return;
@@ -920,37 +960,93 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 					},
 				},
 			);
-			if (callbackError) return err(callbackError);
+			if (callbackError) {
+				if (typeof json.spillPath === "string") callbackError.spillPath = json.spillPath;
+				failure = callbackError;
+				return err(failure);
+			}
 			return ok({
 				exitCode: json.exitCode as number,
 				...(typeof json.spillPath === "string" ? { spillPath: json.spillPath } : {}),
 			});
 		} catch (error) {
-			if (callbackError) return err(callbackError);
-			if (!(error instanceof RemoteError)) {
-				return err(new ExecutionError("unknown", error instanceof Error ? error.message : String(error)));
-			}
-			const failure =
-				error.code === "timeout"
-					? new ExecutionError("timeout", `timeout:${timeout}`)
-					: error.code === "aborted"
-						? new ExecutionError("aborted", "aborted")
-						: error.code === "shell_unavailable" || error.code === "spawn_error"
-							? new ExecutionError(error.code, error.message)
-							: new ExecutionError("unknown", error.message);
-			if (typeof error.fields.spillPath === "string") failure.spillPath = error.fields.spillPath;
+			const ownerCause =
+				owned &&
+				error instanceof RemoteError &&
+				error.cause instanceof Error &&
+				"code" in error.cause &&
+				error.cause.code === "ERR_PROCESS_OWNER_CLEANUP"
+					? error.cause
+					: undefined;
+			unconfirmed =
+				ownerCause !== undefined &&
+				error instanceof RemoteError &&
+				(error.fields.owner as Json | undefined)?.state === "unconfirmed";
+			failure = ownerCause
+				? new ExecutionError("unknown", error instanceof Error ? error.message : String(error), ownerCause)
+				: (callbackError ??
+					(error instanceof RemoteError
+						? error.code === "timeout"
+							? new ExecutionError("timeout", `timeout:${timeout}`, error)
+							: error.code === "aborted"
+								? new ExecutionError("aborted", "aborted", error)
+								: error.code === "shell_unavailable" || error.code === "spawn_error"
+									? new ExecutionError(error.code, error.message, error)
+									: new ExecutionError("unknown", error.message, error)
+						: new ExecutionError(
+								"unknown",
+								error instanceof Error ? error.message : String(error),
+								error instanceof Error ? error : undefined,
+							)));
+			if (error instanceof RemoteError && typeof error.fields.spillPath === "string")
+				failure.spillPath = error.fields.spillPath;
 			return err(failure);
 		} finally {
 			settled = true;
 			signal?.removeEventListener("abort", onAbort);
 			if (running !== undefined) this.#running.delete(running);
+			if (entry) {
+				entry.outcome = { failure, unconfirmed };
+				if (unconfirmed) this.#cleanupFailure ??= failure;
+				done();
+				this.#ownedEntries.delete(entry);
+			}
 		}
 	}
 
 	async cleanup(_context: Context): Promise<void> {
-		// Kill without aborting, so the commands settle with their killed status, as `NodeExecutionEnv` does.
-		for (const [id, session] of this.#running) this.connection.kill(id, session);
-		this.#running.clear();
+		const entries = [...this.#ownedEntries];
+		for (const entry of entries) entry.stopping = true;
+		const send = (stop: () => void) => {
+			try {
+				stop();
+				return true;
+			} catch (error) {
+				if (entries.length === 0 && this.#cleanupFailure === undefined) throw error;
+				const message = error instanceof Error ? error.message : String(error);
+				this.#cleanupFailure ??= new ExecutionError(
+					"unknown",
+					message,
+					Object.assign(new Error(message, { cause: error }), { code: "ERR_PROCESS_OWNER_CLEANUP" }),
+				);
+				return false;
+			}
+		};
+		for (const entry of entries) {
+			send(() => {
+				if (entry.id !== undefined && entry.session !== undefined) this.connection.kill(entry.id, entry.session);
+				else entry.controller.abort();
+			});
+		}
+		// Legacy-only cleanup keeps its immediate kill-without-abort behavior.
+		let legacyFailed = false;
+		for (const [id, session] of this.#running) {
+			if (!send(() => this.connection.kill(id, session))) legacyFailed = true;
+		}
+		if (!legacyFailed) this.#running.clear();
+		await Promise.all(entries.map((entry) => entry.done));
+		const failure = this.#cleanupFailure ?? entries.find((entry) => entry.outcome?.unconfirmed)?.outcome?.failure;
+		if (failure) throw failure;
 	}
 }
 
