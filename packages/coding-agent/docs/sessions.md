@@ -75,7 +75,7 @@ Use `--no-session` for an ephemeral run. An ephemeral session cannot be resumed 
 
 Pi stores sessions as plain JSONL and does not compress them itself. To save disk space, use transparent compression provided by your operating system or filesystem, such as NTFS compression, btrfs or ZFS. Readers, extensions and external tools keep seeing plain text.
 
-Run `/session-disk-compression [folder]` to have the agent inspect the session folder and recommend a setup. It changes nothing without your approval. Pi shows a startup warning about this command until you run it; the global setting [`sessionDiskCompressionWarning`](settings.md#sessions-and-context) controls it and is set to `false` when the command runs. The older `sessionDiskCompressionHint` setting, which the earlier one-time tip set by itself, is ignored. Pi never inspects the filesystem for this warning.
+Run `/session-disk-compression [folder]` to have the agent inspect the session folder, test the compression algorithms, levels and deduplication the filesystem supports on a copied sample, and recommend a setup. It changes nothing without your approval. Pi shows a startup warning about this command until you run it; the global setting [`sessionDiskCompressionWarning`](settings.md#sessions-and-context) controls it and is set to `false` when the command runs. The older `sessionDiskCompressionHint` setting, which the earlier one-time tip set by itself, is ignored. Pi never inspects the filesystem for this warning.
 
 Sessions that downstream releases from 1.5.0-xz.399 until this change wrote in compressed form are standard Zstandard frames plus skippable frames. Pi no longer reads them; recover one with `zstd -dc FILE > FILE.plain`, then replace the original with the plain file.
 
