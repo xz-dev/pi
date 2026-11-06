@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+
+/**
+ * True when patch/process-ownership is part of this checkout: it owns the
+ * process-owner builder. Without it the binary embeds no owner daemon, so the
+ * build skips it and acceptance drops the owner-lifecycle gate.
+ */
+export const PROCESS_OWNER_ENABLED = existsSync(fileURLToPath(new URL("../../packages/coding-agent/scripts/build-process-owner.mjs", import.meta.url)));
 
 /** Authoritative xz-dev binary Release target and acceptance matrix. */
 export const BUN_BUILD_FLAGS = Object.freeze(["--minify", "--bytecode", "--format=esm"]);
@@ -110,7 +117,7 @@ function target({ id, bunTarget, os, arch, libc, cpu, runner, buildRunner = runn
 			"version",
 			"help",
 			"list-models",
-			"owner-lifecycle",
+			...(PROCESS_OWNER_ENABLED ? ["owner-lifecycle"] : []),
 			os === "windows" ? "tui-pseudoconsole" : "tui-pseudoterminal",
 			"resource-materialization",
 			"clipboard",

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { cpus, platform, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { bunTarget, EMULATED_SMOKE_SLOWDOWN, smokeLimits } from "./lib/bun-targets.mjs";
+import { bunTarget, EMULATED_SMOKE_SLOWDOWN, PROCESS_OWNER_ENABLED, smokeLimits } from "./lib/bun-targets.mjs";
 import { cpuFeatures } from "./lib/cpu-features.mjs";
 import { collectMacosCrashReports } from "./lib/macos-crash-reports.mjs";
 import { operatingSystemArchitecture } from "./lib/runtime-architecture.mjs";
@@ -126,14 +126,16 @@ try {
 	const listModels = run("list-models", executable, ["--list-models"], { env, maxMs: SMOKE_LIMITS.listModelsMs });
 	if (!listModels.stdout.trim()) throw new Error("list-models produced no output");
 	// The owner probe provisions a standard CI user when this host token is privileged.
-	const ownerStarted = performance.now();
-	const ownerResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), executable, targetId, ownerEvidencePath], { encoding: "utf8", env, timeout: target.os === "windows" ? 1_250_000 : (target.emulated ? 1_100_000 : 460_000) });
-	try { ownerLifecycle = JSON.parse(ownerResult.stdout.trim().split(/\r?\n/).at(-1)); } catch {}
-	commands.push({ name: "owner-lifecycle", command: `${process.execPath} smoke-owner-lifecycle.mjs ${executable}`, status: ownerResult.status, elapsedMs: Math.round(performance.now() - ownerStarted) });
-	if (ownerResult.status !== 0 || ownerLifecycle?.status !== "passed") {
-		// Print the full privilege-drop trail: hosted Darwin/Windows failures are only diagnosable from CI logs.
-		if (ownerLifecycle?.privilegeDrop?.diagnostics) console.error(`owner privilege-drop diagnostics: ${JSON.stringify(ownerLifecycle.privilegeDrop.diagnostics)}`);
-		throw new Error(`owner lifecycle failed: ${ownerLifecycle?.error || ownerResult.stderr || ownerResult.error?.message || "missing evidence"}`);
+	if (PROCESS_OWNER_ENABLED) {
+		const ownerStarted = performance.now();
+		const ownerResult = spawnSync(process.execPath, [join(import.meta.dirname, "smoke-owner-lifecycle.mjs"), executable, targetId, ownerEvidencePath], { encoding: "utf8", env, timeout: target.os === "windows" ? 1_250_000 : (target.emulated ? 1_100_000 : 460_000) });
+		try { ownerLifecycle = JSON.parse(ownerResult.stdout.trim().split(/\r?\n/).at(-1)); } catch {}
+		commands.push({ name: "owner-lifecycle", command: `${process.execPath} smoke-owner-lifecycle.mjs ${executable}`, status: ownerResult.status, elapsedMs: Math.round(performance.now() - ownerStarted) });
+		if (ownerResult.status !== 0 || ownerLifecycle?.status !== "passed") {
+			// Print the full privilege-drop trail: hosted Darwin/Windows failures are only diagnosable from CI logs.
+			if (ownerLifecycle?.privilegeDrop?.diagnostics) console.error(`owner privilege-drop diagnostics: ${JSON.stringify(ownerLifecycle.privilegeDrop.diagnostics)}`);
+			throw new Error(`owner lifecycle failed: ${ownerLifecycle?.error || ownerResult.stderr || ownerResult.error?.message || "missing evidence"}`);
+		}
 	}
 	// Resource materialization: the paste-probed TUI session below unfolds the
 	// embedded native helper into the per-user tmpdir cache (Linux needs a

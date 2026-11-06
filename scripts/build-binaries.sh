@@ -87,10 +87,15 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	# checkout by design) into $build_dir/process-owner so it embeds under
 	# `/$bunfs/root/process-owner` and materializes to cacheRoot/process-owner.
 	# CARGO_BUILD_TARGET comes from the same target descriptor as the Bun
-	# triple, keeping the two matrices locked together.
-	cargo_target=$(node ../../scripts/lib/bun-targets.mjs --get "$target" cargoTarget)
-	CARGO_BUILD_TARGET="$cargo_target" node scripts/build-process-owner.mjs "$build_dir/process-owner"
-	if [[ $target == freebsd-* ]]; then
+	# triple, keeping the two matrices locked together. Builds without
+	# patch/process-ownership have no builder and embed no daemon.
+	owner_assets=()
+	if [[ -f scripts/build-process-owner.mjs ]]; then
+		cargo_target=$(node ../../scripts/lib/bun-targets.mjs --get "$target" cargoTarget)
+		CARGO_BUILD_TARGET="$cargo_target" node scripts/build-process-owner.mjs "$build_dir/process-owner"
+		owner_assets=(--asset="$build_dir/process-owner")
+	fi
+	if [[ $target == freebsd-* && ${#owner_assets[@]} -gt 0 ]]; then
 		# One artifact must run on every supported FreeBSD release; libutil.so.9 (14) became .10 (15).
 		# Assignment (not a for-list) so a readelf failure stops the build under set -e/pipefail.
 		# LLVM readelf (FreeBSD 15) prints "(NEEDED)"; ELF Tool Chain readelf (14) prints "NEEDED" without parentheses.
@@ -102,7 +107,7 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	fi
 	asset_args=(
 		--asset="$build_dir/package.json"
-		--asset="$build_dir/process-owner"
+		${owner_assets[@]+"${owner_assets[@]}"}
 		--asset=README.md
 		--asset=CHANGELOG.md
 		--asset=docs

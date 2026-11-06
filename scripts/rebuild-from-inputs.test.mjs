@@ -681,7 +681,7 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 43);
+	assert.equal(order.length, 42);
 	assert.equal(order[order.indexOf("async-compaction") + 1], "session-compression");
 	assert.ok(sync.includes("refs/heads/patch/session-compression:refs/remotes/origin/patch/session-compression"));
 	assert.ok(sync.includes("            session-compression \\\n"));
@@ -692,8 +692,10 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 		assert.ok(!sync.includes(`test/${file}`));
 	}
 	const downstreamChanges = readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8");
-	assert.equal(order[order.indexOf("single-executable") + 1], "process-ownership");
-	assert.equal(order[order.indexOf("process-ownership") + 1], "env-process-output-drain");
+	// patch/process-ownership is held out of packaging while it is reworked.
+	assert.ok(!order.includes("process-ownership"));
+	assert.ok(!sync.includes("refs/heads/patch/process-ownership"));
+	assert.equal(order[order.indexOf("single-executable") + 1], "env-process-output-drain");
 	assert.equal(order[order.indexOf("env-process-output-drain") + 1], "chord-registry-gc-observation");
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));

@@ -3,11 +3,14 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
-import { bunTarget } from "./lib/bun-targets.mjs";
+import nodeTest from "node:test";
+import { bunTarget, PROCESS_OWNER_ENABLED } from "./lib/bun-targets.mjs";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 import { windowsOwnerGateDependencies } from "./smoke-windows-owner-gate.mjs";
 import { artifactBunFromOwnerRows, assertOwnerLifecycle, ownerPrivilegeDropRequired, smokeOwnerLifecycleAsNonadmin } from "./smoke-owner-lifecycle.mjs";
+
+// The owner harness exercises patch/process-ownership code; skip it when that patch is held out.
+const test = PROCESS_OWNER_ENABLED ? nodeTest : nodeTest.skip;
 
 const standard = { name: "host\\pi-owner-smoke", uid: 1001, euid: 1001, elevated: false, adminGroup: false, mediumIntegrity: true };
 const root = { uid: 0, euid: 0, elevated: true };

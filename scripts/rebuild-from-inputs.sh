@@ -108,7 +108,6 @@ PATCH_ORDER=(
 	model-refresh-session-rebind
 	startup-benchmark-exit
 	single-executable
-	process-ownership
 	env-process-output-drain
 	chord-registry-gc-observation
 	agent-run-failure-seam
@@ -158,7 +157,6 @@ PATCH_ORDER=(
 # is rebased.
 CHAIN_EDGES=(
 	model-refresh:single-executable
-	single-executable:process-ownership
 	single-executable:plugin-dependency-updates
 	agent-run-failure-seam:managed-tool-executions
 	managed-tool-executions:esc-abort

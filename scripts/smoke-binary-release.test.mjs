@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { bunTarget } from "./lib/bun-targets.mjs";
+import { bunTarget, PROCESS_OWNER_ENABLED } from "./lib/bun-targets.mjs";
 import { assertOwnerLifecycle, smokeOwnerLifecycle } from "./smoke-owner-lifecycle.mjs";
 
 // Test-only owner: real detached descendants, deterministic cleanup, no native backend dependency.
@@ -286,8 +286,10 @@ esac
 		assert.equal(record.clipboard.loadedAndCalled, true);
 		assert.equal(record.clipboard.textRead, true);
 		assert.equal(record.clipboard.imageRead, true);
-		assert.equal(record.ownerLifecycle.status, "passed");
-		assertOwnerLifecycle(record.ownerLifecycle, "linux");
+		if (PROCESS_OWNER_ENABLED) {
+			assert.equal(record.ownerLifecycle.status, "passed");
+			assertOwnerLifecycle(record.ownerLifecycle, "linux");
+		} else assert.equal(record.ownerLifecycle, null);
 		assert.equal(record.timingsMs.interactive, 37);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -128,6 +128,8 @@ Pi stores sessions as plain JSONL, exactly as upstream writes them, and does not
 
 ## Process ownership
 
+Not in current releases: `patch/process-ownership` is held out of sync and packaging while it is reworked. The release build and acceptance skip the owner daemon and the owner-lifecycle gate until the patch returns.
+
 Pi owns every subprocess tree it starts and stops it when the task or Pi ends, as an ordinary user, with no root, cgroups or setup.
 
 - Details: [Process ownership](process-ownership.md): owners, per-platform guarantees, macOS limits, remote execution and verification.

@@ -4,12 +4,15 @@ import { createHash } from "node:crypto";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
+import nodeTest from "node:test";
 import { fileURLToPath } from "node:url";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
-import { bunTarget } from "./lib/bun-targets.mjs";
+import { bunTarget, PROCESS_OWNER_ENABLED } from "./lib/bun-targets.mjs";
 import { artifactBunFromOwnerRows } from "./smoke-owner-lifecycle.mjs";
 import { assertWindowsOwnerDependencies, assertWindowsOwnerGate, parseBunOwnerGate, parseWindowsOwnerGate, smokeWindowsOwnerGate, stageWindowsOwnerGate, WINDOWS_OWNER_GATE_TIMEOUT_MS, WINDOWS_OWNER_TEST_NAMES, windowsOwnerGateCommand, windowsOwnerGateDependencies } from "./smoke-windows-owner-gate.mjs";
+
+// The Windows owner gate stages patch/process-ownership sources; skip it when that patch is held out.
+const test = PROCESS_OWNER_ENABLED ? nodeTest : nodeTest.skip;
 
 const target = bunTarget("windows-x64-baseline");
 const identity = { name: "host\\pi-owner-smoke" };

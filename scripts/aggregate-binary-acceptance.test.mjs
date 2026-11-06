@@ -5,10 +5,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { BUN_TARGETS, binaryArchiveName, releaseArchiveName, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
+import { BUN_TARGETS, binaryArchiveName, PROCESS_OWNER_ENABLED, releaseArchiveName, SMOKE_LIMITS, smokeLimits } from "./lib/bun-targets.mjs";
 import { muslSmokeLibraries } from "./prepare-musl-smoke.mjs";
 import { passedWindowsOwnerGate } from "./fixtures/windows-owner-gate.mjs";
 
+const ownerGate = { skip: !PROCESS_OWNER_ENABLED && "patch/process-ownership is not in this checkout" };
 const nativeBytes = Buffer.from("native helper fixture");
 const nativeDigest = createHash("sha256").update(nativeBytes).digest("hex");
 
@@ -223,7 +224,7 @@ for (const [label, mutate] of [
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 
-test("aggregator rejects Windows owner identity without medium integrity evidence", () => {
+test("aggregator rejects Windows owner identity without medium integrity evidence", ownerGate, () => {
 	const value = fixture();
 	try {
 		const target = BUN_TARGETS.find(({ os }) => os === "windows");
@@ -237,7 +238,7 @@ test("aggregator rejects Windows owner identity without medium integrity evidenc
 	} finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 
-test("aggregator rejects missing owner lifecycle evidence and uncontained Windows descendants", () => {
+test("aggregator rejects missing owner lifecycle evidence and uncontained Windows descendants", ownerGate, () => {
 	for (const missing of [true, false]) {
 		const value = fixture();
 		try {
@@ -265,7 +266,7 @@ for (const [label, mutate] of [
 	["skipped test", (owner) => { owner.windowsRuntimeGate.runtimes[0].tests[0].status = "skipped"; owner.windowsRuntimeGate.runtimes[0].counts.skipped = 1; }],
 	["incomplete inventory", (owner) => { owner.windowsRuntimeGate.runtimes[0].tests.pop(); }],
 	["wrong shipped hash", (owner) => { owner.windowsRuntimeGate.runtimes[0].artifact.cliSha256 = "f".repeat(64); }],
-]) test(`aggregator rejects ${label} Windows runtime gate evidence`, () => {
+]) test(`aggregator rejects ${label} Windows runtime gate evidence`, ownerGate, () => {
 	const value = fixture();
 	try {
 		const target = BUN_TARGETS.find(({ os }) => os === "windows");

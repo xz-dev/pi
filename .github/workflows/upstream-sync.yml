@@ -59,7 +59,6 @@ jobs:
             +refs/heads/patch/startup-benchmark-exit:refs/remotes/origin/patch/startup-benchmark-exit \
             +refs/heads/patch/freebsd-support:refs/remotes/origin/patch/freebsd-support \
             +refs/heads/patch/single-executable:refs/remotes/origin/patch/single-executable \
-            +refs/heads/patch/process-ownership:refs/remotes/origin/patch/process-ownership \
             +refs/heads/patch/env-process-output-drain:refs/remotes/origin/patch/env-process-output-drain \
             +refs/heads/patch/chord-registry-gc-observation:refs/remotes/origin/patch/chord-registry-gc-observation \
             +refs/heads/patch/agent-run-failure-seam:refs/remotes/origin/patch/agent-run-failure-seam \
@@ -117,7 +116,6 @@ jobs:
             startup-benchmark-exit \
             freebsd-support \
             single-executable \
-            process-ownership \
             env-process-output-drain \
             chord-registry-gc-observation \
             agent-run-failure-seam \
