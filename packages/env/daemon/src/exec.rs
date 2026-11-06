@@ -14,12 +14,52 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
+/// After the program exited, a reader reads this much more without waiting for the link, so what the program left in its
+/// pipe is not held back past the grace. 1 MiB is Linux's unprivileged pipe-max-size default; a privileged program can
+/// enlarge its pipe beyond it, and output past the allowance (also descendants') waits again under the silence rule.
+pub const EXITED_UNPACED: usize = 1024 * 1024;
+
+/// Wait for the link after a reader passed on `read` bytes. The exit grace is silence of the pipe; waiting for a slow
+/// link here would let it pass with the program's last output still unread, so after `exited` up to `unpaced` more bytes
+/// are read without waiting.
+pub fn wait_for_link(
+    output: &Output,
+    stop: &AtomicBool,
+    exited: &AtomicBool,
+    unpaced: &mut usize,
+    read: usize,
+) {
+    if exited.load(Ordering::SeqCst) {
+        *unpaced = unpaced.saturating_sub(read);
+    }
+    if *unpaced > 0 {
+        output.wait_for_room_until(|| stop.load(Ordering::SeqCst) || exited.load(Ordering::SeqCst));
+    } else {
+        output.wait_for_room(stop);
+    }
+}
+
+/// Receive a reader or control message, waiting at most `wait` and, after the program exited, until the silence deadline
+/// `idle_until`. An expired deadline is not silence while messages are already queued: a loop that resumes late still
+/// gets the reader's last output, or a cancel. A loop ends at the deadline only when this times out.
+pub fn receive(
+    receiver: &Receiver<Message>,
+    wait: Duration,
+    idle_until: Option<Instant>,
+) -> Result<Message, RecvTimeoutError> {
+    let wait = match idle_until {
+        Some(idle) => wait.min(idle.saturating_duration_since(Instant::now())),
+        None => wait,
+    };
+    receiver.recv_timeout(wait)
+}
+
 /// How often a delivery waiting for the link to drain looks again.
 const UNSENT_POLL: Duration = Duration::from_millis(20);
 
@@ -416,12 +456,14 @@ pub fn spawn_reader(
     sender: Sender<Message>,
     stop: Arc<AtomicBool>,
     output: Option<Arc<Output>>,
+    exited: Arc<AtomicBool>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new().spawn(move || {
+        let mut unpaced = EXITED_UNPACED;
         sys::read_pipe(pipe, &stop, |bytes| {
             let delivered = sender.send(Message::Data(stream, bytes.to_vec())).is_ok();
             if let Some(output) = &output {
-                output.wait_for_room(&stop);
+                wait_for_link(output, &stop, &exited, &mut unpaced, bytes.len());
             }
             delivered
         });
@@ -501,6 +543,7 @@ pub fn run(
     groups.lock().unwrap().insert(pid);
     let deadline = request.timeout.map(|timeout| Instant::now() + timeout);
     let stop = Arc::new(AtomicBool::new(false));
+    let exited = Arc::new(AtomicBool::new(false));
     // Without a window, output is not coalesced; reading then waits for the link.
     let gate = if request.window.is_none() {
         Some(output.clone())
@@ -519,11 +562,25 @@ pub fn run(
         Failure::new("spawn_error", error.to_string())
     };
     let stdout = child.stdout.take().unwrap();
-    if let Err(error) = spawn_reader(0, stdout, sender.clone(), stop.clone(), gate.clone()) {
+    if let Err(error) = spawn_reader(
+        0,
+        stdout,
+        sender.clone(),
+        stop.clone(),
+        gate.clone(),
+        exited.clone(),
+    ) {
         return Err(abandon(child, error));
     }
     let stderr = child.stderr.take().unwrap();
-    if let Err(error) = spawn_reader(1, stderr, sender.clone(), stop.clone(), gate) {
+    if let Err(error) = spawn_reader(
+        1,
+        stderr,
+        sender.clone(),
+        stop.clone(),
+        gate,
+        exited.clone(),
+    ) {
         return Err(abandon(child, error));
     }
     if let Err((child, error)) = start_waiter(child, None, sender.clone()) {
@@ -587,10 +644,6 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        if idle_until.is_some_and(|idle| now >= idle) {
-            // A descendant may hold the pipes open after the process exited; stop waiting for it.
-            break;
-        }
         if let Some(pending) = &mut pending
             && !pending.is_empty()
             && now >= pending.next_send()
@@ -602,9 +655,6 @@ pub fn run(
         if let Some(deadline) = deadline.filter(|_| !timed_out) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
-        if let Some(idle) = idle_until {
-            wait = wait.min(idle.saturating_duration_since(now));
-        }
         if let Some(pending) = pending.as_ref().filter(|pending| !pending.is_empty()) {
             wait = wait.min(if unsent.load(Ordering::SeqCst) > 0 {
                 UNSENT_POLL
@@ -612,7 +662,7 @@ pub fn run(
                 pending.next_send().saturating_duration_since(now)
             });
         }
-        match receiver.recv_timeout(wait) {
+        match receive(&receiver, wait, idle_until) {
             Ok(Message::Data(stream, bytes)) => {
                 emit(&mut pending, stream, decoders[stream].decode(&bytes, false));
                 if let Some(spill) = &mut spill {
@@ -629,6 +679,8 @@ pub fn run(
             Ok(Message::Exit(exit)) => {
                 status = Some(Ok(exit));
                 idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
+                exited.store(true, Ordering::SeqCst);
+                output.wake();
             }
             Ok(Message::WaitFailed(error)) => {
                 status = Some(Err(error));
@@ -639,6 +691,12 @@ pub fn run(
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
+            // A descendant may hold the pipes open after the process exited; stop waiting for it.
+            Err(RecvTimeoutError::Timeout)
+                if idle_until.is_some_and(|idle| Instant::now() >= idle) =>
+            {
+                break;
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
