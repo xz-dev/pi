@@ -88,6 +88,16 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));
 		},
+		flushPendingBashComponents: vi.fn(),
+		settledRetryText: undefined,
+		updateTerminalTitle: vi.fn(),
+		checkShutdownRequested: vi.fn(async () => {}),
+		maybeShowInstallChangeWarning: vi.fn(),
+		showStatusIndicator: vi.fn(),
+		autoCompactionEscapeHandler: undefined,
+		editor: {} as { onEscape?: () => void; borderColor?: (text: string) => string },
+		workingVisible: false,
+		updatePendingMessagesDisplay: vi.fn(),
 	};
 }
 
