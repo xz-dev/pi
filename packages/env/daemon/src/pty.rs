@@ -5,7 +5,7 @@
 use crate::errors::Failure;
 use crate::exec::{Control, Groups, running};
 #[cfg(unix)]
-use crate::exec::{Message, kill_group, start_waiter};
+use crate::exec::{EXITED_UNPACED, Message, kill_group, receive, start_waiter, wait_for_link};
 #[cfg(unix)]
 use crate::frame::{EVENT, Frame};
 use crate::output::Output;
@@ -178,6 +178,7 @@ pub fn run(
     ));
 
     let stop = Arc::new(AtomicBool::new(false));
+    let exited = Arc::new(AtomicBool::new(false));
     // A thread that cannot start (a task limit) fails the terminal; the started program is killed and reaped.
     let abandon = |mut child: std::process::Child, error: std::io::Error| {
         stop.store(true, Ordering::SeqCst);
@@ -191,12 +192,14 @@ pub fn run(
         let master = master.clone();
         let sender = sender.clone();
         let stop = stop.clone();
+        let exited = exited.clone();
         let output = output.clone();
         thread::Builder::new().spawn(move || {
+            let mut unpaced = EXITED_UNPACED;
             unix::read(&master, &stop, |bytes| {
                 let delivered = sender.send(Message::Data(0, bytes.to_vec())).is_ok();
                 // Like a full pipe: a program that writes faster than the link waits.
-                output.wait_for_room(&stop);
+                wait_for_link(&output, &stop, &exited, &mut unpaced, bytes.len());
                 delivered
             });
             let _ = sender.send(Message::Eof(0));
@@ -243,18 +246,7 @@ pub fn run(
         if status.is_some() && ended {
             break;
         }
-        let wait = match idle_until {
-            Some(idle) => {
-                let now = Instant::now();
-                if now >= idle {
-                    // A background job may keep the terminal open after the program exited.
-                    break;
-                }
-                idle - now
-            }
-            None => Duration::from_secs(3600),
-        };
-        match receiver.recv_timeout(wait) {
+        match receive(&receiver, Duration::from_secs(3600), idle_until) {
             Ok(Message::Data(_, bytes)) => {
                 output.bulk(
                     Frame::with_payload(EVENT, id, json!({ "kind": "output" }), bytes),
@@ -268,6 +260,8 @@ pub fn run(
             Ok(Message::Exit(exit)) => {
                 status = Some(Ok(exit));
                 idle_until = Some(Instant::now() + EXIT_GRACE);
+                exited.store(true, Ordering::SeqCst);
+                output.wake();
             }
             Ok(Message::WaitFailed(error)) => {
                 status = Some(Err(error));
@@ -278,6 +272,8 @@ pub fn run(
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
+            // A background job may keep the terminal open after the program exited.
+            Err(RecvTimeoutError::Timeout) if idle_until.is_some() => break,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -297,6 +293,115 @@ pub fn run(
             "spawn_error",
             "process did not report its exit",
         )),
+    }
+}
+
+/// The terminal's last output must survive a link slower than the exit grace, as for `exec` and `process`.
+#[cfg(all(test, target_os = "linux"))]
+mod tail_tests {
+    use super::*;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// A link that accepts nothing until `open_at`, like a client that stops reading; it keeps what it was sent.
+    struct Link {
+        open_at: Instant,
+        sent: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for Link {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            thread::sleep(self.open_at.saturating_duration_since(Instant::now()));
+            self.sent.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// One `x`, then (once the reader waits for the link behind more unsent output than the limit) `TAIL` `y`s left in
+    /// the terminal when the program exits.
+    const TAIL: usize = 4000;
+
+    fn run_behind_closed_link(
+        background: &str,
+        closed_for: Duration,
+    ) -> (Duration, Arc<Output>, Arc<Mutex<Vec<u8>>>) {
+        let output = Arc::new(Output::default());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut link = Link {
+            open_at: Instant::now() + closed_for,
+            sent: sent.clone(),
+        };
+        // The writer takes the first and waits on the closed link; the second stays unsent.
+        for _ in 0..2 {
+            output.bulk(
+                Frame::with_payload(EVENT, 99, json!({}), vec![0; 4 * 1024 * 1024 + 1]),
+                None,
+            );
+        }
+        let writer = output.clone();
+        thread::spawn(move || writer.run(&mut link));
+        let script =
+            format!("printf x; sleep 0.2; {background} head -c {TAIL} /dev/zero | tr '\\0' y");
+        let request = PtyRequest::from_json(&json!({
+            "argv": ["sh", "-c", script],
+            "cwd": std::env::temp_dir().to_str().unwrap(),
+            "cols": 80,
+            "rows": 24,
+        }))
+        .unwrap();
+        let started = Instant::now();
+        let reply = run(
+            1,
+            request,
+            &output,
+            &Control::default(),
+            &Groups::default(),
+            &Terminals::default(),
+        );
+        assert_eq!(reply.unwrap()["exitCode"], 0);
+        (started.elapsed(), output, sent)
+    }
+
+    /// Wait until only this test holds `output`, then count the `y`s the terminal delivered.
+    fn delivered_tail(output: Arc<Output>, sent: &Mutex<Vec<u8>>) -> usize {
+        output.close();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&output) > 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let sent = sent.lock().unwrap();
+        let mut input = std::io::Cursor::new(&sent[..]);
+        let mut total = 0;
+        while let Some(frame) = crate::frame::read_frame(&mut input).unwrap() {
+            if frame.kind == EVENT && frame.json["kind"] == "output" {
+                total += frame.payload.iter().filter(|&&byte| byte == b'y').count();
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn delivers_output_left_in_the_terminal_when_the_link_is_slower_than_the_exit_grace() {
+        let (_, output, sent) = run_behind_closed_link("", Duration::from_millis(500));
+        assert_eq!(delivered_tail(output, &sent), TAIL);
+    }
+
+    #[test]
+    fn ends_and_stops_reading_when_the_link_never_drains() {
+        let (took, output, _) = run_behind_closed_link("", Duration::from_secs(30));
+        assert!(took < Duration::from_secs(2), "run took {took:?}");
+        // `run` joined the reader: only this test and the stuck writer hold the output.
+        assert_eq!(Arc::strong_count(&output), 2);
+    }
+
+    #[test]
+    fn ends_after_the_silence_while_a_background_job_holds_the_terminal() {
+        let (took, output, sent) = run_behind_closed_link("sleep 5 &", Duration::from_millis(500));
+        assert!(took < Duration::from_secs(2), "run took {took:?}");
+        assert_eq!(delivered_tail(output, &sent), TAIL);
     }
 }
 
