@@ -76,6 +76,7 @@ describe("collapsed expanded input presentation", () => {
 		controller.addMessageToChat.call(host, userMessage("Review this code: a.ts", "interactive", "/review a.ts"));
 		const view = Object.assign(host, {
 			loadedResourcesContainer: new Container(),
+			pendingMessagesContainer: new Container(),
 			builtInHeader: undefined,
 			showStatus: vi.fn(),
 		});
