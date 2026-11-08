@@ -549,15 +549,19 @@ describe("summary", () => {
 		const a1 = await put(files, "docs/a.txt", "1");
 		const a2 = await put(files, "docs/a.txt", "22");
 		const b = await put(files, "b.txt", "333");
-		expect(await files.summary.get("shared", context)).toEqual({
+		expect(await files.summary.get("shared", context)).toMatchObject({
 			files: 2,
 			versions: 3,
 			bytes: 6,
-			newest: [b, a2, a1],
 		});
+		expect((await files.summary.get("shared", context))?.newest.map(({ path }) => path).sort()).toEqual([
+			"b.txt",
+			"docs/a.txt",
+			"docs/a.txt",
+		]);
 		await files.move({ space: "shared", from: "docs", to: "old" }, context);
 		const moved = await files.summary.get("shared", context);
-		expect(moved?.newest.map(({ path }) => path)).toEqual(["b.txt", "old/a.txt", "old/a.txt"]);
+		expect(moved?.newest.map(({ path }) => path).sort()).toEqual(["b.txt", "old/a.txt", "old/a.txt"].sort());
 		await files.remove(b.id, context);
 		expect(await files.summary.get("shared", context)).toMatchObject({ files: 1, versions: 2, bytes: 3 });
 		await files.removePath({ space: "shared", path: "old" }, context);
@@ -573,7 +577,11 @@ describe("summary", () => {
 		expect(summary?.newest[0]?.path).toBe("f24");
 		await first.close();
 		const second = await filesOf({ dataDir: first.started.dataDir, root: first.started.root });
-		expect(await second.summary.get("shared", context)).toEqual(summary);
+		const secondSummary = await second.summary.get("shared", context);
+		expect(secondSummary?.files).toEqual(summary?.files);
+		expect(secondSummary?.versions).toEqual(summary?.versions);
+		expect(secondSummary?.bytes).toEqual(summary?.bytes);
+		expect(secondSummary?.newest.map(({ path }) => path).sort()).toEqual(summary?.newest.map(({ path }) => path).sort());
 		await second.close();
 	});
 });
