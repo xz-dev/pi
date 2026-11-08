@@ -186,7 +186,16 @@ describe("InteractiveMode pending user bash output", () => {
 			pendingMessagesContainer,
 			pendingBashComponents,
 			compactionQueuedMessages: [],
-			session: { getSteeringMessages: () => ["steer"], getFollowUpMessages: () => [] },
+			session: {
+				getQueuedInputs: () => ({
+					steering: [{ role: "user", content: "steer", timestamp: 0 }],
+					followUp: [],
+				}),
+				getSteeringMessages: () => ["steer"],
+				getFollowUpMessages: () => [],
+			},
+			getUserMessageDisplayText: (message: { content?: unknown } | string) =>
+				typeof message === "string" ? message : String(message.content ?? ""),
 			footer: { invalidate: vi.fn() },
 			programStatus: { handleEvent: vi.fn() },
 			ui: { requestRender: vi.fn() },
