@@ -188,7 +188,7 @@ describe("InteractiveMode pending user bash output", () => {
 			compactionQueuedMessages: [],
 			session: {
 				getQueuedInputs: () => ({
-					steering: [{ role: "user", content: "steer", timestamp: 0 }],
+					steering: [{ role: "user", content: "steer", timestamp: 0, origin: { type: "interactive" } }],
 					followUp: [],
 				}),
 				getSteeringMessages: () => ["steer"],
