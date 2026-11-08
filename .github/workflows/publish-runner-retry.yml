@@ -1,0 +1,56 @@
+name: Publish Runner Retry
+
+# GitHub cancels a job when no hosted runner picks it up ("The job was not
+# acquired by Runner of type hosted"), which happens under macOS arm64 capacity
+# shortages. Rerun the failed jobs of a Release run when, and only when, every
+# failed job was such a runner-acquisition cancellation. Real build or
+# acceptance failures are never retried.
+on:
+  workflow_run:
+    workflows: [Publish GitHub Release]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: publish-runner-retry-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    if: >-
+      github.repository == 'xz-dev/pi' &&
+      github.event.workflow_run.head_repository.full_name == 'xz-dev/pi' &&
+      (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'cancelled') &&
+      github.event.workflow_run.run_attempt < 4
+    runs-on: ubuntu-24.04
+    permissions: { actions: write, checks: read }
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - name: Rerun jobs that never acquired a runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "\(.id)\t\(.runner_id // 0)\t\(.name)"')
+          if [[ -z "$jobs" ]]; then
+            echo "No failed jobs in attempt $RUN_ATTEMPT; nothing to retry."
+            exit 0
+          fi
+          while IFS=$'\t' read -r id runner name; do
+            messages=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$id/annotations" --jq '.[].message')
+            if [[ "$runner" != 0 ]] || ! grep -q 'was not acquired by Runner' <<<"$messages"; then
+              echo "Not retrying: '$name' failed for a reason other than runner acquisition."
+              exit 0
+            fi
+            echo "Runner not acquired: $name"
+          done <<<"$jobs"
+          # Give hosted capacity time to recover before the next attempt.
+          sleep 600
+          echo "Rerunning failed jobs of run $RUN_ID (attempt $RUN_ATTEMPT of at most 4)."
+          gh run rerun "$RUN_ID" --failed --repo "$GITHUB_REPOSITORY"
