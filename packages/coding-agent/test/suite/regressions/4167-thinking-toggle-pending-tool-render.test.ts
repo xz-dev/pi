@@ -53,6 +53,16 @@ type RenderSessionContextThis = {
 	maybeShowAssistantDiagnostics(message: AssistantMessage): void;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	renderSessionItems: RenderSessionItems;
+	flushPendingBashComponents(): void;
+	settledRetryText: unknown;
+	updateTerminalTitle(): void;
+	checkShutdownRequested(): Promise<void>;
+	maybeShowInstallChangeWarning(): void;
+	showStatusIndicator(): void;
+	autoCompactionEscapeHandler: unknown;
+	editor: { onEscape?: () => void; borderColor?: (text: string) => string };
+	workingVisible: boolean;
+	updatePendingMessagesDisplay(): void;
 };
 
 type RenderSessionEntries = (
