@@ -546,8 +546,8 @@ describe("caps", () => {
 describe("summary", () => {
 	it("counts a space's files, versions and bytes and keeps its newest versions", async () => {
 		const files = await filesOf();
-		const a1 = await put(files, "docs/a.txt", "1");
-		const a2 = await put(files, "docs/a.txt", "22");
+		await put(files, "docs/a.txt", "1");
+		await put(files, "docs/a.txt", "22");
 		const b = await put(files, "b.txt", "333");
 		expect(await files.summary.get("shared", context)).toMatchObject({
 			files: 2,
