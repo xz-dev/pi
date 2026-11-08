@@ -18,6 +18,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("openai responses cache affinity e2
 		};
 
 		const response = await complete(model, context, {
+			transport: "sse",
 			apiKey: process.env.OPENAI_API_KEY!,
 			sessionId,
 		});
