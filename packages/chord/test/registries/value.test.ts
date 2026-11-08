@@ -363,9 +363,10 @@ describe("readers' memory", () => {
 		const refs = await (async () => {
 			const reader = await host.get(Reader, { id: 1 }, context);
 			expect(reader.total.value).toBe(2);
+			const refs = objects.filter((ref) => ref.deref()?.label === "app.reader(1)");
 			reader.release();
 			await new Promise((resolve) => setTimeout(resolve, 0));
-			return objects.filter((ref) => ref.deref()?.label === "app.reader(1)");
+			return refs;
 		})();
 		expect(refs.length).toBeGreaterThan(0);
 		await (await host.get(Setter, {}, context)).set(5, context);
