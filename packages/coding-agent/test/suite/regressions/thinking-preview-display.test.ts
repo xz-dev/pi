@@ -310,6 +310,7 @@ describe("thinking preview display", () => {
 			editor,
 			ui,
 			loadedResourcesContainer: new Container(),
+			pendingMessagesContainer: new Container(),
 			showStatus() {},
 		};
 		for (const name of [
