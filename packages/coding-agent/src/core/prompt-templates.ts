@@ -3,8 +3,9 @@ import { basename, dirname, join, resolve, sep } from "path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { SESSION_DISK_COMPRESSION_TEMPLATE } from "./builtin-prompts.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
-import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { BUILTIN_PATH_PREFIX, createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /**
  * Represents a prompt template loaded from a markdown file
@@ -136,7 +137,15 @@ function loadTemplateFromFile(
 		diagnostics.push({ type: "warning", message, path: filePath });
 		return { template: null, diagnostics };
 	}
+	return parseTemplate(rawContent, filePath, sourceInfo);
+}
 
+function parseTemplate(
+	rawContent: string,
+	filePath: string,
+	sourceInfo: SourceInfo,
+): { template: PromptTemplate | null; diagnostics: ResourceDiagnostic[] } {
+	const diagnostics: ResourceDiagnostic[] = [];
 	let frontmatter: Record<string, unknown>;
 	let body: string;
 	try {
@@ -316,6 +325,17 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): LoadPr
 	}
 
 	return { templates, diagnostics };
+}
+
+/** Built-in templates; callers add them after every other source so any same-named template wins. */
+export function loadBuiltinPromptTemplates(): PromptTemplate[] {
+	const path = `${BUILTIN_PATH_PREFIX}prompts/session-disk-compression.md`;
+	const { template } = parseTemplate(
+		SESSION_DISK_COMPRESSION_TEMPLATE,
+		path,
+		createSyntheticSourceInfo(path, { source: "builtin" }),
+	);
+	return template ? [template] : [];
 }
 
 /**
