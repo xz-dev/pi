@@ -272,6 +272,7 @@ describe("message origin rendering", () => {
 			toolOutputExpanded: false,
 			chatContainer,
 			loadedResourcesContainer: new Container(),
+			pendingMessagesContainer: new Container(),
 			showStatus: vi.fn(),
 		};
 		click(a);
