@@ -3,7 +3,7 @@ import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works
 import { Container, Text, type TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import type { SessionEntry } from "../../../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager } from "../../../src/core/session-manager.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
@@ -44,7 +44,7 @@ type RenderSessionContextThis = {
 		getImageWidthCells(): number;
 		getShowCacheMissNotices(): boolean;
 	};
-	sessionManager: { getCwd(): string; getEntries(): SessionEntry[] };
+	sessionManager: Pick<SessionManager, "getCwd" | "getEntries" | "buildSessionProjection">;
 	session: { retryAttempt: number; modelRegistry: { find(provider: string, modelId: string): undefined } };
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
@@ -53,6 +53,16 @@ type RenderSessionContextThis = {
 	maybeShowAssistantDiagnostics(message: AssistantMessage): void;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	renderSessionItems: RenderSessionItems;
+	flushPendingBashComponents(): void;
+	settledRetryText: unknown;
+	updateTerminalTitle(): void;
+	checkShutdownRequested(): Promise<void>;
+	maybeShowInstallChangeWarning(): void;
+	showStatusIndicator(): void;
+	autoCompactionEscapeHandler: unknown;
+	editor: { onEscape?: () => void; borderColor?: (text: string) => string };
+	workingVisible: boolean;
+	updatePendingMessagesDisplay(): void;
 };
 
 type RenderSessionEntries = (
@@ -76,7 +86,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			getImageWidthCells: () => 60,
 			getShowCacheMissNotices: () => false,
 		},
-		sessionManager: { getCwd: () => process.cwd(), getEntries: () => [] },
+		sessionManager: SessionManager.inMemory(),
 		session: { retryAttempt: 0, modelRegistry: { find: () => undefined } },
 		toolOutputExpanded: false,
 		isInitialized: true,
@@ -88,6 +98,16 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));
 		},
+		flushPendingBashComponents: vi.fn(),
+		settledRetryText: undefined,
+		updateTerminalTitle: vi.fn(),
+		checkShutdownRequested: vi.fn(async () => {}),
+		maybeShowInstallChangeWarning: vi.fn(),
+		showStatusIndicator: vi.fn(),
+		autoCompactionEscapeHandler: undefined,
+		editor: {} as { onEscape?: () => void; borderColor?: (text: string) => string },
+		workingVisible: false,
+		updatePendingMessagesDisplay: vi.fn(),
 	};
 }
 
