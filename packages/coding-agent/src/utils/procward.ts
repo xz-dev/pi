@@ -87,6 +87,8 @@ export interface ProcwardBootstrap {
 	/** This process's PID and parent PID (test seam). */
 	readonly selfPid?: number;
 	readonly parentPid?: number;
+	/** True when this build ships the helper (release binaries must). */
+	readonly buildShipsHelper?: boolean;
 }
 
 /**
@@ -119,7 +121,18 @@ export function ownCliProcess(args: readonly string[], bootstrap: ProcwardBootst
 		}
 	}
 	const binary = bootstrap.resolveBinary();
-	if (binary === undefined) return undefined; // feature absent (PROCWARD=0 build, no helper)
+	if (binary === undefined) {
+		// Feature absent. A release build that ships the helper must fail
+		// visibly (broken packaging), pointing at the opt-out; source/npm
+		// trees without a built helper degrade to unmanaged with one notice.
+		if (bootstrap.buildShipsHelper) {
+			throw new Error(
+				"pi: the bundled process-ownership helper is missing from this installation; " +
+				"reinstall pi, or disable ownership with --no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1",
+			);
+		}
+		return undefined;
+	}
 
 	const nonce = randomBytes(16).toString("hex");
 	const childEnv = { ...process.env, [BOOTSTRAP_NONCE]: nonce };

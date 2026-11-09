@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProcwardBinary } from "./config.ts";
+import { isBunBinary, resolveProcwardBinary } from "./config.ts";
 import { setupCli } from "./cli/setup.ts";
 import { runMain } from "./cli-entry.ts";
 import { main } from "./main.ts";
@@ -9,7 +9,10 @@ import { ownCliProcess } from "./utils/procward.ts";
 // whole tree (tools, MCP servers, background children) is owned. Returns an
 // exit code when pi already ran as the outer bootstrap (owner finished), in
 // which case the CLI must not start again.
-const bootstrapStatus = ownCliProcess(process.argv.slice(2), { resolveBinary: resolveProcwardBinary });
+const bootstrapStatus = ownCliProcess(process.argv.slice(2), {
+	resolveBinary: resolveProcwardBinary,
+	buildShipsHelper: isBunBinary,
+});
 if (bootstrapStatus !== undefined) {
 	process.exit(bootstrapStatus);
 }
