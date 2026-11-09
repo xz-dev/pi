@@ -21,6 +21,7 @@ pub fn run(
     command: &OsStr,
     args: &[OsString],
     config: crate::config::Config,
+    retain_descendants: bool,
     mut task: Option<&mut crate::task::Task>,
 ) -> io::Result<u32> {
     if unsafe { SetConsoleCtrlHandler(Some(console_control), 1) } == 0 {
@@ -66,6 +67,20 @@ pub fn run(
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
+        if retain_descendants && !notified {
+            loop {
+                if CLOSING.load(Ordering::SeqCst) || task.as_mut().is_some_and(|task| task.poll()) {
+                    break;
+                }
+                // The wrapper's try_wait observes the Job's empty notification,
+                // not merely the already-exited primary. Keep polling control.
+                if child.try_wait()?.is_some() {
+                    ready?;
+                    return Ok(status.code().expect("native process status") as u32);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
         child.start_kill()?;
         tokio::time::timeout(config.deadline, child.wait())
             .await

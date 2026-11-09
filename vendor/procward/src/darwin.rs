@@ -54,7 +54,17 @@ impl Target {
         true
     }
 }
-pub struct Inventory(HashMap<Pid, Target>, HashSet<Pid>, Progress);
+// The optional task-group leader is our unreaped direct child: its reserved PID
+// prevents another process group from acquiring that number until forget().
+pub struct Inventory(HashMap<Pid, Target>, HashSet<Pid>, Progress, Option<Pid>);
+
+fn list_group(leader: Pid) -> io::Result<Vec<u32>> {
+    // libproc also consults stale errno for an empty group result.
+    errno::set_errno(errno::Errno(0));
+    pids_by_type(ProcFilter::ByProgramGroup {
+        pgrpid: leader.as_raw_nonzero().get() as u32,
+    })
+}
 
 fn list_children(parent: u32) -> io::Result<Vec<u32>> {
     // libproc 0.14.11 checks errno on a valid empty result without clearing stale errno first.
@@ -110,7 +120,7 @@ unsafe fn pid_info<T>(pid: Pid, flavor: libc::c_int) -> io::Result<T> {
 // an exec copy of the proc keeps it. Same-euid processes need one read; for others xnu
 // bsd/kern/proc_info.c proc_pidinfo_internal() denies BSDINFO* with EPERM but serves
 // SHORTBSDINFO and UNIQIDENTIFIERINFO without the same-user check.
-fn identify(pid: Pid) -> io::Result<(Identity, u32)> {
+fn identify(pid: Pid) -> io::Result<(Identity, u32, u32)> {
     // SAFETY: BSDINFOWITHUNIQID writes proc_bsdinfowithuniqid.
     match unsafe { pid_info::<BsdInfoWithUniqueId>(pid, PROC_PIDT_BSDINFOWITHUNIQID) } {
         Ok(info) => {
@@ -128,6 +138,7 @@ fn identify(pid: Pid) -> io::Result<(Identity, u32)> {
                     saved_uid: info.bsd.pbi_svuid,
                 },
                 info.bsd.pbi_ppid,
+                info.bsd.pbi_pgid,
             ))
         }
         Err(error) if error.raw_os_error() == Some(Errno::PERM.raw_os_error()) => {
@@ -137,7 +148,7 @@ fn identify(pid: Pid) -> io::Result<(Identity, u32)> {
     }
 }
 
-fn identify_short(pid: Pid) -> io::Result<(Identity, u32)> {
+fn identify_short(pid: Pid) -> io::Result<(Identity, u32, u32)> {
     // SAFETY: each flavor is paired with its xnu struct.
     let (before, info, after) = unsafe {
         (
@@ -167,10 +178,11 @@ fn identify_short(pid: Pid) -> io::Result<(Identity, u32)> {
             saved_uid: info.pbsi_svuid,
         },
         info.pbsi_ppid,
+        info.pbsi_pgid,
     ))
 }
 
-fn query(pid: Pid) -> io::Result<Option<(Identity, u32)>> {
+fn query(pid: Pid) -> io::Result<Option<(Identity, u32, u32)>> {
     let error = match identify(pid) {
         Ok(found) => return Ok(Some(found)),
         Err(error) if error.raw_os_error().is_none() => return Err(error),
@@ -192,7 +204,7 @@ fn query(pid: Pid) -> io::Result<Option<(Identity, u32)>> {
 }
 
 fn current(pid: Pid) -> io::Result<Option<Identity>> {
-    Ok(query(pid)?.map(|(identity, _)| identity))
+    Ok(query(pid)?.map(|(identity, ..)| identity))
 }
 
 fn signal_if_current(
@@ -209,13 +221,97 @@ fn signal_if_current(
 
 impl Inventory {
     pub fn new() -> Self {
-        Self(HashMap::new(), HashSet::new(), Progress::default())
+        Self(HashMap::new(), HashSet::new(), Progress::default(), None)
+    }
+    // Only the reaper of this direct child may bind its original task group.
+    pub fn pin_task_group(&mut self, primary: Pid) {
+        self.3 = Some(primary);
+    }
+    pub fn may_reap(&mut self, pid: Pid) -> io::Result<bool> {
+        if self.3 != Some(pid) {
+            return Ok(true);
+        }
+        // Establish exit BEFORE checking for an empty group: a live primary
+        // could otherwise fork into the group after the last scan.
+        match process::waitid(
+            process::WaitId::Pid(pid),
+            process::WaitIdOptions::EXITED
+                | process::WaitIdOptions::NOHANG
+                | process::WaitIdOptions::NOWAIT,
+        ) {
+            Ok(Some(status))
+                if status.exit_status().is_some() || status.terminating_signal().is_some() => {}
+            Ok(_) | Err(Errno::INTR) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        self.refresh()?;
+        // Include known detached descendants and unknown observations as blockers.
+        // The primary itself may be an unknown observation once it is a zombie.
+        Ok(self.0.keys().chain(&self.1).all(|known| *known == pid)
+            // Do not infer group emptiness from resolved identities: a listed
+            // member can fork and exit before its identity query completes.
+            && list_group(pid)?
+                .into_iter()
+                .all(|member| member == pid.as_raw_nonzero().get() as u32))
+    }
+    pub fn wait(&mut self) -> io::Result<Option<(Pid, process::WaitStatus)>> {
+        if self.3.is_none() {
+            return process::wait(process::WaitOptions::NOHANG).map_err(io::Error::from);
+        }
+        let direct = children()?;
+        if direct.is_empty() {
+            return Err(Errno::CHILD.into());
+        }
+        // wait(-1) could consume the pinned zombie before we checked its group.
+        // Still reap other direct children while that primary is deferred.
+        for pid in direct {
+            if self.may_reap(pid)? {
+                match process::waitpid(Some(pid), process::WaitOptions::NOHANG) {
+                    Ok(Some(status)) => return Ok(Some(status)),
+                    Ok(None) | Err(Errno::INTR) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(None)
     }
     pub fn progress(&mut self) -> &mut Progress {
         &mut self.2
     }
     pub fn refresh(&mut self) -> io::Result<()> {
-        let root = process::getpid();
+        let root = self.3.unwrap_or_else(process::getpid);
+        // A group snapshot is only a candidate list. The same identity read
+        // must establish membership before it can authorize any later signal.
+        if let Some(leader) = self.3 {
+            for raw in list_group(leader)? {
+                let pid = Pid::from_raw(raw as i32)
+                    .ok_or_else(|| io::Error::other("invalid libproc group PID"))?;
+                match query(pid) {
+                    Ok(Some((identity, _, group)))
+                        if group == leader.as_raw_nonzero().get() as u32 =>
+                    {
+                        self.1.remove(&pid);
+                        let entry = self.0.entry(pid).or_insert(Target {
+                            identity,
+                            term_sent: false,
+                            denied: false,
+                        });
+                        if !entry.follow(identity) {
+                            *entry = Target {
+                                identity,
+                                term_sent: false,
+                                denied: false,
+                            };
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        self.1.insert(pid);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         // Unknown observations remain completion blockers, never signalling authority.
         let mut absent = Vec::new();
         for pid in &self.1 {
@@ -258,7 +354,7 @@ impl Inventory {
                 let pid = Pid::from_raw(raw as i32)
                     .ok_or_else(|| io::Error::other("invalid libproc child PID"))?;
                 match query(pid) {
-                    Ok(Some((identity, ppid))) if ppid == before.pid => {
+                    Ok(Some((identity, ppid, _))) if ppid == before.pid => {
                         observed.push((pid, identity))
                     }
                     Ok(_) => {}
@@ -382,12 +478,20 @@ impl Inventory {
     }
 
     pub fn forget(&mut self, pid: Pid) {
+        // No group query is allowed after the leader's PID becomes reusable.
+        if self.3 == Some(pid) {
+            self.3 = None;
+        }
         self.0.remove(&pid);
         self.1.remove(&pid);
     }
     #[cfg(test)]
     pub(crate) fn knows(&self, pid: Pid) -> bool {
         self.0.contains_key(&pid)
+    }
+
+    pub fn settled(&self) -> io::Result<bool> {
+        Ok(self.is_empty())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -410,6 +514,8 @@ mod tests {
     use super::*;
     use std::{
         fs,
+        io::Write,
+        os::unix::process::CommandExt,
         path::PathBuf,
         process::{Child, Command, Stdio},
         thread,
@@ -426,6 +532,7 @@ mod tests {
         child: Child,
         dir: PathBuf,
         worker: Option<Identity>,
+        reaped: bool,
         expected_escape: bool,
     }
     impl Fixture {
@@ -443,13 +550,15 @@ mod tests {
             let child = Command::new(fixture)
                 .arg(mode)
                 .arg(&dir)
-                .stdin(Stdio::null())
+                .stdin(Stdio::piped())
+                .process_group(0)
                 .spawn()
                 .unwrap();
             Self {
                 child,
                 dir,
                 worker: None,
+                reaped: false,
                 expected_escape: false,
             }
         }
@@ -466,8 +575,10 @@ mod tests {
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            if !self.reaped {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
             if let Some(identity) = self.worker {
                 let pid = Pid::from_raw(identity.pid as i32).unwrap();
                 if current(pid).unwrap() == Some(identity) {
@@ -725,6 +836,159 @@ while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
         );
         assert!(sent);
     }
+    #[test]
+    fn empty_group_query_ignores_stale_errno() {
+        errno::set_errno(errno::Errno(libc::ESRCH));
+        assert!(
+            list_group(Pid::from_raw(i32::MAX).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retained_group_discovers_unseen_orphan_and_pins_primary_through_natural_or_cancel_exit() {
+        let _guard = crate::owner::tests::PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A separate orphaned group must neither be inventoried nor signalled.
+        let mut unrelated = Fixture::new("fast-escape");
+        let other = unrelated.remember("escape-worker");
+        poll(|| unrelated.dir.join("escaped").exists());
+        fs::write(unrelated.dir.join("exit-escape"), b"orphan unrelated work").unwrap();
+        assert!(unrelated.child.wait().unwrap().success());
+        unrelated.reaped = true;
+        poll(|| {
+            query(other)
+                .unwrap()
+                .is_some_and(|(_, parent, _)| parent == 1)
+        });
+        let other_identity = current(other).unwrap();
+        for cancel in [false, true] {
+            let mut fixture = Fixture::new("retained-task");
+            let worker = fixture.remember("retained-worker");
+            let primary = Pid::from_raw(fixture.child.id() as i32).unwrap();
+            let mut inventory = Inventory::new();
+            inventory.pin_task_group(primary);
+            assert!(
+                !inventory.may_reap(primary).unwrap(),
+                "live primary was reapable"
+            );
+            fixture
+                .child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"x")
+                .unwrap();
+            poll(|| {
+                process::waitid(
+                    process::WaitId::Pid(primary),
+                    process::WaitIdOptions::EXITED
+                        | process::WaitIdOptions::NOHANG
+                        | process::WaitIdOptions::NOWAIT,
+                )
+                .unwrap()
+                .is_some_and(|status| status.exit_status() == Some(23))
+            });
+            poll(|| {
+                query(worker)
+                    .unwrap()
+                    .is_some_and(|(_, parent, _)| parent == 1)
+            });
+            // No refresh has run before the primary exits and its worker reparents.
+            assert!(inventory.0.is_empty() && inventory.1.is_empty());
+            assert!(!inventory.may_reap(primary).unwrap());
+            assert!(
+                inventory.knows(worker),
+                "post-exit group scan lost ordinary work"
+            );
+            assert!(!inventory.knows(other));
+            assert!(
+                !inventory.settled().unwrap(),
+                "live work allowed completion"
+            );
+            assert!(
+                inventory.wait().unwrap().is_none(),
+                "primary reaped too early"
+            );
+            assert_eq!(inventory.3, Some(primary));
+            fs::write(
+                fixture.dir.join("retained-probe"),
+                b"prove post-exit liveness",
+            )
+            .unwrap();
+            poll(|| fixture.dir.join("retained-probed").exists());
+            if cancel {
+                let mut result = Some(23);
+                let mut passes = 0;
+                let cleaned = crate::reaper::cleanup(
+                    &mut inventory,
+                    None,
+                    &mut result,
+                    crate::policy::Policy::new(
+                        crate::config::Config::from_millis(100, 100, 2500).unwrap(),
+                        false,
+                    ),
+                    |inventory| {
+                        passes += 1;
+                        // Keep the worker live for one drain pass, then prove
+                        // cancellation did not consume the group pin early.
+                        if passes == 1 {
+                            return Ok(Some(worker));
+                        }
+                        if passes == 2 {
+                            fixture.reaped = inventory.3.is_none();
+                            assert_eq!(inventory.3, Some(primary));
+                            assert_eq!(
+                                process::waitid(
+                                    process::WaitId::Pid(primary),
+                                    process::WaitIdOptions::EXITED
+                                        | process::WaitIdOptions::NOHANG
+                                        | process::WaitIdOptions::NOWAIT,
+                                )
+                                .unwrap()
+                                .unwrap()
+                                .exit_status(),
+                                Some(23)
+                            );
+                        }
+                        Ok(None)
+                    },
+                );
+                fixture.reaped = inventory.3.is_none();
+                cleaned.unwrap();
+                assert!(passes >= 2);
+                assert_eq!(result, Some(23));
+                assert!(!fixture.dir.join("retained-finished").exists());
+            } else {
+                fs::write(fixture.dir.join("retained-release"), b"finish naturally").unwrap();
+                poll(|| inventory.may_reap(primary).unwrap());
+                let waited = inventory.wait().unwrap();
+                fixture.reaped = waited.as_ref().is_some_and(|(pid, _)| *pid == primary);
+                let (pid, status) = waited.expect("exited primary was not reaped");
+                inventory.forget(pid);
+                assert_eq!(pid, primary);
+                assert_eq!(status.exit_status(), Some(23));
+                assert!(fixture.dir.join("retained-finished").exists());
+            }
+            assert!(fixture.reaped);
+            assert_eq!(
+                inventory.3, None,
+                "reaped primary left a reusable group binding"
+            );
+            assert!(inventory.settled().unwrap());
+            assert!(query(worker).unwrap().is_none());
+            assert_eq!(
+                current(other).unwrap(),
+                other_identity,
+                "unrelated group was signalled"
+            );
+        }
+        process::kill_process(other, process::Signal::KILL).unwrap();
+        poll(|| matches!(query(other), Ok(None)));
+    }
+
     #[test]
     fn retained_observation_survives_setsid_and_reparenting_but_unseen_escape_is_explicit() {
         let _guard = crate::owner::tests::PROCESS_LOCK

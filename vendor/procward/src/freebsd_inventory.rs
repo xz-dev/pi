@@ -98,6 +98,10 @@ impl Inventory {
         Ok(())
     }
 
+    pub fn settled(&self) -> io::Result<bool> {
+        Ok(process::get_reaper_pids(None)?.is_empty())
+    }
+
     pub fn empty_except(&self, pid: Pid) -> io::Result<bool> {
         Ok(process::get_reaper_pids(None)?
             .iter()

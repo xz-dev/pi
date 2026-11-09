@@ -43,6 +43,7 @@ pub fn run_owned(
     lease: &rustix::fd::OwnedFd,
     notice: &rustix::fd::OwnedFd,
     config: Config,
+    retain_descendants: bool,
 ) -> io::Result<u8> {
     acquire()?;
     #[cfg(target_os = "linux")]
@@ -94,6 +95,7 @@ pub fn run_owned(
     }
     crate::contract::clear(&mut payload);
     payload.env_remove("PROCWARD_PRIVATE_TASK");
+    payload.env_remove("PROCWARD_PRIVATE_RETAIN_DESCENDANTS");
     if let Some(handoff) = &handoff {
         payload.envs(handoff.environment()?);
     }
@@ -115,6 +117,10 @@ pub fn run_owned(
         .as_mut()
         .map_or(Ok(()), |handoff| handoff.ready(child.id()));
     let mut inventory = Inventory::new();
+    #[cfg(target_os = "macos")]
+    if terminal.is_none() {
+        inventory.pin_task_group(primary);
+    }
     #[cfg(target_os = "linux")]
     if let Some(scope) = scope {
         inventory.own(scope);
@@ -148,36 +154,49 @@ pub fn run_owned(
                     return Ok(());
                 }
             }
-            match process::waitid(
-                WaitId::Pid(primary),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-            ) {
-                Ok(Some(status)) => {
-                    if let Some(code) = status
-                        .exit_status()
-                        .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
-                    {
-                        result = Some(code as u8);
-                        let _ = rustix::io::write(notice, &[b'X', code as u8]);
-                        return Ok(());
+            if result.is_none() {
+                match process::waitid(
+                    WaitId::Pid(primary),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                ) {
+                    Ok(Some(status)) => {
+                        if let Some(code) = status
+                            .exit_status()
+                            .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
+                        {
+                            result = Some(code as u8);
+                            let _ = rustix::io::write(notice, &[b'X', code as u8]);
+                            if !retain_descendants {
+                                return Ok(());
+                            }
+                        } else if status.raw_code() != 0
+                            && !status.stopped()
+                            && !status.continued()
+                            && !status.trapped()
+                        {
+                            // Darwin can report an empty/nonterminal WNOHANG notification.
+                            return Err(io::Error::other(format!(
+                                "unexpected waitid code {}",
+                                status.raw_code()
+                            )));
+                        }
                     }
-                    // Darwin can return a nonterminal/empty notification with WNOHANG.
-                    // Stopped/continued work is still alive and must retain ownership.
-                    if status.raw_code() != 0
-                        && !status.stopped()
-                        && !status.continued()
-                        && !status.trapped()
-                    {
-                        return Err(io::Error::other(format!(
-                            "unexpected waitid code {}",
-                            status.raw_code()
-                        )));
-                    }
+                    Ok(None) | Err(Errno::INTR) => {}
+                    Err(error) => return Err(error.into()),
                 }
-                Ok(None) | Err(Errno::INTR) => {}
-                Err(error) => return Err(error.into()),
             }
-            reap_adopted(primary, &mut inventory)?;
+            // In retained task mode, X ends the command, not its ownership. Reap
+            // ready exits without signalling live work; Darwin pins the primary
+            // until a post-exit inventory scan finds no remaining work.
+            let retained_primary = (result.is_none() || !retain_descendants).then_some(primary);
+            reap_adopted(retained_primary, &mut inventory)?;
+            if retain_descendants
+                && result.is_some()
+                && children()?.is_empty()
+                && inventory.settled()?
+            {
+                return Ok(());
+            }
             // Fatal requests select one immutable policy now, even if primary ignores TERM.
             let events: Vec<_> = signals.pending().collect();
             if let Some(signal) = events
@@ -224,7 +243,9 @@ pub fn run_owned(
     })();
     let policy = Policy::new(config, false);
     let published = crate::owner::publish(notice, policy);
-    let notified = if owner_lost || requested.is_some() || observed.is_err() {
+    let primary_released = retain_descendants && result.is_some();
+    let notified = if (owner_lost || requested.is_some() || observed.is_err()) && !primary_released
+    {
         handoff
             .as_mut()
             .map_or(Ok(()), |handoff| handoff.owner_lost())
@@ -232,14 +253,14 @@ pub fn run_owned(
         Ok(())
     };
     let forwarded = match requested {
-        Some(signal) => child.signal(signal),
-        None => Ok(()),
+        Some(signal) if !primary_released => child.signal(signal),
+        _ => Ok(()),
     };
     let mut fatal = observed.is_err() || requested.is_some() || owner_lost;
     let result_sent = result.is_some();
     cleanup(
         &mut inventory,
-        Some(primary),
+        (!primary_released).then_some(primary),
         &mut result,
         policy,
         |inventory| {
@@ -309,9 +330,13 @@ pub fn run_owned(
     result.ok_or_else(|| io::Error::other("primary result missing after cleanup"))
 }
 
-fn reap_adopted(primary: Pid, inventory: &mut Inventory) -> io::Result<()> {
+fn reap_adopted(primary: Option<Pid>, inventory: &mut Inventory) -> io::Result<()> {
     for pid in children()? {
-        if pid != primary {
+        if Some(pid) != primary {
+            #[cfg(target_os = "macos")]
+            if !inventory.may_reap(pid)? {
+                continue;
+            }
             match process::waitpid(Some(pid), WaitOptions::NOHANG) {
                 Ok(Some((_, status)))
                     if status.exit_status().is_some() || status.terminating_signal().is_some() =>
@@ -348,16 +373,26 @@ pub(crate) fn cleanup(
         inventory.advance(phase, protected)?;
         // Drain ready exits before another tree walk; rescanning for every zombie makes
         // teardown quadratic and can spend the whole deadline after the work already died.
+        #[cfg(target_os = "linux")]
+        let mut reaped = false;
         loop {
             if policy.phase(crate::policy::now()) == Phase::Expired {
                 continue 'cleanup;
             }
-            match process::wait(WaitOptions::NOHANG) {
+            #[cfg(target_os = "macos")]
+            let waited = inventory.wait();
+            #[cfg(not(target_os = "macos"))]
+            let waited = process::wait(WaitOptions::NOHANG).map_err(io::Error::from);
+            match waited {
                 Ok(Some((pid, status))) => {
                     if let Some(code) = status
                         .exit_status()
                         .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
                     {
+                        #[cfg(target_os = "linux")]
+                        {
+                            reaped = true;
+                        }
                         inventory.forget(pid);
                         if Some(pid) == primary {
                             if let Some(expected) =
@@ -374,8 +409,8 @@ pub(crate) fn cleanup(
                     }
                     continue;
                 }
-                Err(Errno::INTR) => continue,
-                Err(Errno::CHILD) => {
+                Err(error) if error.raw_os_error() == Some(Errno::INTR.raw_os_error()) => continue,
+                Err(error) if error.raw_os_error() == Some(Errno::CHILD.raw_os_error()) => {
                     // No reapable child is not enough while the owned workload group is populated.
                     #[cfg(target_os = "linux")]
                     if !inventory.settled()? {
@@ -389,9 +424,15 @@ pub(crate) fn cleanup(
                     }
                     return Ok(());
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
                 Ok(None) => break,
             }
+        }
+        // Fresh adoptions must not pay a fixed delay for each tree generation.
+        #[cfg(target_os = "linux")]
+        if phase == Phase::Kill && reaped {
+            thread::yield_now();
+            continue;
         }
         if protected.is_some() {
             thread::yield_now();
