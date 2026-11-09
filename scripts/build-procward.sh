@@ -47,18 +47,23 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
+# The default Rust host triple, so --triple matching the host builds without a
+# rustup target add (build-binaries.sh runs on native per-platform runners).
+rust_host_triple() {
+    rustc -vV 2>/dev/null | awk '/^host:/ {print $2}'
+}
+
 cd "$VENDOR_DIR"
-if [[ -n "$TRIPLE" ]]; then
+if [[ -n "$TRIPLE" ]] && [[ "$TRIPLE" != "$(rust_host_triple)" ]]; then
     echo "==> Building procward for $TRIPLE..."
     cargo build --release --target "$TRIPLE"
     BIN="target/$TRIPLE/release/procward"
-    OUT_DIR="$OUT_ROOT/$TRIPLE"
 else
     echo "==> Building procward for host..."
     cargo build --release
     BIN="target/release/procward"
-    OUT_DIR="$OUT_ROOT/host"
 fi
+OUT_DIR="$OUT_ROOT/${TRIPLE:-host}"
 
 mkdir -p "$OUT_DIR"
 rm -f "$OUT_DIR/procward" "$OUT_DIR/procward.exe"

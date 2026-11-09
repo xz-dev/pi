@@ -114,8 +114,12 @@ else
     PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 windows-arm64)
 fi
 
-# Compile the vendored procward helper for every platform being packaged.
-# PROCWARD=0 in the environment produces a package without process ownership.
+# Compile the vendored procward helper for the platforms being packaged.
+# Each build-binaries run executes on a native runner for its platform
+# (publish-github-release.yml asserts RUNNER_OS/RUNNER_ARCH), so the helper
+# is built with the host toolchain and filed under the matching triple;
+# no cross-compilation targets are needed. PROCWARD=0 in the environment
+# produces a package without process ownership.
 declare -A PROWARD_TRIPLES=(
     [darwin-arm64]="aarch64-apple-darwin"
     [darwin-x64]="x86_64-apple-darwin"
@@ -124,11 +128,12 @@ declare -A PROWARD_TRIPLES=(
     [windows-x64]="x86_64-pc-windows-msvc"
     [windows-arm64]="aarch64-pc-windows-msvc"
 )
+cd "$(dirname "$0")/.."
 for platform in "${PLATFORMS[@]}"; do
-    echo "==> Building procward for $platform..."
-    "$PWD/scripts/build-procward.sh" --triple "${PROWARD_TRIPLES[$platform]}"
+    echo "==> Building procward for $platform (host toolchain)..."
+    ./scripts/build-procward.sh --triple "${PROWARD_TRIPLES[$platform]}"
 done
-
+cd - >/dev/null
 
 for platform in "${PLATFORMS[@]}"; do
     echo "Building for $platform..."
