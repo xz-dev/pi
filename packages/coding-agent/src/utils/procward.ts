@@ -20,6 +20,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { consumeManagedContract, type ManagedContract } from "./managed-child.ts";
 
 // One-shot marker for pi's own re-exec handoff. Not a security boundary
 // against a hostile parent: procward's contract validation proves
@@ -81,6 +82,11 @@ export function clearBootstrapNonce(): void {
 export interface ProcwardBootstrap {
 	/** Resolve the vendored procward helper, or undefined when absent. */
 	readonly resolveBinary: () => string | undefined;
+	/** Validate the managed-child contract for this process (test seam). */
+	readonly consumeContract?: typeof consumeManagedContract;
+	/** This process's PID and parent PID (test seam). */
+	readonly selfPid?: number;
+	readonly parentPid?: number;
 }
 
 /**
@@ -100,11 +106,17 @@ export function ownCliProcess(args: readonly string[], bootstrap: ProcwardBootst
 		return undefined;
 	}
 	if (hasBootstrapNonce()) {
-		// Our own handoff: procward's contract (lifecycle pipe + READY with
-		// matching launch id and immediate parent) has already validated this
-		// exact relationship. One-shot: consume the marker.
+		// Our own handoff, proven by procward's lifecycle contract: a valid
+		// READY record whose owner is our immediate parent and whose launch id
+		// matches the environment. Anything stale or mismatched fails closed.
+		const contract = validateOwnHandoff(bootstrap);
 		clearBootstrapNonce();
-		return undefined;
+		if (contract === undefined) {
+			// Environment did not claim management; the nonce is stale garbage.
+			// Treat as unmanaged and fall through to wrapping.
+		} else {
+			return undefined;
+		}
 	}
 	const binary = bootstrap.resolveBinary();
 	if (binary === undefined) return undefined; // feature absent (PROCWARD=0 build, no helper)
@@ -118,4 +130,12 @@ export function ownCliProcess(args: readonly string[], bootstrap: ProcwardBootst
 		env: childEnv,
 	});
 	return result.status ?? 125;
+}
+
+/** Result of validating our own bootstrap handoff. */
+function validateOwnHandoff(bootstrap: ProcwardBootstrap): ManagedContract | undefined {
+	const consume = bootstrap.consumeContract ?? consumeManagedContract;
+	const selfPid = bootstrap.selfPid ?? process.pid;
+	const parentPid = bootstrap.parentPid ?? (process.ppid ?? 0);
+	return consume(process.env, selfPid, parentPid);
 }
