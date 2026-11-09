@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseStreamingJson, parseToolCallArguments } from "../src/utils/json-parse.ts";
+import { encodeToolCallArguments, parseStreamingJson, parseToolCallArguments } from "../src/utils/json-parse.ts";
 
 describe("parseStreamingJson", () => {
 	// #10868
@@ -53,5 +53,33 @@ describe("parseToolCallArguments", () => {
 			arguments: {},
 			argumentsError: "Tool arguments must be a JSON object\n\nReceived arguments:\n[1,2]",
 		});
+	});
+});
+
+describe("encodeToolCallArguments", () => {
+	const raw = '{"command": "echo one"}';
+
+	it("replays the model's original text unchanged", () => {
+		expect(encodeToolCallArguments(parseToolCallArguments(raw, { keepJson: true }))).toBe(raw);
+	});
+
+	it("keeps no text that a fresh encoding reproduces, or when not asked to", () => {
+		expect(parseToolCallArguments('{"a":1}', { keepJson: true }).argumentsJson).toBeUndefined();
+		expect(parseToolCallArguments(raw).argumentsJson).toBeUndefined();
+	});
+
+	it("re-encodes arguments that no longer match the original text", () => {
+		const call = { ...parseToolCallArguments(raw, { keepJson: true }), arguments: { command: "echo two" } };
+		expect(encodeToolCallArguments(call)).toBe('{"command":"echo two"}');
+	});
+
+	it("does not keep repaired text, which is not valid JSON", () => {
+		const call = parseToolCallArguments(String.raw`{"note": "\url"}`, { keepJson: true });
+		expect(call.argumentsJson).toBeUndefined();
+		expect(encodeToolCallArguments(call)).toBe(JSON.stringify({ note: "\\url" }));
+	});
+
+	it("encodes calls without original text", () => {
+		expect(encodeToolCallArguments({ arguments: { a: 1 } })).toBe('{"a":1}');
 	});
 });
