@@ -20,7 +20,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { consumeManagedContract, type ManagedContract } from "./managed-child.ts";
+import { consumeManagedContract, observeOwnerLoss, type ManagedContract } from "./managed-child.ts";
 
 // One-shot marker for pi's own re-exec handoff. Not a security boundary
 // against a hostile parent: procward's contract validation proves
@@ -89,6 +89,10 @@ export interface ProcwardBootstrap {
 	readonly parentPid?: number;
 	/** True when this build ships the helper (release binaries must). */
 	readonly buildShipsHelper?: boolean;
+	/** Bridge validated owner loss into pi's shutdown path (test seam). */
+	readonly onOwnerLoss?: (reason: string) => void;
+	/** Observe the lifecycle pipe for owner loss (test seam). */
+	readonly observeLoss?: typeof observeOwnerLoss;
 }
 
 /**
@@ -117,6 +121,12 @@ export function ownCliProcess(args: readonly string[], bootstrap: ProcwardBootst
 			// Environment did not claim management; the nonce is stale garbage.
 			// Treat as unmanaged and fall through to wrapping.
 		} else {
+			// Managed by our own handoff: watch the lifecycle pipe. When the
+			// owner disappears, pi shuts down through its signal path (graceful
+			// hooks, bounded) while the independent watchdog enforces the exit.
+			const observe = bootstrap.observeLoss ?? observeOwnerLoss;
+			const onLoss = bootstrap.onOwnerLoss ?? defaultOwnerLoss;
+			observe(contract, (reason) => onLoss(reason));
 			return undefined;
 		}
 	}
@@ -151,4 +161,15 @@ function validateOwnHandoff(bootstrap: ProcwardBootstrap): ManagedContract | und
 	const selfPid = bootstrap.selfPid ?? process.pid;
 	const parentPid = bootstrap.parentPid ?? (process.ppid ?? 0);
 	return consume(process.env, selfPid, parentPid);
+}
+
+/**
+ * Default owner-loss bridge: re-enter pi through its SIGTERM shutdown path
+ * (the same one external terminators use), which runs graceful hooks. The
+ * 7-second watchdog armed by observeOwnerLoss bounds the exit even when a
+ * hook never yields.
+ */
+function defaultOwnerLoss(reason: string): void {
+	process.stderr.write(`pi: process owner gone (${reason}); shutting down\n`);
+	process.kill(process.pid, "SIGTERM");
 }

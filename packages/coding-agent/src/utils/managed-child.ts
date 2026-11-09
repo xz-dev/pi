@@ -19,6 +19,7 @@
  */
 
 import { readSync } from "node:fs";
+import { Worker } from "node:worker_threads";
 
 const MAX_RECORD_BYTES = 256;
 
@@ -130,4 +131,64 @@ export function consumeManagedContract(
 	if (Number(ownerPid) !== parentPid) throw new Error("procward: owner is not the immediate parent");
 
 	return { ownerPid: Number(ownerPid), launchId, lifecycleFd: Number(env.lifecycleFd) };
+}
+
+/**
+ * Observe the lifecycle pipe for owner loss after a validated contract.
+ *
+ * A dedicated worker thread blocks on the inherited pipe fd: procward closes
+ * it when the owner exits, so EOF (or an OWNER-LOSS record) wakes the worker,
+ * which posts back to the main thread. The main loop staying busy cannot
+ * delay detection, and `onLoss` runs on the event loop; the independent
+ * watchdog below bounds the whole shutdown even if hooks never yield.
+ */
+export function observeOwnerLoss(contract: ManagedContract, onLoss: (reason: string) => void): () => void {
+	const workerSource = `
+import { parentPort } from "node:worker_threads";
+import { readSync } from "node:fs";
+const fd = ${contract.lifecycleFd};
+const scratch = Buffer.alloc(256);
+for (;;) {
+	let n;
+	try {
+		n = readSync(fd, scratch, 0, scratch.length, null);
+	} catch {
+		parentPort.postMessage({ reason: "read-error" });
+		break;
+	}
+	if (n === 0) {
+		parentPort.postMessage({ reason: "eof" });
+		break;
+	}
+	const line = scratch.subarray(0, n).toString("utf8").trim();
+	if (line.startsWith("PROCWARD/1 OWNER-LOSS")) {
+		parentPort.postMessage({ reason: "owner-loss" });
+		break;
+	}
+	// Any other record: keep reading until EOF.
+}
+`;
+	const workerUrl = new URL(`data:text/javascript;base64,${Buffer.from(workerSource, "utf8").toString("base64")}`);
+	const worker = new Worker(workerUrl, {
+		// The inherited fd number is meaningful only in this process.
+		resourceLimits: { maxOldGenerationSizeMb: 32 },
+	});
+	const watchdog = setTimeout(() => {
+		// Hooks had their budget; enforce the bounded exit independently.
+		process.kill(process.pid, "SIGKILL");
+	}, 7000);
+	watchdog.unref?.();
+	const done = () => {
+		clearTimeout(watchdog);
+		void worker.terminate();
+	};
+	worker.on("message", (message: { reason: string }) => {
+		done();
+		onLoss(message.reason);
+	});
+	worker.on("error", () => {
+		done();
+		onLoss("worker-error");
+	});
+	return done;
 }
