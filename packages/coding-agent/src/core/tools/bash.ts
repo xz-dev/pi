@@ -17,6 +17,8 @@ import { OutputAccumulator } from "./output-accumulator.ts";
 import { BASH_UPDATE_THROTTLE_MS, createShellRenderers } from "./renderers/bash.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
+import { prepareOwnedSpawn, type OwnedSpawn } from "./owned-exec.ts";
+import type { OwnedSession } from "../process-registry.ts";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 /** Output limit of `structuredContent.output`, which programmatic callers such as codemode scripts receive. */
@@ -107,7 +109,22 @@ class ShellTimeoutError extends Error {
 }
 
 /** Shared process execution used by the built-in shell tools. */
-export function createLocalShellOperations(shellName: string, resolveShellConfig: () => ShellConfig): BashOperations {
+export interface ShellOwnershipOptions {
+	/** Resolved vendored procward binary; undefined disables wrapping. */
+	readonly procwardBinary: string | undefined;
+	/** Registry that tracks owned tasks for process_list/process_kill. */
+	readonly registry: OwnedSession;
+	/** Whether pi runs with process ownership enabled. */
+	readonly enabled: boolean;
+	/** Reason recorded in the registry ("bash tool", "user_bash", ...). */
+	readonly purpose: string;
+}
+
+export function createLocalShellOperations(
+	shellName: string,
+	resolveShellConfig: () => ShellConfig,
+	ownership?: ShellOwnershipOptions,
+): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout, env }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
@@ -122,13 +139,30 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			}
 
 			const commandFromStdin = shellConfig.commandTransport === "stdin";
-			const child = spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
-				cwd,
-				detached: process.platform !== "win32",
-				env: env ?? getShellEnv(),
-				stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
-				windowsHide: true,
-			});
+			const shellArgs = commandFromStdin ? shellConfig.args : [...shellConfig.args, command];
+			let owned: OwnedSpawn | undefined;
+			if (ownership?.enabled && ownership.procwardBinary !== undefined) {
+				owned = await prepareOwnedSpawn(
+					{ procwardBinary: ownership.procwardBinary, registry: ownership.registry, purpose: ownership.purpose },
+					shellConfig.shell,
+					shellArgs,
+				);
+			}
+			const child = owned
+				? spawn(owned.command, owned.args, {
+						cwd,
+						env: env ?? getShellEnv(),
+						stdio: owned.stdio as never,
+						windowsHide: true,
+					})
+				: spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
+						cwd,
+						detached: process.platform !== "win32",
+						env: env ?? getShellEnv(),
+						stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
+						windowsHide: true,
+					});
+			const ownedTask = owned ? owned.finalize(child.pid) : undefined;
 			if (commandFromStdin) {
 				child.stdin?.on("error", () => {});
 				child.stdin?.end(command);
@@ -143,6 +177,14 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			let exitedBeforeDeadlineAfterMs: number | undefined;
 			let timeoutHandle: NodeJS.Timeout | undefined;
 			const onAbort = () => {
+				if (owned) {
+					// Cancellation goes through the control endpoint; the owner's
+					// grace/fatal-grace ladder replaces the local tree kill.
+					void owned.cancel().then(({ unconfirmed }) => {
+						if (ownedTask && unconfirmed) ownedTask.status = "unconfirmed";
+					});
+					return;
+				}
 				if (child.pid) killProcessTree(child.pid);
 			};
 
@@ -185,6 +227,21 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				return { exitCode: resolvedExitCode };
 			} finally {
+				if (ownedTask) {
+					// The wrapper outlives the primary while descendants live (it
+				// owns them); reaching here means the stdio pipes drained. Probe
+					// the wrapper: still running means background descendants remain.
+					let descendantsAlive = false;
+					if (owned && child.pid) {
+						try {
+							process.kill(child.pid, 0);
+							descendantsAlive = true;
+						} catch {
+							descendantsAlive = false;
+						}
+					}
+					ownership?.registry.settle(ownedTask.id, { descendantsAlive, unconfirmed: false });
+				}
 				if (child.pid) untrackDetachedChildPid(child.pid);
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
@@ -199,8 +256,11 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
-export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
-	return createLocalShellOperations("bash", () => getShellConfig(options?.shellPath));
+export function createLocalBashOperations(options?: {
+	shellPath?: string;
+	ownership?: ShellOwnershipOptions;
+}): BashOperations {
+	return createLocalShellOperations("bash", () => getShellConfig(options?.shellPath), options?.ownership);
 }
 
 export interface BashSpawnContext {
