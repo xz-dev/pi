@@ -49,3 +49,4 @@ packages/agent/docs/extensions/pi-server-artifact/index.md
 
 # Vendored procward build output (compiled at package time)
 vendor/procward/target/
+packages/coding-agent/native/procward/
