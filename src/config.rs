@@ -7,6 +7,13 @@ pub struct Config {
     pub fatal_grace: Duration,
     pub deadline: Duration,
 }
+
+pub struct RunOptions {
+    pub cleanup: Config,
+    pub control: Option<u64>,
+    pub retain_descendants: bool,
+    pub command_index: usize,
+}
 impl Default for Config {
     fn default() -> Self {
         Self::from_millis(6000, 3000, 7500).expect("default cleanup policy is valid")
@@ -52,15 +59,32 @@ fn duration(text: &str) -> Result<Duration, String> {
     Ok(Duration::from_millis(millis))
 }
 
-pub fn options(args: &[OsString]) -> Result<(Config, Option<u64>, usize), (u8, String)> {
+pub fn options(args: &[OsString]) -> Result<RunOptions, (u8, String)> {
     let mut config = Config::default();
     let mut control = None;
+    let mut retain_descendants = false;
     let mut index = 0;
     let mut seen = 0;
     while let Some(option) = args.get(index) {
         if option == "--" {
             config.validate().map_err(|error| (2, error))?;
-            return Ok((config, control, index + 1));
+            if retain_descendants && control.is_none() {
+                return Err((2, "--retain-descendants requires task control".into()));
+            }
+            return Ok(RunOptions {
+                cleanup: config,
+                control,
+                retain_descendants,
+                command_index: index + 1,
+            });
+        }
+        if option == "--retain-descendants" {
+            if retain_descendants {
+                return Err((2, "duplicate --retain-descendants option".into()));
+            }
+            retain_descendants = true;
+            index += 1;
+            continue;
         }
         if option
             == if cfg!(windows) {

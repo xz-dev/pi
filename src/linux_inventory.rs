@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 use rustix::{
+    event::{PollFd, PollFlags, Timespec, poll},
     fd::OwnedFd,
     io::Errno,
     process::{self, Pid, PidfdFlags},
 };
-use std::os::fd::AsFd;
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
@@ -219,13 +219,9 @@ impl Inventory {
                 Err(error) if scarce(&error) => continue,
                 Err(error) => return Err(error),
             };
-            // Edges observed after the parent's confirmed death are final: a
-            // dead process cannot fork, so its children list can no longer
-            // grow. Descendants of death-confirmed parents skip the per-child
-            // parent-rebirth read below; halving /proc traffic keeps the walk
-            // inside the deadline on throttled vCPUs.
-            // The parent's own birth read doubles as the liveness probe: a
-            // vanished entry proves death; a changed birth is handled above.
+            // Previously observed children remain owned if their parent is
+            // reaped during validation. This snapshot can omit reparenting
+            // children; cleanup must rescan fresh adoptions after reap progress.
             let parent_dead = expected.is_some() && matches!(birth(parent), Ok(None));
             for (pid, observed) in observed_edges {
                 // The protected keeper and its whole subtree are never reached.
@@ -241,9 +237,8 @@ impl Inventory {
                     Err(error) if scarce(&error) => continue,
                     Err(error) => return Err(error),
                 };
-                // The handle and the edge must name the observed child of the still-same parent.
-                // A death-confirmed parent's edges are frozen; only the child's own birth
-                // needs checking against the observed edge.
+                // The handle must name the observed child. If the parent is
+                // already reaped, validate the child's own birth after adoption.
                 if parent_dead {
                     match birth(pid) {
                         Ok(Some(child)) if child == observed => {}
@@ -269,27 +264,15 @@ impl Inventory {
                     }
                     Err(error) => return Err(error.into()),
                 }
-                // Wait for a member's death only when it has children to
-                // protect: a fork relay always carries its successor as an
-                // observed child, and only a still-live parent can hand over
-                // mid-kill. A blocking waitid returns as soon as the kernel
-                // marks the SIGKILLed member dead, so relays cannot out-fork a
-                // waiter; childless leaves skip the wait entirely, keeping the
-                // walk fast across wide spreads. The original deadline stays
-                // enforced between members, and a denied member is skipped at once.
+                // pidfd readiness observes nondirect exit too; waitid's ECHILD
+                // does not prove death. Keep waits inside the original policy.
                 let has_children = match edges(pid) {
                     Ok(children) => !children.is_empty(),
                     Err(error) if scarce(&error) => true,
                     Err(error) => return Err(error),
                 };
-                if !denied && has_children {
-                    match process::waitid(
-                        process::WaitId::PidFd(fd.as_fd()),
-                        process::WaitIdOptions::EXITED | process::WaitIdOptions::NOWAIT,
-                    ) {
-                        Ok(_) | Err(Errno::INTR) | Err(Errno::CHILD) => {}
-                        Err(error) => return Err(error.into()),
-                    }
+                if !denied && has_children && !self.wait_for_death(&fd)? {
+                    return Ok(());
                 }
                 if self.expired() {
                     return Ok(());
@@ -299,6 +282,41 @@ impl Inventory {
             }
         }
         Ok(())
+    }
+
+    fn wait_for_death(&self, fd: &OwnedFd) -> io::Result<bool> {
+        if self.4.is_none() {
+            return Err(io::Error::other("pidfd death wait requires cleanup policy"));
+        }
+        let mut readiness = [PollFd::new(fd, PollFlags::IN)];
+        while !self.expired() {
+            match poll(
+                &mut readiness,
+                Some(&Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 2_000_000,
+                }),
+            ) {
+                Ok(_) => {}
+                Err(Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
+            }
+            let events = readiness[0].revents();
+            if events.intersects(PollFlags::ERR | PollFlags::NVAL) {
+                return Err(io::Error::other(format!(
+                    "invalid pidfd readiness: {events:?}"
+                )));
+            }
+            if events.intersects(PollFlags::IN | PollFlags::HUP) {
+                return Ok(true);
+            }
+            if !events.is_empty() {
+                return Err(io::Error::other(format!(
+                    "unexpected pidfd readiness: {events:?}"
+                )));
+            }
+        }
+        Ok(false)
     }
 
     fn report_denied(&mut self, pid: Pid, birth: u64) {
@@ -533,6 +551,96 @@ mod tests {
             assert!(!vanished(&io::Error::from_raw_os_error(errno)));
         }
     }
+    #[test]
+    fn nondirect_pidfd_wait_requires_readiness_and_preserves_adoption() {
+        use std::{
+            os::fd::AsFd,
+            process::{Command, Stdio},
+            thread,
+            time::{Duration, Instant},
+        };
+        // Native process fixture: execute only through the separate-kernel VM runner.
+        crate::reaper::acquire().unwrap();
+        let dir = std::env::temp_dir().join(format!("procward-pidfd-wait-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let fixture = executable
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/fixture");
+        let mut parent = Command::new(fixture)
+            .arg("tree")
+            .arg(&dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let read_pid = |name: &str| {
+            fs::read_to_string(dir.join(format!("{name}.pid")))
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .and_then(Pid::from_raw)
+        };
+        let ready_by = Instant::now() + Duration::from_secs(5);
+        let (branch, worker) = loop {
+            if let (Some(branch), Some(worker)) = (read_pid("branch"), read_pid("worker")) {
+                break (branch, worker);
+            }
+            assert!(Instant::now() < ready_by, "finite pidfd fixture readiness");
+            thread::sleep(Duration::from_millis(2));
+        };
+        let fd = open_identity(branch).unwrap().unwrap();
+        assert!(matches!(
+            process::waitid(
+                process::WaitId::PidFd(fd.as_fd()),
+                process::WaitIdOptions::EXITED | process::WaitIdOptions::NOWAIT
+            ),
+            Err(Errno::CHILD)
+        ));
+        assert!(process::test_kill_process(branch).is_ok());
+        let mut expired = Inventory::new();
+        expired.bound(crate::policy::Policy::new(
+            crate::config::Config::from_millis(5, 5, 50).unwrap(),
+            false,
+        ));
+        assert!(
+            !expired.wait_for_death(&fd).unwrap(),
+            "a live nonchild is not dead at ECHILD or timeout"
+        );
+        assert!(parent.try_wait().unwrap().is_none());
+        assert!(process::test_kill_process(branch).is_ok());
+        // A separate observation policy, not a restarted production cleanup budget.
+        let mut observed = Inventory::new();
+        observed.bound(crate::policy::Policy::new(
+            crate::config::Config::from_millis(50, 25, 1000).unwrap(),
+            false,
+        ));
+        process::pidfd_send_signal(&fd, process::Signal::KILL).unwrap();
+        assert!(observed.wait_for_death(&fd).unwrap());
+        assert!(parent.try_wait().unwrap().is_none());
+        assert!(
+            edges(branch).unwrap().is_empty(),
+            "dead parent no longer lists adopted children"
+        );
+        assert!(
+            edges(process::getpid())
+                .unwrap()
+                .iter()
+                .any(|(pid, _)| *pid == worker),
+            "fresh adoption must be rescanned at the reaper, including libtest's other threads"
+        );
+        // Explicit teardown of the finite test actors; not product cleanup evidence.
+        process::kill_process(worker, process::Signal::KILL).unwrap();
+        process::waitpid(Some(worker), process::WaitOptions::empty()).unwrap();
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+        process::waitpid(Some(branch), process::WaitOptions::empty()).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn birth_parser_handles_spaces_and_parentheses_in_comm() {
         let stat = "23 (worker ) (name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242 0";

@@ -23,11 +23,16 @@ The patch:
 - enables the windows binding module containing the empty-message constant.
 
 No new Job implementation, handle enumeration or altered containment policy.
-Modified source/manifest files carry change notices. Procward intentionally
-observes primary exit through `inner_mut().try_wait()` and awaits one Job wait;
-it does not consume Job events through wrapper `try_wait` or retry a cancelled
-Job wait. Other wrapper cancellation/event-caching semantics are not broadened
-by this narrow patch.
+Modified source/manifest files carry change notices. Procward observes primary
+exit through `inner_mut().try_wait()` independently of whole-Job completion.
+
+Retained task mode additionally polls the Tokio wrapper's `try_wait()`. That
+method must return `None` while Job members remain, not merely return the
+primary's status. The wrapper caches the matching empty notification so polling
+and a subsequent wait cannot consume it twice. It caches `Exited` only after
+whole-Job completion, not before an asynchronous Job wait finishes. The retained
+task natural-completion/cancellation tests exercise these paths on both Windows
+matrix targets; Linux results do not count as Windows verification.
 
 ## Red/green evidence
 

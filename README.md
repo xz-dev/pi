@@ -1,7 +1,7 @@
 # procward
 
 Procward owns a command's process tree and provides job control for CLI programs
-on Linux, FreeBSD, macOS and Windows. It cleans up owned work when the command
+on Linux, FreeBSD, macOS and Windows. By default, it cleans up owned work when the command
 exits or its owner disappears, while preserving the command's exit status.
 macOS cleanup is best-effort for observed descendants, not kernel containment.
 
@@ -13,7 +13,7 @@ Download your target's `procward-<target>.zip` and `SHA256SUMS` from
 
 ```sh
 # Substitute the published version and your target.
-tag=v0.1.1
+tag=v0.3.0
 target=x86_64-unknown-linux-gnu
 asset="procward-$target.zip"
 gh release download "$tag" --repo xz-dev/procward --pattern "$asset" --pattern SHA256SUMS
@@ -39,6 +39,12 @@ procward run --grace 6s --fatal-grace 3s --cleanup-deadline 7500ms -- command
 Arguments execute directly, without an added shell. Durations use integer `s`
 or `ms`; require `0 < fatal-grace <= grace < cleanup-deadline`. Defaults are
 6s, 3s and 7500ms. Use `procward --help` for options.
+
+Task controllers can add `--retain-descendants` to receive the primary result
+while ordinary background work continues under ownership. The tree ends on
+natural completion, cancellation or owner/controller loss. This option requires
+`--control-fd` (Unix) or `--control-handle` (Windows); it does not detach or
+redirect the command. See the [task contract](docs/contract.md#retaining-ordinary-task-descendants).
 
 ## Development
 
