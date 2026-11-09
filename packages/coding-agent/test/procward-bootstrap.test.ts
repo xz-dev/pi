@@ -50,9 +50,12 @@ describe("ownCliProcess", () => {
 		expect(hasBootstrapNonce()).toBe(false);
 	});
 
-	test("own bootstrap nonce is consumed without wrapping", () => {
+	test("own bootstrap nonce without contract env is stale, not accepted", () => {
 		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "mine";
-		expect(ownCliProcess(["chat"], { resolveBinary: () => "/bin/true" })).toBeUndefined();
+		// No PROCWARD_* env: consumeManagedContract reports unmanaged, so the
+		// nonce alone must NOT skip wrapping (fail closed on stale markers).
+		const status = ownCliProcess(["chat"], { resolveBinary: () => "/nonexistent-procward" });
+		expect(status).toBeGreaterThan(0);
 		expect(hasBootstrapNonce()).toBe(false);
 	});
 
@@ -80,5 +83,44 @@ describe("ownCliProcess", () => {
 		// not crash while building the environment.
 		const status = ownCliProcess(["--version"], { resolveBinary: () => helper });
 		expect(status).toBeDefined();
+	});
+});
+
+describe("ownCliProcess handoff validation", () => {
+	test("nonce with a valid contract consumes and continues", () => {
+		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "mine";
+		const status = ownCliProcess(["chat"], {
+			resolveBinary: () => "/bin/false",
+			consumeContract: (env) => {
+				void env;
+				return { ownerPid: 9, launchId: "f".repeat(32), lifecycleFd: 7 };
+			},
+		});
+		expect(status).toBeUndefined();
+		expect(hasBootstrapNonce()).toBe(false);
+	});
+
+	test("nonce without contract env is stale: wraps again", () => {
+		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "stale";
+		// consumeContract reports "unmanaged" (undefined): must re-wrap,
+		// which with a broken binary surfaces a nonzero status.
+		const status = ownCliProcess(["chat"], {
+			resolveBinary: () => "/nonexistent-procward",
+			consumeContract: () => undefined,
+		});
+		expect(status).toBeGreaterThan(0);
+		expect(hasBootstrapNonce()).toBe(false);
+	});
+
+	test("nonce with a mismatched contract fails closed with a diagnostic", () => {
+		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "spoofed";
+		expect(() =>
+			ownCliProcess(["chat"], {
+				resolveBinary: () => "/bin/false",
+				consumeContract: () => {
+					throw new Error("procward: READY launch id mismatch");
+				},
+			}),
+		).toThrow(/launch id mismatch/);
 	});
 });
