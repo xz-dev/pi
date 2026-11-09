@@ -2,7 +2,7 @@ import { closeSync, mkdtempSync, openSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { consumeManagedContract, readLifecycleRecord } from "../src/utils/managed-child.ts";
+import { consumeManagedContract, observeOwnerLoss, readLifecycleRecord } from "../src/utils/managed-child.ts";
 
 const openFds: number[] = [];
 afterEach(() => {
@@ -134,3 +134,17 @@ function writeTempThenReopen(content: string): number {
 	openFds.push(fd);
 	return fd;
 }
+
+describe("observeOwnerLoss", () => {
+	test("EOF on the lifecycle fd triggers the loss callback", async () => {
+		// A regular file fd reads EOF immediately: the worker posts eof.
+		const fd = writeTempThenReopen("");
+		const reason = await new Promise<string>((resolve) => {
+			const done = observeOwnerLoss({ ownerPid: 1, launchId: "f".repeat(32), lifecycleFd: fd }, (why) => {
+				resolve(why);
+			});
+			void done;
+		});
+		expect(reason).toBe("eof");
+	}, 10000);
+});
