@@ -20,7 +20,7 @@ To include files or images:
 
 ## Follow Pi's work
 
-Pi shows each tool call and result while it works. Press `Ctrl+O` to expand or collapse tool output. Press `Ctrl+T` to show or hide thinking blocks.
+Pi shows each tool call and result while it works. Press `Ctrl+O` to expand or collapse tool output and thinking blocks. Press `Ctrl+T` to cycle thinking display between preview (live one-line tail while streaming), expanded (full reasoning Markdown), and collapsed (label).
 
 The startup header lists the instructions and resources Pi loaded. The editor border indicates the current thinking level. The footer updates as the model uses context and reports usage.
 

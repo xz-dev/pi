@@ -3,7 +3,14 @@ import markedCjkFriendly from "marked-cjk-friendly";
 import { renderLatex } from "../latex.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, cjkPunctuationRegex, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import {
+	applyBackgroundToLine,
+	cjkPunctuationRegex,
+	flattenLines,
+	sliceByColumn,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -281,6 +288,8 @@ export interface MarkdownTheme {
 }
 
 export interface MarkdownOptions {
+	/** Wrap/clip lines, or preserve unwrapped body rows without generated padding or table borders. */
+	overflow?: "wrap" | "clip-start" | "clip-end" | "preserve";
 	/** Preserve source list markers instead of normalizing them. */
 	preserveOrderedListMarkers?: boolean;
 	/** Preserve source backslash escapes instead of normalizing escaped punctuation. */
@@ -420,6 +429,13 @@ export class Markdown implements Component {
 			}
 		}
 
+		if (this.options.overflow === "preserve") {
+			this.cachedText = this.text;
+			this.cachedWidth = width;
+			this.cachedLines = contentLines;
+			return contentLines;
+		}
+
 		// Add top/bottom padding (empty lines)
 		const bgFn = this.defaultTextStyle?.bgColor;
 		const emptyLine = " ".repeat(width);
@@ -459,7 +475,11 @@ export class Markdown implements Component {
 				lines.push(line);
 				continue;
 			}
-			for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
+			for (const wrappedLine of this.layoutLine(line, contentWidth)) {
+				if (this.options.overflow === "preserve") {
+					lines.push(wrappedLine);
+					continue;
+				}
 				const lineWithMargins = leftMargin + wrappedLine + rightMargin;
 				if (bgFn) {
 					lines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
@@ -475,6 +495,21 @@ export class Markdown implements Component {
 		block.lines = lines;
 		block.width = width;
 		block.nextTokenType = nextTokenType;
+	}
+
+	private layoutLine(text: string, width: number): string[] {
+		if (this.options.overflow === "preserve") {
+			// Keep hard line breaks and their ANSI state without soft wrapping or clipping.
+			return wrapTextWithAnsi(text, Infinity);
+		}
+		if (!this.options.overflow || this.options.overflow === "wrap") {
+			return wrapTextWithAnsi(text, width);
+		}
+		// Preserve hard line breaks and their ANSI state without soft wrapping before clipping.
+		return wrapTextWithAnsi(text, Infinity).map((line) => {
+			const start = this.options.overflow === "clip-start" ? Math.max(0, visibleWidth(line) - width) : 0;
+			return sliceByColumn(line, start, width, true);
+		});
 	}
 
 	/**
@@ -631,8 +666,11 @@ export class Markdown implements Component {
 			}
 
 			case "code": {
-				const indent = this.theme.codeBlockIndent ?? "  ";
-				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
+				// "preserve" consumers crop the styled rows themselves; skip renderer-added
+				// indentation so it cannot be mistaken for body content.
+				const indent = this.options.overflow === "preserve" ? "" : (this.theme.codeBlockIndent ?? "  ");
+				const openingBorder = this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`);
+				if (openingBorder) lines.push(openingBorder);
 				if (this.theme.highlightCode) {
 					const key = `${token.lang ?? ""}\0${token.text}`;
 					let highlighted = this.blockHighlightedCode?.get(key);
@@ -650,7 +688,8 @@ export class Markdown implements Component {
 						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
 					}
 				}
-				lines.push(this.theme.codeBlockBorder("```"));
+				const closingBorder = this.theme.codeBlockBorder("```");
+				if (closingBorder) lines.push(closingBorder);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}
@@ -727,7 +766,7 @@ export class Markdown implements Component {
 
 				for (const quoteLine of renderedQuoteLines) {
 					const styledLine = applyQuoteStyle(quoteLine);
-					const wrappedLines = wrapTextWithAnsi(styledLine, quoteContentWidth);
+					const wrappedLines = this.layoutLine(styledLine, quoteContentWidth);
 					for (const wrappedLine of wrappedLines) {
 						lines.push(this.theme.quoteBorder("│ ") + wrappedLine);
 					}
@@ -901,7 +940,9 @@ export class Markdown implements Component {
 	 */
 	private renderList(token: Tokens.List, depth: number, width: number, styleContext?: InlineStyleContext): string[] {
 		const lines: string[] = [];
-		const indent = "    ".repeat(depth);
+		// "preserve" consumers crop styled rows themselves; drop layout indentation so
+		// it cannot be mistaken for body content.
+		const indent = this.options.overflow === "preserve" ? "" : "    ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = typeof token.start === "number" ? token.start : 1;
 
@@ -918,7 +959,8 @@ export class Markdown implements Component {
 			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
 			const marker = bullet + taskMarker;
 			const firstPrefix = indent + this.theme.listBullet(marker);
-			const continuationPrefix = indent + " ".repeat(visibleWidth(marker));
+			const continuationPrefix =
+				this.options.overflow === "preserve" ? "" : indent + " ".repeat(visibleWidth(marker));
 			const itemWidth = Math.max(1, width - visibleWidth(firstPrefix));
 			let renderedAnyLine = false;
 
@@ -931,7 +973,7 @@ export class Markdown implements Component {
 
 				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext);
 				for (const line of itemLines) {
-					for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
+					for (const wrappedLine of this.layoutLine(line, itemWidth)) {
 						const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;
 						lines.push(linePrefix + wrappedLine);
 						renderedAnyLine = true;
@@ -973,7 +1015,7 @@ export class Markdown implements Component {
 	 * consistently with the rest of the renderer.
 	 */
 	private wrapCellText(text: string, maxWidth: number, stylePrefix = ""): string[] {
-		const lines = wrapTextWithAnsi(text, Math.max(1, maxWidth));
+		const lines = this.layoutLine(text, Math.max(1, maxWidth));
 		return lines.map((line, index) => {
 			// Reset text styles after each non-final fragment, then restore the surrounding style before padding and borders.
 			const styleReset = index < lines.length - 1 ? "\x1b[22;23;24;25;27;28;29;39m" : "";
@@ -998,13 +1040,28 @@ export class Markdown implements Component {
 			return lines;
 		}
 
+		if (this.options.overflow === "preserve") {
+			// Keep styled cell content in row order, separated by a visible marker.
+			// Alignment spaces and box borders are layout, not reasoning content.
+			lines.push(
+				token.header
+					.map((cell) => this.theme.bold(this.renderInlineTokens(cell.tokens || [], styleContext)))
+					.join("│"),
+			);
+			for (const row of token.rows) {
+				lines.push(row.map((cell) => this.renderInlineTokens(cell.tokens || [], styleContext)).join("│"));
+			}
+			if (nextTokenType && nextTokenType !== "space") lines.push("");
+			return lines;
+		}
+
 		// Calculate border overhead: "│ " + (n-1) * " │ " + " │"
 		// = 2 + (n-1) * 3 + 2 = 3n + 1
 		const borderOverhead = 3 * numCols + 1;
 		const availableForCells = availableWidth - borderOverhead;
 		if (availableForCells < numCols) {
 			// Too narrow to render a stable table. Fall back to raw markdown.
-			const fallbackLines = token.raw ? wrapTextWithAnsi(token.raw, availableWidth) : [];
+			const fallbackLines = token.raw ? this.layoutLine(token.raw, availableWidth) : [];
 			if (nextTokenType && nextTokenType !== "space") {
 				fallbackLines.push("");
 			}
