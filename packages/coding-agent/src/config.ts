@@ -14,7 +14,7 @@ import {
 } from "fs";
 import { createRequire } from "module";
 import { homedir, tmpdir, userInfo } from "os";
-import { basename, dirname, join, resolve, sep, win32 } from "path";
+import { basename, delimiter, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
@@ -770,6 +770,94 @@ export function setEmbeddedQuickJSWasmPath(path: string): void {
 export function getQuickJSWasmPath(): string {
 	quickJSWasmPath ??= createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm");
 	return quickJSWasmPath;
+}
+
+// =============================================================================
+// Procward (process-tree ownership helper)
+// =============================================================================
+
+/**
+ * Resolve the procward process-ownership helper shipped with this pi.
+ *
+ * Search order:
+ * 1. `PI_PROCWARD_BIN` — explicit override (development, distro packaging).
+ * 2. Package resources — `native/procward/` next to the executable (Bun
+ *    binary, copied there by build-binaries.sh) or under the package root
+ *    with a target-triple directory (source checkouts and npm installs built
+ *    by scripts/build-procward.sh).
+ * 3. `PATH` — a developer convenience for running pi from source without
+ *    building the vendored helper.
+ *
+ * Returns undefined when no helper exists (PROCWARD=0 builds, or nothing
+ * found). Ownership callers treat that as "feature absent" and must not
+ * fail a session that did not ask for ownership.
+ */
+export function resolveProcwardBinary(): string | undefined {
+	const override = process.env.PI_PROCWARD_BIN;
+	if (override) {
+		try {
+			accessSync(override, constants.X_OK);
+			return override;
+		} catch {
+			throw new Error(`PI_PROCWARD_BIN is not executable: ${override}`);
+		}
+	}
+
+	const binaryName = process.platform === "win32" ? "procward.exe" : "procward";
+	const candidates: string[] = [];
+	if (isBunBinary) {
+		candidates.push(join(getPackageDir(), "native", "procward", binaryName));
+	} else {
+		const packageDir = getPackageDir();
+		// Source checkout / npm install: native/procward/<triple>/procward, plus the
+		// host shorthand emitted by build-procward.sh without --triple.
+		candidates.push(join(packageDir, "native", "procward", procHostTriple(), binaryName));
+		candidates.push(join(packageDir, "native", "procward", "host", binaryName));
+	}
+	for (const candidate of candidates) {
+		try {
+			accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch {
+			// try the next candidate
+		}
+	}
+
+	return findOnPath(binaryName);
+}
+
+/** Map the running process to the Rust target triple build-procward.sh names its output by. */
+function procHostTriple(): string {
+	const arch = process.arch === "x64" ? "x86_64" : process.arch === "arm64" ? "aarch64" : process.arch;
+	switch (process.platform) {
+		case "linux":
+			return `${arch}-unknown-linux-gnu`;
+		case "darwin":
+			return `${arch}-apple-darwin`;
+		case "win32":
+			return `${arch}-pc-windows-msvc`;
+		case "freebsd":
+			return `${arch}-unknown-freebsd`;
+		default:
+			return `${arch}-unknown`;
+	}
+}
+
+/** First executable match for name on PATH, or undefined. */
+function findOnPath(name: string): string | undefined {
+	const pathEnv = process.env.PATH;
+	if (!pathEnv) return undefined;
+	for (const dir of pathEnv.split(delimiter)) {
+		if (!dir) continue;
+		const candidate = join(dir, name);
+		try {
+			accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch {
+			// keep scanning
+		}
+	}
+	return undefined;
 }
 
 /** Resolve the codemode worker entry for a release runtime. */
