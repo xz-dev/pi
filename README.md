@@ -85,6 +85,12 @@ This monorepo contains the Pi CLI and its supporting libraries.
 
 For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
 
+## Process-tree ownership
+
+Pi wraps itself and every tool subprocess it spawns in [procward](https://github.com/xz-dev/procward), a process-tree owner built from the vendored source in `vendor/procward`. When pi exits — normally or not — the whole tree, including commands an agent left running in the background, is cleaned up (kernel-level on Linux, FreeBSD and Windows; best-effort on macOS).
+
+Disable it per invocation with `--no-process-ownership`, or for nested invocations with `PI_NO_PROCESS_OWNERSHIP=1`. Distributions can build pi without the feature entirely (`PROCWARD=0` at build time; Gentoo installs expose it as `USE=procward`).
+
 ## Permissions & Containerization
 
 Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
