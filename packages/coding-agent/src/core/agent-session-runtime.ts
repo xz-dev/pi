@@ -407,6 +407,7 @@ export class AgentSessionRuntime {
 	 * is saved would lose the login (#11692).
 	 */
 	async dispose(): Promise<void> {
+		this.session.prepareForShutdown();
 		await this.session.abort();
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
