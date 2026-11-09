@@ -57,6 +57,8 @@ Use `pi --list-models --refresh` to load extension providers, refresh loaded pro
 
 See the [documentation](docs/index.md) for full setup and usage instructions.
 
+**Managed long-running tools.** Eligible AI tool calls can detach without duplicating their original result. Configure rules and use `tool_task` as described in [Managed tool executions](docs/usage.md#managed-tool-executions). User `!`/`!!` commands remain foreground shell commands; use tmux when direct interaction and full terminal observability are needed.
+
 ## Share your OSS coding agent sessions
 
 If you use Pi for open source work, please share your coding agent sessions.
