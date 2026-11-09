@@ -420,6 +420,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb libxcb1
 
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@f13885f1c285c38af6e81d8b0d42d0924a8f83c0 # v2
+        with: { workspaces: "vendor/procward", cache-on-failure: false }
+
       - name: Smoke test host binary packaging path
         run: |
           set -euo pipefail
