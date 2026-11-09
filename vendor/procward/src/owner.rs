@@ -156,6 +156,7 @@ pub fn run(
     command: &OsStr,
     args: &[OsString],
     config: Config,
+    retain_descendants: bool,
     mut task: Option<&mut crate::task::Task>,
 ) -> io::Result<u8> {
     crate::reaper::acquire()?;
@@ -179,9 +180,13 @@ pub fn run(
     let scope = match crate::cgroup::Scope::create() {
         Ok(scope) => Some(scope),
         Err(reason) => {
-            crate::diagnostic(format!(
-                "Linux cgroup v2 workload group unavailable ({reason}); cleanup falls back to subreaper and pidfd termination"
-            ));
+            // Retained tasks preserve the command's stdio; the controller already
+            // receives ownership scope over its separate control endpoint.
+            if !retain_descendants {
+                crate::diagnostic(format!(
+                    "Linux cgroup v2 workload group unavailable ({reason}); cleanup falls back to subreaper and pidfd termination"
+                ));
+            }
             None
         }
     };
@@ -217,6 +222,10 @@ pub fn run(
     anchor.env(
         "PROCWARD_PRIVATE_TASK",
         if task.is_some() { "1" } else { "0" },
+    );
+    anchor.env(
+        "PROCWARD_PRIVATE_RETAIN_DESCENDANTS",
+        if retain_descendants { "1" } else { "0" },
     );
     #[cfg(target_os = "linux")]
     {
@@ -387,6 +396,8 @@ pub fn anchor(args: &[OsString]) -> io::Result<u8> {
     };
     let config = Config::from_millis(millis(grace)?, millis(fatal)?, millis(deadline)?)
         .map_err(io::Error::other)?;
+    let retain_descendants =
+        std::env::var_os("PROCWARD_PRIVATE_RETAIN_DESCENDANTS").as_deref() == Some(OsStr::new("1"));
     if lease.to_str().and_then(|text| text.parse::<i32>().ok())
         == publish.to_str().and_then(|text| text.parse::<i32>().ok())
     {
@@ -405,7 +416,7 @@ pub fn anchor(args: &[OsString]) -> io::Result<u8> {
     if !alive(&lease)? || process::getppid() != Some(parent) {
         return Err(io::Error::other("owner lost before payload launch"));
     }
-    crate::reaper::run_owned(command, rest, &lease, &publish, config)
+    crate::reaper::run_owned(command, rest, &lease, &publish, config, retain_descendants)
 }
 
 pub fn publish(fd: &OwnedFd, policy: Policy) -> io::Result<()> {

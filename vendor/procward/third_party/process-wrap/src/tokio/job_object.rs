@@ -1,4 +1,4 @@
-// Modified for procward: pass the expected Job key to completion-port waits.
+// Modified for procward: bind completion waits to the Job and cache only full Job completion.
 use std::{
 	future::Future,
 	io::{Error, ErrorKind, Result},
@@ -135,6 +135,7 @@ impl CommandWrapper for JobObject {
 pub struct JobObjectChild {
 	inner: Box<dyn ChildWrapper>,
 	exit_status: ChildExitStatus,
+	job_complete: bool,
 	job_port: JobPort,
 }
 
@@ -144,6 +145,7 @@ impl JobObjectChild {
 		Self {
 			inner,
 			exit_status: ChildExitStatus::Running,
+			job_complete: false,
 			job_port,
 		}
 	}
@@ -186,7 +188,10 @@ impl ChildWrapper for JobObjectChild {
 			// always wait for parent to exit first, as by the time it does,
 			// it's likely that all its children have already exited.
 			let status = self.inner.wait().await?;
-			self.exit_status = ChildExitStatus::Exited(status);
+			if self.job_complete {
+				self.exit_status = ChildExitStatus::Exited(status);
+				return Ok(status);
+			}
 
 			// nevertheless, now try reaping all children a few times...
 			for _ in 1..MAX_RETRY_ATTEMPT {
@@ -197,6 +202,8 @@ impl ChildWrapper for JobObjectChild {
 				)?
 				.is_break()
 				{
+					self.job_complete = true;
+					self.exit_status = ChildExitStatus::Exited(status);
 					return Ok(status);
 				}
 			}
@@ -208,17 +215,32 @@ impl ChildWrapper for JobObjectChild {
 				completion_port,
 			} = self.job_port;
 			let _ = spawn_blocking(move || wait_on_job(job, completion_port, None)).await??;
+			self.job_complete = true;
+			self.exit_status = ChildExitStatus::Exited(status);
 			Ok(status)
 		})
 	}
 
 	#[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
 	fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-		let _ = wait_on_job(
-			self.job_port.job,
-			self.job_port.completion_port,
-			Some(Duration::ZERO),
-		)?;
-		self.inner.try_wait()
+		if let ChildExitStatus::Exited(status) = self.exit_status {
+			return Ok(Some(status));
+		}
+		if !self.job_complete {
+			self.job_complete = wait_on_job(
+				self.job_port.job,
+				self.job_port.completion_port,
+				Some(Duration::ZERO),
+			)?
+			.is_break();
+		}
+		if !self.job_complete {
+			return Ok(None);
+		}
+		let status = self.inner.try_wait()?;
+		if let Some(status) = status {
+			self.exit_status = ChildExitStatus::Exited(status);
+		}
+		Ok(status)
 	}
 }

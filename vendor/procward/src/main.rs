@@ -28,7 +28,7 @@ mod windows;
 const USAGE: &str = concat!(
     "procward ",
     env!("CARGO_PKG_VERSION"),
-    "\n\nUsage: procward run [options] -- <command> [args...]\n       procward --help\n       procward --version\n\nOptions: --grace <dur> --fatal-grace <dur> --cleanup-deadline <dur>\nDurations: integer ms or s suffix (for example 750ms, 6s).\n\nUnix terminal jobs use a private PTY; redirected streams retain their destinations.\nTask control: --control-fd <fd> (Unix), --control-handle <handle> (Windows)."
+    "\n\nUsage: procward run [options] -- <command> [args...]\n       procward --help\n       procward --version\n\nOptions: --grace <dur> --fatal-grace <dur> --cleanup-deadline <dur>\nDurations: integer ms or s suffix (for example 750ms, 6s).\n\nUnix terminal jobs use a private PTY; redirected streams retain their destinations.\nTask control: --control-fd <fd> (Unix), --control-handle <handle> (Windows).\n--retain-descendants keeps task descendants alive after the primary exits (requires task control)."
 );
 fn main() -> ExitCode {
     match cli(env::args_os().skip(1).collect()) {
@@ -71,7 +71,12 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
             .map(u32::from)
             .map_err(|error| (125, error.to_string())),
         [run, options @ ..] if run == "run" => {
-            let (config, control, index) = config::options(options)?;
+            let config::RunOptions {
+                cleanup: config,
+                control,
+                retain_descendants,
+                command_index: index,
+            } = config::options(options)?;
             let [command, rest @ ..] = &options[index..] else {
                 return Err((125, "missing command after --".into()));
             };
@@ -84,9 +89,10 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
                 .transpose()
                 .map_err(|error| (125, error.to_string()))?;
             #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-            let result = owner::run(command, rest, config, task.as_mut()).map(u32::from);
+            let result =
+                owner::run(command, rest, config, retain_descendants, task.as_mut()).map(u32::from);
             #[cfg(windows)]
-            let result = windows::run(command, rest, config, task.as_mut());
+            let result = windows::run(command, rest, config, retain_descendants, task.as_mut());
             #[cfg(any(
                 target_os = "linux",
                 target_os = "freebsd",
