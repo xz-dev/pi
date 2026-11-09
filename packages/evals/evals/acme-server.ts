@@ -1,4 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from "node:zlib";
+
+const CONTENT_ENCODINGS = ["identity", "zstd", "gzip", "deflate", "br"];
 
 export const OPENAI_PROVIDER_ID = "acme";
 export const OPENAI_MODEL_ID = "acme-chat";
@@ -43,9 +46,16 @@ function rejectRequest(response: ServerResponse, status: number, message: string
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
-	let body = "";
-	for await (const chunk of request) body += chunk.toString();
-	return JSON.parse(body);
+	const chunks: Buffer[] = [];
+	for await (const chunk of request) chunks.push(Buffer.from(chunk));
+	const raw = Buffer.concat(chunks);
+	const encoding = request.headers["content-encoding"]?.toString().trim().toLowerCase();
+	const body = encoding === "zstd" ? zstdDecompressSync(raw)
+		: encoding === "gzip" ? gunzipSync(raw)
+		: encoding === "deflate" ? inflateSync(raw)
+		: encoding === "br" ? brotliDecompressSync(raw)
+		: raw;
+	return JSON.parse(body.toString("utf8"));
 }
 
 export type AcmeServer = {
@@ -68,6 +78,11 @@ export function createAcmeServer(mode: ServerMode): AcmeServer {
 		if (request.method !== "POST") return rejectRequest(response, 405, "Expected POST");
 		if (!request.headers["content-type"]?.startsWith("application/json")) {
 			return rejectRequest(response, 415, "Expected application/json");
+		}
+		const encoding = request.headers["content-encoding"]?.toString().trim().toLowerCase();
+		if (encoding && !CONTENT_ENCODINGS.includes(encoding)) {
+			response.setHeader("accept-encoding", CONTENT_ENCODINGS.join(", "));
+			return rejectRequest(response, 415, "Unsupported content-encoding");
 		}
 		let payload: unknown;
 		try {
