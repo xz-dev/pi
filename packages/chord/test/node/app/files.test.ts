@@ -581,7 +581,9 @@ describe("summary", () => {
 		expect(secondSummary?.files).toEqual(summary?.files);
 		expect(secondSummary?.versions).toEqual(summary?.versions);
 		expect(secondSummary?.bytes).toEqual(summary?.bytes);
-		expect(secondSummary?.newest.map(({ path }) => path).sort()).toEqual(summary?.newest.map(({ path }) => path).sort());
+		expect(secondSummary?.newest.map(({ path }) => path).sort()).toEqual(
+			summary?.newest.map(({ path }) => path).sort(),
+		);
 		await second.close();
 	});
 });
