@@ -732,8 +732,15 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    // FreeBSD 14 libutil::openpty uses ptsname's shared static buffer.
+    // Keep these PTY allocations apart so each slave belongs to its master.
+    static PTY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn acquisition_record_round_trips_all_terminal_settings() {
+        let _guard = PTY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pty = rustix_openpty::openpty(None, None).unwrap();
         let mut saved = termios::tcgetattr(&pty.user).unwrap();
         saved.local_modes ^= termios::LocalModes::ECHO;
@@ -749,6 +756,13 @@ mod tests {
 
     #[test]
     fn background_read_after_foreground_reclaim_returns_to_cleanup() {
+        #[cfg(target_os = "macos")]
+        let _process_guard = crate::owner::tests::PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PTY_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if std::env::var_os("PROCWARD_READ_RACE").is_some() {
             rustix_openpty::login_tty(
                 rio::fcntl_dupfd_cloexec(unsafe { BorrowedFd::borrow_raw(0) }, 3).unwrap(),

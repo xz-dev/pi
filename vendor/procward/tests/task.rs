@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[path = "support/retained_task.rs"]
+mod retained;
 
 #[cfg(unix)]
 fn pair() -> (fs::File, fs::File, &'static str, String) {
@@ -123,6 +125,9 @@ struct Task {
 }
 impl Task {
     fn start(mode: &str, argument: &str) -> Self {
+        Self::start_retained(mode, argument, false)
+    }
+    fn start_retained(mode: &str, argument: &str, retain: bool) -> Self {
         let (parent, child, option, raw) = pair();
         if mode == "task-probe" {
             #[cfg(unix)]
@@ -154,19 +159,23 @@ impl Task {
         } else {
             ("500ms", "250ms", "1500ms")
         };
-        let process = Command::new(env!("CARGO_BIN_EXE_procward"))
-            .args([
-                "run",
-                "--grace",
-                grace,
-                "--fatal-grace",
-                fatal,
-                "--cleanup-deadline",
-                deadline,
-                option,
-                &raw,
-                "--",
-            ])
+        let mut command = Command::new(env!("CARGO_BIN_EXE_procward"));
+        command.args([
+            "run",
+            "--grace",
+            grace,
+            "--fatal-grace",
+            fatal,
+            "--cleanup-deadline",
+            deadline,
+            option,
+            &raw,
+        ]);
+        if retain {
+            command.arg("--retain-descendants");
+        }
+        let process = command
+            .arg("--")
             .arg(fixture)
             .args([mode, argument])
             .stdin(Stdio::piped())

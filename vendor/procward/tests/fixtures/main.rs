@@ -14,6 +14,7 @@ use std::{
 mod hazard;
 mod managed;
 mod pipes;
+mod retained;
 #[cfg(unix)]
 mod terminal;
 #[cfg(windows)]
@@ -32,6 +33,9 @@ fn main() {
                 process::exit(125);
             }
             process::exit(23);
+        }
+        "retained-task" | "retained-worker" => {
+            retained::run(Path::new(&args[2]), args[1] == "retained-worker")
         }
         "task-probe" => {
             if let Err(error) = managed::task_probe(Path::new(&args[2])) {

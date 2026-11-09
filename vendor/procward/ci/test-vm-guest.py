@@ -44,5 +44,38 @@ class VerdictPolicy(unittest.TestCase):
         self.assertEqual(guest.classify("cgroup", 0, OK, False, False, []), "fail")
 
 
+class RescueDiagnostics(unittest.TestCase):
+    def test_snapshot_includes_adopted_zombie_missing_from_cgroup_procs(self):
+        def source(path, mode="r"):
+            if path.endswith("/children"):
+                return io.StringIO("42")
+            if path.endswith("/cgroup.procs"):
+                return io.StringIO("43")
+            if path == "/proc/43/stat":
+                raise FileNotFoundError("exited during snapshot")
+            return io.BytesIO(b"42 (procward) Z" if path.endswith("/stat")
+                              else b"anchor\0owner")
+
+        with patch("builtins.open", side_effect=source), patch.object(guest.os, "listdir", return_value=[]):
+            snapshot = guest.rescue_processes("/group")
+        self.assertEqual([record["pid"] for record in snapshot], [42, 43])
+        self.assertEqual(snapshot[0]["stat"], "42 (procward) Z")
+        self.assertEqual(snapshot[0]["cmdline"], "anchor owner")
+        self.assertIn("exited during snapshot", snapshot[1]["stat"])
+
+    def test_snapshot_is_bounded(self):
+        def source(path, mode="r"):
+            if path.endswith("/children"):
+                return io.StringIO("")
+            if path.endswith("/cgroup.procs"):
+                return io.StringIO(" ".join(str(pid) for pid in range(1, 100)))
+            return io.BytesIO(b"x" * 2048)
+
+        with patch("builtins.open", side_effect=source):
+            snapshot = guest.rescue_processes("/group")
+        self.assertEqual(len(snapshot), 64)
+        self.assertEqual(len(snapshot[-1]["cmdline"]), 1024)
+
+
 if __name__ == "__main__":
     unittest.main()

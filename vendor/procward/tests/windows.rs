@@ -219,13 +219,17 @@ fn console_handles_one_ctrl_c_and_break_then_response_driven_quit() {
 fn job_wait_does_not_complete_while_gated_descendants_are_alive() {
     use process_wrap::tokio::{CommandWrap, JobObject, KillOnDrop};
     use std::task::{Context, Poll, Waker};
-    let dir = std::env::temp_dir().join(format!("procward-job-wait-{}", std::process::id()));
-    fs::create_dir(&dir).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
+    for polling_first in [false, true] {
+        let dir = std::env::temp_dir().join(format!(
+            "procward-job-wait-{}-{polling_first}",
+            std::process::id()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
         let mut command = tokio::process::Command::new(fixture());
         command.arg("job-wait").arg(&dir);
         let mut job = CommandWrap::from(command)
@@ -249,22 +253,49 @@ fn job_wait_does_not_complete_while_gated_descendants_are_alive() {
             job.inner_mut().try_wait().unwrap().is_some()
         });
         assert!(descendants.iter().all(|handle| !handle.exited()));
-        let mut completion = job.wait();
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(
-            matches!(completion.as_mut().poll(&mut context), Poll::Pending),
-            "Job wait completed while gated descendant process handles are still live"
-        );
-        for handle in &descendants {
-            assert_ne!(unsafe { TerminateProcess(handle.0, 0) }, 0);
+        for _ in 0..2 {
+            assert!(
+                job.try_wait().unwrap().is_none(),
+                "Job polling must not confuse primary exit with whole-Job completion"
+            );
         }
-        let result = tokio::time::timeout(Duration::from_millis(7500), completion)
-            .await
-            .unwrap()
-            .unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let result = if polling_first {
+            for handle in &descendants {
+                assert_ne!(unsafe { TerminateProcess(handle.0, 0) }, 0);
+            }
+            let mut observed = None;
+            poll(Instant::now() + Duration::from_millis(7500), || {
+                observed = job.try_wait().unwrap();
+                observed.is_some()
+            });
+            observed.unwrap()
+        } else {
+            let mut completion = job.wait();
+            assert!(
+                matches!(completion.as_mut().poll(&mut context), Poll::Pending),
+                "Job wait completed while gated descendant process handles are still live"
+            );
+            for handle in &descendants {
+                assert_ne!(unsafe { TerminateProcess(handle.0, 0) }, 0);
+            }
+            tokio::time::timeout(Duration::from_millis(7500), completion)
+                .await
+                .unwrap()
+                .unwrap()
+        };
         assert_eq!(result.code(), Some(23));
         assert!(descendants.iter().all(Handle::exited));
+        for _ in 0..2 {
+            assert_eq!(job.try_wait().unwrap(), Some(result));
+        }
+        let mut cached = job.wait();
+        assert!(
+            matches!(cached.as_mut().poll(&mut context), Poll::Ready(Ok(status)) if status == result),
+            "completed Job must remain complete without consuming a second empty notification"
+        );
     });
-    runtime.shutdown_timeout(Duration::from_millis(50));
-    fs::remove_dir_all(dir).unwrap();
+        runtime.shutdown_timeout(Duration::from_millis(50));
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
