@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: BSD-3-Clause
+name: Full-system Linux fixtures
+description: Copy-only, bounded native Linux guest with official Rust target tools
+inputs:
+  target:
+    required: true
+    description: Exact official Rust target triple
+  arch:
+    required: true
+    description: Explicit QEMU guest architecture
+  provider:
+    required: true
+    description: ubuntu or alpine
+  mode:
+    required: true
+    description: ci, release or separately bounded hazard
+  deadline:
+    required: true
+    description: Independent host runtime deadline in seconds
+runs:
+  using: composite
+  steps:
+    - name: Bind immutable source to the actual host boot
+      shell: bash
+      run: python3 ci/actions-vm.py prepare '${{ inputs.target }}' '${{ inputs.mode }}'
+    - name: Ubuntu 24.04 full-system guest (copy only)
+      if: inputs.provider == 'ubuntu'
+      uses: vmactions/ubuntu-vm@ba37729c99c3b7b11f55314a28a7a9a6f3d61262 # v1
+      with:
+        release: '24.04'
+        arch: ${{ inputs.arch }}
+        cpu: 2
+        mem: 2048
+        sync: rsync
+        copyback: false
+        disable-cache: true
+        data-dir: ${{ runner.temp }}/procward-linux-vm
+    - name: Alpine 3.24 full-system guest (copy only; official Rust, not distro aliases)
+      if: inputs.provider == 'alpine'
+      uses: vmactions/alpine-vm@0bf4a0e96eda91817beb50dd571a362a0da21772 # v1
+      with:
+        release: '3.24'
+        arch: ${{ inputs.arch }}
+        cpu: 2
+        mem: 2048
+        sync: rsync
+        copyback: false
+        disable-cache: true
+        data-dir: ${{ runner.temp }}/procward-linux-vm
+    - name: Host watchdog, complete-record validation and allowlisted artifact transfer
+      shell: bash
+      run: python3 ci/actions-vm.py run '${{ inputs.provider }}' '${{ inputs.deadline }}' "$RUNNER_TEMP/procward-linux-vm"
+    - name: Guest distribution and startup summary
+      if: inputs.mode != 'hazard'
+      shell: bash
+      run: cat 'artifacts/${{ inputs.target }}/summary.md' >> "$GITHUB_STEP_SUMMARY"

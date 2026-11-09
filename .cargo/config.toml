@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Linux runtime tests must go through ci/vm-test.py; --no-run/static checks stay on the host.
+[target.'cfg(target_os = "linux")']
+runner = ["python3", "ci/linux-test-guard.py"]
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
