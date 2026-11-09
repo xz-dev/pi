@@ -28,6 +28,7 @@ import { convertToLlm } from "../messages.ts";
 import {
 	buildSessionProjection,
 	type CompactionEntry,
+	getEntriesAfterLatestCompaction,
 	type ProjectedSessionEntry,
 	type SessionEntry,
 	type SessionProjection,
@@ -242,15 +243,11 @@ export function estimateProjectedContextTokens(
 		}
 
 		const usageEntryIndex = usageEntryId ? branchEntries.findIndex((entry) => entry.id === usageEntryId) : -1;
-		let latestInvalidatingEntryIndex = -1;
-		for (let i = branchEntries.length - 1; i >= 0; i--) {
-			const entry = branchEntries[i];
-			if (entry.type === "context_edit" || entry.type === "compaction") {
-				latestInvalidatingEntryIndex = i;
-				break;
-			}
-		}
-		if (usageEntryIndex > latestInvalidatingEntryIndex) return estimate;
+		const latestEditIndex = branchEntries.findLastIndex((entry) => entry.type === "context_edit");
+		// Usage recorded before the latest compaction describes the replaced context.
+		const usageAfterCompaction =
+			getEntriesAfterLatestCompaction(branchEntries)?.some((entry) => entry.id === usageEntryId) ?? true;
+		if (usageEntryIndex > latestEditIndex && usageAfterCompaction) return estimate;
 	}
 
 	const currentSystem = getCurrentSystemMessage(projection.messages);
@@ -860,7 +857,8 @@ export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
-	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
+	const entriesAfterCompaction = getEntriesAfterLatestCompaction(pathEntries);
+	if (entriesAfterCompaction?.length === 0) {
 		return undefined;
 	}
 
