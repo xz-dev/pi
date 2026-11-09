@@ -13,6 +13,7 @@ import {
 	type ShellToolConfig,
 } from "./bash.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import type { ShellOwnershipOptions } from "./bash.ts";
 
 const UTF8_OUTPUT_PREFIX = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
 
@@ -38,7 +39,7 @@ export type PowerShellToolInput = BashToolInput;
 export interface PowerShellToolOptions
 	extends Pick<BashToolOptions, "operations" | "exposeSessionEnvironment" | "spawnHook"> {}
 
-export function createLocalPowerShellOperations(): PowerShellOperations {
+export function createLocalPowerShellOperations(ownership?: ShellOwnershipOptions): PowerShellOperations {
 	return {
 		exec: async (command, cwd, options) => {
 			const shellConfig = getPowerShellConfig();
@@ -47,7 +48,7 @@ export function createLocalPowerShellOperations(): PowerShellOperations {
 				win32.basename(shellConfig.shell).toLowerCase() === "powershell.exe" && !command.endsWith("`")
 					? WINDOWS_POWERSHELL_EXIT_SUFFIX
 					: "";
-			return createLocalShellOperations("PowerShell", () => shellConfig).exec(
+			return createLocalShellOperations("PowerShell", () => shellConfig, ownership).exec(
 				`${UTF8_OUTPUT_PREFIX}${command}${suffix}`,
 				cwd,
 				options,
