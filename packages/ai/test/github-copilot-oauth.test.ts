@@ -1,8 +1,41 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCredentialStore } from "../src/auth/credential-store.ts";
+import { anthropicOAuth } from "../src/auth/oauth/anthropic.ts";
 import { githubCopilotOAuth } from "../src/auth/oauth/github-copilot.ts";
+import { kimiCodingOAuth } from "../src/auth/oauth/kimi-coding.ts";
+import { registerBundledOAuthFlowLoaders } from "../src/auth/oauth/load.ts";
+import { metaOAuth } from "../src/auth/oauth/meta.ts";
+import { openaiChatGPTOAuth } from "../src/auth/oauth/openai-chatgpt.ts";
+import { openaiCodexOAuth } from "../src/auth/oauth/openai-codex.ts";
+import { openRouterOAuth } from "../src/auth/oauth/openrouter.ts";
+import { createRadiusOAuth } from "../src/auth/oauth/radius.ts";
+import { xaiOAuth } from "../src/auth/oauth/xai.ts";
 import { createModels } from "../src/models.ts";
 import { githubCopilotProvider } from "../src/providers/github-copilot.ts";
+
+// The lazy OAuth loaders import their flow module through a variable specifier
+// resolved against load.ts's own URL, so an inlined bundle cannot follow it
+// (5c6ce2b3). Under vitest that absolute file URL bypasses the module graph:
+// the flow loads as a second, native instance whose import only settles across
+// real ticks. models.login() goes through that import, so the flow starts only
+// after this file's single fake-clock advance, its first poll timer then waits
+// on a clock that never advances again, and the test times out (upstream CI is
+// red on 5c6ce2b3 for the same reason). Register the statically imported flows
+// through the bundled-loader seam - the same escape hatch standalone binaries
+// use when the dynamic import cannot resolve - so the lazy loader returns in a
+// microtask and the fake clock can drive the device flow. Drop this block when
+// upstream fixes the loader or the test.
+registerBundledOAuthFlowLoaders({
+	anthropic: () => anthropicOAuth,
+	githubCopilot: () => githubCopilotOAuth,
+	kimiCoding: () => kimiCodingOAuth,
+	meta: () => metaOAuth,
+	openaiChatGPT: () => openaiChatGPTOAuth,
+	openaiCodex: () => openaiCodexOAuth,
+	openrouter: () => openRouterOAuth,
+	radius: (options) => createRadiusOAuth(options),
+	xai: () => xaiOAuth,
+});
 
 const neverAbortedSignal = new AbortController().signal;
 
