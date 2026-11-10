@@ -3,6 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getAssistantTexts, type Harness } from "./harness.ts";
 
@@ -92,6 +93,124 @@ describe("persisted agent run state", () => {
 		expect(reopen(created).hasUnfinishedWork()).toBe(action === "dispose");
 		if (action === "abort") expect(created.session.canRetry).toBe(true);
 	});
+
+	it.each(["quit", "replacement"] as const)("preserves interrupted state during real runtime %s", async (action) => {
+		const created = await harness();
+		const services = {
+			cwd: created.tempDir,
+			agentDir: created.tempDir,
+			modelRuntime: created.session.modelRuntime,
+			settingsManager: created.settingsManager,
+			resourceLoader: created.session.resourceLoader,
+			diagnostics: [],
+		};
+		const runtime = new AgentSessionRuntime(created.session, services, async ({ sessionManager }) => {
+			const successor = await createHarness({ sessionManager });
+			harnesses.push(successor);
+			return {
+				session: successor.session,
+				services: { ...services, modelRuntime: successor.session.modelRuntime },
+				extensionsResult: successor.session.resourceLoader.getExtensions(),
+				diagnostics: [],
+			};
+		});
+		let entered = () => {};
+		let release = () => {};
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		created.setResponses([
+			async () => {
+				entered();
+				await gate;
+				return fauxAssistantMessage("late");
+			},
+		]);
+		const prompt = created.session.prompt("work");
+		await started;
+		const cancelled = new Promise<void>((resolve) => {
+			created.session.agent.signal!.addEventListener("abort", () => resolve(), { once: true });
+		});
+		const stopped = action === "quit" ? runtime.dispose() : runtime.newSession();
+		await cancelled;
+		try {
+			expect(reopen(created).hasUnfinishedWork()).toBe(true);
+			await expect(created.session.prompt("late run")).rejects.toThrow("Session is shutting down");
+		} finally {
+			release();
+			await Promise.all([prompt, stopped]);
+		}
+		expect(reopen(created).hasUnfinishedWork()).toBe(true);
+		expect(created.session.canRetry).toBe(false);
+		await expect(created.session.retry()).rejects.toThrow("Session is shutting down");
+	});
+
+	it("rejects cold-start retry admission after prepare without closing interrupted work", async () => {
+		const created = await harness();
+		created.sessionManager.appendMessage({ role: "user", content: "work", timestamp: Date.now() });
+		created.sessionManager.appendRunState("started");
+		created.session.refreshContext();
+		const before = created.sessionManager.getEntries();
+		created.session.prepareForShutdown();
+		expect(created.session.canRetry).toBe(false);
+		await expect(created.session.retry()).rejects.toThrow("Session is shutting down");
+		expect(created.sessionManager.getEntries()).toEqual(before);
+		expect(reopen(created).hasUnfinishedWork()).toBe(true);
+	});
+
+	it.each(["dispose", "abortCompaction"] as const)(
+		"preserves the exit/cancel distinction during overflow compaction: %s",
+		async (action) => {
+			let entered = () => {};
+			let release = () => {};
+			const started = new Promise<void>((resolve) => {
+				entered = resolve;
+			});
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const created = await createHarness({
+				models: [{ id: "faux-1", contextWindow: 1_000_000, maxTokens: 100 }],
+				settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
+				sessionManagerFactory: (dir) => SessionManager.create(dir, dir),
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_before_compact", async (event) => {
+							entered();
+							await gate;
+							return {
+								compaction: {
+									summary: "must be discarded on cancellation",
+									firstKeptEntryId: event.preparation.firstKeptEntryId,
+									tokensBefore: event.preparation.tokensBefore,
+									details: {},
+								},
+							};
+						});
+					},
+				],
+			});
+			harnesses.push(created);
+			created.setResponses([
+				() => fauxAssistantMessage("x".repeat(64), { stopReason: "length", timestamp: Date.now() + 10_000 }),
+			]);
+			const prompt = created.session.prompt("x".repeat(5000));
+			await started;
+			try {
+				if (action === "dispose") await created.session.dispose();
+				else created.session.abortCompaction();
+				expect(reopen(created).hasUnfinishedWork()).toBe(action === "dispose");
+			} finally {
+				release();
+				await prompt;
+			}
+			expect(reopen(created).hasUnfinishedWork()).toBe(action === "dispose");
+			expect(created.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+		},
+	);
 
 	it("closes an explicitly aborted run: no unfinished work, manual retry stays available", async () => {
 		const created = await harness();

@@ -2445,7 +2445,7 @@ export class AgentSession {
 
 	private _planRetry(): ContinuationPlan {
 		const continuationAnchorId = this._continuationAnchorId;
-		if (this._isShuttingDown) throw new Error("Session is shutting down.");
+		this._assertNotShuttingDown();
 		if (this._manualRetryActive || this._isAgentRunActive) {
 			throw new Error("Agent is already processing a retry.");
 		}
