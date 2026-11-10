@@ -1,133 +1,178 @@
-/**
- * Owned tool execution: spawn tool commands under `procward run --control-fd`
- * so each task's tree is owned, cancellable, and observable.
- *
- * The control endpoint is a Unix-domain socketpair synthesized through an
- * abstract-namespace listener (Node exposes no socketpair API): the accepted
- * server-side fd is inherited by the child and passed to procward via
- * `--control-fd <n>` (its inherited fd number, which is 3 when stdio[3] is
- * the socket). Windows named-pipe task control is out of scope in this slice.
- *
- * Cancellation writes `PROCWARD/1 CANCEL\n` and reads until the contract's
- * C record plus EOF; a truncated or errored transcript settles the registry
- * entry as `unconfirmed` instead of success.
- */
+/** Per-task procward control. Native lifecycle tests run in procward's VM runner. */
+import type { ChildProcess } from "node:child_process";
+import { Duplex } from "node:stream";
+import type { OwnedCompletion, OwnedSession, OwnedTask, OwnedTaskProvenance } from "../process-registry.ts";
 
-import { spawn } from "node:child_process";
-import { createServer, createConnection, type Socket } from "node:net";
-import type { OwnedSession, OwnedTask } from "./process-registry.ts";
+export type { OwnedCompletion } from "../process-registry.ts";
 
 const CANCEL_REQUEST = "PROCWARD/1 CANCEL\n";
-const CONTROL_FD = 3;
+const DRAIN_DEADLINE_MS = 15_000;
 
 export interface OwnedExecOptions {
-	/** Resolved vendored procward binary; undefined disables wrapping. */
 	readonly procwardBinary: string | undefined;
 	readonly registry: OwnedSession;
-	/** Human-readable reason recorded with the task (which tool call). */
 	readonly purpose: string;
+	readonly provenance?: OwnedTaskProvenance;
 }
 
 export interface OwnedSpawn {
-	/** argv for the owned spawn (procward run -- ...). */
-	command: string;
-	args: string[];
-	/** stdio array with the control socket at index 3. */
-	stdio: Array<"ignore" | "pipe" | "inherit" | Socket>;
-	/** Register the live task once the wrapper process has a pid. */
-	finalize(pid: number | undefined): OwnedTask | undefined;
-	/** Cancel through the control endpoint; resolves with cleanup evidence. */
-	cancel(): Promise<{ unconfirmed: boolean }>;
+	readonly command: string;
+	readonly args: string[];
+	readonly stdio: ["ignore" | "pipe", "pipe", "pipe", "pipe"];
+	readonly ready: Promise<OwnedTask | undefined>;
+	/** X reports the command result, independently of later C + EOF. */
+	readonly primaryExit: Promise<number | undefined>;
+	/** Attach the spawned child's duplex control endpoint at fd 3. */
+	finalize(child: ChildProcess): void;
+	readonly completion: Promise<OwnedCompletion>;
+	cancel(): Promise<OwnedCompletion>;
 }
 
-/**
- * Prepare an owned spawn for `command args`. Returns undefined when ownership
- * is unavailable (caller falls back to a direct spawn).
- */
-export async function prepareOwnedSpawn(
-	options: OwnedExecOptions,
-	command: string,
-	args: string[],
-): Promise<OwnedSpawn | undefined> {
-	if (process.platform === "win32") return undefined;
-	const binary = options.procwardBinary;
-	if (binary === undefined) return undefined;
+export function prepareOwnedSpawn(options: OwnedExecOptions, command: string, args: string[]): OwnedSpawn | undefined {
+	if (options.procwardBinary === undefined) return undefined;
+	// Windows needs a native HANDLE adapter; do not claim it is already wired.
+	if (process.platform === "win32") throw new Error("procward task HANDLE transport is not implemented");
 
-	// Synthesize the socketpair: accept one connection on an abstract socket,
-	// keep the client side for control traffic, hand the server side to the
-	// child as its fd 3.
-	const address = `\0pi-procward-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-	const server = createServer(() => {});
-	await new Promise<void>((resolve) => server.listen(address, resolve));
-	// Register the connection listener BEFORE connecting: the accepted socket
-	// event must not race the connect.
-	const peerPromise = new Promise<Socket>((resolve) => server.once("connection", resolve));
-	const connector = createConnection(address);
-	await new Promise<void>((resolve) => connector.once("connect", resolve));
-	const peer = await peerPromise;
-	connector.pause();
-	server.close();
+	let control: Duplex | undefined;
+	let task: OwnedTask | undefined;
+	let record = "";
+	let scope: OwnedCompletion["scope"];
+	let exitCode: number | undefined;
+	let completedRecord = false;
+	let finished = false;
+	let childClosed = false;
+	let settled = false;
+	let transcriptUnconfirmed = false;
+	let cancellationRequested = false;
+	let cancellationSent = false;
+	let drainTimer: NodeJS.Timeout | undefined;
+	let resolveCompletion: (value: OwnedCompletion) => void = () => {};
+	const completion = new Promise<OwnedCompletion>((resolve) => {
+		resolveCompletion = resolve;
+	});
+	let resolveReady: (value: OwnedTask | undefined) => void = () => {};
+	const ready = new Promise<OwnedTask | undefined>((resolve) => {
+		resolveReady = resolve;
+	});
+	let resolvePrimary: (value: number | undefined) => void = () => {};
+	const primaryExit = new Promise<number | undefined>((resolve) => {
+		resolvePrimary = resolve;
+	});
 
-	const finalize = (pid: number | undefined): OwnedTask | undefined => {
-		if (pid === undefined) {
-			connector.destroy();
-			peer.destroy();
-			return undefined;
-		}
-		return options.registry.register({
-			command: [command, ...args].join(" "),
-			purpose: options.purpose,
-			procwardPid: pid,
-			cancel: () => {
-				connector.write(CANCEL_REQUEST);
-			},
+	const settle = (expired = false) => {
+		if (settled || !finished || (!childClosed && !expired)) return;
+		settled = true;
+		if (drainTimer) clearTimeout(drainTimer);
+		const unconfirmed = transcriptUnconfirmed || !childClosed;
+		if (task) options.registry.settle(task.id, { descendantsAlive: false, unconfirmed });
+		resolveCompletion({ exitCode, scope, unconfirmed });
+	};
+	const finish = (unconfirmed: boolean) => {
+		if (finished) return;
+		finished = true;
+		transcriptUnconfirmed = unconfirmed;
+		resolveReady(task);
+		resolvePrimary(exitCode);
+		control?.destroy();
+		boundDrain();
+		settle();
+	};
+	const boundDrain = () => {
+		drainTimer ??= setTimeout(() => {
+			finish(true);
+			settle(true);
+		}, DRAIN_DEADLINE_MS);
+	};
+	const sendCancellation = () => {
+		if (!control || cancellationSent || finished) return;
+		cancellationSent = true;
+		control.write(CANCEL_REQUEST, (error) => {
+			if (error) finish(true);
 		});
 	};
-
-	const cancel = (): Promise<{ unconfirmed: boolean }> => readControlCompletion(connector);
+	const cancel = () => {
+		if (!finished) {
+			cancellationRequested = true;
+			if (task) task.status = "reaping";
+			boundDrain();
+			sendCancellation();
+		}
+		return completion;
+	};
 
 	return {
-		command: binary,
-		args: ["run", "--control-fd", String(CONTROL_FD), "--", command, ...args],
-		stdio: ["ignore", "pipe", "pipe", peer],
-		finalize,
+		command: options.procwardBinary,
+		args: ["run", "--retain-descendants", "--control-fd", "3", "--", command, ...args],
+		// libuv's Unix UV_CREATE_PIPE uses socketpair(SOCK_STREAM). Extra
+		// stdio pipes are duplex; no listener, socket path or retained peer is
+		// needed. See Node deps/uv/src/unix/process.c: uv__process_init_stdio.
+		stdio: ["ignore", "pipe", "pipe", "pipe"],
+		ready,
+		primaryExit,
+		completion,
 		cancel,
-	};
-}
-
-/** Read the task-control transcript until C+EOF; unconfirmed on truncation. */
-async function readControlCompletion(client: Socket): Promise<{ unconfirmed: boolean }> {
-	return await new Promise((resolve) => {
-		let buffer = "";
-		const complete = /^PROCWARD\/1 C (kernel|best-effort)\n$/m.test.bind(buffer);
-		const finish = (unconfirmed: boolean) => {
-			client.destroy();
-			resolve({ unconfirmed });
-		};
-		const timer = setTimeout(() => finish(true), 15_000);
-		const check = () => {
-			if (buffer.includes("PROCWARD/1 E ")) {
-				clearTimeout(timer);
+		finalize(child) {
+			child.once("error", () => finish(true));
+			child.once("close", () => {
+				childClosed = true;
 				finish(true);
-				return true;
+				settle();
+			});
+			const endpoint = child.stdio[3];
+			if (!(endpoint instanceof Duplex) || child.pid === undefined) {
+				finish(true);
+				return;
 			}
-			return false;
-		};
-		client.on("data", (chunk: Buffer) => {
-			buffer += chunk.toString("utf8");
-			if (check()) return;
-			if (complete()) {
-				// C seen; EOF must still follow for confirmed cleanup.
-				client.once("close", () => {
-					clearTimeout(timer);
-					finish(false);
-				});
-			}
-		});
-		client.on("close", () => {
-			clearTimeout(timer);
-			finish(!complete());
-		});
-		client.resume();
-	});
+			control = endpoint;
+			const accept = (line: string) => {
+				if (completedRecord) return finish(true);
+				const started = /^PROCWARD\/1 S ([1-9][0-9]*) (kernel|best-effort)$/.exec(line);
+				if (started && scope === undefined && Number(started[1]) === child.pid) {
+					scope = started[2] === "kernel" ? "kernel" : "best-effort";
+					task = options.registry.register({
+						command: [command, ...args].join(" "),
+						purpose: options.purpose,
+						provenance: options.provenance,
+						procwardPid: child.pid!,
+						cancel,
+					});
+					if (cancellationRequested) task.status = "reaping";
+					resolveReady(task);
+					return;
+				}
+				const primary = /^PROCWARD\/1 X (0|[1-9][0-9]*)$/.exec(line);
+				if (primary && scope !== undefined && exitCode === undefined && Number(primary[1]) <= 0xffff_ffff) {
+					exitCode = Number(primary[1]);
+					if (task && !cancellationRequested) {
+						options.registry.settle(task.id, { descendantsAlive: true, unconfirmed: false });
+					}
+					resolvePrimary(exitCode);
+					return;
+				}
+				if (scope !== undefined && exitCode !== undefined && line === `PROCWARD/1 C ${scope}`) {
+					completedRecord = true;
+					boundDrain();
+					return;
+				}
+				finish(true);
+			};
+			endpoint.on("data", (chunk: Buffer) => {
+				for (const byte of chunk) {
+					if (finished) return;
+					if (byte === 10) {
+						accept(record);
+						record = "";
+					} else if (byte < 32 || byte > 126 || record.length >= 255) {
+						finish(true);
+					} else {
+						record += String.fromCharCode(byte);
+					}
+				}
+			});
+			endpoint.once("end", () => finish(!completedRecord || record.length !== 0));
+			endpoint.once("close", () => finish(true));
+			endpoint.once("error", () => finish(true));
+			if (cancellationRequested) sendCancellation();
+		},
+	};
 }

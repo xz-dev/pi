@@ -39,6 +39,8 @@ import type {
 	ToolDefinition,
 } from "../../core/extensions/types.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
+import { sessionProcessRegistries } from "../../core/process-ownership.ts";
+import type { OwnedSession } from "../../core/process-registry.ts";
 import { sliceHead } from "../../core/tools/truncate.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { CODEMODE_TOOL_NAME } from "../codemode/tool.ts";
@@ -296,6 +298,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		const startupWaitMs = options.startupWaitMs ?? DEFAULT_STARTUP_WAIT_MS;
 		/** Working directory of the session, for stdio servers. */
 		let sessionCwd = process.cwd();
+		let processRegistry: OwnedSession | undefined;
 		let credentials = options.credentials;
 		/** The session's model registry, which resolves `auth.provider` tokens. */
 		let modelRegistry: ModelRegistry | undefined;
@@ -569,7 +572,9 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			const connection = new runtime.McpServerConnection({
 				entry: server.entry,
 				cwd: sessionCwd,
-				createTransport: options.createTransport ?? runtime.createDefaultTransport,
+				createTransport:
+					options.createTransport ??
+					((entry, cwd, auth) => runtime.createDefaultTransport(entry, cwd, auth, processRegistry)),
 				credentials: getCredentials(runtime),
 				providerToken: async (provider) => modelRegistry?.getApiKeyForProvider(provider),
 				log: getServerLog(runtime),
@@ -1120,6 +1125,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			warnedUnreachable = false;
 			waitedForStartup = false;
 			sessionCwd = ctx.cwd;
+			processRegistry = sessionProcessRegistries.get(ctx.sessionManager);
 			modelRegistry = ctx.modelRegistry;
 			session = new AbortController();
 			const { signal } = session;

@@ -1,48 +1,121 @@
-import { spawn } from "node:child_process";
-import { describe, expect, test } from "vitest";
+import { type ChildProcess, spawn } from "node:child_process";
+import { afterEach, describe, expect, test } from "vitest";
 import { createProcessRegistry } from "../src/core/process-registry.ts";
 import { prepareOwnedSpawn } from "../src/core/tools/owned-exec.ts";
+import { waitForChildProcess } from "../src/utils/child-process.ts";
 
-const HELPER = new URL("../native/procward/host/procward", import.meta.url).pathname;
+// Node-only protocol peers: no native procward execution or tree killing on
+// the host. Native task lifecycle checks run in procward's disposable VMs.
+const children: ChildProcess[] = [];
+afterEach(() => {
+	for (const child of children.splice(0)) {
+		if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+	}
+});
 
-function runOwned(command: string, args: string[]) {
-	return prepareOwnedSpawn({ procwardBinary: HELPER, registry: createProcessRegistry(), purpose: "bash tool" }, command, args);
+function fixture(transcript: string, waitForCancel = false, primaryBeforeCancel?: number) {
+	const registry = createProcessRegistry();
+	const owned = prepareOwnedSpawn(
+		{ procwardBinary: "/unused-native-helper", registry, purpose: "protocol fixture" },
+		"command",
+		["argument"],
+	);
+	if (!owned) throw new Error("expected an ownership control channel");
+	const script = `
+const { Socket } = require("node:net");
+const channel = new Socket({ fd: 3 });
+channel.on("error", () => process.exit(1));
+const payload = ${JSON.stringify(transcript)}.replaceAll("{pid}", String(process.pid));
+if (${waitForCancel}) {
+ channel.write("PROCWARD/1 S " + process.pid + " kernel\\n" + ${JSON.stringify(primaryBeforeCancel === undefined ? "" : `PROCWARD/1 X ${primaryBeforeCancel}\n`)});
+ let request = "";
+ channel.on("data", bytes => {
+  request += bytes.toString();
+  if (request.includes("\\n")) {
+   channel.end(request === "PROCWARD/1 CANCEL\\n" ? payload : "PROCWARD/1 E 125\\n");
+  }
+ });
+} else {
+ channel.end(payload);
+}
+`;
+	const child = spawn(process.execPath, ["-e", script], { stdio: owned.stdio });
+	children.push(child);
+	owned.finalize(child);
+	return { owned, registry, child };
 }
 
-describe("prepareOwnedSpawn (real procward)", () => {
-	test("wraps a command and passes the primary status through", async () => {
-		const owned = await runOwned(process.execPath, ["-e", "process.exit(7)"]);
-		expect(owned).toBeDefined();
-		const child = spawn(owned!.command, owned!.args, { stdio: owned!.stdio as never });
-		const task = owned!.finalize(child.pid);
-		expect(task?.status).toBe("running");
-		const status = await new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
-		expect(status).toBe(7);
-	}, 20000);
+describe.skipIf(process.platform === "win32")("procward task control adapter", () => {
+	test("confirms exactly S, X, C and transport EOF", async () => {
+		const { owned, registry } = fixture("PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 7\nPROCWARD/1 C kernel\n");
+		expect(await owned.ready).toMatchObject({ purpose: "protocol fixture" });
+		expect(await owned.primaryExit).toBe(7);
+		expect(await owned.completion).toEqual({ exitCode: 7, scope: "kernel", unconfirmed: false });
+		expect(registry.list()).toEqual([]);
+	});
 
-	test("cancel drives the CANCEL/S/X/C transcript", async () => {
-		const owned = await runOwned(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
-		const child = spawn(owned!.command, owned!.args, { stdio: owned!.stdio as never });
-		await new Promise<void>((resolve) => child.on("spawn", resolve));
-		// Give the primary a moment to start, then cancel through the endpoint.
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		// On hosts without cgroup v2 permission, procward v0.2.1's fallback
-		// mode never closes the control endpoint after C (upstream bug), so
-		// confirmed cleanup (C + EOF) cannot be asserted everywhere. The
-		// transcript itself must still reach the C record; the process must
-		// exit from the cancellation.
-		await owned!.cancel().catch(() => ({ unconfirmed: true }));
-		await new Promise<void>((resolve) => child.on("exit", () => resolve()));
-	}, 25000);
+	test("returns the primary result while background ownership remains live", async () => {
+		const { owned, registry, child } = fixture("PROCWARD/1 C kernel\n", true, 7);
+		expect(owned.args).toEqual(["run", "--retain-descendants", "--control-fd", "3", "--", "command", "argument"]);
+		const result = await waitForChildProcess(child, owned.primaryExit);
+		expect(result).toBe(7);
+		expect(child.exitCode).toBeNull();
+		expect(registry.list()).toMatchObject([{ status: "background" }]);
+		expect(await owned.cancel()).toEqual({ exitCode: 7, scope: "kernel", unconfirmed: false });
+		expect(registry.list()).toEqual([]);
+	});
 
-	test("undefined helper means no wrapping (opt-out path)", async () => {
-		const owned = await runOwned("echo", ["hi"]).then((r) => r);
-		expect(owned).toBeDefined();
-		const none = await prepareOwnedSpawn(
-			{ procwardBinary: undefined, registry: createProcessRegistry(), purpose: "bash tool" },
-			"echo",
-			["hi"],
-		);
-		expect(none).toBeUndefined();
-	}, 20000);
+	test("cancel sends the bounded request and is idempotent", async () => {
+		const { owned } = fixture("PROCWARD/1 X 143\nPROCWARD/1 C kernel\n", true);
+		expect(await owned.ready).toMatchObject({ status: "running" });
+		const first = owned.cancel();
+		expect(owned.cancel()).toBe(first);
+		expect(await first).toEqual({ exitCode: 143, scope: "kernel", unconfirmed: false });
+	});
+
+	test("registry cancellation uses the same control request", async () => {
+		const { owned } = fixture("PROCWARD/1 X 143\nPROCWARD/1 C kernel\n", true);
+		const task = await owned.ready;
+		if (!task) throw new Error("task did not register");
+		task.cancel();
+		expect(await owned.completion).toEqual({ exitCode: 143, scope: "kernel", unconfirmed: false });
+	});
+
+	test.each([
+		["missing start", "PROCWARD/1 X 0\nPROCWARD/1 C kernel\n"],
+		["missing cleanup", "PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 0\n"],
+		["wrong scope", "PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 0\nPROCWARD/1 C best-effort\n"],
+		["duplicate primary", "PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 0\nPROCWARD/1 X 0\nPROCWARD/1 C kernel\n"],
+		["wrong order", "PROCWARD/1 S {pid} kernel\nPROCWARD/1 C kernel\nPROCWARD/1 X 0\n"],
+		["truncated record", "PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 0\nPROCWARD/1 C kernel"],
+		["native failure", "PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 0\nPROCWARD/1 E 125\n"],
+		["oversized record", `${"x".repeat(256)}\n`],
+		["result outside u32", "PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 4294967296\nPROCWARD/1 C kernel\n"],
+		["data after cleanup", "PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 0\nPROCWARD/1 C kernel\nextra\n"],
+	])("reports %s as unconfirmed cleanup", async (_name, transcript) => {
+		const { owned } = fixture(transcript);
+		expect((await owned.completion).unconfirmed).toBe(true);
+	});
+
+	test("a missing primary result fails instead of treating wrapper exit as success", async () => {
+		const { owned, child } = fixture("PROCWARD/1 S {pid} kernel\nPROCWARD/1 E 125\n");
+		await expect(waitForChildProcess(child, owned.primaryExit)).rejects.toThrow("without a primary result");
+		expect((await owned.completion).unconfirmed).toBe(true);
+	});
+
+	test("keeps an unconfirmed task for inspection", async () => {
+		const { owned, registry } = fixture("PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 0\n");
+		expect((await owned.completion).unconfirmed).toBe(true);
+		expect(registry.list()).toMatchObject([{ status: "unconfirmed" }]);
+	});
+});
+
+test("an absent helper does not allocate a control channel", () => {
+	expect(
+		prepareOwnedSpawn(
+			{ procwardBinary: undefined, registry: createProcessRegistry(), purpose: "disabled" },
+			"command",
+			[],
+		),
+	).toBeUndefined();
 });

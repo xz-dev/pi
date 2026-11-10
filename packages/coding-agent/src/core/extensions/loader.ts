@@ -18,6 +18,7 @@ import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { type McpServerConfig, McpServerRegistry, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
+import { sessionProcessRegistries } from "../process-ownership.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
@@ -422,7 +423,11 @@ function createExtensionAPI(
 
 		exec(command: string, args: string[], options?: ExecOptions) {
 			assertActive();
-			return execCommand(command, args, options?.cwd ?? cwd, options);
+			return execCommand(command, args, options?.cwd ?? cwd, options, {
+				registry: sessionProcessRegistries.get(runtime),
+				purpose: `extension ${extension.path} pi.exec`,
+				provenance: { toolName: "pi.exec", toolCallId: crypto.randomUUID(), extensionPath: extension.path },
+			});
 		},
 
 		getActiveTools(): string[] {
