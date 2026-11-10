@@ -143,11 +143,11 @@ export function ownCliProcess(args: readonly string[], bootstrap: ProcwardBootst
 	const childEnv = { ...process.env, [BOOTSTRAP_NONCE]: nonce };
 	const launchArgs = bootstrap.standalone ? [...args] : [...process.execArgv, process.argv[1], ...args];
 
-	// Replacing the outer Node process keeps signals addressed to its PID inside
-	// the native owner; a waiting wrapper could die and orphan that owner.
-	if (process.platform !== "win32" && !process.versions.bun && !bootstrap.standalone) {
+	// Replacing the outer process keeps signals addressed to its PID inside
+	// the native owner; a waiting Unix wrapper could die and orphan that owner.
+	if (process.platform !== "win32") {
 		try {
-			if (!process.execve) throw new Error("Node process.execve is unavailable");
+			if (!process.execve) throw new Error("process.execve is unavailable");
 			process.execve(binary, [binary, "run", "--quiet", "--", process.execPath, ...launchArgs], childEnv);
 		} catch (cause) {
 			throw new Error(
