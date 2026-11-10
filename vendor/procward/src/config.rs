@@ -12,6 +12,7 @@ pub struct RunOptions {
     pub cleanup: Config,
     pub control: Option<u64>,
     pub retain_descendants: bool,
+    pub quiet: bool,
     pub command_index: usize,
 }
 impl Default for Config {
@@ -63,6 +64,7 @@ pub fn options(args: &[OsString]) -> Result<RunOptions, (u8, String)> {
     let mut config = Config::default();
     let mut control = None;
     let mut retain_descendants = false;
+    let mut quiet = false;
     let mut index = 0;
     let mut seen = 0;
     while let Some(option) = args.get(index) {
@@ -75,8 +77,17 @@ pub fn options(args: &[OsString]) -> Result<RunOptions, (u8, String)> {
                 cleanup: config,
                 control,
                 retain_descendants,
+                quiet,
                 command_index: index + 1,
             });
+        }
+        if option == "--quiet" {
+            if quiet {
+                return Err((2, "duplicate --quiet option".into()));
+            }
+            quiet = true;
+            index += 1;
+            continue;
         }
         if option == "--retain-descendants" {
             if retain_descendants {
