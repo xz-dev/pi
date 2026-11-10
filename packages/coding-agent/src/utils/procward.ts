@@ -11,7 +11,7 @@
  *   its own layer, unless ownership is disabled.
  * - Only pi's own one-shot bootstrap handoff (validated by procward's
  *   lifecycle contract) skips re-wrapping. Anything stale or mismatched
- *   fails closed (treated as not ours, so pi wraps again).
+ *   fails closed before the application loads.
  *
  * Opt-outs:
  * - `--no-process-ownership` disables for this invocation.
@@ -20,21 +20,33 @@
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { consumeManagedContract, observeOwnerLoss, type ManagedContract } from "./managed-child.ts";
+import { constants as osConstants } from "node:os";
+import {
+	CONTRACT_ENV_KEYS,
+	consumeAndObserveManagedContract,
+	type consumeManagedContract,
+	observeOwnerLoss,
+} from "./managed-child.ts";
 
 // One-shot marker for pi's own re-exec handoff. Not a security boundary
 // against a hostile parent: procward's contract validation proves
 // management; the nonce only prevents pi from re-wrapping itself forever.
 const BOOTSTRAP_NONCE = "PI_PROCWARD_BOOTSTRAP_NONCE";
 
-/** CLI options that consume the next argument as their value. */
+let bootstrapOwnership: { enabled: boolean; ownerPid?: number } | undefined;
+
+/** Read invocation-local ownership state; embedded SDKs never claim an unvalidated parent. */
+export function getProcessOwnership(): Readonly<{ enabled: boolean; ownerPid?: number }> {
+	return bootstrapOwnership ?? { enabled: process.env.PI_NO_PROCESS_OWNERSHIP !== "1" };
+}
+
+/** CLI options that consume even a flag-looking next argument (see cli/args.ts). */
 const VALUE_OPTIONS = new Set([
 	"--provider",
 	"--model",
 	"--api-key",
 	"--system-prompt",
 	"--append-system-prompt",
-	"--mode",
 	"--session",
 	"--session-id",
 	"--fork",
@@ -52,8 +64,6 @@ const VALUE_OPTIONS = new Set([
 	"--skill",
 	"--prompt-template",
 	"--theme",
-	"--use-theme",
-	"--tui-mode",
 	"--export",
 ]);
 
@@ -87,8 +97,8 @@ export interface ProcwardBootstrap {
 	/** This process's PID and parent PID (test seam). */
 	readonly selfPid?: number;
 	readonly parentPid?: number;
-	/** True when this build ships the helper (release binaries must). */
-	readonly buildShipsHelper?: boolean;
+	/** Standalone executables have no Node script entry in argv[1]. */
+	readonly standalone?: boolean;
 	/** Bridge validated owner loss into pi's shutdown path (test seam). */
 	readonly onOwnerLoss?: (reason: string) => void;
 	/** Observe the lifecycle pipe for owner loss (test seam). */
@@ -100,67 +110,88 @@ export interface ProcwardBootstrap {
  * when the caller must exit immediately (pi re-exec'd under an owner and the
  * owner finished), or undefined when pi should continue starting normally.
  *
- * - Ownership disabled, or the helper is absent: continue (opt-out behavior;
- *   the caller clears its nonce so children never see it).
+ * - Ownership disabled: clear the one-shot marker and continue.
+ * - Helper absent: fail visibly with an explicit opt-out diagnostic.
  * - Pi's own bootstrap nonce present: procward validated the handoff via its
  *   lifecycle contract; consume the nonce and continue without re-wrapping.
- * - Otherwise: exec pi under a fresh procward owner and return its status.
+ * - Otherwise: run pi under a fresh procward owner and return its status.
  */
 export function ownCliProcess(args: readonly string[], bootstrap: ProcwardBootstrap): number | undefined {
 	if (ownershipDisabled(args)) {
+		bootstrapOwnership = { enabled: false };
 		clearBootstrapNonce();
 		return undefined;
 	}
 	if (hasBootstrapNonce()) {
-		// Our own handoff, proven by procward's lifecycle contract: a valid
-		// READY record whose owner is our immediate parent and whose launch id
-		// matches the environment. Anything stale or mismatched fails closed.
-		const contract = validateOwnHandoff(bootstrap);
+		const nonce = process.env[BOOTSTRAP_NONCE];
 		clearBootstrapNonce();
-		if (contract === undefined) {
-			// Environment did not claim management; the nonce is stale garbage.
-			// Treat as unmanaged and fall through to wrapping.
-		} else {
-			// Managed by our own handoff: watch the lifecycle pipe. When the
-			// owner disappears, pi shuts down through its signal path (graceful
-			// hooks, bounded) while the independent watchdog enforces the exit.
-			const observe = bootstrap.observeLoss ?? observeOwnerLoss;
-			const onLoss = bootstrap.onOwnerLoss ?? defaultOwnerLoss;
-			observe(contract, (reason) => onLoss(reason));
-			return undefined;
-		}
+		if (!nonce || !/^[0-9a-f]{32}$/.test(nonce)) throw new Error("pi: invalid bootstrap nonce");
+		validateOwnHandoff(bootstrap);
+		bootstrapOwnership = { enabled: true, ownerPid: Number(process.env.PROCWARD_OWNER_PID) };
+		for (const key of CONTRACT_ENV_KEYS) delete process.env[key];
+		return undefined;
 	}
 	const binary = bootstrap.resolveBinary();
 	if (binary === undefined) {
-		// Feature absent. A release build that ships the helper must fail
-		// visibly (broken packaging), pointing at the opt-out; source/npm
-		// trees without a built helper degrade to unmanaged with one notice.
-		if (bootstrap.buildShipsHelper) {
-			throw new Error(
-				"pi: the bundled process-ownership helper is missing from this installation; " +
-				"reinstall pi, or disable ownership with --no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1",
-			);
-		}
-		return undefined;
+		throw new Error(
+			"pi: the process-ownership helper is missing; rebuild or reinstall pi, " +
+				"or disable ownership with --no-process-ownership / PI_NO_PROCESS_OWNERSHIP=1",
+		);
 	}
 
 	const nonce = randomBytes(16).toString("hex");
 	const childEnv = { ...process.env, [BOOTSTRAP_NONCE]: nonce };
-	delete childEnv.PI_PROCWARD_BIN; // the inner pi resolves its own copy
+	const launchArgs = bootstrap.standalone ? [...args] : [...process.execArgv, process.argv[1], ...args];
 
-	const result = spawnSync(binary, ["run", "--", process.execPath, ...args], {
+	// Replacing the outer Node process keeps signals addressed to its PID inside
+	// the native owner; a waiting wrapper could die and orphan that owner.
+	if (process.platform !== "win32" && !process.versions.bun && !bootstrap.standalone) {
+		try {
+			if (!process.execve) throw new Error("Node process.execve is unavailable");
+			process.execve(binary, [binary, "run", "--quiet", "--", process.execPath, ...launchArgs], childEnv);
+		} catch (cause) {
+			throw new Error(
+				"pi: cannot exec the process owner; use --no-process-ownership or PI_NO_PROCESS_OWNERSHIP=1 to opt out",
+				{ cause },
+			);
+		}
+	}
+
+	const result = spawnSync(binary, ["run", "--quiet", "--", process.execPath, ...launchArgs], {
 		stdio: "inherit",
 		env: childEnv,
 	});
-	return result.status ?? 125;
+	if (result.error) {
+		throw new Error(
+			"pi: cannot start the process owner; use --no-process-ownership or PI_NO_PROCESS_OWNERSHIP=1 to opt out",
+			{ cause: result.error },
+		);
+	}
+	return result.status ?? (result.signal ? 128 + (osConstants.signals[result.signal] ?? 0) : 125);
 }
 
-/** Result of validating our own bootstrap handoff. */
-function validateOwnHandoff(bootstrap: ProcwardBootstrap): ManagedContract | undefined {
-	const consume = bootstrap.consumeContract ?? consumeManagedContract;
+/** Validate and consume our own handoff before any application startup. */
+function validateOwnHandoff(bootstrap: ProcwardBootstrap): void {
+	const env = {
+		protocol: process.env.PROCWARD_PROTOCOL,
+		ownerPid: process.env.PROCWARD_OWNER_PID,
+		contractId: process.env.PROCWARD_CONTRACT_ID,
+		lifecycleFd: process.env.PROCWARD_LIFECYCLE_FD,
+	};
+	if (env.protocol === undefined) throw new Error("pi: bootstrap handoff is missing its contract");
+	if (process.env.PROCWARD_LIFECYCLE_HANDLE !== undefined) {
+		throw new Error("pi: Windows process-ownership handoff is not supported by this adapter");
+	}
 	const selfPid = bootstrap.selfPid ?? process.pid;
-	const parentPid = bootstrap.parentPid ?? (process.ppid ?? 0);
-	return consume(process.env, selfPid, parentPid);
+	const parentPid = bootstrap.parentPid ?? process.ppid;
+	const onLoss = bootstrap.onOwnerLoss ?? defaultOwnerLoss;
+	if (bootstrap.consumeContract) {
+		const contract = bootstrap.consumeContract(env, selfPid, parentPid);
+		if (!contract) throw new Error("pi: invalid bootstrap handoff");
+		(bootstrap.observeLoss ?? observeOwnerLoss)(contract, onLoss);
+	} else {
+		consumeAndObserveManagedContract(env, selfPid, parentPid, onLoss);
+	}
 }
 
 /**

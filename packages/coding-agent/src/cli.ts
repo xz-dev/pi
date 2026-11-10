@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 import { isBunBinary, resolveProcwardBinary } from "./config.ts";
-import { setupCli } from "./cli/setup.ts";
 import { runMain } from "./cli-entry.ts";
-import { main } from "./main.ts";
 import { ownCliProcess } from "./utils/procward.ts";
 
 // Wrap this process in a procward owner before any CLI side effects, so the
@@ -11,11 +9,14 @@ import { ownCliProcess } from "./utils/procward.ts";
 // which case the CLI must not start again.
 const bootstrapStatus = ownCliProcess(process.argv.slice(2), {
 	resolveBinary: resolveProcwardBinary,
-	buildShipsHelper: isBunBinary,
+	standalone: isBunBinary,
 });
 if (bootstrapStatus !== undefined) {
 	process.exit(bootstrapStatus);
 }
 
+// Entry-only lazy imports keep setup and the full CLI behind the ownership decision.
+const { setupCli } = await import("./cli/setup.ts");
+const { main } = await import("./main.ts");
 setupCli();
 void runMain(() => main(process.argv.slice(2)));

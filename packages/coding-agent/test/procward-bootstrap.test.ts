@@ -1,126 +1,208 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
-import { hasBootstrapNonce, ownershipDisabled, ownCliProcess } from "../src/utils/procward.ts";
+import { spawnSync } from "node:child_process";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { consumeManagedContract } from "../src/utils/managed-child.ts";
+import { hasBootstrapNonce, ownCliProcess, ownershipDisabled } from "../src/utils/procward.ts";
 
-const ORIGINAL_NONCE = process.env.PI_PROCWARD_BOOTSTRAP_NONCE;
-const ORIGINAL_DISABLE = process.env.PI_NO_PROCESS_OWNERSHIP;
+vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
+
+const launchId = "a".repeat(32);
+const spawnOwner = vi.mocked(spawnSync);
+const execOwner = vi.fn<NonNullable<typeof process.execve>>(() => {
+	throw new Error("exec fixture");
+});
+const ownerResult = {
+	pid: 123,
+	output: [null, Buffer.alloc(0), Buffer.alloc(0)],
+	stdout: Buffer.alloc(0),
+	stderr: Buffer.alloc(0),
+	status: 42,
+	signal: null,
+};
+
+beforeEach(() => {
+	vi.clearAllMocks();
+	if (process.execve) vi.spyOn(process, "execve").mockImplementation(execOwner);
+	for (const key of [
+		"PI_PROCWARD_BOOTSTRAP_NONCE",
+		"PI_NO_PROCESS_OWNERSHIP",
+		"PI_PROCWARD_BIN",
+		"PROCWARD_PROTOCOL",
+		"PROCWARD_OWNER_PID",
+		"PROCWARD_CONTRACT_ID",
+		"PROCWARD_LIFECYCLE_FD",
+	]) {
+		vi.stubEnv(key, undefined);
+	}
+	spawnOwner.mockReturnValue(ownerResult);
+});
 
 afterEach(() => {
-	for (const key of ["PI_PROCWARD_BOOTSTRAP_NONCE", "PI_NO_PROCESS_OWNERSHIP"]) {
-		if (process.env[key] === undefined) delete process.env[key];
-	}
-	if (ORIGINAL_NONCE === undefined) delete process.env.PI_PROCWARD_BOOTSTRAP_NONCE;
-	else process.env.PI_PROCWARD_BOOTSTRAP_NONCE = ORIGINAL_NONCE;
-	if (ORIGINAL_DISABLE === undefined) delete process.env.PI_NO_PROCESS_OWNERSHIP;
-	else process.env.PI_NO_PROCESS_OWNERSHIP = ORIGINAL_DISABLE;
+	vi.unstubAllEnvs();
+	vi.restoreAllMocks();
 });
 
 describe("ownershipDisabled", () => {
-	test("flag disables for this invocation", () => {
+	test("explicit invocation and inherited opt-outs", () => {
 		expect(ownershipDisabled(["--no-process-ownership"])).toBe(true);
+		vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "1");
+		expect(ownershipDisabled([])).toBe(true);
 	});
 
-	test("environment variable disables inherited invocations", () => {
-		process.env.PI_NO_PROCESS_OWNERSHIP = "1";
-		expect(ownershipDisabled(["--model", "x"])).toBe(true);
+	test.each(["--model", "--name", "--system-prompt"])("%s consumes its value before opt-out scanning", (option) => {
+		expect(ownershipDisabled([option, "--no-process-ownership"])).toBe(false);
 	});
 
-	test("flag as another option's value does not disable", () => {
-		expect(ownershipDisabled(["--system-prompt", "--no-process-ownership"])).toBe(false);
-		expect(ownershipDisabled(["--name", "--no-process-ownership"])).toBe(false);
-		expect(ownershipDisabled(["--use-theme", "--no-process-ownership"])).toBe(false);
-	});
-
-	test("flag after -- is a positional value, not a switch", () => {
+	test("-- terminates option scanning", () => {
 		expect(ownershipDisabled(["--", "--no-process-ownership"])).toBe(false);
-	});
-
-	test("value options skip their argument", () => {
-		expect(ownershipDisabled(["--model", "--no-process-ownership"])).toBe(false);
-	});
-
-	test("plain invocation keeps ownership", () => {
-		expect(ownershipDisabled(["--model", "gpt"])).toBe(false);
+		expect(ownershipDisabled(["--model", "example"])).toBe(false);
 	});
 });
 
 describe("ownCliProcess", () => {
-	test("disabled invocation continues immediately and clears a stale nonce", () => {
-		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "stale";
-		expect(ownCliProcess(["--no-process-ownership"], { resolveBinary: () => "/bin/true" })).toBeUndefined();
+	test.each(["0", "1", "2", "9007199254740992"])("rejects invalid lifecycle fd %s before reading", (lifecycleFd) => {
+		const readRecord = vi.fn();
+		expect(() => consumeManagedContract({ protocol: "1", lifecycleFd }, 100, 200, readRecord)).toThrow(
+			"lifecycle fd",
+		);
+		expect(readRecord).not.toHaveBeenCalled();
+	});
+	test.each(["--mode", "--use-theme", "--tui-mode"])("%s does not consume a flag-looking value", (option) => {
+		expect(ownershipDisabled([option, "--no-process-ownership"])).toBe(true);
+	});
+
+	test("print accepts a documented flag-looking prompt without hiding later opt-out", () => {
+		expect(ownershipDisabled(["-p", "---no-process-ownership"])).toBe(false);
+		expect(ownershipDisabled(["-p", "---prompt", "--no-process-ownership"])).toBe(true);
+	});
+
+	test("missing helper fails closed for source and npm invocations too", () => {
+		expect(() => ownCliProcess([], { resolveBinary: () => undefined })).toThrow("--no-process-ownership");
+	});
+
+	test("stale and malformed own markers fail closed rather than rewrap", () => {
+		for (const nonce of ["stale", "a".repeat(32)]) {
+			vi.stubEnv("PI_PROCWARD_BOOTSTRAP_NONCE", nonce);
+			expect(() => ownCliProcess([], { resolveBinary: () => "/unused" })).toThrow(/handoff|nonce/i);
+			expect(hasBootstrapNonce()).toBe(false);
+		}
+		expect(spawnOwner).not.toHaveBeenCalled();
+	});
+
+	test("external metadata alone is not consumed as our handoff", () => {
+		vi.stubEnv("PROCWARD_PROTOCOL", "1");
+		const consumeContract = vi.fn();
+		expect(ownCliProcess([], { resolveBinary: () => "/helper", consumeContract, standalone: true })).toBe(42);
+		expect(consumeContract).not.toHaveBeenCalled();
+	});
+
+	test("opt-out never resolves or launches a helper", () => {
+		vi.stubEnv("PI_PROCWARD_BOOTSTRAP_NONCE", "stale");
+		const resolveBinary = vi.fn(() => "/unused");
+		expect(ownCliProcess(["--no-process-ownership"], { resolveBinary })).toBeUndefined();
+		expect(resolveBinary).not.toHaveBeenCalled();
+		expect(spawnOwner).not.toHaveBeenCalled();
 		expect(hasBootstrapNonce()).toBe(false);
 	});
 
-	test("own bootstrap nonce without contract env is stale, not accepted", () => {
-		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "mine";
-		// No PROCWARD_* env: consumeManagedContract reports unmanaged, so the
-		// nonce alone must NOT skip wrapping (fail closed on stale markers).
-		const status = ownCliProcess(["chat"], { resolveBinary: () => "/nonexistent-procward" });
-		expect(status).toBeGreaterThan(0);
+	test.skipIf(process.platform === "win32" || !!process.versions.bun)(
+		"Node exec preserves runtime arguments, the CLI entry, and user arguments",
+		() => {
+			vi.stubEnv("PI_PROCWARD_BIN", "/explicit/helper");
+			expect(() =>
+				ownCliProcess(["--model", "example", "hello world"], { resolveBinary: () => "/explicit/helper" }),
+			).toThrow("--no-process-ownership");
+			expect(execOwner).toHaveBeenCalledWith(
+				"/explicit/helper",
+				[
+					"/explicit/helper",
+					"run",
+					"--quiet",
+					"--",
+					process.execPath,
+					...process.execArgv,
+					process.argv[1],
+					"--model",
+					"example",
+					"hello world",
+				],
+				expect.objectContaining({
+					PI_PROCWARD_BIN: "/explicit/helper",
+					PI_PROCWARD_BOOTSTRAP_NONCE: expect.stringMatching(/^[a-f0-9]{32}$/),
+				}),
+			);
+			expect(spawnOwner).not.toHaveBeenCalled();
+		},
+	);
+
+	test.skipIf(process.platform === "win32" || !!process.versions.bun)(
+		"unavailable Node exec fails closed instead of waiting in a wrapper",
+		() => {
+			process.execve = undefined;
+			expect(() => ownCliProcess([], { resolveBinary: () => "/helper" })).toThrow("--no-process-ownership");
+			expect(spawnOwner).not.toHaveBeenCalled();
+		},
+	);
+
+	test("standalone relaunch does not add a Node script entry", () => {
+		ownCliProcess(["--help"], { resolveBinary: () => "/helper", standalone: true });
+		expect(spawnOwner).toHaveBeenCalledWith(
+			"/helper",
+			["run", "--quiet", "--", process.execPath, "--help"],
+			expect.any(Object),
+		);
+	});
+
+	test("maps real PROCWARD environment variables into the READY validator", () => {
+		vi.stubEnv("PI_PROCWARD_BOOTSTRAP_NONCE", "b".repeat(32));
+		vi.stubEnv("PROCWARD_PROTOCOL", "1");
+		vi.stubEnv("PROCWARD_OWNER_PID", "200");
+		vi.stubEnv("PROCWARD_CONTRACT_ID", launchId);
+		vi.stubEnv("PROCWARD_LIFECYCLE_FD", "7");
+		const observeLoss = vi.fn(() => () => {});
+		const resolveBinary = vi.fn(() => "/unused");
+		expect(
+			ownCliProcess([], {
+				resolveBinary,
+				selfPid: 100,
+				parentPid: 200,
+				consumeContract: (env, self, parent) =>
+					consumeManagedContract(env, self, parent, () => `PROCWARD/1 READY 200 100 parent ${launchId}`),
+				observeLoss,
+			}),
+		).toBeUndefined();
+		expect(observeLoss).toHaveBeenCalledWith({ ownerPid: 200, launchId, lifecycleFd: 7 }, expect.any(Function));
 		expect(hasBootstrapNonce()).toBe(false);
+		expect(resolveBinary).not.toHaveBeenCalled();
+		expect(spawnOwner).not.toHaveBeenCalled();
 	});
 
-	test("missing helper continues without ownership", () => {
-		expect(ownCliProcess(["chat"], { resolveBinary: () => undefined })).toBeUndefined();
-	});
-
-	test("unmanaged invocation re-execs under the owner and returns its status", () => {
-		// The real vendored helper: procward run -- sh -c 'exit 42' must surface
-		// the primary's status through the ownership lifecycle.
-		const helper = new URL("../native/procward/host/procward", import.meta.url).pathname;
-		const resolveBinary = vi.fn(() => helper);
-		const status = ownCliProcess(["-c", "exit 42"], { resolveBinary });
-		expect(resolveBinary).toHaveBeenCalled();
-		// process.execPath (node) runs with args; node -c is invalid, so the
-		// owner reports a nonzero status — assert a defined code, not 0.
-		expect(status).toBeDefined();
-		expect(status).toBeGreaterThan(0);
-		expect(hasBootstrapNonce()).toBe(false);
-	});
-
-	test("re-exec passes a clean environment decision to the child", () => {
-		const helper = new URL("../native/procward/host/procward", import.meta.url).pathname;
-		// The child (node, bad argv) exits fast; we only assert the parent did
-		// not crash while building the environment.
-		const status = ownCliProcess(["--version"], { resolveBinary: () => helper });
-		expect(status).toBeDefined();
-	});
-});
-
-describe("ownCliProcess handoff validation", () => {
-	test("nonce with a valid contract consumes and continues", () => {
-		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "mine";
-		const status = ownCliProcess(["chat"], {
-			resolveBinary: () => "/bin/false",
-			consumeContract: (env) => {
-				void env;
-				return { ownerPid: 9, launchId: "f".repeat(32), lifecycleFd: 7 };
-			},
-		});
-		expect(status).toBeUndefined();
-		expect(hasBootstrapNonce()).toBe(false);
-	});
-
-	test("nonce without contract env is stale: wraps again", () => {
-		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "stale";
-		// consumeContract reports "unmanaged" (undefined): must re-wrap,
-		// which with a broken binary surfaces a nonzero status.
-		const status = ownCliProcess(["chat"], {
-			resolveBinary: () => "/nonexistent-procward",
-			consumeContract: () => undefined,
-		});
-		expect(status).toBeGreaterThan(0);
-		expect(hasBootstrapNonce()).toBe(false);
-	});
-
-	test("nonce with a mismatched contract fails closed with a diagnostic", () => {
-		process.env.PI_PROCWARD_BOOTSTRAP_NONCE = "spoofed";
+	test("invalid READY fails before relaunch", () => {
+		vi.stubEnv("PROCWARD_PROTOCOL", "1");
+		vi.stubEnv("PI_PROCWARD_BOOTSTRAP_NONCE", "b".repeat(32));
 		expect(() =>
-			ownCliProcess(["chat"], {
-				resolveBinary: () => "/bin/false",
+			ownCliProcess([], {
+				resolveBinary: () => "/unused",
 				consumeContract: () => {
-					throw new Error("procward: READY launch id mismatch");
+					throw new Error("invalid READY");
 				},
 			}),
-		).toThrow(/launch id mismatch/);
+		).toThrow("invalid READY");
+		expect(spawnOwner).not.toHaveBeenCalled();
+	});
+
+	test("spawn failure points at the explicit opt-out", () => {
+		spawnOwner.mockReturnValue({ ...ownerResult, status: null, error: new Error("ENOENT") });
+		expect(() => ownCliProcess([], { resolveBinary: () => "/missing", standalone: true })).toThrow(
+			"--no-process-ownership",
+		);
+	});
+
+	test("preserves signal-derived status", () => {
+		spawnOwner.mockReturnValue({ ...ownerResult, status: null, signal: "SIGTERM" });
+		expect(ownCliProcess([], { resolveBinary: () => "/helper", standalone: true })).toBe(143);
+	});
+
+	test("missing helper is not silently ignored", () => {
+		expect(() => ownCliProcess([], { resolveBinary: () => undefined })).toThrow("--no-process-ownership");
 	});
 });
