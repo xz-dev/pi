@@ -260,6 +260,65 @@ fn help_and_version_do_not_launch_payload() {
 }
 
 #[test]
+fn quiet_preserves_command_streams_and_visible_exec_errors() {
+    let script = "printf 'command stdout\\n'; printf 'command stderr\\n' >&2; exit 23";
+    let direct = Command::new("/bin/sh")
+        .args(["-c", script])
+        .output()
+        .unwrap();
+    let scratch = Scratch::new();
+    let fallback = std::env::var_os("PROCWARD_TEST_CGROUP_PARENT").is_none();
+    for quiet in [false, true] {
+        let mut cmd = command();
+        cmd.arg("run");
+        if quiet {
+            cmd.arg("--quiet");
+        }
+        cmd.args(["--", "/bin/sh", "-c", script]);
+        let output = Run::start(cmd).finish();
+        assert_eq!(output.status.code(), direct.status.code(), "{output:?}");
+        assert_eq!(output.stdout, direct.stdout);
+        assert_eq!(payload_stderr(&output.stderr), direct.stderr);
+        if quiet || !fallback {
+            assert_eq!(output.stderr, direct.stderr, "quiet={quiet}: {output:?}");
+        } else {
+            assert_ne!(
+                output.stderr, direct.stderr,
+                "default fallback notice missing"
+            );
+        }
+
+        let mut cmd = command();
+        cmd.arg("run");
+        if quiet {
+            cmd.arg("--quiet");
+        }
+        cmd.arg("--").arg(scratch.0.join("missing-command"));
+        let output = Run::start(cmd).finish();
+        assert_eq!(output.status.code(), Some(125));
+        assert!(
+            String::from_utf8_lossy(payload_stderr(&output.stderr)).contains("(os error 2)"),
+            "quiet={quiet} hid the exec failure: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn quiet_rejects_duplicate_options_without_launching_payload() {
+    let scratch = Scratch::new();
+    let marker = scratch.0.join("payload");
+    let mut cmd = command();
+    cmd.args(["run", "--quiet", "--quiet", "--"])
+        .arg(fixture())
+        .arg("touch")
+        .arg(&marker);
+    let output = Run::start(cmd).finish();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate --quiet"));
+    assert!(!marker.exists());
+}
+
+#[test]
 fn native_argv_cwd_environment_stdio_and_primary_status_are_preserved() {
     let scratch = Scratch::new();
     let args = [
