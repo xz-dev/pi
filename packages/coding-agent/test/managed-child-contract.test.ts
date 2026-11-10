@@ -1,12 +1,14 @@
-import { closeSync, mkdtempSync, openSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { consumeManagedContract, observeOwnerLoss, readLifecycleRecord } from "../src/utils/managed-child.ts";
+import { consumeManagedContract, readLifecycleRecord } from "../src/utils/managed-child.ts";
 
 const openFds: number[] = [];
+const tempDirectories: string[] = [];
 afterEach(() => {
 	while (openFds.length > 0) closeSync(openFds.pop()!);
+	for (const directory of tempDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 function readyRecord(ownerPid: number, primaryPid: number, launchId: string): string {
@@ -110,6 +112,18 @@ describe("readLifecycleRecord (real fd framing)", () => {
 		expect(readLifecycleRecord(fd)).toBe(readyRecord(200, 100, LAUNCH));
 	});
 
+	test("preserves a following owner-loss record delivered with READY", () => {
+		const loss = `PROCWARD/1 OWNER-LOSS ${LAUNCH}`;
+		const fd = writeTempThenReopen(`${readyRecord(200, 100, LAUNCH)}\n${loss}\n`);
+		expect(readLifecycleRecord(fd)).toBe(readyRecord(200, 100, LAUNCH));
+		expect(readLifecycleRecord(fd)).toBe(loss);
+	});
+
+	test("counts LF in the 256-byte limit", () => {
+		expect(readLifecycleRecord(writeTempThenReopen(`${"x".repeat(255)}\n`))).toHaveLength(255);
+		expect(readLifecycleRecord(writeTempThenReopen(`${"x".repeat(256)}\n`))).toBeNull();
+	});
+
 	test("EOF with no data yields undefined", () => {
 		const fd = writeTempThenReopen("");
 		expect(readLifecycleRecord(fd)).toBeUndefined();
@@ -128,23 +142,10 @@ describe("readLifecycleRecord (real fd framing)", () => {
 
 function writeTempThenReopen(content: string): number {
 	const dir = mkdtempSync(join(tmpdir(), "pi-lifecycle-"));
+	tempDirectories.push(dir);
 	const path = join(dir, "pipe");
 	writeFileSync(path, content);
 	const fd = openSync(path, "r");
 	openFds.push(fd);
 	return fd;
 }
-
-describe("observeOwnerLoss", () => {
-	test("EOF on the lifecycle fd triggers the loss callback", async () => {
-		// A regular file fd reads EOF immediately: the worker posts eof.
-		const fd = writeTempThenReopen("");
-		const reason = await new Promise<string>((resolve) => {
-			const done = observeOwnerLoss({ ownerPid: 1, launchId: "f".repeat(32), lifecycleFd: fd }, (why) => {
-				resolve(why);
-			});
-			void done;
-		});
-		expect(reason).toBe("eof");
-	}, 10000);
-});

@@ -59,32 +59,21 @@ function isLaunchId(value: string): boolean {
  * Oversized or partial records are contract violations (null).
  */
 export function readLifecycleRecord(fd: number): string | null | undefined {
-	const chunks: Buffer[] = [];
-	let total = 0;
-	const scratch = Buffer.alloc(64);
-	for (;;) {
-		let bytesRead: number;
+	// Reading exactly through LF preserves a coalesced following record for
+	// the owner-loss observer. The protocol includes LF in its 256-byte cap.
+	const record = Buffer.alloc(MAX_RECORD_BYTES);
+	for (let offset = 0; offset < record.length; offset++) {
+		let count: number;
 		try {
-			bytesRead = readSync(fd, scratch, 0, scratch.length, null);
+			count = readSync(fd, record, offset, 1, null);
 		} catch {
-			return null; // transport error: treat as invalid contract
+			return null;
 		}
-		if (bytesRead === 0) {
-			// EOF: a complete line already read is fine; a partial one is not.
-			return total === 0 ? undefined : null;
-		}
-		const lf = scratch.subarray(0, bytesRead).indexOf(10);
-		if (lf >= 0) {
-			// Copy: `scratch` is reused by the next readSync call.
-			chunks.push(Buffer.from(scratch.subarray(0, lf)));
-			total += lf;
-			if (total > MAX_RECORD_BYTES) return null;
-			return Buffer.concat(chunks).toString("utf8");
-		}
-		chunks.push(Buffer.from(scratch.subarray(0, bytesRead)));
-		total += bytesRead;
-		if (total > MAX_RECORD_BYTES) return null;
+		if (count === 0) return offset === 0 ? undefined : null;
+		if (record[offset] === 10) return record.subarray(0, offset).toString("ascii");
+		if (record[offset] < 32 || record[offset] > 126) return null;
 	}
+	return null;
 }
 
 /**
@@ -93,7 +82,7 @@ export function readLifecycleRecord(fd: number): string | null | undefined {
  * management. Throws when the environment claims management but the contract
  * is invalid (fail closed: callers must not treat this as unmanaged).
  *
- * `readRecord` is injectable for tests; production reads the lifecycle fd.
+ * `readRecord` supplies framing; bootstrap uses its deadline-bounded worker reader.
  */
 export function consumeManagedContract(
 	env: ContractEnvironment,
@@ -103,8 +92,13 @@ export function consumeManagedContract(
 ): ManagedContract | undefined {
 	if (env.protocol === undefined) return undefined;
 	if (env.protocol !== "1") throw new Error("procward: unknown contract protocol");
-	if (env.lifecycleFd === undefined || !/^[1-9][0-9]*$/.test(env.lifecycleFd)) {
-		throw new Error("procward: missing lifecycle fd");
+	if (
+		env.lifecycleFd === undefined ||
+		!/^[1-9][0-9]*$/.test(env.lifecycleFd) ||
+		!Number.isSafeInteger(Number(env.lifecycleFd)) ||
+		Number(env.lifecycleFd) <= 2
+	) {
+		throw new Error("procward: invalid lifecycle fd");
 	}
 	if (env.ownerPid === undefined || !isPositiveDecimalPid(env.ownerPid)) {
 		throw new Error("procward: missing owner pid");
@@ -136,59 +130,99 @@ export function consumeManagedContract(
 /**
  * Observe the lifecycle pipe for owner loss after a validated contract.
  *
- * A dedicated worker thread blocks on the inherited pipe fd: procward closes
- * it when the owner exits, so EOF (or an OWNER-LOSS record) wakes the worker,
- * which posts back to the main thread. The main loop staying busy cannot
- * delay detection, and `onLoss` runs on the event loop; the independent
- * watchdog below bounds the whole shutdown even if hooks never yield.
+ * A dedicated worker observes the inherited pipe asynchronously, so it can
+ * shut down without a blocked read retaining the process. On loss, it arms
+ * its own fatal timer before notifying the main thread; a blocked main loop
+ * cannot prevent that deadline from firing.
  */
 export function observeOwnerLoss(contract: ManagedContract, onLoss: (reason: string) => void): () => void {
-	const workerSource = `
-import { parentPort } from "node:worker_threads";
-import { readSync } from "node:fs";
-const fd = ${contract.lifecycleFd};
-const scratch = Buffer.alloc(256);
-for (;;) {
-	let n;
-	try {
-		n = readSync(fd, scratch, 0, scratch.length, null);
-	} catch {
-		parentPort.postMessage({ reason: "read-error" });
-		break;
-	}
-	if (n === 0) {
-		parentPort.postMessage({ reason: "eof" });
-		break;
-	}
-	const line = scratch.subarray(0, n).toString("utf8").trim();
-	if (line.startsWith("PROCWARD/1 OWNER-LOSS")) {
-		parentPort.postMessage({ reason: "owner-loss" });
-		break;
-	}
-	// Any other record: keep reading until EOF.
+	return startLifecycleObserver(contract, onLoss);
 }
+
+/** Validate READY within two seconds, then observe owner loss on the same endpoint. */
+export function consumeAndObserveManagedContract(
+	env: ContractEnvironment,
+	selfPid: number,
+	parentPid: number,
+	onLoss: (reason: string) => void,
+): void {
+	let stop: (() => void) | undefined;
+	try {
+		const contract = consumeManagedContract(env, selfPid, parentPid, (fd) => {
+			const shared = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT + MAX_RECORD_BYTES);
+			const state = new Int32Array(shared, 0, 1);
+			// consumeManagedContract validates environment fields before invoking the reader.
+			stop = startLifecycleObserver(
+				{ ownerPid: Number(env.ownerPid), launchId: env.contractId!, lifecycleFd: fd },
+				onLoss,
+				shared,
+			);
+			if (Atomics.wait(state, 0, 0, 2000) === "timed-out") {
+				throw new Error("procward: READY startup deadline exceeded");
+			}
+			const length = Atomics.load(state, 0);
+			return length < 0 ? null : Buffer.from(shared, Int32Array.BYTES_PER_ELEMENT, length).toString("ascii");
+		});
+		if (!contract) throw new Error("procward: missing bootstrap contract");
+		// Reading READY may outlive the parent; recheck the kernel relationship at acceptance.
+		if (contract.ownerPid !== process.ppid) throw new Error("procward: owner is not the immediate parent");
+	} catch (error) {
+		stop?.();
+		throw error;
+	}
+}
+
+function startLifecycleObserver(
+	contract: ManagedContract,
+	onLoss: (reason: string) => void,
+	ready?: SharedArrayBuffer,
+): () => void {
+	const workerSource = `
+import { parentPort, workerData } from "node:worker_threads";
+import { Socket } from "node:net";
+let lost = false;
+let record = "";
+let pendingReady = workerData.ready !== undefined;
+function readiness(length) {
+ const state = new Int32Array(workerData.ready, 0, 1);
+ if (length >= 0) new Uint8Array(workerData.ready, 4).set(Buffer.from(record, "ascii"));
+ Atomics.store(state, 0, length);
+ Atomics.notify(state, 0);
+ pendingReady = false;
+ record = "";
+}
+function loss(reason) {
+ if (pendingReady) { readiness(-1); pipe.destroy(); return; }
+ if (lost) return;
+ lost = true;
+ // This timer remains independent of a blocked main loop.
+ setTimeout(() => process.kill(workerData.pid, "SIGKILL"), 7000);
+ parentPort.postMessage(reason);
+}
+const pipe = new Socket({ fd: workerData.fd, readable: true, writable: false });
+pipe.on("data", chunk => {
+ for (const byte of chunk) {
+  if (lost) return;
+  if (byte === 10) {
+   if (pendingReady) { readiness(record.length); continue; }
+   loss(record === "PROCWARD/1 OWNER-LOSS " + workerData.launchId ? "owner-loss" : "invalid-record");
+   return;
+  }
+  if (byte < 32 || byte > 126 || record.length >= 255) { loss("invalid-record"); return; }
+  record += String.fromCharCode(byte);
+ }
+});
+pipe.once("end", () => loss(record.length === 0 ? "eof" : "invalid-record"));
+pipe.once("error", () => loss("read-error"));
 `;
-	const workerUrl = new URL(`data:text/javascript;base64,${Buffer.from(workerSource, "utf8").toString("base64")}`);
-	const worker = new Worker(workerUrl, {
-		// The inherited fd number is meaningful only in this process.
+	const worker = new Worker(new URL(`data:text/javascript;base64,${Buffer.from(workerSource).toString("base64")}`), {
+		workerData: { fd: contract.lifecycleFd, launchId: contract.launchId, pid: process.pid, ready },
 		resourceLimits: { maxOldGenerationSizeMb: 32 },
 	});
-	const watchdog = setTimeout(() => {
-		// Hooks had their budget; enforce the bounded exit independently.
-		process.kill(process.pid, "SIGKILL");
-	}, 7000);
-	watchdog.unref?.();
-	const done = () => {
-		clearTimeout(watchdog);
+	worker.once("message", (reason: string) => onLoss(reason));
+	worker.once("error", () => onLoss("worker-error"));
+	worker.unref();
+	return () => {
 		void worker.terminate();
 	};
-	worker.on("message", (message: { reason: string }) => {
-		done();
-		onLoss(message.reason);
-	});
-	worker.on("error", () => {
-		done();
-		onLoss("worker-error");
-	});
-	return done;
 }
