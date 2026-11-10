@@ -30,11 +30,11 @@ function omissionHintText(hidden: number): string {
 
 const BARE_HINT = "\u2026 ";
 const MINIMAL_HINT = "\u2026";
-const NEWLINE_MARK = "\u21b2 ";
+const NEWLINE_MARK = "\u21a9 ";
 
 /**
  * One styled reasoning row: a rolling tail window over the fully rendered
- * Markdown buffer, with line breaks shown as a muted `↲ ` so newlines never
+ * Markdown buffer, with line breaks shown as a muted `↩ ` so newlines never
  * reset the row. New text pushes old content off the left edge; the muted
  * `… (N chars)` hint reports hidden rendered-body grapheme clusters. Live and
  * completed runs use the identical algorithm, so thinking_end changes nothing.
@@ -95,7 +95,7 @@ class ThinkingPreviewText implements Component {
 			i < textLines.length - 1 ? line.replace(/ +((?:\x1b\[[0-9;]*m)*)$/, "$1") : line,
 		);
 		const tail = theme.italic(bodyLines.join(`\x1b[0m${theme.italic(theme.fg("muted", NEWLINE_MARK))}`));
-		// The omission count reports body graphemes only, so hidden `↲ ` marks are excluded.
+		// The omission count reports body graphemes only, so hidden `↩ ` marks are excluded.
 		const markEnds: number[] = [];
 		let position = 0;
 		for (const line of bodyLines.slice(0, -1)) {

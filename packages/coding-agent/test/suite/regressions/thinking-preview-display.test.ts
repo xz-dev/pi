@@ -206,7 +206,7 @@ describe("thinking preview display", () => {
 			const end = snapshots.find((s) => s.kind === "thinking_end");
 			expect(end).toBeDefined();
 			// Folded preview-mode run keeps one row with newlines marked inline, not a label.
-			expect(end?.text).toContain("first↲ live tail");
+			expect(end?.text).toContain("first↩ live tail");
 			expect(end?.text).not.toContain("Thinking...");
 			expect(end?.text).not.toContain("answer");
 			// The thinking_end row is unchanged from the streaming tail row.
@@ -326,7 +326,7 @@ describe("thinking preview display", () => {
 			editor.handleInput("\x14");
 			expect(ctx.thinkingDisplayMode).toBe(expected);
 			expect(renderText(component).includes("first reasoning")).toBe(expected !== "collapsed");
-			expect(renderText(component).includes("first reasoning↲ live tail")).toBe(expected === "preview");
+			expect(renderText(component).includes("first reasoning↩ live tail")).toBe(expected === "preview");
 			await manager.flush();
 			expect(SettingsManager.fromStorage(storage).getThinkingDisplayMode()).toBe(expected);
 			expect(renderText(tool)).toBe(collapsedTool);
@@ -352,7 +352,7 @@ describe("thinking preview display", () => {
 		expect(renderText(next)).toContain("new first");
 		clickRow(next, "new first");
 		// Per-run mouse collapse folds back to the rolling tail row.
-		expect(renderText(next)).toContain("new first↲ new tail");
+		expect(renderText(next)).toContain("new first↩ new tail");
 		expect(renderText(component)).toContain("first reasoning");
 		expect(renderText(tool)).toBe(expandedTool);
 		// A new bulk action resets that local mouse choice, without replacing cards.
@@ -367,7 +367,7 @@ describe("thinking preview display", () => {
 		}
 		editor.handleInput("\x0f");
 		expect(renderText(tool)).toBe(collapsedTool);
-		expect(renderText(component)).toContain("first reasoning↲ live tail");
+		expect(renderText(component)).toContain("first reasoning↩ live tail");
 		await handleEvent.call(ctx, { type: "message_end", message: nextMessage });
 		await handleEvent.call(ctx, { type: "message_start", message: nextMessage });
 		await handleEvent.call(ctx, {
@@ -378,7 +378,7 @@ describe("thinking preview display", () => {
 		expect(ctx.streamingComponent).not.toBe(next);
 		expect(ctx.streamingComponent).toBeDefined();
 		if (!ctx.streamingComponent) throw new Error("new assistant component missing");
-		expect(renderText(ctx.streamingComponent)).toContain("new first↲ new tail");
+		expect(renderText(ctx.streamingComponent)).toContain("new first↩ new tail");
 		await handleEvent.call(ctx, {
 			type: "message_update",
 			message: nextMessage,
@@ -391,7 +391,7 @@ describe("thinking preview display", () => {
 		});
 		expect(renderText(ctx.streamingComponent)).not.toContain("Thinking...");
 		// thinking_end keeps the identical rolling tail row.
-		expect(renderText(ctx.streamingComponent)).toContain("new first↲ new tail");
+		expect(renderText(ctx.streamingComponent)).toContain("new first↩ new tail");
 	});
 
 	test("preview shows newlines as inline marks on one row and clips the oldest text", () => {
@@ -402,7 +402,7 @@ describe("thinking preview display", () => {
 			.map(stripAnsi)
 			.filter((row) => row.trim());
 		expect(rows).toHaveLength(1);
-		expect(rows[0]).toContain("alpha↲ beta↲ gamma");
+		expect(rows[0]).toContain("alpha↩ beta↩ gamma");
 
 		const long = `${"old ".repeat(40)}\nnewest`;
 		component.updateContent(fauxAssistantMessage([{ type: "thinking", thinking: long }]), true, 0);
@@ -411,7 +411,7 @@ describe("thinking preview display", () => {
 			.map(stripAnsi)
 			.filter((row) => row.trim());
 		expect(clipped).toHaveLength(1);
-		expect(clipped[0]).toMatch(/^ … \(\d+ chars\) .*old↲ newest *$/);
+		expect(clipped[0]).toMatch(/^ … \(\d+ chars\) .*old↩ newest *$/);
 	});
 
 	test.each(["ctrl+t", "ctrl+y"] as const)("settings description respects display binding %s", (binding) => {
