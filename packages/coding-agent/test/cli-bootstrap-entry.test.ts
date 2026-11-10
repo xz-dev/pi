@@ -28,7 +28,7 @@ import { appendFileSync } from "node:fs";
 registerHooks({ load(url, context, next) {
  appendFileSync(${JSON.stringify(graph)}, url + "\\n");
  if (url.endsWith("/src/cli/setup.ts")) return {format:"module", shortCircuit:true, source:'export function setupCli() { console.log("SETUP"); }'};
- if (url.endsWith("/src/main.ts")) return {format:"module", shortCircuit:true, source:'export function main(args) { console.log(JSON.stringify({args, nonce:process.env.PI_PROCWARD_BOOTSTRAP_NONCE, protocol:process.env.PROCWARD_PROTOCOL})); }'};
+ if (url.endsWith("/src/main.ts")) return {format:"module", shortCircuit:true, source:'export async function main(args) { if (process.env.PI_ENTRY_HOLD === "1") await new Promise(resolve => setTimeout(resolve, 400)); console.log(JSON.stringify({args, nonce:process.env.PI_PROCWARD_BOOTSTRAP_NONCE, protocol:process.env.PROCWARD_PROTOCOL})); }'};
  return next(url, context);
 }});
 `,
@@ -84,7 +84,7 @@ describe.skipIf(process.platform === "win32")("real CLI bootstrap entry (Node-on
 		expect(result.stdout).not.toContain("nonce");
 	});
 
-	test.each(["valid", "silent", "partial", "dribble", "mismatch", "coalesced"])(
+	test.each(["valid", "fragmented", "silent", "partial", "dribble", "mismatch", "coalesced"])(
 		"%s READY handoff is bounded and one-shot",
 		async (kind) => {
 			const f = fixture();
@@ -92,6 +92,7 @@ describe.skipIf(process.platform === "win32")("real CLI bootstrap entry (Node-on
 				env: {
 					...f.env,
 					PI_PROCWARD_BOOTSTRAP_NONCE: "b".repeat(32),
+					PI_ENTRY_HOLD: "1",
 					PROCWARD_PROTOCOL: "1",
 					PROCWARD_OWNER_PID: String(process.pid),
 					PROCWARD_CONTRACT_ID: launchId,
@@ -115,19 +116,29 @@ describe.skipIf(process.platform === "win32")("real CLI bootstrap entry (Node-on
 			});
 			const ready = `PROCWARD/1 READY ${process.pid} ${kind === "mismatch" ? 1 : child.pid} parent ${launchId}`;
 			let dribble: NodeJS.Timeout | undefined;
-			if (kind === "partial") lifecycle.end(ready);
+			const fragments: NodeJS.Timeout[] = [];
+			if (kind === "fragmented") {
+				for (const [index, piece] of [ready.slice(0, 17), ready.slice(17), "\n"].entries())
+					fragments.push(setTimeout(() => lifecycle.write(piece), 150 + index * 60));
+			} else if (kind === "partial") lifecycle.end(ready);
 			else if (kind === "dribble") dribble = setInterval(() => lifecycle.write("x"), 100);
 			else if (kind !== "silent")
 				lifecycle.write(`${ready}\n${kind === "coalesced" ? `PROCWARD/1 OWNER-LOSS ${launchId}\n` : ""}`);
 			const startedAt = Date.now();
-			const guard = setTimeout(() => child.kill("SIGKILL"), 6000);
+			let guarded = false;
+			const guard = setTimeout(() => {
+				guarded = true;
+				child.kill("SIGKILL");
+			}, 6000);
 			try {
 				const status = await new Promise<number | null>((resolve, reject) => {
 					child.once("error", reject);
 					child.once("close", (code) => resolve(code));
 				});
+				expect(guarded).toBe(false);
 				expect(Date.now() - startedAt).toBeLessThan(4500);
-				if (kind === "valid") {
+				if (kind === "valid" || kind === "fragmented") {
+					expect(Date.now() - startedAt).toBeGreaterThanOrEqual(400);
 					expect(status, error).toBe(0);
 					expect(output).toContain("SETUP\n");
 					expect(output).not.toMatch(/nonce|protocol/);
@@ -142,6 +153,7 @@ describe.skipIf(process.platform === "win32")("real CLI bootstrap entry (Node-on
 			} finally {
 				clearTimeout(guard);
 				clearInterval(dribble);
+				for (const timer of fragments) clearTimeout(timer);
 				lifecycle.destroy();
 			}
 		},

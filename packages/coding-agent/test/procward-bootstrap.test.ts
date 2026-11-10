@@ -6,6 +6,7 @@ import { hasBootstrapNonce, ownCliProcess, ownershipDisabled } from "../src/util
 vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
 
 const launchId = "a".repeat(32);
+const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
 const spawnOwner = vi.mocked(spawnSync);
 const execOwner = vi.fn<NonNullable<typeof process.execve>>(() => {
 	throw new Error("exec fixture");
@@ -37,6 +38,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	Object.defineProperty(process, "platform", platform);
 	vi.unstubAllEnvs();
 	vi.restoreAllMocks();
 });
@@ -89,6 +91,7 @@ describe("ownCliProcess", () => {
 	});
 
 	test("external metadata alone is not consumed as our handoff", () => {
+		Object.defineProperty(process, "platform", { value: "win32" });
 		vi.stubEnv("PROCWARD_PROTOCOL", "1");
 		const consumeContract = vi.fn();
 		expect(ownCliProcess([], { resolveBinary: () => "/helper", consumeContract, standalone: true })).toBe(42);
@@ -104,8 +107,8 @@ describe("ownCliProcess", () => {
 		expect(hasBootstrapNonce()).toBe(false);
 	});
 
-	test.skipIf(process.platform === "win32" || !!process.versions.bun)(
-		"Node exec preserves runtime arguments, the CLI entry, and user arguments",
+	test.skipIf(process.platform === "win32")(
+		"Unix exec preserves runtime arguments, the CLI entry, and user arguments",
 		() => {
 			vi.stubEnv("PI_PROCWARD_BIN", "/explicit/helper");
 			expect(() =>
@@ -134,8 +137,8 @@ describe("ownCliProcess", () => {
 		},
 	);
 
-	test.skipIf(process.platform === "win32" || !!process.versions.bun)(
-		"unavailable Node exec fails closed instead of waiting in a wrapper",
+	test.skipIf(process.platform === "win32")(
+		"unavailable Unix exec fails closed instead of waiting in a wrapper",
 		() => {
 			process.execve = undefined;
 			expect(() => ownCliProcess([], { resolveBinary: () => "/helper" })).toThrow("--no-process-ownership");
@@ -143,7 +146,20 @@ describe("ownCliProcess", () => {
 		},
 	);
 
-	test("standalone relaunch does not add a Node script entry", () => {
+	test.skipIf(process.platform === "win32")("Unix standalone exec does not add a script entry", () => {
+		expect(() => ownCliProcess(["--help"], { resolveBinary: () => "/helper", standalone: true })).toThrow(
+			"--no-process-ownership",
+		);
+		expect(execOwner).toHaveBeenCalledWith(
+			"/helper",
+			["/helper", "run", "--quiet", "--", process.execPath, "--help"],
+			expect.any(Object),
+		);
+		expect(spawnOwner).not.toHaveBeenCalled();
+	});
+
+	test("Windows standalone relaunch does not add a script entry", () => {
+		Object.defineProperty(process, "platform", { value: "win32" });
 		ownCliProcess(["--help"], { resolveBinary: () => "/helper", standalone: true });
 		expect(spawnOwner).toHaveBeenCalledWith(
 			"/helper",
@@ -190,14 +206,16 @@ describe("ownCliProcess", () => {
 		expect(spawnOwner).not.toHaveBeenCalled();
 	});
 
-	test("spawn failure points at the explicit opt-out", () => {
+	test("Windows spawn failure points at the explicit opt-out", () => {
+		Object.defineProperty(process, "platform", { value: "win32" });
 		spawnOwner.mockReturnValue({ ...ownerResult, status: null, error: new Error("ENOENT") });
 		expect(() => ownCliProcess([], { resolveBinary: () => "/missing", standalone: true })).toThrow(
 			"--no-process-ownership",
 		);
 	});
 
-	test("preserves signal-derived status", () => {
+	test("Windows preserves signal-derived status", () => {
+		Object.defineProperty(process, "platform", { value: "win32" });
 		spawnOwner.mockReturnValue({ ...ownerResult, status: null, signal: "SIGTERM" });
 		expect(ownCliProcess([], { resolveBinary: () => "/helper", standalone: true })).toBe(143);
 	});

@@ -18,7 +18,7 @@
  * (see owner-loss handling in the interactive/rpc modes).
  */
 
-import { readSync } from "node:fs";
+import { closeSync, fstatSync, readSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 
 const MAX_RECORD_BYTES = 256;
@@ -133,7 +133,8 @@ export function consumeManagedContract(
  * A dedicated worker observes the inherited pipe asynchronously, so it can
  * shut down without a blocked read retaining the process. On loss, it arms
  * its own fatal timer before notifying the main thread; a blocked main loop
- * cannot prevent that deadline from firing.
+ * cannot prevent that deadline from firing. This observer exclusively owns
+ * the endpoint until its worker exits; callers must not close or reuse it.
  */
 export function observeOwnerLoss(contract: ManagedContract, onLoss: (reason: string) => void): () => void {
 	return startLifecycleObserver(contract, onLoss);
@@ -177,9 +178,12 @@ function startLifecycleObserver(
 	onLoss: (reason: string) => void,
 	ready?: SharedArrayBuffer,
 ): () => void {
+	// The inherited OS descriptor is a trust boundary; reject invalid Bun fds before taking ownership.
+	if (process.versions.bun) fstatSync(contract.lifecycleFd);
 	const workerSource = `
 import { parentPort, workerData } from "node:worker_threads";
 import { Socket } from "node:net";
+import { Readable } from "node:stream";
 let lost = false;
 let record = "";
 let pendingReady = workerData.ready !== undefined;
@@ -199,7 +203,9 @@ function loss(reason) {
  setTimeout(() => process.kill(workerData.pid, "SIGKILL"), 7000);
  parentPort.postMessage(reason);
 }
-const pipe = new Socket({ fd: workerData.fd, readable: true, writable: false });
+const pipe = process.versions.bun
+ ? Readable.fromWeb(Bun.file(workerData.fd).stream())
+ : new Socket({ fd: workerData.fd, readable: true, writable: false });
 pipe.on("data", chunk => {
  for (const byte of chunk) {
   if (lost) return;
@@ -219,6 +225,8 @@ pipe.once("error", () => loss("read-error"));
 		workerData: { fd: contract.lifecycleFd, launchId: contract.launchId, pid: process.pid, ready },
 		resourceLimits: { maxOldGenerationSizeMb: 32 },
 	});
+	// Bun's stream owns a duplicate; release the inherited endpoint only after the worker exits.
+	if (process.versions.bun) worker.once("exit", () => closeSync(contract.lifecycleFd));
 	worker.once("message", (reason: string) => onLoss(reason));
 	worker.once("error", () => onLoss("worker-error"));
 	worker.unref();
