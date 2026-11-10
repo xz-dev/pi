@@ -326,17 +326,18 @@ describe("detectInstallMethod", () => {
 	});
 
 	test("self-update respects configured npmCommand", () => {
-		const { prefix } = createNpmPrefixInstall();
-		const root = join(prefix, "lib", "node_modules");
+		const { prefix, packageDir } = createNpmPrefixInstall();
+		// The configured command is part of this fixture, not the host npm:
+		// Gentoo's npm uses lib64, whereas this fixture deliberately uses lib.
 		const binDir = join(prefix, "bin");
+		const root = dirname(dirname(packageDir));
 		const npmPath = join(binDir, process.platform === "win32" ? "npm.cmd" : "npm");
-		mkdirSync(binDir, { recursive: true });
-		writeFileSync(
-			npmPath,
+		const script =
 			process.platform === "win32"
-				? `@echo off\r\necho ${root}\r\n`
-				: `#!/bin/sh\nprintf '%s\\n' '${root.replaceAll("'", "'\\''")}'\n`,
-		);
+				? `@echo off\r\nif "%1"=="--prefix" if "%2"=="${prefix}" if "%3"=="root" if "%4"=="-g" echo ${root}\r\n`
+				: `#!/bin/sh\n[ "$1" = "--prefix" ] && [ "$2" = '${prefix.replaceAll("'", "'\\''")}' ] && [ "$3" = "root" ] && [ "$4" = "-g" ] || exit 1\nprintf '%s\\n' '${root.replaceAll("'", "'\\''")}'\n`;
+		mkdirSync(binDir, { recursive: true });
+		writeFileSync(npmPath, script);
 		chmodSync(npmPath, 0o755);
 		process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
 
