@@ -150,8 +150,9 @@ import {
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions, createToolTaskTool } from "./tools/index.ts";
+import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+import { createToolTaskTool } from "./tools/tool-task.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
 	findLatestResponse,
@@ -752,6 +753,7 @@ export class AgentSession {
 	}
 
 	private async _notifyManagedExecution(notification: ManagedExecutionNotification): Promise<void> {
+		if (this._isShuttingDown) return;
 		// The notice tells the model to call tool_task, so the next request must offer it.
 		this._activateToolTaskForManagedExecutions();
 		const text = `Managed tool execution ${notification.id} (${notification.toolName}) ${notification.status}. Use tool_task wait with this task ID to retrieve its result.`;
@@ -3888,21 +3890,22 @@ export class AgentSession {
 		const shellPath = this.settingsManager.getShellPath();
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
-					[
-						...Object.entries(this._baseToolsOverride),
-						["tool_task", createToolTaskTool(this.agent.managedExecutions)] as const,
-					].map(([name, tool]) => [name, createToolDefinitionFromAgentTool(tool)]),
+					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
+						name,
+						createToolDefinitionFromAgentTool(tool),
+					]),
 				)
-			: {
-					...createAllToolDefinitions(this._cwd, {
-						read: { autoResizeImages },
-						bash: { commandPrefix: shellCommandPrefix, shellPath },
-					}),
-					tool_task: createToolDefinitionFromAgentTool(createToolTaskTool(this.agent.managedExecutions)),
-				};
+			: createAllToolDefinitions(this._cwd, {
+					read: { autoResizeImages },
+					bash: { commandPrefix: shellCommandPrefix, shellPath },
+				});
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
+		);
+		this._baseToolDefinitions.set(
+			"tool_task",
+			createToolDefinitionFromAgentTool(createToolTaskTool(this.agent.managedExecutions)),
 		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
