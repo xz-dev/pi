@@ -60,6 +60,7 @@ import {
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { processImage } from "../utils/image-process.ts";
+import { getProcessOwnership } from "../utils/procward.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
@@ -120,6 +121,12 @@ import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./m
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { NestedToolCallRunner } from "./nested-tool-calls.ts";
+import {
+	assertSessionProcessesOpen,
+	closePendingSessionSpawns,
+	sessionProcessRegistries,
+} from "./process-ownership.ts";
+import { createProcessRegistry, type OwnedSession, type OwnedTaskProvenance } from "./process-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
@@ -149,6 +156,8 @@ import {
 } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { createProcessKillToolDefinition } from "./tools/process-kill.ts";
+import { createProcessListToolDefinition } from "./tools/process-list.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
@@ -471,6 +480,8 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
+	private readonly _processRegistry: OwnedSession | undefined;
+	private readonly _bashExecutions = new Set<Promise<BashResult>>();
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	/**
@@ -528,6 +539,9 @@ export class AgentSession {
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
+		const ownership = getProcessOwnership();
+		this._processRegistry = ownership.enabled ? createProcessRegistry(ownership.ownerPid) : undefined;
+		if (this._processRegistry) sessionProcessRegistries.set(this.sessionManager, this._processRegistry);
 		this._modelRuntime = config.modelRuntime;
 		this._cacheWarmer = config.cacheWarmer;
 		if (this._cacheWarmer) {
@@ -1525,6 +1539,14 @@ export class AgentSession {
 			this._cacheWarmer.cancel();
 		}
 		cleanupSessionResources(this.sessionId);
+		const registry = this._processRegistry;
+		// An aborted tool can still be awaiting startup and its first ownership record.
+		if (!registry) return Promise.resolve();
+		// Cancel pending transports before waiting for S; startup may never produce it.
+		const pending = closePendingSessionSpawns(registry);
+		return Promise.all([pending, this.agent.waitForIdle(), Promise.allSettled([...this._bashExecutions])])
+			.then(() => {})
+			.finally(() => registry.close());
 	}
 
 	// =========================================================================
@@ -3836,6 +3858,9 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
+		const ownership = this._processRegistry
+			? { enabled: true, registry: this._processRegistry, procwardBinary: undefined, purpose: "shell tool" }
+			: undefined;
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -3845,8 +3870,15 @@ export class AgentSession {
 				)
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					bash: { commandPrefix: shellCommandPrefix, shellPath, ownership },
+					powershell: { ownership },
 				});
+		if (this._processRegistry && !this._baseToolsOverride) {
+			Object.assign(baseToolDefinitions, {
+				process_list: createProcessListToolDefinition(this._processRegistry),
+				process_kill: createProcessKillToolDefinition(this._processRegistry),
+			});
+		}
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
@@ -3874,7 +3906,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", ...(this._processRegistry ? ["process_list", "process_kill"] : [])];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -4078,6 +4110,7 @@ export class AgentSession {
 		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
 	): Promise<BashResult> {
 		this._assertNotShuttingDown();
+		assertSessionProcessesOpen(this._processRegistry);
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
@@ -4085,13 +4118,32 @@ export class AgentSession {
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
 		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
+		// Link only to this command's own persisted entry, never an unrelated prior user message.
+		const provenance: Omit<OwnedTaskProvenance, "messageId"> & { messageId?: string } = {
+			toolName: "user_bash",
+			toolCallId: options?.id ?? crypto.randomUUID(),
+			messageSummary: command.slice(0, 160),
+		};
 
+		let execution: Promise<BashResult> | undefined;
 		try {
-			const result = await executeBashWithOperations(
+			execution = executeBashWithOperations(
 				resolvedCommand,
 				this.sessionManager.getCwd(),
-				options?.operations ?? createLocalBashOperations({ shellPath }),
+				options?.operations ??
+					createLocalBashOperations({
+						shellPath,
+						ownership: this._processRegistry
+							? {
+									enabled: true,
+									registry: this._processRegistry,
+									procwardBinary: undefined,
+									purpose: "user_bash",
+								}
+							: undefined,
+					}),
 				{
+					provenance,
 					onChunk: (delta) => {
 						onChunk?.(delta);
 						this._emit({ type: "bash_execution_update", id: options?.id, delta });
@@ -4100,10 +4152,14 @@ export class AgentSession {
 				},
 			);
 
-			this.recordBashResult(command, result, options);
+			this._bashExecutions.add(execution);
+			const result = await execution;
+			const messageId = this.recordBashResult(command, result, options);
+			if (messageId) provenance.messageId = messageId;
 			return result;
 		} finally {
 			this._bashAbortControllers.delete(abortController);
+			if (execution) this._bashExecutions.delete(execution);
 		}
 	}
 
@@ -4111,7 +4167,11 @@ export class AgentSession {
 	 * Record a bash execution result in session history.
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
-	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+	recordBashResult(
+		command: string,
+		result: BashResult,
+		options?: { excludeFromContext?: boolean },
+	): string | undefined {
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
 			command,
@@ -4129,8 +4189,9 @@ export class AgentSession {
 			// Queue for later - will be flushed on agent_end
 			this._pendingBashMessages.push(bashMessage);
 		} else {
-			this.sessionManager.appendMessage(bashMessage);
+			const id = this.sessionManager.appendMessage(bashMessage);
 			this._refreshFinalizedContext();
+			return id;
 		}
 	}
 
