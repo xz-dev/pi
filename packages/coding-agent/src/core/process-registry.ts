@@ -1,48 +1,51 @@
-/**
- * Registry of processes owned through procward.
- *
- * Every tool call spawned under `procward run --control-fd` registers here;
- * `process_list`/`process_kill` read it. Entries outlive the tool call that
- * created them while their procward still tracks background descendants
- * (`status: "background"`), and record `unconfirmed` when cleanup evidence
- * was incomplete (X without a valid C+EOF, per the procward contract).
- */
-
+/** Registry of procward tasks whose control transcripts prove cleanup. */
 export type OwnedTaskStatus = "running" | "background" | "reaping" | "unconfirmed";
+
+export interface OwnedCompletion {
+	readonly exitCode: number | undefined;
+	readonly scope: "kernel" | "best-effort" | undefined;
+	readonly unconfirmed: boolean;
+}
+
+export type OwnedTaskProvenance = {
+	readonly toolName: string;
+	readonly toolCallId: string;
+	readonly messageId?: string;
+	readonly messageSummary?: string;
+};
 
 export interface OwnedTask {
 	readonly id: number;
-	/** The command line as invoked (for display). */
 	readonly command: string;
-	/** Why this task exists: which tool call / message triggered it. */
 	readonly purpose: string;
-	/** PID of the procward owner wrapping this task's tree. */
+	readonly provenance?: OwnedTaskProvenance;
 	readonly procwardPid: number;
-	/** Cancel this task's tree through its control endpoint. */
-	readonly cancel: () => void;
+	readonly cancel: () => Promise<OwnedCompletion>;
 	status: OwnedTaskStatus;
 	readonly startedAt: number;
 }
 
 export interface OwnedSession {
-	/** pi's own self-ownership entry (the outer procward), when managed. */
+	/** Only a validated bootstrap handoff supplies the current session owner. */
 	readonly selfProcwardPid: number | undefined;
+	readonly startedAt: number;
 	list(): readonly OwnedTask[];
 	get(id: number): OwnedTask | undefined;
 	register(task: Omit<OwnedTask, "id" | "status" | "startedAt">): OwnedTask;
-	/** Mark a finished task: kept when descendants remain, else removed. */
 	settle(id: number, outcome: { descendantsAlive: boolean; unconfirmed: boolean }): void;
-	/** Drop a task from the registry (tree fully cleaned). */
 	forget(id: number): void;
+	/** Request cleanup of every owned task; unconfirmed entries remain visible. */
+	close(): Promise<void>;
 }
 
+/** Create one registry for the lifetime of an AgentSession, including runtime reloads. */
 export function createProcessRegistry(selfProcwardPid?: number): OwnedSession {
 	let nextId = 1;
 	const tasks = new Map<number, OwnedTask>();
 	return {
 		selfProcwardPid,
-		list: () =>
-			[...tasks.values()].sort((a, b) => a.startedAt - b.startedAt || a.id - b.id),
+		startedAt: Date.now(),
+		list: () => [...tasks.values()].sort((a, b) => a.startedAt - b.startedAt || a.id - b.id),
 		get: (id) => tasks.get(id),
 		register: (task) => {
 			const entry: OwnedTask = { ...task, id: nextId++, status: "running", startedAt: Date.now() };
@@ -52,18 +55,23 @@ export function createProcessRegistry(selfProcwardPid?: number): OwnedSession {
 		settle: (id, outcome) => {
 			const task = tasks.get(id);
 			if (!task) return;
-			if (outcome.unconfirmed) {
-				task.status = "unconfirmed";
-				return; // keep the entry: an operator may want to inspect it
-			}
-			if (outcome.descendantsAlive) {
-				task.status = "background";
-				return;
-			}
-			tasks.delete(id);
+			if (outcome.unconfirmed) task.status = "unconfirmed";
+			else if (outcome.descendantsAlive) task.status = "background";
+			else tasks.delete(id);
 		},
 		forget: (id) => {
 			tasks.delete(id);
+		},
+		close: async () => {
+			await Promise.all(
+				[...tasks.values()].map(async (task) => {
+					try {
+						await task.cancel();
+					} catch {
+						task.status = "unconfirmed";
+					}
+				}),
+			);
 		},
 	};
 }

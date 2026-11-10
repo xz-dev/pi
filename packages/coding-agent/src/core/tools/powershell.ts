@@ -1,5 +1,6 @@
 import { win32 } from "node:path";
 import { getPowerShellConfig } from "../../utils/shell.ts";
+import type { ShellOwnershipOptions } from "./bash.ts";
 import {
 	type BashOperations,
 	type BashSpawnContext,
@@ -13,7 +14,6 @@ import {
 	type ShellToolConfig,
 } from "./bash.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import type { ShellOwnershipOptions } from "./bash.ts";
 
 const UTF8_OUTPUT_PREFIX = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
 
@@ -37,7 +37,7 @@ export type PowerShellToolDetails = BashToolDetails;
 export type PowerShellToolInput = BashToolInput;
 
 export interface PowerShellToolOptions
-	extends Pick<BashToolOptions, "operations" | "exposeSessionEnvironment" | "spawnHook"> {}
+	extends Pick<BashToolOptions, "operations" | "exposeSessionEnvironment" | "spawnHook" | "ownership"> {}
 
 export function createLocalPowerShellOperations(ownership?: ShellOwnershipOptions): PowerShellOperations {
 	return {
@@ -73,7 +73,7 @@ export function createPowerShellToolDefinition(
 ): ReturnType<typeof createShellToolDefinition> {
 	return createShellToolDefinition(cwd, powershellToolConfig, {
 		...options,
-		operations: options?.operations ?? createLocalPowerShellOperations(),
+		operations: options?.operations ?? createLocalPowerShellOperations(options?.ownership),
 	});
 }
 
