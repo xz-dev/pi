@@ -40,6 +40,10 @@ Arguments execute directly, without an added shell. Durations use integer `s`
 or `ms`; require `0 < fatal-grace <= grace < cleanup-deadline`. Defaults are
 6s, 3s and 7500ms. Use `procward --help` for options.
 
+Use `procward run --quiet -- command` to omit the routine Linux
+cgroup-fallback startup notice. Command stderr and errors remain visible;
+quiet mode does not change ownership or cleanup behavior.
+
 Task controllers can add `--retain-descendants` to receive the primary result
 while ordinary background work continues under ownership. The tree ends on
 natural completion, cancellation or owner/controller loss. This option requires

@@ -157,8 +157,11 @@ pub fn run(
     args: &[OsString],
     config: Config,
     retain_descendants: bool,
+    quiet: bool,
     mut task: Option<&mut crate::task::Task>,
 ) -> io::Result<u8> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = quiet;
     crate::reaper::acquire()?;
     let interactive = task.is_none() && crate::terminal::interactive()?;
     let mut signals = Signals::new([
@@ -180,9 +183,9 @@ pub fn run(
     let scope = match crate::cgroup::Scope::create() {
         Ok(scope) => Some(scope),
         Err(reason) => {
-            // Retained tasks preserve the command's stdio; the controller already
-            // receives ownership scope over its separate control endpoint.
-            if !retain_descendants {
+            // Quiet invocations and retained tasks preserve command stderr;
+            // errors still use the normal diagnostic path.
+            if !retain_descendants && !quiet {
                 crate::diagnostic(format!(
                     "Linux cgroup v2 workload group unavailable ({reason}); cleanup falls back to subreaper and pidfd termination"
                 ));
