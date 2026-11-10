@@ -158,6 +158,15 @@ removal, parent/primary/launch identity mismatches, unsupported versions,
 truncation, oversized records and EOF before readiness. Applications, including
 pi's later adapter, implement the same documented boundary independently.
 
+## Quiet startup
+
+`procward run --quiet -- <command>` suppresses only the routine Linux notice
+that cgroup creation was unavailable and cleanup uses the subreaper/pidfd
+fallback. It does not suppress command stderr, startup errors or cleanup failure
+diagnostics, and does not change lifetime, ownership or cleanup policy. Without
+`--quiet`, the normal fallback notice remains unchanged. Retained task mode
+already omits this notice, with or without `--quiet`.
+
 ## Per-task control, result and cleanup
 
 Use `procward run --control-fd N -- <command>` on Unix, or
