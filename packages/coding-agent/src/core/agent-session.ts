@@ -2035,7 +2035,6 @@ export class AgentSession {
 		for (const cancel of [
 			() => this.abortRetry(),
 			() => this.abortCompaction(),
-			() => this._discardBackgroundCompaction(),
 			() => this.abortBranchSummary(),
 			() => this.abortBash(),
 			() => this.agent.abort(),
@@ -2055,6 +2054,11 @@ export class AgentSession {
 	async dispose(): Promise<void> {
 		this.prepareForShutdown();
 		this._cancelSessionOperations();
+		try {
+			this._discardBackgroundCompaction();
+		} catch {
+			// Background cancellation must not skip the remaining shutdown cleanup.
+		}
 		try {
 			this.agent.managedExecutions.dispose();
 		} catch {
@@ -3780,9 +3784,9 @@ export class AgentSession {
 		customInstructions: string | undefined,
 		pendingBackground: BackgroundCompaction | undefined,
 	): Promise<CompactionResult> {
-		const abortController = this._startManualCompaction();
 		let fromExtension = false;
 		let cancelledByExtension = false;
+		const abortController = this._startManualCompaction();
 
 		try {
 			const background = await this._waitForBackgroundCompaction(
