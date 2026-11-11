@@ -171,53 +171,64 @@ describe("SDK disposal during owned startup", () => {
 });
 
 describe("prepared built-in native lifetimes", () => {
-	test.each(["bash", "powershell"])("dispose drains %s before S without an active agent run", async (name) => {
-		delayedPeer("confirmed");
-		vi.spyOn(shell, "getPowerShellConfig").mockReturnValue({ shell: "pwsh", args: ["-Command"] });
-		const harness = await createHarness();
-		let execution: Promise<unknown> | undefined;
-		let disposal: Promise<void> | undefined;
-		try {
-			const { session } = await createAgentSession({
-				cwd: directory,
-				agentDir: join(directory, "agent"),
-				sessionManager: SessionManager.inMemory(directory),
-				model: harness.getModel(),
-				modelRuntime: harness.session.modelRuntime,
-				tools: [name],
-			});
-			sessions.push(session);
-			const tool = session.agent.state.tools.find((tool) => tool.name === name)!;
-			const registry = sessionProcessRegistries.get(session.sessionManager)!;
-			execution = tool.execute("pre-S", { command: "never executed" }).catch((error) => error);
-			await expect.poll(() => events()).toContain("spawned");
-			expect(registry.list()).toEqual([]);
-			let disposed = false;
-			disposal = session.dispose().then(() => {
-				disposed = true;
-			});
-			await expect.poll(() => events()).toContain("cancel");
-			expect(disposed).toBe(false);
-			await expect(tool.execute("late", { command: "not admitted" })).rejects.toThrow("stale");
-			writeFileSync(join(directory, "start"), "");
-			await expect.poll(() => registry.list()).toMatchObject([{ status: "reaping" }]);
-			writeFileSync(join(directory, "primary"), "");
-			await expect.poll(() => events()).toContain("X");
-			expect(disposed).toBe(false);
-			writeFileSync(join(directory, "cleanup"), "");
-			await expect.poll(() => events()).toContain("eof");
-			expect(disposed).toBe(false);
-			writeFileSync(join(directory, "exit"), "");
-			await disposal;
-			await execution;
-			expect(registry.list()).toEqual([]);
-		} finally {
-			for (const name of ["start", "primary", "cleanup", "exit"]) writeFileSync(join(directory, name), "");
-			await disposal;
-			await execution;
-			harness.cleanup();
-		}
-	});
+	test.each(["bash", "powershell", "user_bash"])(
+		"dispose drains %s before S without an active agent run",
+		async (name) => {
+			delayedPeer("confirmed");
+			vi.spyOn(shell, "getPowerShellConfig").mockReturnValue({ shell: "pwsh", args: ["-Command"] });
+			const harness = await createHarness();
+			let execution: Promise<unknown> | undefined;
+			let disposal: Promise<void> | undefined;
+			try {
+				const { session } = await createAgentSession({
+					cwd: directory,
+					agentDir: join(directory, "agent"),
+					sessionManager: SessionManager.inMemory(directory),
+					model: harness.getModel(),
+					modelRuntime: harness.session.modelRuntime,
+					tools: name === "user_bash" ? [] : [name],
+				});
+				sessions.push(session);
+				const tool = session.agent.state.tools.find((tool) => tool.name === name);
+				const registry = sessionProcessRegistries.get(session.sessionManager)!;
+				execution = (
+					name === "user_bash"
+						? session.executeBash("never executed")
+						: tool!.execute("pre-S", { command: "never executed" })
+				).catch((error) => error);
+				await expect.poll(() => events()).toContain("spawned");
+				expect(registry.list()).toEqual([]);
+				let disposed = false;
+				disposal = session.dispose().then(() => {
+					disposed = true;
+				});
+				await expect.poll(() => events()).toContain("cancel");
+				expect(disposed).toBe(false);
+				if (name === "user_bash") {
+					await expect(session.executeBash("not admitted")).rejects.toThrow("shutting down");
+				} else {
+					await expect(tool!.execute("late", { command: "not admitted" })).rejects.toThrow("stale");
+				}
+				writeFileSync(join(directory, "start"), "");
+				await expect.poll(() => registry.list()).toMatchObject([{ status: "reaping" }]);
+				writeFileSync(join(directory, "primary"), "");
+				await expect.poll(() => events()).toContain("X");
+				expect(disposed).toBe(false);
+				writeFileSync(join(directory, "cleanup"), "");
+				await expect.poll(() => events()).toContain("eof");
+				expect(disposed).toBe(false);
+				writeFileSync(join(directory, "exit"), "");
+				await disposal;
+				await execution;
+				expect(registry.list()).toEqual([]);
+			} finally {
+				for (const name of ["start", "primary", "cleanup", "exit"]) writeFileSync(join(directory, name), "");
+				await disposal;
+				await execution;
+				harness.cleanup();
+			}
+		},
+	);
 });
 
 describe("shell triggering-turn provenance", () => {
@@ -340,6 +351,44 @@ test("native disposal does not wait for an unrelated JavaScript tool that ignore
 	} finally {
 		release.resolve();
 		await prompt;
+		await harness.session.dispose();
+		harness.cleanup();
+	}
+});
+
+test.each(["enabled", "opt-out"])("custom BashOperations ignoring abort cannot block %s disposal", async (mode) => {
+	if (mode === "opt-out") vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "1");
+	const entered = Promise.withResolvers<AbortSignal | undefined>();
+	const release = Promise.withResolvers<void>();
+	const harness = await createHarness();
+	let execution: Promise<unknown> | undefined;
+	let disposal: Promise<void> | undefined;
+	try {
+		execution = harness.session.executeBash("custom non-native operation", undefined, {
+			operations: {
+				exec: async (_command, _cwd, options) => {
+					entered.resolve(options.signal);
+					await release.promise;
+					return { exitCode: 0 };
+				},
+			},
+		});
+		const signal = await entered.promise;
+		vi.spyOn(harness.session, "abortRetry").mockImplementation(() => {
+			throw new Error("abort hook failed");
+		});
+		let disposed = false;
+		disposal = harness.session.dispose().then(() => {
+			disposed = true;
+		});
+		expect(signal?.aborted).toBe(true);
+		await setImmediate();
+		expect(disposed).toBe(true);
+		await disposal;
+	} finally {
+		release.resolve();
+		await execution;
+		await disposal;
 		await harness.session.dispose();
 		harness.cleanup();
 	}
