@@ -18,6 +18,12 @@ function query(command, args) {
 	return result.stdout.trim();
 }
 
+export function ownerLifecycleEnvironment(source) {
+	const env = { ...source };
+	for (const key of ["PI_PROCESS_OWNER_PID", "PI_PROCESS_OWNER_PENDING", "PI_PROCESS_OWNER_BINARY", "PI_STARTUP_BENCHMARK", "PI_PROCWARD_BIN", "PI_PACKAGE_DIR", "PI_NO_PROCESS_OWNERSHIP", "PI_PROCWARD_BOOTSTRAP_NONCE", "PROCWARD_PROTOCOL", "PROCWARD_OWNER_PID", "PROCWARD_PRIMARY_PID", "PROCWARD_CONTRACT_ID", "PROCWARD_LIFECYCLE_FD", "PROCWARD_LIFECYCLE_HANDLE"]) delete env[key];
+	return env;
+}
+
 export function ownerIdentity() {
 	if (process.platform === "win32") {
 		const token = JSON.parse(query(windowsTool("WindowsPowerShell\\v1.0\\powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", "$i=[Security.Principal.WindowsIdentity]::GetCurrent(); $p=New-Object Security.Principal.WindowsPrincipal($i); @{name=$i.Name; elevated=$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); groups=@($i.Groups | ForEach-Object {$_.Value})} | ConvertTo-Json -Compress"]));
@@ -100,7 +106,7 @@ export function assertOwnerLifecycle(evidence, os) {
 
 export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_000, windowsGateRoot = process.env.PI_WINDOWS_GATE_ROOT } = {}) {
 	const started = performance.now();
-	const evidence = { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), path: "ownCliProcesses + explicit extension factory; no model, prompt or API", peerPid: null };
+	const evidence = { status: "failed", identity: null, rows: [], ...artifactBunFromOwnerRows([]), path: "validated procward bootstrap + explicit extension factory; no model, prompt or API", peerPid: null };
 	try { evidence.identity = ownerIdentity(); assertNonadminIdentity(evidence.identity, target.os); }
 	catch (error) { evidence.error = error.message; return evidence; }
 	const work = mkdtempSync(join(tmpdir(), "pi-owner-smoke-"));
@@ -116,8 +122,7 @@ export async function smokeOwnerLifecycle(executable, target, { timeoutMs = 60_0
 			const release = join(work, `${name}.release`);
 			const row = { name, status: "failed", immediateChecks: 0 };
 			evidence.rows.push(row);
-			const env = { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: work, HOME: work, USERPROFILE: work, PI_OWNER_RUNTIME: process.execPath, PI_OWNER_FIXTURES: fixtures, PI_OWNER_PID_FILE: pidFile, PI_OWNER_READY: ready, PI_OWNER_RELEASE: release, PI_OWNER_CASE: name === "darwin-fast-escape" ? "fast-escape" : name.endsWith("double-fork") ? "double-fork" : "setsid" };
-			for (const key of ["PI_PROCESS_OWNER_PID", "PI_PROCESS_OWNER_PENDING", "PI_PROCESS_OWNER_BINARY", "PI_STARTUP_BENCHMARK"]) delete env[key];
+			const env = { ...ownerLifecycleEnvironment(process.env), PI_OFFLINE: "1", PI_CODING_AGENT_DIR: work, HOME: work, USERPROFILE: work, PI_OWNER_RUNTIME: process.execPath, PI_OWNER_FIXTURES: fixtures, PI_OWNER_PID_FILE: pidFile, PI_OWNER_READY: ready, PI_OWNER_RELEASE: release, PI_OWNER_CASE: name === "darwin-fast-escape" ? "fast-escape" : name.endsWith("double-fork") ? "double-fork" : "setsid" };
 			const child = spawn(executable, ["-p", "--no-session", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "-e", join(fixtures, "extension.mjs")], { cwd: work, env, stdio: ["ignore", "ignore", "pipe"] });
 			let stderr = "";
 			child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2048); });
