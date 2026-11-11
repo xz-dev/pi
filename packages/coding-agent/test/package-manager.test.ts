@@ -129,9 +129,13 @@ describe("DefaultPackageManager", () => {
 			expect(result.extensions).toEqual([]);
 			expect(result.prompts).toEqual([]);
 			expect(result.themes).toEqual([]);
-			expect(result.skills.every((r) => r.metadata.source === "auto" && r.metadata.origin === "top-level")).toBe(
-				true,
-			);
+			expect(
+				result.skills.every(
+					(r) =>
+						(r.metadata.source === "auto" || r.metadata.source === "builtin") &&
+						r.metadata.origin === "top-level",
+				),
+			).toBe(true);
 		});
 
 		it("should resolve local extension paths from settings", async () => {
@@ -277,7 +281,7 @@ Content`,
 
 				expect({
 					extensions: result.extensions.length,
-					skills: result.skills.length,
+					skills: result.skills.filter((r) => r.metadata.source !== "builtin").length,
 					prompts: result.prompts.length,
 					themes: result.themes.length,
 				}).toEqual({
@@ -2711,7 +2715,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			const result = await packageManager.resolve();
 
 			expect(result.extensions.map((resource) => resource.path)).toEqual([join(pkgDir, "extensions", "foo.ts")]);
-			expect(result.skills).toEqual([]);
+			expect(result.skills.filter((resource) => resource.metadata.source !== "builtin")).toEqual([]);
 		});
 	});
 

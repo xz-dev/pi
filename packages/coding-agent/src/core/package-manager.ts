@@ -38,7 +38,7 @@ import type { Readable } from "node:stream";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { gt, maxSatisfying, rcompare, satisfies, valid, validRange } from "semver";
-import { CONFIG_DIR_NAME, DISTRIBUTION, isBunBinary } from "../config.ts";
+import { CONFIG_DIR_NAME, DISTRIBUTION, getBuiltinSkillsDir, isBunBinary } from "../config.ts";
 import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import {
@@ -231,7 +231,7 @@ interface ResourceAccumulator {
  *   4  package resource (origin: "package")
  */
 function resourcePrecedenceRank(m: PathMetadata): number {
-	// Built-in extensions load after file and package extensions, whichever scope enables them.
+	// Built-in resources load after file and package resources, whichever scope enables them.
 	if (m.source === "builtin") return 5;
 	if (m.origin === "package") return 4;
 	const scopeBase = m.scope === "project" ? 0 : 2;
@@ -1055,6 +1055,16 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir);
+
+		const builtinSkillsDir = getBuiltinSkillsDir();
+		for (const path of collectAutoSkillEntries(builtinSkillsDir, "pi")) {
+			this.addResource(
+				accumulator.skills,
+				path,
+				{ source: "builtin", scope: "user", origin: "top-level", baseDir: builtinSkillsDir },
+				true,
+			);
+		}
 
 		// Built-in extensions are enabled unless the user `extensions` setting excludes them, for example
 		// with `-builtin:mcp`. A matching `+`, `-`, or `!` entry in the project setting overrides that.
