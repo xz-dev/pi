@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "../../src/core/agent-session-runtime.ts";
+import { assistantMsg, userMsg } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function deferred<T>() {
@@ -95,6 +96,58 @@ describe("permanent session shutdown", () => {
 		await expect(harness.session.compact()).rejects.toThrow("Session is shutting down");
 		await expect(harness.session.reload()).rejects.toThrow("Session is shutting down");
 		expect(harness.session.messages).toEqual([]);
+	});
+
+	function seedBranch(harness: Harness): { targetId: string; leafId: string | null } {
+		harness.sessionManager.appendMessage(userMsg("first prompt"));
+		const targetId = harness.sessionManager.appendMessage(assistantMsg("first response"));
+		harness.sessionManager.appendMessage(userMsg("abandoned prompt"));
+		harness.sessionManager.appendMessage(assistantMsg("abandoned response"));
+		harness.session.refreshContext();
+		return { targetId, leafId: harness.sessionManager.getLeafId() };
+	}
+
+	it("rejects summarized tree navigation after prepare without provider work or branch changes", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const { targetId, leafId } = seedBranch(harness);
+		harness.setResponses([fauxAssistantMessage("must not summarize")]);
+		const entries = harness.sessionManager.getEntries().length;
+		harness.session.prepareForShutdown();
+		await expect(harness.session.navigateTree(targetId, { summarize: true })).rejects.toThrow(
+			"Session is shutting down",
+		);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.sessionManager.getLeafId()).toBe(leafId);
+		expect(harness.sessionManager.getEntries()).toHaveLength(entries);
+	});
+
+	it("rejects tree navigation when shutdown crosses session_before_tree", async () => {
+		const entered = deferred<void>();
+		const release = deferred<void>();
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_tree", async () => {
+						entered.resolve();
+						await release.promise;
+						return { summary: { summary: "late extension summary" } };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const { targetId, leafId } = seedBranch(harness);
+		harness.setResponses([fauxAssistantMessage("must not summarize")]);
+		const entries = harness.sessionManager.getEntries().length;
+		const navigation = harness.session.navigateTree(targetId, { summarize: true });
+		await entered.promise;
+		harness.session.prepareForShutdown();
+		release.resolve();
+		await expect(navigation).rejects.toThrow("Session is shutting down");
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.sessionManager.getLeafId()).toBe(leafId);
+		expect(harness.sessionManager.getEntries()).toHaveLength(entries);
 	});
 
 	it("rejects a prompt whose input preflight resumes after prepare", async () => {

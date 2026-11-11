@@ -4350,6 +4350,9 @@ export class AgentSession {
 				}
 			}
 
+			// Shutdown may have begun while session_before_tree was awaited.
+			this._assertNotShuttingDown();
+
 			// Run default summarizer if needed
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
