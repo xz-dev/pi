@@ -9,6 +9,7 @@
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
+import { prepareProcessShutdown } from "../utils/procward.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 import { toJsonEvent } from "./json-event.ts";
 
@@ -43,6 +44,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	// Callers share one disposal, so a signal during the final disposal waits for it to finish.
 	const disposeRuntime = (): Promise<void> => {
+		prepareProcessShutdown();
 		disposing ??= (async () => {
 			unsubscribe?.();
 			unsubscribeBackpressure?.();
@@ -60,6 +62,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		for (const signal of signals) {
 			const exitCode = signal === "SIGHUP" ? 129 : 143;
 			const handler = () => {
+				prepareProcessShutdown();
 				signalCount++;
 				killTrackedDetachedChildren();
 				if (signalCount > 1) process.exit(exitCode);

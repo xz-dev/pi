@@ -25,6 +25,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import { prepareProcessShutdown } from "../../utils/procward.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
@@ -381,6 +382,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// Handlers stay registered until exit: without one, a signal during shutdown would kill
 			// the process before dispose() finishes (for example a pending MCP token refresh).
 			process.on(signal, () => {
+				prepareProcessShutdown();
 				signalCount++;
 				killTrackedDetachedChildren();
 				if (!shuttingDown) {
@@ -742,6 +744,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	/** Dispose the runtime and exit. Runs once; later calls (stdin EOF after a signal) do nothing. */
 	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<void> {
+		prepareProcessShutdown();
 		if (shuttingDown) return;
 		shuttingDown = true;
 		unsubscribe?.();
