@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import * as procward from "../src/utils/procward.ts";
@@ -65,7 +66,7 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		expect(processKillSpy).not.toHaveBeenCalled();
 	});
 
-	test("keeps the process alive while suspended and restores the TUI on SIGCONT", () => {
+	test("keeps the process alive while suspended and restores the TUI on SIGCONT", async () => {
 		const ui: FakeUi = {
 			start: vi.fn(),
 			stop: vi.fn(),
@@ -108,6 +109,7 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		expect(sigcontHandler).toBeDefined();
 
 		sigcontHandler?.();
+		await setImmediate();
 
 		expect(clearIntervalSpy).toHaveBeenCalledWith(keepAliveHandle);
 		expect(removeListenerSpy).toHaveBeenCalledWith("SIGINT", sigintHandler);
@@ -117,7 +119,7 @@ describe("InteractiveMode.handleCtrlZ", () => {
 
 	test.each(["isShuttingDown", "shutdownRequested", "owner-loss"] as const)(
 		"does not restart UI/input on CONT while %s is pending",
-		(pending) => {
+		async (pending) => {
 			const ui: FakeUi = { start: vi.fn(), stop: vi.fn(), requestRender: vi.fn() };
 			const context: HandleCtrlZThis = {
 				ui,
@@ -133,10 +135,29 @@ describe("InteractiveMode.handleCtrlZ", () => {
 			}) as typeof process.once);
 			callHandleCtrlZ(context);
 			resume?.();
+			await setImmediate();
 			expect(ui.start).not.toHaveBeenCalled();
 			expect(ui.requestRender).not.toHaveBeenCalled();
 		},
 	);
+
+	test("does not resume when a queued shutdown signal is dispatched after CONT", async () => {
+		const ui: FakeUi = { start: vi.fn(), stop: vi.fn(), requestRender: vi.fn() };
+		let shutdownPending = false;
+		vi.spyOn(procward, "processShutdownPending").mockImplementation(() => shutdownPending);
+		vi.spyOn(process, "kill").mockReturnValue(true);
+		let resume: ProcessSignalHandler | undefined;
+		vi.spyOn(process, "once").mockImplementation(((event: string, listener: () => void) => {
+			if (event === "SIGCONT") resume = listener;
+			return process;
+		}) as typeof process.once);
+		callHandleCtrlZ({ ui });
+		resume?.();
+		shutdownPending = true;
+		await setImmediate();
+		expect(ui.start).not.toHaveBeenCalled();
+		expect(ui.requestRender).not.toHaveBeenCalled();
+	});
 
 	test("cleans up the temporary handlers if suspension fails", () => {
 		const ui: FakeUi = {

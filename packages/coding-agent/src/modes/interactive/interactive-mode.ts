@@ -4642,12 +4642,14 @@ export class InteractiveMode {
 
 		// Set up handler to restore TUI when resumed
 		process.once("SIGCONT", () => {
-			clearInterval(suspendKeepAlive);
-			process.removeListener("SIGINT", ignoreSigint);
-			// Native sends TERM before CONT; shared observation also covers delayed loss callbacks.
-			if (this.isShuttingDown || this.shutdownRequested || processShutdownPending()) return;
-			this.ui.start();
-			this.ui.requestRender(true);
+			// Let already-pending TERM callbacks run before restoring input.
+			setImmediate(() => {
+				clearInterval(suspendKeepAlive);
+				process.removeListener("SIGINT", ignoreSigint);
+				if (this.isShuttingDown || this.shutdownRequested || processShutdownPending()) return;
+				this.ui.start();
+				this.ui.requestRender(true);
+			});
 		});
 
 		try {
