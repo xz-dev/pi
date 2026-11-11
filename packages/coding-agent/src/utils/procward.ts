@@ -25,6 +25,7 @@ import {
 	CONTRACT_ENV_KEYS,
 	consumeAndObserveManagedContract,
 	type consumeManagedContract,
+	type OwnerLossObserver,
 	observeOwnerLoss,
 } from "./managed-child.ts";
 
@@ -34,6 +35,31 @@ import { procwardIncluded } from "./procward-build.ts";
 // against a hostile parent: procward's contract validation proves
 // management; the nonce only prevents pi from re-wrapping itself forever.
 const BOOTSTRAP_NONCE = "PI_PROCWARD_BOOTSTRAP_NONCE";
+
+let ownerLossObserver: OwnerLossObserver | undefined;
+let ownerLossDeadline: NodeJS.Timeout | undefined;
+let shutdownPending = false;
+
+/** Arm the owner-loss budget before entering any mode's shutdown/re-entry guard. */
+export function prepareProcessShutdown(): void {
+	shutdownPending = true;
+	const observedAt = ownerLossObserver?.observedAt;
+	if (observedAt !== undefined) armOwnerLossDeadline(observedAt);
+}
+
+/** Check worker-published loss even when its main-thread callback has not run. */
+export function processShutdownPending(): boolean {
+	const observedAt = ownerLossObserver?.observedAt;
+	if (observedAt !== undefined) armOwnerLossDeadline(observedAt);
+	return shutdownPending || observedAt !== undefined;
+}
+
+function armOwnerLossDeadline(observedAt: number): void {
+	if (ownerLossDeadline) return;
+	const remaining = Math.max(0, observedAt + 5000 - (performance.timeOrigin + performance.now()));
+	if (remaining === 0) process.exit(143);
+	ownerLossDeadline = setTimeout(() => process.exit(143), remaining);
+}
 
 let bootstrapOwnership: { enabled: boolean; ownerPid?: number } | undefined;
 
@@ -191,9 +217,9 @@ function validateOwnHandoff(bootstrap: ProcwardBootstrap): void {
 	if (bootstrap.consumeContract) {
 		const contract = bootstrap.consumeContract(env, selfPid, parentPid);
 		if (!contract) throw new Error("pi: invalid bootstrap handoff");
-		(bootstrap.observeLoss ?? observeOwnerLoss)(contract, onLoss);
+		ownerLossObserver = (bootstrap.observeLoss ?? observeOwnerLoss)(contract, onLoss);
 	} else {
-		consumeAndObserveManagedContract(env, selfPid, parentPid, onLoss);
+		ownerLossObserver = consumeAndObserveManagedContract(env, selfPid, parentPid, onLoss);
 	}
 }
 
@@ -203,7 +229,11 @@ function validateOwnHandoff(bootstrap: ProcwardBootstrap): void {
  * 7-second watchdog armed by observeOwnerLoss bounds the exit even when a
  * hook never yields.
  */
-function defaultOwnerLoss(reason: string): void {
+function defaultOwnerLoss(reason: string, observedAt: number): void {
+	// Native has already published cleanup policy; never renew its fatal deadline.
+	armOwnerLossDeadline(observedAt);
+	const alreadyClosing = shutdownPending;
+	shutdownPending = true;
 	process.stderr.write(`pi: process owner gone (${reason}); shutting down\n`);
-	process.kill(process.pid, "SIGTERM");
+	if (!alreadyClosing) process.kill(process.pid, "SIGTERM");
 }
