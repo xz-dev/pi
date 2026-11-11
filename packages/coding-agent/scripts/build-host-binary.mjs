@@ -11,7 +11,7 @@ export function buildHostBinary(directory = resolve(dirname(fileURLToPath(import
 	const included = assertProcwardBundleBuild(directory, env);
 	const staging = mkdtempSync(join(tmpdir(), "pi-host-binary-"));
 	try {
-		const assets = [];
+		const assets = ["--asset=.pi/skills"];
 		if (included) {
 			const owner = join(staging, "process-owner");
 			cpSync(join(directory, "native/procward", env.CARGO_BUILD_TARGET || "host"), owner, { recursive: true });
