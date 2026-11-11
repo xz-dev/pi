@@ -714,6 +714,15 @@ export function getReadmePath(): string {
 	return resolve(join(getPackageDir(), "README.md"));
 }
 
+/** Get built-in skills as real files, including materialized embedded assets. */
+export function getBuiltinSkillsDir(): string {
+	if (isBunBinary) {
+		return materializeResourceTree({ sourceDir: getEmbeddedAssetPath("skills"), relativePath: "skills" });
+	}
+	const packageDir = getPackageDir();
+	return join(packageDir, existsSync(join(packageDir, "src")) ? ".pi" : "dist", "skills");
+}
+
 /** Get path to docs directory */
 export function getDocsPath(): string {
 	if (isBunBinary) {
