@@ -481,7 +481,6 @@ export class AgentSession {
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private readonly _processRegistry: OwnedSession | undefined;
-	private readonly _bashExecutions = new Set<Promise<BashResult>>();
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	/**
@@ -1543,7 +1542,7 @@ export class AgentSession {
 		}
 		cleanupSessionResources(this.sessionId);
 		try {
-			await Promise.all([pending, Promise.allSettled([...this._bashExecutions])]);
+			await pending;
 		} finally {
 			await registry?.close();
 		}
@@ -4125,9 +4124,8 @@ export class AgentSession {
 			messageSummary: command.slice(0, 160),
 		};
 
-		let execution: Promise<BashResult> | undefined;
 		try {
-			execution = executeBashWithOperations(
+			const result = await executeBashWithOperations(
 				resolvedCommand,
 				this.sessionManager.getCwd(),
 				options?.operations ??
@@ -4152,14 +4150,11 @@ export class AgentSession {
 				},
 			);
 
-			this._bashExecutions.add(execution);
-			const result = await execution;
 			const messageId = this.recordBashResult(command, result, options);
 			if (messageId) provenance.messageId = messageId;
 			return result;
 		} finally {
 			this._bashAbortControllers.delete(abortController);
-			if (execution) this._bashExecutions.delete(execution);
 		}
 	}
 
