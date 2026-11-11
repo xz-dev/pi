@@ -85,12 +85,6 @@ This monorepo contains the Pi CLI and its supporting libraries.
 
 For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
 
-## Process-tree ownership
-
-Pi's experimental ownership integration wraps the CLI and local tool subprocesses in [procward](https://github.com/xz-dev/procward), built from the vendored source in `vendor/procward`. It requests process-tree cleanup when the session exits and retains unconfirmed cleanup outcomes for inspection. Controlled protocol peers test the integration; native release acceptance remains pending. The Windows task HANDLE adapter is not implemented, so Windows ownership is not supported by this integration yet.
-
-Disable it per invocation with `--no-process-ownership`, or for nested invocations with `PI_NO_PROCESS_OWNERSHIP=1`. `PROCWARD=0` omits the helper at build time; a missing helper does not disable ownership at runtime, which fails closed unless explicitly opted out. Release packaging and intentional build-off behavior require separate validation.
-
 ## Permissions & Containerization
 
 Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
