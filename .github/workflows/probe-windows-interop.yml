@@ -38,7 +38,7 @@ jobs:
           $src = Join-Path $env:GITHUB_WORKSPACE 'scripts/windows-interop-probe'
           $out = Join-Path $env:RUNNER_TEMP 'windows-interop-${{ matrix.runtime }}-${{ matrix.mechanism }}'
           New-Item -ItemType Directory -Path $out | Out-Null
-          Copy-Item "$src/*" -Destination $out
+          Copy-Item "$src/*" -Destination $out -Force
           Copy-Item "$env:GITHUB_WORKSPACE/.github/workflows/probe-windows-interop.yml" "$out/workflow.yml"
           Get-FileHash -Algorithm SHA256 "$out/workflow.yml" | Format-List | Out-File "$out/workflow-hash.txt"
           foreach ($line in Get-Content "$src/SHA256SUMS") {
@@ -70,4 +70,5 @@ jobs:
           name: windows-interop-stage1-x64-${{ matrix.runtime }}-${{ matrix.mechanism }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/windows-interop-${{ matrix.runtime }}-${{ matrix.mechanism }}
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 14
