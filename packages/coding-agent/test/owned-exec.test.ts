@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createProcessRegistry } from "../src/core/process-registry.ts";
 import { prepareOwnedSpawn } from "../src/core/tools/owned-exec.ts";
 import { waitForChildProcess } from "../src/utils/child-process.ts";
@@ -118,4 +118,26 @@ test("an absent helper does not allocate a control channel", () => {
 			[],
 		),
 	).toBeUndefined();
+});
+
+test("registry close bounds a prepared launch that never reports S and rejects later preparation", async () => {
+	vi.useFakeTimers();
+	try {
+		const registry = createProcessRegistry();
+		const options = { procwardBinary: "/unused-native-helper", registry, purpose: "never-S" };
+		const owned = prepareOwnedSpawn(options, "not executed", [])!;
+		let closed = false;
+		const closing = registry.close().then(() => {
+			closed = true;
+		});
+		expect(() => prepareOwnedSpawn(options, "late", [])).toThrow("closed");
+		await vi.advanceTimersByTimeAsync(14_999);
+		expect(closed).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		await closing;
+		expect(await owned.completion).toMatchObject({ unconfirmed: true, scope: undefined });
+		expect(await owned.ready).toBeUndefined();
+	} finally {
+		vi.useRealTimers();
+	}
 });
