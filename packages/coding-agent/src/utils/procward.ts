@@ -28,6 +28,8 @@ import {
 	observeOwnerLoss,
 } from "./managed-child.ts";
 
+import { procwardIncluded } from "./procward-build.ts";
+
 // One-shot marker for pi's own re-exec handoff. Not a security boundary
 // against a hostile parent: procward's contract validation proves
 // management; the nonce only prevents pi from re-wrapping itself forever.
@@ -37,6 +39,7 @@ let bootstrapOwnership: { enabled: boolean; ownerPid?: number } | undefined;
 
 /** Read invocation-local ownership state; embedded SDKs never claim an unvalidated parent. */
 export function getProcessOwnership(): Readonly<{ enabled: boolean; ownerPid?: number }> {
+	if (!procwardIncluded) return { enabled: false };
 	return bootstrapOwnership ?? { enabled: process.env.PI_NO_PROCESS_OWNERSHIP !== "1" };
 }
 
@@ -69,7 +72,7 @@ const VALUE_OPTIONS = new Set([
 
 /** True when this invocation must not add any procward ownership layer. */
 export function ownershipDisabled(args: readonly string[]): boolean {
-	if (process.env.PI_NO_PROCESS_OWNERSHIP === "1") return true;
+	if (!procwardIncluded || process.env.PI_NO_PROCESS_OWNERSHIP === "1") return true;
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
 		if (arg === "--") break;
