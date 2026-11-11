@@ -114,27 +114,6 @@ else
     PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 windows-arm64)
 fi
 
-# Compile the vendored procward helper for the platforms being packaged.
-# Each build-binaries run executes on a native runner for its platform
-# (publish-github-release.yml asserts RUNNER_OS/RUNNER_ARCH), so the helper
-# is built with the host toolchain and filed under the matching triple;
-# no cross-compilation targets are needed. PROCWARD=0 in the environment
-# produces a package without process ownership.
-declare -A PROWARD_TRIPLES=(
-    [darwin-arm64]="aarch64-apple-darwin"
-    [darwin-x64]="x86_64-apple-darwin"
-    [linux-x64]="x86_64-unknown-linux-gnu"
-    [linux-arm64]="aarch64-unknown-linux-gnu"
-    [windows-x64]="x86_64-pc-windows-msvc"
-    [windows-arm64]="aarch64-pc-windows-msvc"
-)
-cd "$(dirname "$0")/.."
-for platform in "${PLATFORMS[@]}"; do
-    echo "==> Building procward for $platform (host toolchain)..."
-    ./scripts/build-procward.sh --triple "${PROWARD_TRIPLES[$platform]}"
-done
-cd - >/dev/null
-
 for platform in "${PLATFORMS[@]}"; do
     echo "Building for $platform..."
     bun_target="bun-$platform"
@@ -180,19 +159,6 @@ for platform in "${PLATFORMS[@]}"; do
     native_path="native/${native_platform%-*}/prebuilds"
     mkdir -p "$OUTPUT_DIR/$platform/$native_path"
     cp -R "../tui/$native_path/$native_platform" "$OUTPUT_DIR/$platform/$native_path/"
-
-    # Vendored procward process owner (omitted entirely by PROCWARD=0 builds).
-    if [[ "${PROCWARD:-1}" != "0" ]]; then
-        triple="${PROWARD_TRIPLES[$platform]}"
-        procward_src="../native/procward/$triple"
-        if [[ -d "$procward_src" ]]; then
-            mkdir -p "$OUTPUT_DIR/$platform/native/procward"
-            cp "$procward_src"/* "$OUTPUT_DIR/$platform/native/procward/"
-        else
-            echo "build-binaries.sh: procward build output missing for $platform ($procward_src)" >&2
-            exit 1
-        fi
-    fi
 done
 
 # Create archives
