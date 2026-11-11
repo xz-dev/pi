@@ -5,7 +5,7 @@
 
 typedef int (PI_NAPI_CALL *napi_create_uint32_fn)(napi_env, uint32_t, napi_value*);
 
-static HANDLE ownership_pipe(napi_env env, napi_callback_info info) {
+static HANDLE ownership_pipe(napi_env env, napi_callback_info info, bool private_read) {
     napi_get_cb_info_fn get_info = (napi_get_cb_info_fn)node_symbol("napi_get_cb_info");
     napi_get_value_string_utf8_fn get_string = (napi_get_value_string_utf8_fn)node_symbol("napi_get_value_string_utf8");
     size_t argc = 1, length = 0;
@@ -28,12 +28,12 @@ static HANDLE ownership_pipe(napi_env env, napi_callback_info info) {
     if (!handle || handle == INVALID_HANDLE_VALUE ||
         handle == GetStdHandle(STD_INPUT_HANDLE) || handle == GetStdHandle(STD_OUTPUT_HANDLE) ||
         handle == GetStdHandle(STD_ERROR_HANDLE) || !GetHandleInformation(handle, &flags) ||
-        GetFileType(handle) != FILE_TYPE_PIPE) return 0;
+        GetFileType(handle) != FILE_TYPE_PIPE || (private_read && (flags & HANDLE_FLAG_INHERIT))) return 0;
     return handle;
 }
 
 static napi_value PI_NAPI_CALL prepare_ownership_pipe(napi_env env, napi_callback_info info) {
-    HANDLE handle = ownership_pipe(env, info);
+    HANDLE handle = ownership_pipe(env, info, false);
     DWORD available = 0;
     if (!handle || !PeekNamedPipe(handle, 0, 0, 0, &available, 0) ||
         !SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0)) {
@@ -43,7 +43,7 @@ static napi_value PI_NAPI_CALL prepare_ownership_pipe(napi_env env, napi_callbac
 }
 
 static napi_value PI_NAPI_CALL read_ownership_pipe(napi_env env, napi_callback_info info) {
-    HANDLE handle = ownership_pipe(env, info);
+    HANDLE handle = ownership_pipe(env, info, true);
     if (!handle) return fail(env, "Invalid procward lifecycle HANDLE");
     DWORD available = 0;
     if (!PeekNamedPipe(handle, 0, 0, 0, &available, 0)) {
@@ -66,7 +66,7 @@ static napi_value PI_NAPI_CALL read_ownership_pipe(napi_env env, napi_callback_i
 }
 
 static napi_value PI_NAPI_CALL close_ownership_pipe(napi_env env, napi_callback_info info) {
-    HANDLE handle = ownership_pipe(env, info);
+    HANDLE handle = ownership_pipe(env, info, false);
     if (!handle || !CloseHandle(handle)) return fail(env, "Could not close procward lifecycle pipe");
     return undefined_value(env);
 }
