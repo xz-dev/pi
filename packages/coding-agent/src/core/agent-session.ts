@@ -2043,6 +2043,7 @@ export class AgentSession {
 		this._agentRunAbortRequested = false;
 		try {
 			messages = await this._prepareRun(trigger);
+			this._assertNotShuttingDown();
 		} catch (error) {
 			this._isAgentRunActive = false;
 			this._flushPendingBashMessages();
@@ -2128,7 +2129,6 @@ export class AgentSession {
 		}
 		this._assertNotShuttingDown();
 		// Inject any pending "nextTurn" messages as context alongside the starting message
-		this._assertNotShuttingDown();
 		messages.push(...this._pendingNextTurnMessages);
 		this._pendingNextTurnMessages = [];
 		for (const msg of result.messages) {
