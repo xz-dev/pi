@@ -26,7 +26,7 @@ function fixture(t) {
 	put(join(bin, "cargo"), `#!${process.execPath}
 const fs = require("node:fs"), path = require("node:path");
 const args = process.argv.slice(2);
-fs.appendFileSync(process.env.CALL_LOG, JSON.stringify({command:"cargo",args,home:process.env.CARGO_HOME,offline:process.env.CARGO_NET_OFFLINE})+"\\n");
+fs.appendFileSync(process.env.CALL_LOG, JSON.stringify({command:"cargo",args,cwd:process.cwd(),home:process.env.CARGO_HOME,offline:process.env.CARGO_NET_OFFLINE})+"\\n");
 if (process.env.FAIL_CARGO) process.exit(9);
 if (args[0] !== "build") process.exit(10);
 const target = args.includes("--target") ? args[args.indexOf("--target")+1] : "";
@@ -84,6 +84,7 @@ test("enabled source build stages the canonical target, executable mode and exac
 	buildProcward({ ...f.options, target, offline: true });
 	const [call] = calls(f.log);
 	assert.deepEqual(call.args, ["build", "--manifest-path", join(f.directory, "vendor/procward/Cargo.toml"), "--release", "--locked", "--target-dir", join(f.directory, "cargo-cache"), "--target", target, "--offline"]);
+	assert.equal(call.cwd, join(f.directory, "vendor/procward"), "Cargo must load the native project's .cargo/config.toml (including Windows static CRT)");
 	assert.equal(call.home, f.env.CARGO_HOME);
 	assert.equal(call.offline, "true");
 	const staged = join(f.directory, "native/procward", target);
