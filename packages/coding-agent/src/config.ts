@@ -1,5 +1,6 @@
 import {
 	accessSync,
+	chmodSync,
 	constants,
 	existsSync,
 	mkdirSync,
@@ -781,16 +782,14 @@ export function getQuickJSWasmPath(): string {
  *
  * Search order:
  * 1. `PI_PROCWARD_BIN` — explicit override (development, distro packaging).
- * 2. Package resources — `native/procward/` next to the executable (Bun
- *    binary, copied there by build-binaries.sh) or under the package root
- *    with a target-triple directory (source checkouts and npm installs built
- *    by scripts/build-procward.sh).
+ * 2. Embedded `process-owner` resources, materialized to the existing resource
+ *    cache for Bun binaries; `native/procward/<triple>` or `host` under the
+ *    package root for source checkouts and npm installs.
  * 3. `PATH` — a developer convenience for running pi from source without
  *    building the vendored helper.
  *
- * Returns undefined when no helper exists (PROCWARD=0 builds, or nothing
- * found). Ownership callers treat that as "feature absent" and must not
- * fail a session that did not ask for ownership.
+ * Returns undefined when no helper exists. Enabled ownership fails closed;
+ * absence is not an opt-out. Build-off runtime policy belongs to packaging.
  */
 export function resolveProcwardBinary(): string | undefined {
 	const override = process.env.PI_PROCWARD_BIN;
@@ -806,7 +805,14 @@ export function resolveProcwardBinary(): string | undefined {
 	const binaryName = process.platform === "win32" ? "procward.exe" : "procward";
 	const candidates: string[] = [];
 	if (isBunBinary) {
-		candidates.push(join(getPackageDir(), "native", "procward", binaryName));
+		const sourceDir = getEmbeddedAssetPath("process-owner");
+		if (existsSync(join(sourceDir, binaryName))) {
+			const directory = materializeResourceTree({ sourceDir, relativePath: "process-owner" });
+			const binary = join(directory, binaryName);
+			// Resource copying preserves bytes, not Unix executable permissions.
+			if (process.platform !== "win32") chmodSync(binary, 0o755);
+			candidates.push(binary);
+		}
 	} else {
 		const packageDir = getPackageDir();
 		// Source checkout / npm install: native/procward/<triple>/procward, plus the

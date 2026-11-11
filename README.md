@@ -87,9 +87,9 @@ For Slack/chat automation and workflows see [earendil-works/pi-chat](https://git
 
 ## Process-tree ownership
 
-Pi wraps itself and every tool subprocess it spawns in [procward](https://github.com/xz-dev/procward), a process-tree owner built from the vendored source in `vendor/procward`. When pi exits — normally or not — the whole tree, including commands an agent left running in the background, is cleaned up (kernel-level on Linux, FreeBSD and Windows; best-effort on macOS).
+Pi's experimental ownership integration wraps the CLI and local tool subprocesses in [procward](https://github.com/xz-dev/procward), built from the vendored source in `vendor/procward`. It requests process-tree cleanup when the session exits and retains unconfirmed cleanup outcomes for inspection. Controlled protocol peers test the integration; native release acceptance remains pending. The Windows task HANDLE adapter is not implemented, so Windows ownership is not supported by this integration yet.
 
-Disable it per invocation with `--no-process-ownership`, or for nested invocations with `PI_NO_PROCESS_OWNERSHIP=1`. Distributions can build pi without the feature entirely (`PROCWARD=0` at build time; Gentoo installs expose it as `USE=procward`).
+Disable it per invocation with `--no-process-ownership`, or for nested invocations with `PI_NO_PROCESS_OWNERSHIP=1`. `PROCWARD=0` omits the helper at build time; a missing helper does not disable ownership at runtime, which fails closed unless explicitly opted out. Release packaging and intentional build-off behavior require separate validation.
 
 ## Permissions & Containerization
 

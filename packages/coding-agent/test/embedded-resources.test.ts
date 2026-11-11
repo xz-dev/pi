@@ -1,6 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 import {
 	copyResourceTree,
@@ -157,3 +159,72 @@ describe("getResourceCacheRoot", () => {
 		expect(segments.length).toBeGreaterThanOrEqual(4);
 	});
 });
+
+test.skipIf(process.platform === "win32")(
+	"compiled resolver materializes one executable helper and ignores stale cache when omitted",
+	() => {
+		const root = makeCacheRoot();
+		const assets = join(root, "embedded");
+		const owner = join(assets, "process-owner");
+		mkdirSync(owner, { recursive: true });
+		writeFileSync(join(owner, "procward"), "fixture bytes, never executed");
+		chmodSync(join(owner, "procward"), 0o600);
+		const loader = join(root, "loader.mjs");
+		// Model Bun's virtual file URL and read-only assets without executing a native helper.
+		writeFileSync(
+			loader,
+			`
+import { registerHooks } from "node:module";
+registerHooks({load(url, context, next) {
+ const result = next(url, context);
+ if (!url.endsWith("/src/config.ts")) return result;
+ let source = String(result.source);
+ source = source.replace(/const EMBEDDED_ASSETS_ROOT = [^;]+;/, ${JSON.stringify(`const EMBEDDED_ASSETS_ROOT = ${JSON.stringify(assets)};`)});
+ source = source.replace(/export const isBunBinary =[^;]+;/, "export const isBunBinary = true;");
+ return { ...result, source };
+}});
+`,
+		);
+		const config = fileURLToPath(new URL("../src/config.ts", import.meta.url));
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--experimental-strip-types",
+				"--import",
+				loader,
+				"--input-type=module",
+				"-e",
+				`
+import { readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { resolveProcwardBinary } from ${JSON.stringify(config)};
+const first = resolveProcwardBinary();
+const bytes = readFileSync(first, "utf8");
+const mode = statSync(first).mode & 0o777;
+writeFileSync(first, "cached-edit");
+const second = resolveProcwardBinary();
+rmSync(${JSON.stringify(owner)}, { recursive: true });
+console.log(JSON.stringify({ first, second, bytes, mode, cached: readFileSync(second, "utf8"), omitted: resolveProcwardBinary() === undefined }));
+`,
+			],
+			{ env: { ...process.env, PI_PROCWARD_BIN: "", PATH: "", TMPDIR: root }, encoding: "utf8", timeout: 6000 },
+		);
+		expect(result.status, result.stderr).toBe(0);
+		const actual = JSON.parse(result.stdout) as {
+			first: string;
+			second: string;
+			bytes: string;
+			mode: number;
+			cached: string;
+			omitted: boolean;
+		};
+		expect(actual.first).toBe(actual.second);
+		expect(actual.first).not.toBe(join(owner, "procward"));
+		expect(actual.first.startsWith(root)).toBe(true);
+		expect(actual).toMatchObject({
+			bytes: "fixture bytes, never executed",
+			mode: 0o755,
+			cached: "cached-edit",
+			omitted: true,
+		});
+	},
+);
