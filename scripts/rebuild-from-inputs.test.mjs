@@ -11,8 +11,8 @@ const SCRIPT = join(ROOT, "scripts", "rebuild-from-inputs.sh");
 // Disposable fixture repo input vector (rebuilt per test run; SHAs are
 // resolved dynamically, so the fixture never depends on recorded object ids).
 // The new-model contract: independent patches squash-merge; chain descendants
-// (seam → mte → esc here) apply as predecessor-relative range diffs and must
-// keep the predecessor patch tip in their ancestry.
+// (common → model, common → seam → mte → esc here) apply as predecessor-relative
+// range diffs and must keep the predecessor patch tip in their ancestry.
 function buildFixture() {
 	const dir = mkdtempSync(join(tmpdir(), "replay-fixture-"));
 	const run = (cmd) =>
@@ -42,8 +42,9 @@ function buildFixture() {
 	execFileSync("bash", ["-c", "printf 'ci\\n' > ci.txt && printf 'ci-edited\\n' > f.txt && git add scripts ci.txt f.txt"], { cwd: dir });
 	run("git commit -q -m ci-content");
 	const ciSha = run("git rev-parse HEAD").trim();
-	const aaa = file("aaa.txt", "aaa\n", "aaa", "patch/model-refresh");
-	const seam = file("seam.txt", "seam\n", "seam", "patch/agent-run-failure-seam");
+	const common = file("shutdown-contract.txt", "permanent admission\n", "shared shutdown contract", "patch/session-shutdown-contract");
+	const aaa = file("aaa.txt", "aaa\n", "aaa", "patch/model-refresh", "patch/session-shutdown-contract");
+	const seam = file("seam.txt", "seam\n", "seam", "patch/agent-run-failure-seam", "patch/session-shutdown-contract");
 	const mte = file("mte.txt", "mte\n", "mte", "patch/managed-tool-executions", "patch/agent-run-failure-seam");
 	const esc = file("esc.txt", "esc\n", "esc", "patch/esc-abort", "patch/managed-tool-executions");
 	// Conflict fixture: touches f.txt which ci already edited.
@@ -57,10 +58,11 @@ function buildFixture() {
 		return commit("offender");
 	})();
 	run("git checkout -q upstream-main");
-	return { dir, run, file, upstream, ci: ciSha, aaa, seam, mte, esc, conf, offender };
+	return { dir, run, file, upstream, ci: ciSha, common, aaa, seam, mte, esc, conf, offender };
 }
 
 const CHAIN = (fixture) => [
+	"--patch", `session-shutdown-contract=${fixture.common}`,
 	"--patch", `agent-run-failure-seam=${fixture.seam}`,
 	"--patch", `managed-tool-executions=${fixture.mte}`,
 	"--patch", `esc-abort=${fixture.esc}`,
@@ -108,10 +110,11 @@ test("applies recorded inputs in the declared fixed order", () => {
 		const subjects = log(target);
 		assert.equal(subjects[0], "base");
 		assert.equal(subjects[1], "merge ci branch");
-		assert.equal(subjects[2], "merge patch/model-refresh branch");
-		assert.equal(subjects[3], "merge patch/agent-run-failure-seam branch");
-		assert.equal(subjects[4], "merge patch/managed-tool-executions branch");
-		assert.equal(subjects[5], "merge patch/esc-abort branch");
+		assert.equal(subjects[2], "merge patch/session-shutdown-contract branch");
+		assert.equal(subjects[3], "merge patch/model-refresh branch");
+		assert.equal(subjects[4], "merge patch/agent-run-failure-seam branch");
+		assert.equal(subjects[5], "merge patch/managed-tool-executions branch");
+		assert.equal(subjects[6], "merge patch/esc-abort branch");
 		assert.equal(subjects[subjects.length - 1], "record upstream sync inputs (diagnostic subset)");
 		// The marker records the exact frozen input vector.
 		const body = execSync("git show -s --format=%B HEAD", { cwd: target, encoding: "utf8" });
@@ -127,6 +130,113 @@ test("applies recorded inputs in the declared fixed order", () => {
 		assert.ok(existsSync(join(target, "esc.txt")));
 	} finally {
 		cleanup(fixture, target);
+	}
+});
+
+test("shared shutdown contract is integrated once before both real child ranges", () => {
+	const fixture = buildFixture();
+	const { target } = replay(fixture, [
+		"--upstream", fixture.upstream, "--ci", fixture.ci,
+		"--patch", `agent-run-failure-seam=${fixture.seam}`,
+		"--patch", `model-refresh=${fixture.aaa}`,
+		"--patch", `session-shutdown-contract=${fixture.common}`,
+	]);
+	try {
+		assert.deepEqual(log(target), [
+			"base", "merge ci branch", "merge patch/session-shutdown-contract branch",
+			"merge patch/model-refresh branch", "merge patch/agent-run-failure-seam branch",
+			"record upstream sync inputs (diagnostic subset)",
+		]);
+		assert.equal(readFileSync(join(target, "shutdown-contract.txt"), "utf8"), "permanent admission\n");
+		for (const [revision, path] of [["HEAD~3", "shutdown-contract.txt"], ["HEAD~2", "aaa.txt"], ["HEAD~1", "seam.txt"]]) {
+			assert.equal(execFileSync("git", ["diff-tree", "--no-commit-id", "--name-only", "-r", revision], { cwd: target, encoding: "utf8" }).trim(), path);
+		}
+		for (const child of [fixture.aaa, fixture.seam]) {
+			assert.ok(fixture.run(`git rev-list --first-parent ${child}`).trim().split("\n").includes(fixture.common));
+			assert.equal(fixture.run(`git rev-list --count ${fixture.common}..${child}`).trim(), "1");
+		}
+	} finally {
+		cleanup(fixture, target);
+	}
+});
+
+for (const name of ["model-refresh", "agent-run-failure-seam"]) {
+	test(`${name} rejects a stale shared shutdown predecessor`, () => {
+		const fixture = buildFixture();
+		const newerCommon = fixture.file("shutdown-contract.txt", "permanent admission\nindependent cancellation\n", "new shared contract", "patch/session-shutdown-contract", fixture.common);
+		const child = name === "model-refresh" ? fixture.aaa : fixture.seam;
+		const { target, out } = replay(fixture, [
+			"--upstream", fixture.upstream, "--ci", fixture.ci,
+			"--patch", `session-shutdown-contract=${newerCommon}`,
+			"--patch", `${name}=${child}`,
+		], { expectFail: true });
+		try {
+			assert.ok(out.includes(`patch/${name} must descend from patch/session-shutdown-contract`));
+			assert.ok(!log(target).includes(`merge patch/${name} branch`));
+		} finally {
+			cleanup(fixture, target);
+		}
+	});
+
+	test(`${name} rejects a shared shutdown ancestor outside its product first-parent chain`, () => {
+		const fixture = buildFixture();
+		const child = name === "model-refresh" ? fixture.aaa : fixture.seam;
+		const merged = execFileSync("git", ["commit-tree", `${child}^{tree}`, "-p", fixture.upstream, "-p", child, "-m", "secondary-only shared contract"], { cwd: fixture.dir, encoding: "utf8" }).trim();
+		fixture.run(`git update-ref refs/heads/patch/${name} ${merged}`);
+		const { target, out } = replay(fixture, [
+			"--upstream", fixture.upstream, "--ci", fixture.ci,
+			"--patch", `session-shutdown-contract=${fixture.common}`,
+			"--patch", `${name}=${merged}`,
+		], { expectFail: true });
+		try {
+			assert.match(out, /predecessor must be on the product first-parent chain/);
+			assert.ok(!log(target).includes(`merge patch/${name} branch`));
+		} finally {
+			cleanup(fixture, target);
+		}
+	});
+}
+
+test("complete vectors require the shared shutdown owner", () => {
+	const fixture = buildFixture();
+	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
+	try {
+		const { out } = replay(fixture, [
+			"--upstream", fixture.upstream, "--ci", fixture.ci,
+			...order.filter(name => name !== "session-shutdown-contract").flatMap(name => ["--patch", `${name}=${fixture.upstream}`]),
+		], { expectFail: true, diagnostic: false });
+		assert.match(out, /missing explicit input patch\/session-shutdown-contract/);
+	} finally {
+		cleanup(fixture);
+	}
+});
+
+test("complete marker and workflow declare exactly the common-first 43-owner vector", () => {
+	const fixture = buildFixture();
+	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
+	try {
+		const marker = execFileSync("bash", [SCRIPT, "--print-marker", "--upstream", fixture.upstream, "--ci", fixture.ci,
+			...order.flatMap(name => ["--patch", `${name}=${fixture.upstream}`]),
+		], { encoding: "utf8" });
+		const applied = marker.match(/^applied-order (.*)$/m)[1].split(" ");
+		assert.deepEqual(applied, ["ci", ...order]);
+		assert.equal(applied.filter(name => name === "session-shutdown-contract").length, 1);
+		assert.equal((marker.match(/^origin\/patch\/session-shutdown-contract /gm) ?? []).length, 1);
+		assert.equal(order.length, 43);
+		assert.equal(new Set(order).size, 43);
+		assert.equal(order[0], "session-shutdown-contract");
+		assert.ok(!order.includes("chord-registry-gc-observation"));
+		const workflow = readFileSync(join(ROOT, ".github/workflows/upstream-sync.yml"), "utf8");
+		const fetched = [...workflow.matchAll(/\+refs\/heads\/patch\/([^:]+):refs\/remotes\/origin\/patch\/[^\s]+/g)].map(match => match[1]);
+		const resolved = workflow.match(/          for ref in \\\n([\s\S]*?)          ; do/)[1].trim().split(/\s*\\\s*/).filter(Boolean);
+		assert.equal(fetched.length, 43);
+		assert.equal(resolved.length, 43);
+		assert.equal(fetched[0], "session-shutdown-contract");
+		assert.equal(resolved[0], "session-shutdown-contract");
+		assert.deepEqual([...fetched].sort(), [...order].sort());
+		assert.deepEqual([...resolved].sort(), [...order].sort());
+	} finally {
+		cleanup(fixture);
 	}
 });
 
@@ -331,9 +441,41 @@ test("--print-inputs and --print-marker resolve current refs from a source repo"
 		assert.match(inputs, /^patch\/esc-abort [0-9a-f]{40}$/m);
 		const marker = execFileSync("bash", [SCRIPT, "--print-marker", "--source", fixture.dir], { encoding: "utf8" });
 		assert.ok(marker.startsWith(`record upstream sync inputs\n\nupstream/main ${fixture.upstream}`));
-		assert.match(marker, /^applied-order ci model-refresh /m);
+		assert.match(marker, /^applied-order ci session-shutdown-contract model-refresh /m);
 	} finally {
 		cleanup(fixture);
+	}
+});
+
+test("model rebind applies only three own deltas after the shared model prefix without reverting upstream cache warming", () => {
+	const fixture = buildFixture();
+	const settings = "packages/coding-agent/src/core/settings-defaults.ts";
+	const oldUpstream = fixture.file(settings, 'cacheWarming: "streaming"\n', "old cache warming", "upstream-main");
+	const upstream = fixture.file(settings, 'cacheWarming: "idle"\n', "upstream idle warming", "upstream-main", oldUpstream);
+	const model = fixture.file("aaa.txt", "catalog prefix\n", "model prefix", "patch/model-refresh", upstream);
+	let rebind = fixture.file("aaa.txt", "catalog prefix\nsession rebind\n", "rebind metadata", "patch/model-refresh-session-rebind", model);
+	rebind = fixture.file("stats.txt", "rebound stats\n", "rebind stats", "patch/model-refresh-session-rebind", rebind);
+	rebind = fixture.file("extension.txt", "preserved input limits\n", "rebind extensions", "patch/model-refresh-session-rebind", rebind);
+	const { target } = replay(fixture, [
+		"--upstream", upstream, "--ci", fixture.ci,
+		"--patch", `model-refresh=${model}`,
+		"--patch", `model-refresh-session-rebind=${rebind}`,
+	]);
+	try {
+		assert.equal(fixture.run(`git rev-list --count ${model}..${rebind}`).trim(), "3");
+		assert.equal(readFileSync(join(target, "aaa.txt"), "utf8"), "catalog prefix\nsession rebind\n");
+		assert.equal(readFileSync(join(target, "stats.txt"), "utf8"), "rebound stats\n");
+		assert.equal(readFileSync(join(target, "extension.txt"), "utf8"), "preserved input limits\n");
+		assert.equal(readFileSync(join(target, settings), "utf8"), 'cacheWarming: "idle"\n');
+		assert.deepEqual(log(target), [
+			"base", "old cache warming", "upstream idle warming", "merge ci branch",
+			"merge patch/model-refresh branch", "merge patch/model-refresh-session-rebind branch",
+			"record upstream sync inputs (diagnostic subset)",
+		]);
+		assert.equal(execFileSync("git", ["show", "HEAD~2:aaa.txt"], { cwd: target, encoding: "utf8" }), "catalog prefix\n");
+		assert.deepEqual(execFileSync("git", ["diff", "--name-only", "HEAD~2", "HEAD~1"], { cwd: target, encoding: "utf8" }).trim().split("\n"), ["aaa.txt", "extension.txt", "stats.txt"]);
+	} finally {
+		cleanup(fixture, target);
 	}
 });
 
@@ -384,6 +526,161 @@ test("plugin dependency updates apply only their single-executable range after t
 		cleanup(fixture, target);
 	}
 });
+
+function buildOwnershipFixture(problem) {
+	const fixture = buildFixture();
+	const git = (args, input) => execFileSync("git", args, { cwd: fixture.dir, encoding: "utf8", input }).trim();
+	const tree = (rows) => git(["mktree"], `${rows.join("\n")}\n`);
+	const blob = (content) => git(["hash-object", "-w", "--stdin"], content);
+	const commit = (root, parents, message) => git(["commit-tree", root, ...parents.flatMap(parent => ["-p", parent]), "-m", message]);
+	const single = fixture.file("aaa.txt", "aaa\nembedded-bun\n", "single", "patch/single-executable", "patch/model-refresh");
+	const deps = fixture.file("dependency.txt", "dependency-refresh\n", "deps", "patch/plugin-dependency-updates", "patch/single-executable");
+	let ownership = fixture.file("aaa.txt", "aaa\nembedded-bun\nowner-hook\n", "ownership resources", "patch/process-ownership", single);
+	ownership = fixture.file("ownership.txt", "owned child\n", "ownership", "patch/process-ownership", ownership);
+	let previousSquash;
+	const splits = [];
+	const squashes = [];
+	const nativeTrees = [];
+	// Match git-subtree --squash: product merges a separate root-tree squash
+	// lineage, while raw native split commits are not reachable from any ref.
+	for (let i = 0; i < 3; i++) {
+		const nativeTree = tree([`100644 blob ${blob(`native revision ${i}\n`)}\tCargo.toml`]);
+		nativeTrees.push(nativeTree);
+		const split = commit(nativeTree, splits.slice(-1), `native ${i}`);
+		splits.push(split);
+		let squashParents = previousSquash ? [previousSquash] : [];
+		if (i === 0 && problem === "initial-parent") squashParents = [commit(nativeTree, [], `Prior squash\n\ngit-subtree-dir: vendor/procward\ngit-subtree-split: ${split}`)];
+		if (i === 2 && problem === "update-root") squashParents = [];
+		if (i === 2 && problem === "wrong-prior-tree") squashParents = [squashes[0]];
+		if (i === 1 && problem === "merged-lineage") squashParents = [previousSquash, fixture.upstream];
+		let trailers = `git-subtree-dir: vendor/procward\ngit-subtree-split: ${split}`;
+		if (i === 2 && problem === "wrong-dir") trailers = trailers.replace("vendor/procward", "vendor/other");
+		if (i === 2 && problem === "short-split") trailers = trailers.replace(split, split.slice(0, 12));
+		if (i === 2 && problem === "missing-trailers") trailers = "";
+		if (i === 2 && problem === "duplicate-trailers") trailers += `\ngit-subtree-split: ${split}`;
+		if (i === 0 && problem === "bad-prior-trailers") trailers = "git-subtree-dir: vendor/procward";
+		const squash = commit(nativeTree, squashParents, `Squashed vendor/procward changes\n\n${trailers}`);
+		squashes.push(squash);
+		const vendor = tree([`040000 tree ${nativeTree}\tprocward`]);
+		const rows = git(["ls-tree", ownership]).split("\n").filter(row => !row.endsWith("\tvendor"));
+		rows.push(`040000 tree ${vendor}\tvendor`);
+		if (i === 2 && problem === "unrelated-path") rows.push(`100644 blob ${blob("leaked native root\n")}\tCargo.toml`);
+		let root = tree(rows);
+		if (i === 2 && problem === "wrong-tree") {
+			const wrongVendor = tree([`040000 tree ${nativeTrees[0]}\tprocward`]);
+			root = tree([...rows.filter(row => !row.endsWith("\tvendor")), `040000 tree ${wrongVendor}\tvendor`]);
+		}
+		const parents = [ownership, squash];
+		if (i === 2 && problem === "octopus") parents.push(fixture.seam);
+		ownership = commit(root, parents, `Merge vendor/procward revision ${i}`);
+		previousSquash = squash;
+	}
+	if (problem === "empty-graft") ownership = commit(git(["rev-parse", `${ownership}^{tree}`]), [ownership, previousSquash], "empty graft");
+	if (problem === "feature-merge") {
+		const rows = git(["ls-tree", ownership]).split("\n");
+		rows.push(`100644 blob ${blob("feature content\n")}\tfeature.txt`);
+		ownership = commit(tree(rows), [ownership, fixture.seam], "ordinary feature merge");
+	}
+	if (problem === "secondary-predecessor") ownership = commit(git(["rev-parse", `${ownership}^{tree}`]), [fixture.upstream, ownership], "integrate ownership");
+	git(["update-ref", "refs/heads/patch/process-ownership", ownership]);
+	let predecessor = single;
+	if (problem === "stale-predecessor") predecessor = fixture.file("new-resource.txt", "new single resource\n", "new single", "patch/single-executable", single);
+	fixture.run("git checkout -q upstream-main");
+	const args = [
+		"--upstream", fixture.upstream, "--ci", fixture.ci,
+		"--patch", `process-ownership=${ownership}`,
+		"--patch", `plugin-dependency-updates=${deps}`,
+		"--patch", `single-executable=${predecessor}`,
+		"--patch", `model-refresh=${fixture.aaa}`,
+	];
+	return { ...fixture, ownership, single, deps, args, splits, nativeTrees };
+}
+
+// Capture dirty worktree bytes as well as refs/index: replay only reads source.
+function ownershipSourceSnapshot(fixture) {
+	return {
+		head: HEAD(fixture.dir),
+		refs: fixture.run("git for-each-ref"),
+		status: fixture.run("git status --porcelain=v2"),
+		index: readFileSync(join(fixture.dir, ".git/index")),
+		file: readFileSync(join(fixture.dir, "f.txt")),
+	};
+}
+
+test("process ownership applies only its SingleExe-relative resource and verified native-graft delta last", () => {
+	const fixture = buildOwnershipFixture();
+	writeFileSync(join(fixture.dir, "f.txt"), "dirty source must survive\n");
+	const before = ownershipSourceSnapshot(fixture);
+	const { target } = replay(fixture, fixture.args);
+	try {
+		assert.deepEqual(ownershipSourceSnapshot(fixture), before);
+		assert.equal(readFileSync(join(target, "ownership.txt"), "utf8"), "owned child\n");
+		assert.equal(readFileSync(join(target, "aaa.txt"), "utf8"), "aaa\nembedded-bun\nowner-hook\n");
+		assert.equal(readFileSync(join(target, "dependency.txt"), "utf8"), "dependency-refresh\n");
+		assert.deepEqual(log(target), [
+			"base", "merge ci branch", "merge patch/model-refresh branch",
+			"merge patch/single-executable branch", "merge patch/plugin-dependency-updates branch",
+			"merge patch/process-ownership branch", "record upstream sync inputs (diagnostic subset)",
+		]);
+		assert.equal(execFileSync("git", ["rev-parse", "HEAD:vendor/procward"], { cwd: target, encoding: "utf8" }).trim(), fixture.nativeTrees.at(-1));
+		assert.ok(!existsSync(join(target, "Cargo.toml")), "native root files must stay below vendor/procward");
+		for (const split of fixture.splits) {
+			assert.notEqual(spawnSync("git", ["cat-file", "-e", `${split}^{commit}`], { cwd: target }).status, 0, "raw split objects must not be needed in the fresh squash clone");
+		}
+		const body = execSync("git show -s --format=%B HEAD", { cwd: target, encoding: "utf8" });
+		assert.match(body, new RegExp(`^origin/patch/process-ownership ${fixture.ownership}$`, "m"));
+		assert.match(body, /^applied-order ci model-refresh single-executable plugin-dependency-updates process-ownership$/m);
+	} finally {
+		cleanup(fixture, target);
+	}
+});
+
+test("process ownership requires an explicit SingleExe predecessor even in diagnostic mode", () => {
+	const fixture = buildOwnershipFixture();
+	const { target, out } = replay(fixture, [
+		"--upstream", fixture.upstream, "--ci", fixture.ci,
+		"--patch", `process-ownership=${fixture.ownership}`,
+	], { expectFail: true });
+	try {
+		assert.match(out, /patch\/process-ownership guard requires patch\/single-executable input/);
+		assert.ok(!log(target).includes("merge patch/process-ownership branch"));
+	} finally {
+		cleanup(fixture, target);
+	}
+});
+
+for (const [problem, diagnostic] of [
+	["stale-predecessor", /must descend from patch\/single-executable/],
+	["secondary-predecessor", /predecessor must be on the product first-parent chain/],
+	["feature-merge", /outside vendor\/procward/],
+	["unrelated-path", /outside vendor\/procward/],
+	["wrong-tree", /tree must equal the secondary squash root tree/],
+	["wrong-dir", /directory and full split trailers/],
+	["short-split", /directory and full split trailers/],
+	["missing-trailers", /directory and full split trailers/],
+	["duplicate-trailers", /directory and full split trailers/],
+	["bad-prior-trailers", /directory and full split trailers/],
+	["initial-parent", /initial vendor graft requires a root squash/],
+	["update-root", /vendor update requires a single-parent squash/],
+	["wrong-prior-tree", /lineage must match the preceding vendor\/procward tree/],
+	["merged-lineage", /range merge is not on the product first-parent chain|lineage must have zero or one parent|vendor update requires a single-parent squash/],
+	["octopus", /only permits two-parent/],
+	["empty-graft", /nonempty first-parent diff/],
+]) {
+	test(`ownership range rejects ${problem} without mutating source`, () => {
+		const fixture = buildOwnershipFixture(problem);
+		const before = ownershipSourceSnapshot(fixture);
+		const { target, out } = replay(fixture, fixture.args, { expectFail: true });
+		try {
+			assert.match(out, diagnostic);
+			assert.deepEqual(ownershipSourceSnapshot(fixture), before);
+			assert.ok(!log(target).includes("merge patch/process-ownership branch"));
+			assert.ok(!execSync("git show -s --format=%B HEAD", { cwd: target, encoding: "utf8" }).startsWith("record upstream sync inputs"));
+		} finally {
+			cleanup(fixture, target);
+		}
+	});
+}
 
 test("Codex recovery applies only its delta after retry and cache prerequisites", () => {
 	const fixture = buildFixture();
@@ -577,6 +874,9 @@ for (const consumer of ["single-executable", "thinking-preview", "env-native-tes
 }
 
 for (const [ancestor, descendant] of [
+	["session-shutdown-contract", "model-refresh"],
+	["session-shutdown-contract", "agent-run-failure-seam"],
+	["model-refresh", "model-refresh-session-rebind"],
 	["model-refresh", "single-executable"],
 	["single-executable", "plugin-dependency-updates"],
 	["slow-hook-tui-only", "defer-threshold-compaction"],
@@ -659,6 +959,20 @@ test("complete vectors require the native fixture owner", () => {
 	}
 });
 
+test("complete vectors require the process ownership owner", () => {
+	const fixture = buildFixture();
+	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
+	try {
+		const { out } = replay(fixture, [
+			"--upstream", fixture.upstream, "--ci", fixture.ci,
+			...order.filter(name => name !== "process-ownership").flatMap(name => ["--patch", `${name}=${fixture.upstream}`]),
+		], { expectFail: true, diagnostic: false });
+		assert.match(out, /missing explicit input patch\/process-ownership/);
+	} finally {
+		cleanup(fixture);
+	}
+});
+
 test("native workflow gate binds daemon metadata to build targets and keeps Darwin red control", () => {
 	const workflow = readFileSync(join(ROOT, ".github/workflows/env.yml"), "utf8");
 	const builds = readFileSync(join(ROOT, ".github/workflows/env-daemons.yml"), "utf8");
@@ -681,7 +995,9 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 42);
+	assert.equal(order.length, 43);
+	assert.equal(order[0], "session-shutdown-contract");
+	assert.equal(order.filter(name => name === "session-shutdown-contract").length, 1);
 	assert.equal(order[order.indexOf("async-compaction") + 1], "session-compression");
 	assert.ok(sync.includes("refs/heads/patch/session-compression:refs/remotes/origin/patch/session-compression"));
 	assert.ok(sync.includes("            session-compression \\\n"));
@@ -692,21 +1008,24 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 		assert.ok(!sync.includes(`test/${file}`));
 	}
 	const downstreamChanges = readFileSync(join(ROOT, "docs/downstream-changes.md"), "utf8");
-	// patch/process-ownership is held out of packaging while it is reworked.
-	assert.ok(!order.includes("process-ownership"));
-	assert.ok(!sync.includes("refs/heads/patch/process-ownership"));
+	assert.equal(order.at(-1), "process-ownership");
+	assert.ok(sync.includes("refs/heads/patch/process-ownership:refs/remotes/origin/patch/process-ownership"));
+	assert.ok(sync.includes("            process-ownership \\\n"));
 	assert.equal(order[order.indexOf("single-executable") + 1], "env-process-output-drain");
-	assert.equal(order[order.indexOf("env-process-output-drain") + 1], "chord-registry-gc-observation");
+	assert.equal(order[order.indexOf("env-process-output-drain") + 1], "agent-run-failure-seam");
+	assert.ok(!order.includes("chord-registry-gc-observation"));
+	assert.ok(!sync.includes("refs/heads/patch/chord-registry-gc-observation"));
+	assert.ok(!sync.includes("            chord-registry-gc-observation \\\n"));
 	assert.ok(!order.includes("mimo-thinking-toggle-test"));
 	assert.ok(!sync.includes("refs/heads/patch/mimo-thinking-toggle-test"));
-	assert.equal(order.at(-7), "env-native-test-fixtures");
-	assert.equal(order.at(-6), "preserve-tool-arguments-json");
-	assert.equal(order.at(-5), "responses-background-replay");
-	assert.equal(order.at(-4), "ws-retry-jitter");
-	assert.equal(order.at(-3), "collapse-expanded-input");
-	assert.equal(order.at(-2), "prompt-invocation-cards");
-	assert.equal(order.at(-1), "plugin-dependency-updates");
-	for (const name of ["env-process-output-drain", "chord-registry-gc-observation", "collapse-expanded-input", "prompt-invocation-cards", "plugin-dependency-updates"]) {
+	assert.equal(order.at(-8), "env-native-test-fixtures");
+	assert.equal(order.at(-7), "preserve-tool-arguments-json");
+	assert.equal(order.at(-6), "responses-background-replay");
+	assert.equal(order.at(-5), "ws-retry-jitter");
+	assert.equal(order.at(-4), "collapse-expanded-input");
+	assert.equal(order.at(-3), "prompt-invocation-cards");
+	assert.equal(order.at(-2), "plugin-dependency-updates");
+	for (const name of ["env-process-output-drain", "collapse-expanded-input", "prompt-invocation-cards", "plugin-dependency-updates"]) {
 		assert.ok(sync.includes(`refs/heads/patch/${name}:refs/remotes/origin/patch/${name}`));
 		assert.ok(sync.includes(`            ${name} \\\n`));
 		assert.ok(downstreamChanges.includes(`patch/${name}`));

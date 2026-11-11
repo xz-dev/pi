@@ -51,6 +51,18 @@ test("manual sync rejects malformed, unknown and unrelated commits", () => {
 	}
 });
 
+test("workflow fetch and explicit replay vector include every declared patch exactly once", () => {
+	const driver = readFileSync(new URL("./rebuild-from-inputs.sh", import.meta.url), "utf8");
+	const order = driver.match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
+	const fetched = [...workflow.matchAll(/\+refs\/heads\/patch\/([^:]+):refs\/remotes\/origin\/patch\/([^\s]+)/g)];
+	for (const match of fetched) assert.equal(match[1], match[2]);
+	const supplied = [...workflow.match(/          for ref in \\\n([\s\S]*?)          ; do/)[1].matchAll(/^\s+([\w-]+) \\$/gm)].map(match => match[1]);
+	assert.deepEqual(fetched.map(match => match[1]).sort(), [...order].sort());
+	assert.deepEqual(supplied.sort(), [...order].sort());
+	assert.equal(order.at(-1), "process-ownership");
+	assert.match(workflow, /rebuild_args\+=\(--patch "\$ref=\$\(git rev-parse "origin\/patch\/\$ref"\)"\)/);
+});
+
 test("manual input is environment data", () => {
 	assert.match(workflow, /REQUESTED_UPSTREAM_SHA: \$\{\{ inputs\.upstream_sha \}\}/);
 });

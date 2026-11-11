@@ -104,12 +104,12 @@ print_inputs() {
 # Expected application order. run_replay is the shared implementation;
 # a complete marker is allowed only when its actual step trace matches this.
 PATCH_ORDER=(
+	session-shutdown-contract
 	model-refresh
 	model-refresh-session-rebind
 	startup-benchmark-exit
 	single-executable
 	env-process-output-drain
-	chord-registry-gc-observation
 	agent-run-failure-seam
 	managed-tool-executions
 	esc-abort
@@ -146,18 +146,24 @@ PATCH_ORDER=(
 	collapse-expanded-input
 	prompt-invocation-cards
 	plugin-dependency-updates
+	process-ownership
 )
 
 # Dependent chains: the descendant patch must keep the predecessor patch tip
-# in its ancestry so its delta applies on top of the predecessor's content.
+# in its ancestry (and on the product first-parent chain for a range) so its
+# delta applies on top of the predecessor's content.
 # Descendants are integrated as range diffs (predecessor_tip..descendant_tip),
 # not squash merges: the rebuilt tree never contains the predecessor's branch
 # commits, so a squash merge of a descendant would re-conflict on every region
 # the two patches share. Rebase cascades down the chain when the predecessor
 # is rebased.
 CHAIN_EDGES=(
+	session-shutdown-contract:model-refresh
+	session-shutdown-contract:agent-run-failure-seam
+	model-refresh:model-refresh-session-rebind
 	model-refresh:single-executable
 	single-executable:plugin-dependency-updates
+	single-executable:process-ownership
 	agent-run-failure-seam:managed-tool-executions
 	managed-tool-executions:esc-abort
 	esc-abort:manual-retry
@@ -472,6 +478,63 @@ require_ancestor() {
 		die "patch/$2 must descend from patch/$1 — rebase the descendant onto the new predecessor tip"
 }
 
+verify_subtree_squash() {
+	# This proves structural graft history, not release authenticity or a native pin.
+	local squash="$1" previous_tree="$2" msg="$3" current="$1" trailers
+	local parents=() dirs=() splits=()
+	read -r -a parents <<< "$(git show -s --format=%P "$squash")"
+	if [[ -z "$previous_tree" ]]; then
+		((${#parents[@]} == 0)) || die "$msg initial vendor graft requires a root squash"
+	else
+		((${#parents[@]} == 1)) || die "$msg vendor update requires a single-parent squash"
+		[[ "$(git rev-parse "${parents[0]}^{tree}")" == "$previous_tree" ]] ||
+			die "$msg squash lineage must match the preceding vendor/procward tree"
+	fi
+	# Split IDs are provenance text, not necessarily objects in a squash clone.
+	# Validate the whole squash lineage, without fetching the native repository.
+	while [[ -n "$current" ]]; do
+		trailers="$(git show -s --format=%B "$current" | git interpret-trailers --parse)"
+		mapfile -t dirs < <(printf '%s\n' "$trailers" | grep '^git-subtree-dir:' || true)
+		mapfile -t splits < <(printf '%s\n' "$trailers" | grep '^git-subtree-split:' || true)
+		[[ ${#dirs[@]} == 1 && "${dirs[0]}" == 'git-subtree-dir: vendor/procward' &&
+			${#splits[@]} == 1 && "${splits[0]}" =~ ^git-subtree-split:\ [0-9a-f]{40}$ ]] ||
+			die "$msg requires exact vendor/procward directory and full split trailers throughout squash lineage"
+		read -r -a parents <<< "$(git show -s --format=%P "$current")"
+		((${#parents[@]} <= 1)) || die "$msg squash lineage must have zero or one parent"
+		current="${parents[0]:-}"
+	done
+}
+
+verify_vendor_graft() {
+	local graft="$1" msg="$2" path previous_tree changed=0
+	local parents=()
+	read -r -a parents <<< "$(git show -s --format=%P "$graft")"
+	((${#parents[@]} == 2)) || die "$msg range only permits two-parent vendor/procward grafts"
+	while IFS= read -r -d '' path; do
+		[[ "$path" == vendor/procward/* ]] || die "$msg graft changes a path outside vendor/procward: $path"
+		changed=1
+	done < <(git diff-tree --no-commit-id --name-only --no-renames -r -z "${parents[0]}" "$graft" --)
+	((changed)) || die "$msg vendor graft must have a nonempty first-parent diff"
+	[[ "$(git rev-parse "$graft:vendor/procward" 2>/dev/null)" == "$(git rev-parse "${parents[1]}^{tree}")" ]] ||
+		die "$msg vendor/procward tree must equal the secondary squash root tree"
+	previous_tree="$(git rev-parse --verify "${parents[0]}:vendor/procward" 2>/dev/null || true)"
+	verify_subtree_squash "${parents[1]}" "$previous_tree" "$msg"
+}
+
+verify_range_history() {
+	# Ordinary integration merges remain forbidden; only structural vendor grafts pass.
+	local ancestor="$1" descendant="$2" msg="$3" graft first_parent_merges
+	git rev-list --first-parent "$descendant" | grep -Fx "$ancestor" >/dev/null ||
+		die "$msg predecessor must be on the product first-parent chain"
+	first_parent_merges="$(git rev-list --first-parent --min-parents=2 "$ancestor..$descendant")"
+	while IFS= read -r graft; do
+		[[ -n "$graft" ]] || continue
+		grep -Fx "$graft" <<< "$first_parent_merges" >/dev/null ||
+			die "$msg range merge is not on the product first-parent chain"
+		verify_vendor_graft "$graft" "$msg"
+	done < <(git rev-list --min-parents=2 "$ancestor..$descendant")
+}
+
 # Step helpers ---------------------------------------------------------------
 
 merge_squash() {
@@ -532,10 +595,7 @@ apply_range() {
 	local name="$1" msg="$2" pred="$3"
 	stop_before "$name"
 	require_ancestor "$pred" "$name"
-	git merge-base --is-ancestor "${INPUT_SHA[$pred]}" "${INPUT_SHA[$name]}" ||
-		die "$msg must descend from patch/$pred — rebase patch/$name onto the new patch/$pred tip"
-	[[ -z "$(git rev-list --min-parents=2 "${INPUT_SHA[$pred]}..${INPUT_SHA[$name]}")" ]] ||
-		die "$msg range must be linear (no merge commits between patch/$pred and patch/$name)"
+	verify_range_history "${INPUT_SHA[$pred]}" "${INPUT_SHA[$name]}" "$msg"
 	git diff --binary "${INPUT_SHA[$pred]}" "${INPUT_SHA[$name]}" -- >"$TMPDIR_WORK/$name.patch"
 	if ! git apply --3way --index "$TMPDIR_WORK/$name.patch"; then
 		local conflicts
@@ -657,7 +717,9 @@ run_replay() {
 	for edge in "${CHAIN_EDGES[@]}"; do
 		pred="${edge%%:*}"
 		desc="${edge##*:}"
-		if active "$pred" && active "$desc"; then
+		# Ownership cannot use diagnostic squash fallback: its native grafts
+		# and resource delta must pass the predecessor-relative range contract.
+		if active "$desc" && { active "$pred" || [[ "$desc" == process-ownership ]]; }; then
 			require_ancestor "$pred" "$desc"
 		fi
 	done

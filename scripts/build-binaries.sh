@@ -51,6 +51,11 @@ if [[ "$SKIP_BUILD" == false ]]; then
 	if [[ "$OFFLINE_MODEL_DATA" == true ]]; then npm run build:offline; else npm run build; fi
 fi
 export NODE_ENV=production
+# --skip-build may reuse only a completed npm/SDK build with the requested capability.
+if [[ -f packages/coding-agent/scripts/build-procward.mjs ]]; then
+	node packages/coding-agent/scripts/build-procward.mjs --check
+fi
+PROCWARD_INCLUDED=$(node scripts/lib/bun-targets.mjs --process-owner-enabled)
 if [[ "$WITHOUT_X11" == false && -z "$CLIPBOARD_MUSL_DIR" ]] && printf '%s\n' "${PLATFORMS_REQUESTED[@]}" | grep -q -- '-musl'; then
 	echo "musl targets require an architecture-matched --clipboard-musl-dir" >&2
 	exit 1
@@ -83,23 +88,19 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 	# `/$bunfs/root/<basename>` (see config.ts getEmbeddedAssetPath). Physical
 	# resources (native .node addons, README/docs/examples) are materialized to
 	# the tmpdir cache lazily at first use.
-	# Build the process-owner daemon (feature-owned builder; absent in the CI
-	# checkout by design) into $build_dir/process-owner so it embeds under
-	# `/$bunfs/root/process-owner` and materializes to cacheRoot/process-owner.
-	# CARGO_BUILD_TARGET comes from the same target descriptor as the Bun
-	# triple, keeping the two matrices locked together. Builds without
-	# patch/process-ownership have no builder and embed no daemon.
+	# Reuse the feature's sole Cargo authority and the canonical Rust target.
+	# The resource basename is the resolver's existing process-owner contract.
 	owner_assets=()
-	if [[ -f scripts/build-process-owner.mjs ]]; then
+	if [[ "$PROCWARD_INCLUDED" == true ]]; then
 		cargo_target=$(node ../../scripts/lib/bun-targets.mjs --get "$target" cargoTarget)
-		CARGO_BUILD_TARGET="$cargo_target" node scripts/build-process-owner.mjs "$build_dir/process-owner"
+		node scripts/build-procward.mjs --stage-only --triple "$cargo_target" --out "$build_dir/process-owner"
 		owner_assets=(--asset="$build_dir/process-owner")
 	fi
 	if [[ $target == freebsd-* && ${#owner_assets[@]} -gt 0 ]]; then
 		# One artifact must run on every supported FreeBSD release; libutil.so.9 (14) became .10 (15).
 		# Assignment (not a for-list) so a readelf failure stops the build under set -e/pipefail.
 		# LLVM readelf (FreeBSD 15) prints "(NEEDED)"; ELF Tool Chain readelf (14) prints "NEEDED" without parentheses.
-		needed=$(readelf -d "$build_dir/process-owner/pi-env" | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }')
+		needed=$(readelf -d "$build_dir/process-owner/procward" | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }')
 		[[ $needed == *libc.so.7* ]] || { echo "process-owner NEEDED check found no libc.so.7" >&2; exit 1; }
 		for library in $needed; do
 			case $library in libc.so.7 | libthr.so.3 | libm.so.5 | libgcc_s.so.1) ;; *) echo "process-owner links non-portable $library" >&2; exit 1 ;; esac
@@ -117,6 +118,9 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		--asset=src/core/export-html
 		--asset=../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm
 	)
+	if [[ -d .pi/skills ]]; then
+		asset_args+=(--asset=.pi/skills)
+	fi
 	native_dir=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperDir 2>/dev/null || true)
 	native_file=$(node ../../scripts/lib/bun-targets.mjs --get "$target" nativeHelperFile 2>/dev/null || true)
 	if [[ -n "$native_dir" && ( "$WITHOUT_X11" == false || "$native_file" != *-x11.node ) ]]; then
@@ -143,7 +147,7 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		asset_args+=(--asset="$build_dir/native")
 	fi
 	# Do not load project .env files into the standalone process (upstream #10473).
-	bun build --compile "${bun_build_flags[@]}" --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" "${asset_args[@]}" ./src/bun/cli-portable.ts ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$target_dir/$executable"
+	bun build --compile "${bun_build_flags[@]}" --define="PI_PROCWARD_INCLUDED=$PROCWARD_INCLUDED" --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" "${asset_args[@]}" ./src/bun/cli-portable.ts ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$target_dir/$executable"
 	rm -rf "$build_dir"
 	# The release artifact is the raw executable, not a ZIP: publish
 	# `pi-<target>`/`pi-<target>.exe` directly.
