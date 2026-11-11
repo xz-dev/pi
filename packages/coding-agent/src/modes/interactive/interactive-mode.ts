@@ -104,11 +104,17 @@ import {
 } from "../../core/model-resolver.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
+import { compareProviders } from "../../core/preferred-providers.ts";
 import { findMatchingProviders } from "../../core/provider-matching.ts";
 import { RADIUS_PROVIDER_ID } from "../../core/radius.ts";
 import { planRadiusMcpServer } from "../../core/radius-mcp.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
-import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
+import {
+	formatMissingSessionCwdPrompt,
+	getMissingSessionCwdOptions,
+	type MissingSessionCwdChoice,
+	MissingSessionCwdError,
+} from "../../core/session-cwd.ts";
 import {
 	type SessionEntry,
 	SessionManager,
@@ -409,7 +415,7 @@ function getLoginProviderCompletionOptions(
 			subscription: provider.subscription,
 		});
 	}
-	return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+	return Array.from(byId.values()).sort(compareProviders);
 }
 
 function getLoginProviderSearchText(provider: LoginProviderCompletionOption): string {
@@ -2332,6 +2338,7 @@ export class InteractiveMode {
 		this.loadedResourcesContainer.clear();
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
+		this.pendingBashComponents = [];
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -2897,12 +2904,15 @@ export class InteractiveMode {
 		return result === "Yes";
 	}
 
-	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
-		const confirmed = await this.showExtensionConfirm(
-			"Session cwd not found",
+	private async promptForMissingSessionCwd(
+		error: MissingSessionCwdError,
+	): Promise<MissingSessionCwdChoice | undefined> {
+		const options = getMissingSessionCwdOptions(error.issue);
+		const label = await this.showExtensionSelector(
 			formatMissingSessionCwdPrompt(error.issue),
+			options.map((option) => option.label),
 		);
-		return confirmed ? error.issue.fallbackCwd : undefined;
+		return options.find((option) => option.label === label)?.value;
 	}
 
 	/**
@@ -3781,6 +3791,9 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
+				// The session records deferred user bash results when the run settles; show them there too.
+				this.flushPendingBashComponents();
+				this.ui.requestRender();
 				await this.checkShutdownRequested();
 				break;
 
@@ -4737,7 +4750,7 @@ export class InteractiveMode {
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
 		}
-		for (const container of [this.loadedResourcesContainer, this.chatContainer]) {
+		for (const container of [this.loadedResourcesContainer, this.chatContainer, this.pendingMessagesContainer]) {
 			for (const child of container.children) {
 				if (isExpandable(child)) {
 					child.setExpanded(expanded);
@@ -4893,6 +4906,10 @@ export class InteractiveMode {
 
 	private updatePendingMessagesDisplay(): void {
 		this.pendingMessagesContainer.clear();
+		// User bash output shown while the agent works lives here until it moves to the chat.
+		for (const component of this.pendingBashComponents) {
+			this.pendingMessagesContainer.addChild(component);
+		}
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
@@ -5940,24 +5957,46 @@ export class InteractiveMode {
 			return result;
 		} catch (error: unknown) {
 			if (error instanceof MissingSessionCwdError) {
-				const selectedCwd = await this.promptForMissingSessionCwd(error);
-				if (!selectedCwd) {
-					this.showStatus("Resume cancelled");
-					return { cancelled: true };
+				switch (await this.promptForMissingSessionCwd(error)) {
+					case "continue": {
+						const result = await this.runtimeHost.switchSession(sessionPath, {
+							cwdOverride: error.issue.fallbackCwd,
+							withSession: options?.withSession,
+							projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+						});
+						if (!result.cancelled) this.showStatus(`Resumed session in ${error.issue.fallbackCwd}`);
+						return result;
+					}
+					case "fork":
+						return this.switchToForkedSession(sessionPath, error.issue.fallbackCwd, options);
+					case undefined:
+						this.showStatus("Resume cancelled");
+						return { cancelled: true };
 				}
-				const result = await this.runtimeHost.switchSession(sessionPath, {
-					cwdOverride: selectedCwd,
-					withSession: options?.withSession,
-					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
-				});
-				if (result.cancelled) {
-					return result;
-				}
-				this.showStatus("Resumed session in current cwd");
-				return result;
 			}
 			return this.handleFatalRuntimeError("Failed to resume session", error);
 		}
+	}
+
+	/** Fork a session whose stored cwd is gone into `cwd` and switch to the fork, like `--session <id>` from another project (#11060). */
+	private async switchToForkedSession(
+		sourcePath: string,
+		cwd: string,
+		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
+	): Promise<{ cancelled: boolean }> {
+		const fork = SessionManager.forkFrom(sourcePath, cwd, this.sessionManager.getSessionDir());
+		const forkPath = fork.getSessionFile()!;
+		const result = await this.runtimeHost.switchSession(forkPath, {
+			withSession: options?.withSession,
+			projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+		});
+		if (result.cancelled) {
+			// An extension vetoed the switch; drop the fork so cancelling leaves no copy behind.
+			fs.rmSync(forkPath, { force: true });
+			return result;
+		}
+		this.showStatus(`Forked into new session ${fork.getSessionId()} in ${cwd}`);
+		return result;
 	}
 
 	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
@@ -5992,7 +6031,8 @@ export class InteractiveMode {
 				});
 			}
 		}
-		return options.sort((a, b) => a.name.localeCompare(b.name));
+		// The sort is stable, so a provider's account option stays above its API key option.
+		return options.sort(compareProviders);
 	}
 
 	private async getLogoutProviderOptions(): Promise<AuthSelectorProvider[]> {
@@ -6007,7 +6047,7 @@ export class InteractiveMode {
 					subscription: provider?.auth.oauth?.isSubscription === true,
 				};
 			})
-			.sort((a, b) => a.name.localeCompare(b.name));
+			.sort(compareProviders);
 	}
 
 	private async handleLoginCommand(providerRef?: string): Promise<void> {
@@ -6160,8 +6200,9 @@ export class InteractiveMode {
 					}
 				},
 				initialSearchInput,
+				this.ui,
 			);
-			return { component: selector, focus: selector };
+			return { component: selector, focus: selector, dispose: () => selector.dispose() };
 		});
 	}
 
@@ -6220,8 +6261,10 @@ export class InteractiveMode {
 					done();
 					this.ui.requestRender();
 				},
+				undefined,
+				this.ui,
 			);
-			return { component: selector, focus: selector };
+			return { component: selector, focus: selector, dispose: () => selector.dispose() };
 		});
 	}
 
@@ -6732,18 +6775,21 @@ export class InteractiveMode {
 			this.showStatus(`Session imported from: ${inputPath}`);
 		} catch (error: unknown) {
 			if (error instanceof MissingSessionCwdError) {
-				const selectedCwd = await this.promptForMissingSessionCwd(error);
-				if (!selectedCwd) {
-					this.showStatus("Import cancelled");
-					return;
+				switch (await this.promptForMissingSessionCwd(error)) {
+					case "continue": {
+						const result = await this.runtimeHost.importFromJsonl(inputPath, error.issue.fallbackCwd);
+						this.showStatus(result.cancelled ? "Import cancelled" : `Session imported from: ${inputPath}`);
+						return;
+					}
+					case "fork": {
+						const result = await this.switchToForkedSession(inputPath, error.issue.fallbackCwd);
+						if (result.cancelled) this.showStatus("Import cancelled");
+						return;
+					}
+					case undefined:
+						this.showStatus("Import cancelled");
+						return;
 				}
-				const result = await this.runtimeHost.importFromJsonl(inputPath, selectedCwd);
-				if (result.cancelled) {
-					this.showStatus("Import cancelled");
-					return;
-				}
-				this.showStatus(`Session imported from: ${inputPath}`);
-				return;
 			}
 			if (error instanceof SessionImportFileNotFoundError) {
 				this.showError(`Failed to import session: ${error.message}`);
@@ -7152,6 +7198,7 @@ export class InteractiveMode {
 
 			// Create UI component for display
 			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext, this.outputPad);
+			this.bashComponent.setExpanded(this.toolOutputExpanded);
 			if (this.session.isStreaming) {
 				this.pendingMessagesContainer.addChild(this.bashComponent);
 				this.pendingBashComponents.push(this.bashComponent);
@@ -7180,6 +7227,7 @@ export class InteractiveMode {
 		// Normal execution path (possibly with custom operations)
 		const isDeferred = this.session.isStreaming;
 		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext, this.outputPad);
+		this.bashComponent.setExpanded(this.toolOutputExpanded);
 
 		if (isDeferred) {
 			// Show in pending area when agent is streaming

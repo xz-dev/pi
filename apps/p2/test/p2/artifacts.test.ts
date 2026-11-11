@@ -3,8 +3,9 @@ import { after, before, describe, it } from "node:test";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ConversationView } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT, type Held, whenLive } from "@p2/app/v1";
+import type { ArtifactInfo } from "../../plugins/artifacts/contract.ts";
 import { ArtifactContent, ArtifactList, MAX_ARTIFACT_PREVIEW } from "../../plugins/artifacts/contract.ts";
-import { MAX_ARTIFACT_BYTES, Artifacts as Store } from "../../plugins/artifacts/store.ts";
+import { MAX_ARTIFACT_BYTES, saveArtifact } from "../../plugins/artifacts/store.ts";
 import { Chat } from "../../plugins/chat/contract.ts";
 import { Sessions } from "../../plugins/sessions/contract.ts";
 import { Sharing } from "../../plugins/sharing/contract.ts";
@@ -57,14 +58,14 @@ describe("artifacts (fake provider)", () => {
 			index?.map((artifact) => artifact.version),
 			[1, 2],
 		);
-		const source = await http(fixture.server.port, `${url()}&download=1`);
+		const source = await fixture.http(`${url()}&download=1`);
 		assert.equal(source.status, 200);
 		assert.equal(source.body, "<!doctype html><title>Demo</title><h1>Artifact demo</h1>");
 		assert.match(String(source.headers["content-disposition"]), /attachment; filename="demo.html"/);
 	});
 
 	it("isolates executable previews and instruments only the preview, with correct HEAD", async () => {
-		const preview = await http(fixture.server.port, url());
+		const preview = await fixture.http(url());
 		assert.equal(preview.status, 200);
 		assert.match(preview.body, /p2-artifact-diagnostic/);
 		assert.equal(preview.headers["content-type"], "text/html; charset=utf-8");
@@ -72,17 +73,15 @@ describe("artifacts (fake provider)", () => {
 		assert.match(csp, /sandbox allow-scripts allow-modals allow-pointer-lock/);
 		assert.ok(!csp.includes("allow-same-origin"));
 		assert.match(csp, /frame-src 'none'.*object-src 'none'.*base-uri 'none'.*form-action 'none'/);
+		assert.match(csp, /; frame-ancestors 'self'$/);
 		assert.equal(preview.headers["cross-origin-resource-policy"], "same-origin");
-		const head = await http(fixture.server.port, url(), { method: "HEAD" });
+		const head = await fixture.http(url(), { method: "HEAD" });
 		assert.equal(head.status, 200);
 		assert.equal(head.body, "");
 		assert.equal(head.headers["content-length"], preview.headers["content-length"]);
-		assert.equal(
-			(await http(fixture.server.port, url(), { headers: { "Sec-Fetch-Site": "cross-site" } })).status,
-			403,
-		);
+		assert.equal((await fixture.http(url(), { headers: { "Sec-Fetch-Site": "cross-site" } })).status, 403);
 		for (const path of [url("../demo"), url("demo", 0), url("demo", 99), url("demo", 1, other)])
-			assert.equal((await http(fixture.server.port, path)).status, 404);
+			assert.equal((await fixture.http(path)).status, 404);
 	});
 
 	it("retains both versions and the independent index across worker restart and compatible reload", async () => {
@@ -102,8 +101,8 @@ describe("artifacts (fake provider)", () => {
 			[1, 2],
 		);
 		assert.equal(
-			(await http(fixture.server.port, `${url("demo", 1)}&download=1`)).body,
-			(await http(fixture.server.port, `${url("demo", 2)}&download=1`)).body,
+			(await fixture.http(`${url("demo", 1)}&download=1`)).body,
+			(await fixture.http(`${url("demo", 2)}&download=1`)).body,
 		);
 	});
 
@@ -169,40 +168,56 @@ describe("artifacts (fake provider)", () => {
 			index?.find((entry) => entry.name === "flow"),
 			{ name: "flow", title: "Flow", type: "svg", version: 1 },
 		);
-		assert.equal((await http(fixture.server.port, `${url("flow")}&download=1`)).body, svg);
+		assert.equal((await fixture.http(`${url("flow")}&download=1`)).body, svg);
 		// The preview's bridge is CDATA inside the root (SVG is XML) and reports the content height.
-		const preview = (await http(fixture.server.port, url("flow"))).body;
+		const preview = (await fixture.http(url("flow"))).body;
 		assert.ok(preview.startsWith("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 100'><script><![CDATA["));
 		assert.match(preview, /level:"size"/);
 		assert.ok(preview.endsWith("]]></script><rect width='200' height='100'/></svg>"));
 	});
 
+	/** Saves a new artifact (a name not saved before) through the tool on the session's worker: its info. */
+	let saves = 0;
+	const save = async (call: { name: string; title: string; type: string; content: string }) => {
+		const saved = (value: ConversationView | null | undefined) =>
+			results(value).find((result) => (result.details as ArtifactInfo | undefined)?.name === call.name);
+		await chat.send({ text: `artifact ${JSON.stringify(call)}`, requestId: `save-${++saves}` }, BACKGROUND_CONTEXT);
+		const view = await until(
+			chat.view,
+			(value) => saved(value) !== undefined && !(value?.docs["pi.live"] as { run?: unknown })?.run,
+			30_000,
+		);
+		return saved(view)!.details as ArtifactInfo;
+	};
+
 	it("serves Markdown/text as non-executable documents and validates byte bounds", async () => {
-		const store = new Store(fixture.dataDir);
 		for (const type of ["markdown", "text", "svg"] as const) {
-			const info = await store.save(session, {
+			const info = await save({
 				name: type,
 				title: type,
 				type,
 				content: type === "svg" ? "<svg xmlns='http://www.w3.org/2000/svg'/>" : "# safe <script>no</script>",
 			});
-			const response = await http(fixture.server.port, url(info.name, info.version));
+			const response = await fixture.http(url(info.name, info.version));
 			assert.equal(response.status, 200);
 			// An empty root has no inside for the bridge: served as stored, still well-formed XML.
 			if (type === "svg") assert.equal(response.body, "<svg xmlns='http://www.w3.org/2000/svg'/>");
 			else {
 				assert.equal(response.headers["content-type"], "text/plain; charset=utf-8");
-				assert.match(String(response.headers["content-security-policy"]), /; sandbox$/);
+				assert.match(String(response.headers["content-security-policy"]), /; sandbox; frame-ancestors 'self'$/);
 				assert.ok(!response.body.includes("p2-artifact-diagnostic"));
 			}
 		}
 		// Inline previews stop at MAX_ARTIFACT_PREVIEW characters and say so.
-		const long = await store.save(session, {
-			name: "long",
-			title: "Long",
-			type: "text",
-			content: "x".repeat(MAX_ARTIFACT_PREVIEW + 10),
-		});
+		// Made by a code mode script: a message of half a MiB would be the test's own problem.
+		const script = `await tools.artifact({ name: "long", title: "Long", type: "text", content: "x".repeat(${MAX_ARTIFACT_PREVIEW + 10}) })`;
+		await chat.send({ text: `codemode ${script}`, requestId: "save-long" }, BACKGROUND_CONTEXT);
+		const listed = await until(
+			list.artifacts,
+			(value) => Boolean(value?.some((entry) => entry.name === "long")),
+			30_000,
+		);
+		const long = listed!.find((entry) => entry.name === "long")!;
 		const content = owner.hold(ArtifactContent, { session }, BACKGROUND_CONTEXT);
 		await whenLive(content);
 		if (content.variant === "reader") {
@@ -211,13 +226,15 @@ describe("artifacts (fake provider)", () => {
 			assert.equal(read.content.length, MAX_ARTIFACT_PREVIEW);
 		}
 		content.release();
+		// Refused before the session's files are touched.
 		await assert.rejects(
-			store.save(session, {
-				name: "large",
-				title: "Large",
-				type: "text",
-				content: "é".repeat(MAX_ARTIFACT_BYTES / 2 + 1),
-			}),
+			saveArtifact(
+				{} as Parameters<typeof saveArtifact>[0],
+				{ name: "large", title: "Large", type: "text", content: "é".repeat(MAX_ARTIFACT_BYTES / 2 + 1) },
+				"1",
+				// Never reached: validation refuses first.
+				{} as Parameters<typeof saveArtifact>[3],
+			),
 			/2 MiB/,
 		);
 	});

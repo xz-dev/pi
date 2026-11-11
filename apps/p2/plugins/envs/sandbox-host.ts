@@ -8,13 +8,13 @@ import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { type RemotePlatform, type SshTarget, sshArguments } from "@earendil-works/pi-env";
-import type { GondolinEnvConfig } from "./config.ts";
+import { DEFAULT_DISK_GB, type GondolinEnvConfig } from "./config.ts";
+import type { SecretMeta } from "./secrets.ts";
 
 /** The launcher's files as deployed: name on the host, file in the launcher's source directory. */
 const FILES: readonly (readonly [string, string])[] = [
 	["p2-sandbox.sh", "p2-sandbox.sh"],
 	["p2-sandbox.mjs", "p2-sandbox.mjs"],
-	["Dockerfile", "Dockerfile"],
 	["package.json", "host-package.json"],
 	["package-lock.json", "host-package-lock.json"],
 ];
@@ -49,21 +49,26 @@ const START_TIMEOUT_MS = 660_000;
 
 const quote = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`;
 
-/** The sandbox configuration the launcher takes: base64 JSON of what the VM needs. */
-export function sandboxArgument(config: GondolinEnvConfig): string {
+/**
+ * The sandbox configuration the launcher takes: base64 JSON of what the VM needs. Secrets are named with their hosts
+ * and versions, never their values (the command line is visible on the host): `start` reads those on stdin.
+ */
+export function sandboxArgument(config: GondolinEnvConfig, secrets: readonly SecretMeta[] = []): string {
 	const value = {
 		...(config.image === undefined ? {} : { image: config.image }),
 		mounts: config.mounts ?? [],
 		allowHosts: config.allowHosts ?? [],
 		...(config.cpus === undefined ? {} : { cpus: config.cpus }),
 		...(config.memoryMb === undefined ? {} : { memoryMb: config.memoryMb }),
+		diskGb: config.diskGb ?? DEFAULT_DISK_GB,
+		...(secrets.length ? { secrets } : {}),
 	};
 	return Buffer.from(JSON.stringify(value)).toString("base64");
 }
 
 /** The configuration's revision as the launcher reports it for the running VM (it applies at the next start). */
-export function sandboxRevision(config: GondolinEnvConfig): string {
-	return createHash("sha256").update(sandboxArgument(config)).digest("hex").slice(0, 16);
+export function sandboxRevision(config: GondolinEnvConfig, secrets: readonly SecretMeta[] = []): string {
+	return createHash("sha256").update(sandboxArgument(config, secrets)).digest("hex").slice(0, 16);
 }
 
 /** The remote command line that runs the launcher in `directory` with `args`. */
@@ -152,17 +157,23 @@ export async function launcherCommand(
 	remote: RemotePlatform,
 	source: string,
 	args: readonly string[],
+	input?: string,
 ): Promise<unknown> {
-	return deployedCommand(target, await deployLauncher(target, remote, source), args);
+	return deployedCommand(target, await deployLauncher(target, remote, source), args, input);
 }
 
 /**
  * Run a command of the launcher deployed in `directory` and parse its last line of output as JSON; `start` may take
- * minutes (a first start builds the Docker image and downloads the guest image).
+ * minutes (a first start installs Gondolin and downloads the guest image).
  */
-export async function deployedCommand(target: SshTarget, directory: string, args: readonly string[]): Promise<unknown> {
+export async function deployedCommand(
+	target: SshTarget,
+	directory: string,
+	args: readonly string[],
+	input?: string,
+): Promise<unknown> {
 	const timeoutMs = args[0] === "start" ? START_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
-	const output = await runOnHost(target, runLauncher(directory, args), undefined, timeoutMs);
+	const output = await runOnHost(target, runLauncher(directory, args), input, timeoutMs);
 	const line = output.trim().split("\n").at(-1) ?? "";
 	try {
 		return JSON.parse(line);

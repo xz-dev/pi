@@ -131,7 +131,7 @@ export async function startTuiClient(options: {
 	let busy = false;
 	// After launcher-drawn UI: the worker's output was discarded, so restore its modes and ask for a full redraw.
 	ui.onClose = () => {
-		options.terminal.write(modes.restore());
+		options.terminal.write(modes.restore() + modes.keyboard(options.terminal.kittyProtocolActive === true));
 		sandbox?.post({ kind: "redraw" });
 	};
 	let kitty = options.terminal.kittyProtocolActive === true;
@@ -251,13 +251,15 @@ export async function startTuiClient(options: {
 		busy = true;
 		const grant = grants.create(name, "C", worker, target);
 		try {
-			const confirmed = await ui.confirm({
-				...consent,
-				facts: [
-					...(target ? [["Session", `${target.session} #${target.conversation}`] as const] : []),
-					...(consent.facts ?? []),
-				],
-			});
+			const confirmed =
+				consent.ask === false ||
+				(await ui.confirm({
+					...consent,
+					facts: [
+						...(target ? [["Session", `${target.session} #${target.conversation}`] as const] : []),
+						...(consent.facts ?? []),
+					],
+				}));
 			if (!confirmed || !grants.valid(grant.id, worker))
 				return respond({ ok: false, error: confirmed ? "cancelled" : "denied" });
 			const value = await action.run(message.payload, actionContext(grant, worker));
@@ -408,7 +410,8 @@ export async function startTuiClient(options: {
 						if (message.kind === "output" && "data" in message && typeof message.data === "string") {
 							// Launcher UI is up: worker IO is suspended; a full redraw replaces what is dropped here.
 							const output = modes.filter(message.data);
-							if (!ui.active && !paused) options.terminal.write(output);
+							if (!ui.active && !paused)
+								options.terminal.write(output + modes.keyboard(options.terminal.kittyProtocolActive === true));
 						} else if (message.kind === "keyContext" && "suspendPrivileged" in message)
 							// Rule 3: the worker may only suspend interception (e.g. Ctrl+G is search-next while searching).
 							suspendPrivileged = message.suspendPrivileged === true;
@@ -423,6 +426,9 @@ export async function startTuiClient(options: {
 							statusMessage(message as Record<string, unknown>);
 						else if (message.kind === "link" && "data" in message && message.data instanceof Uint8Array)
 							send(message.data);
+						// The worker's link closed on its own (e.g. Chord's heartbeat found the socket silent): drop the socket,
+						// so its close reconnects. No new authority: malformed frames already make the server end the link.
+						else if (message.kind === "linkClosed") socket?.terminate();
 						else if (message.kind === "exit") {
 							void close();
 							options.onExit?.();
@@ -511,6 +517,8 @@ export async function startTuiClient(options: {
 			kitty = !kitty;
 			postCapabilities(sandbox);
 		}
+		const keyboard = modes.keyboard(kitty);
+		if (keyboard) options.terminal.write(keyboard);
 		const key = suspendPrivileged ? undefined : privileged.match(data);
 		if (key) {
 			if (!key.release) void keyAction(key.id);

@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/chord",
-	"version": "1.5.0",
+	"version": "1.5.1",
 	"description": "Object runtime for apps across processes: contracts, documents, a store, links, plugins with hot reload, HTTP, workers, web and terminal clients",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -71,6 +71,11 @@
 			"types": "./dist/node/workers/index.d.ts",
 			"import": "./dist/node/workers/index.js"
 		},
+		"./compression": {
+			"source": "./src/node/compression.ts",
+			"types": "./dist/node/compression.d.ts",
+			"import": "./dist/node/compression.js"
+		},
 		"./workers/child": {
 			"source": "./src/node/workers/child.ts",
 			"types": "./dist/node/workers/child.d.ts",
@@ -90,6 +95,11 @@
 			"source": "./src/node/app/index.ts",
 			"types": "./dist/node/app/index.d.ts",
 			"import": "./dist/node/app/index.js"
+		},
+		"./app/files": {
+			"source": "./src/node/app/files-entry.ts",
+			"types": "./dist/node/app/files-entry.d.ts",
+			"import": "./dist/node/app/files-entry.js"
 		},
 		"./web": {
 			"source": "./src/web/index.ts",
@@ -155,8 +165,8 @@
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@earendil-works/pi-schema": "1.5.0",
-		"@earendil-works/pi-telemetry": "1.5.0"
+		"@earendil-works/pi-schema": "1.5.1",
+		"@earendil-works/pi-telemetry": "1.5.1"
 	},
 	"peerDependencies": {
 		"esbuild": "0.28.2",

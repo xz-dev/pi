@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,9 +8,16 @@ import type { Duplex } from "node:stream";
 import { type TestContext, test } from "node:test";
 import { BACKGROUND_CONTEXT, statusOf, whenLive } from "@p2/app/v1";
 import { WebSocket, WebSocketServer } from "ws";
+import { Chat } from "../../plugins/chat/contract.ts";
 import { Devices } from "../../plugins/devices/contract.ts";
 import { ProviderLogin } from "../../plugins/login/contract.ts";
 import { RadiusBrain, type RadiusStatus, readRadiusConfig, writeRadiusConfig } from "../../plugins/radius/brain.ts";
+import {
+	deviceName,
+	normalizeBrainName,
+	readBrainIdentity,
+	writeBrainIdentity,
+} from "../../plugins/radius/identity.ts";
 import {
 	encodeRelayUser,
 	RELAY_ORIGIN_HEADER,
@@ -22,9 +29,10 @@ import {
 import { radiusStatusText } from "../../plugins/radius/server.ts";
 import { Sessions } from "../../plugins/sessions/contract.ts";
 import { Sharing } from "../../plugins/sharing/contract.ts";
+import { Terminals } from "../../plugins/terminals/contract.ts";
 import { radiusTransport } from "../../src/hosts/tui-radius.ts";
 import { Access } from "../../src/runtime/access.ts";
-import { clientHost, expectChord, holdIn, http, poll, until } from "./helpers.ts";
+import { clientHost, expectChord, holdIn, http, localOwner, poll, until } from "./helpers.ts";
 import { radiusFixture as fixture, OWNER, PUBLIC_ORIGIN } from "./radius-fixture.ts";
 
 test(
@@ -101,9 +109,60 @@ test(
 			(await http(f.server.port, "/probe", { headers: { ...marked, [RELAY_SECRET_HEADER]: "forged" } })).status,
 			403,
 		);
-		assert.equal((await http(f.server.port, "/probe")).status, 200);
+		// Radius needs no local credential, and loopback alone is nobody.
+		assert.equal((await http(f.server.port, "/probe")).status, 403);
+		// A plugin's own WebSocket upgrade (a terminal's byte channel) admits the relayed owner too.
+		const session = await (await holdIn(browser, Sessions, {}, "owner")).create(
+			{ cwd: f.directory },
+			BACKGROUND_CONTEXT,
+		);
+		const view = browser.hold(Terminals, { session: session.id, view: randomUUID() }, BACKGROUND_CONTEXT);
+		const { token } = await view.channel({}, BACKGROUND_CONTEXT);
+		const channel = (headers: Record<string, string>) =>
+			new Promise<number>((resolve) => {
+				const socket = new WebSocket(`ws://127.0.0.1:${f.server.port}/terminal?${new URLSearchParams({ token })}`, {
+					headers,
+				});
+				socket.on("open", () => {
+					socket.terminate();
+					resolve(101);
+				});
+				socket.on("unexpected-response", (_request, response) => {
+					response.resume();
+					resolve(response.statusCode ?? 0);
+				});
+				socket.on("error", () => {});
+			});
+		assert.equal(await channel({}), 403, "not without Radius or a local credential");
+		assert.equal(await channel(marked), 101);
+		view.release();
 	},
 );
+
+test("Radius-relayed artifact previews may sit below the Radius shell's frame", { timeout: 30_000 }, async (t) => {
+	const f = await fixture(t);
+	const owner = clientHost(await localOwner(f.server));
+	t.after(() => owner.close(BACKGROUND_CONTEXT));
+	const session = (await (await holdIn(owner, Sessions, {}, "owner")).create({ cwd: f.directory }, BACKGROUND_CONTEXT))
+		.id;
+	const chat = await holdIn(owner, Chat, { session, conversation: 1 }, "participant");
+	await chat.send({ text: "artifact", requestId: "artifact" }, BACKGROUND_CONTEXT);
+	await until(chat.view, (view) =>
+		(view?.entries ?? []).some((entry) =>
+			(entry.model ?? []).some((message) => message.role === "toolResult" && message.toolName === "artifact"),
+		),
+	);
+	chat.release();
+	// The relayed app is framed by the shell, and `frame-ancestors` checks every ancestor: `'self'` alone showed
+	// Chrome's blocked-frame page instead of every inline preview.
+	const id = f.open(`/artifact?${new URLSearchParams({ session, name: "demo", version: "1" })}`);
+	const response = await f.radius.response(id);
+	assert.equal(response.status, 200);
+	const csp = (response.headers as [string, string][]).find(
+		([key]) => key.toLowerCase() === "content-security-policy",
+	);
+	assert.match(String(csp?.[1]), /; frame-ancestors 'self' https:\/\/radius\.earendil\.com$/);
+});
 
 test("Radius admits people sessions are shared with by email, across organizations", { timeout: 30_000 }, async (t) => {
 	const f = await fixture(t);
@@ -111,7 +170,7 @@ test("Radius admits people sessions are shared with by email, across organizatio
 	assert.equal((await f.radius.response(f.open("/probe"))).status, 200);
 	const config = await readRadiusConfig(f.directory);
 	assert(config);
-	const owner = clientHost(f.server.port);
+	const owner = clientHost(await localOwner(f.server));
 	t.after(() => owner.close(BACKGROUND_CONTEXT));
 	const sessions = await holdIn(owner, Sessions, {}, "owner");
 	const first = await sessions.create({ cwd: f.directory, title: "First" }, BACKGROUND_CONTEXT);
@@ -543,6 +602,7 @@ async function flakyRelay(t: TestContext) {
 		state,
 		statuses,
 		brain,
+		directory,
 		drop: () => host?.close(1001),
 		replace: () => host?.close(1012, "Server host replaced"),
 	};
@@ -637,7 +697,66 @@ test(
 	},
 );
 
+test(
+	"Radius brain connects under its name, the device's at first, and a rename goes with the next connect",
+	{
+		timeout: 20_000,
+	},
+	async (t) => {
+		const f = await flakyRelay(t);
+		const names = () => f.state.urls.map((url) => new URL(url, "http://relay").searchParams.get("name"));
+		const device = await deviceName();
+		f.brain.start();
+		await poll(() => connectedCount(f.statuses) === 1);
+		assert.deepEqual(names(), [device]);
+		// The first connect created identity.json with the device's name; it stays the brain's until changed here.
+		assert.deepEqual(await readBrainIdentity(f.directory), { name: device });
+		await writeBrainIdentity(f.directory, { name: "Studio brain" });
+		f.drop();
+		await poll(() => connectedCount(f.statuses) === 2);
+		assert.equal(names().at(-1), "Studio brain");
+		assert.equal(f.statuses.findLast((status) => status.status === "connected")?.name, "Studio brain");
+	},
+);
+
+test("Brain names are one line of at most 63 characters, else the device's name", async (t) => {
+	assert.equal(normalizeBrainName("  Cristina's\u0000  MacBook\nPro "), "Cristina's MacBook Pro");
+	assert.equal(normalizeBrainName("x".repeat(80)), "x".repeat(63));
+	assert.equal(normalizeBrainName(" \t "), undefined);
+	assert.equal(normalizeBrainName(42), undefined);
+	const directory = await mkdtemp(join(tmpdir(), "p2-identity-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const device = { name: await deviceName() };
+	for (const content of ["{ not json", "null", "[]", '{ "name": "  " }']) {
+		await writeFile(join(directory, "identity.json"), content);
+		assert.deepEqual(await readBrainIdentity(directory), device);
+		assert.deepEqual(JSON.parse(await readFile(join(directory, "identity.json"), "utf8")), device);
+	}
+});
+
+test("A brain whose data directory cannot hold its name still gets the device's", async (t) => {
+	const device = { name: await deviceName() };
+	// A read-only data directory (a locked-down sandbox): nothing can be saved, the name stands in.
+	const readOnly = await mkdtemp(join(tmpdir(), "p2-identity-ro-"));
+	t.after(async () => {
+		await chmod(readOnly, 0o700);
+		await rm(readOnly, { recursive: true, force: true });
+	});
+	await chmod(readOnly, 0o500);
+	assert.deepEqual(await readBrainIdentity(readOnly), device);
+	// identity.json that is not a file: left alone.
+	const odd = await mkdtemp(join(tmpdir(), "p2-identity-dir-"));
+	t.after(() => rm(odd, { recursive: true, force: true }));
+	await mkdir(join(odd, "identity.json"));
+	assert.deepEqual(await readBrainIdentity(odd), device);
+	assert.ok((await stat(join(odd, "identity.json"))).isDirectory());
+});
+
 test("Radius status lines as Pi Mobile logs them, retries with their error", () => {
+	assert.equal(
+		radiusStatusText({ status: "connected", serverId: "brain-1", organizationId: "org", name: "Studio" }),
+		'connected as brain "Studio" (brain-1)',
+	);
 	assert.equal(
 		radiusStatusText({ status: "connected", serverId: "brain-1", organizationId: "org" }),
 		"connected as brain brain-1",

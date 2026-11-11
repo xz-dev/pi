@@ -493,8 +493,9 @@ drops, folds or resets.
 - The app defines its principal type `P`: JSON, every variant with a `kind`, a type alias (not an interface),
   unversioned (owner, 2026-10-22): Chord never persists principals, base code changes every host at once, links stamp
   them. Objects persist a projection with its own schema, never the principal (p2: chat's `Author { kind, id, name }`).
-  p2/p3: `owner` (`access: "local" | "relay" | "device"`), `guest` (`session`, `mode`, grant revision), `server`,
-  `worker` (`session`).
+  p2: `owner` (`access: "local" | "relay" | "device"`), `guest` (`session`, `mode`, grant revision), `server`,
+  `worker` (`session`). p3: `user`, `guest`, `worker`, `server`, no `owner` kind: the kit's owner is one of its users
+  (§23, decision "The kit's owner is a principal the app chooses").
 - **Links stamp principals.** A caller's own data never sets its principal.
 - **The principal key** maps a principal to its object identity (`principalKey`, default canonical JSON; cached per
   principal object; the same function on every host). It should include connection provenance and grant revision, so
@@ -590,6 +591,12 @@ host.serve(Notes, ({ session }, principal, self) =>
   counted pin: the key stays loaded while the consumer lives) or `ref.notes.watch(key, ctx)`/`get(key, ctx)` anywhere;
   an absent key reads `initial()`, a retirement arrives as the `retired` flag (a derive over it carries the flag on).
   Across links, a view per entity (`NoteView { session, id }`) is held as an ordinary remote object.
+  **Host-keyed members** (decision "Documents and table rows can belong to a host", 2026-11-09; spec
+  `host-keyed/spec.md` §1): `keyed(schema, Session)` keys the member by addresses of a host kind; its implementation is
+  a handle of a definition keyed by that kind (`keyed: Session`; another key kind fails the activation), the
+  reference's member takes addresses (`ref.meta.at(Session({ id }))`, checked and encoded to the canonical key), and
+  the kind's name joins the member's normal form (`{ keyed, key }`; string-keyed members keep their fingerprints). A
+  changed key kind is a change `accepts` can only refuse (a value mapping cannot map keys).
 - **Methods:** `method()` (no arguments, no result), `method(args)`, `method(args, result)`, `method(undefined,
   result)`. A method without arguments omits them in the API (`ref.bump(ctx)`, implemented as `bump: async (ctx) =>
   …`); `null` is their internal and wire form (owner, 2026-10-22).
@@ -859,7 +866,8 @@ location are dropped.
   version), keeping no node of it. After a `failed` call, the next good value arrives as `[["r", value]]` even when
   unchanged; a watch opened while failed starts at the last value and gets the failure once. No source, mapping,
   document handle or pin of an instance outlives it through a reference: a detached reference keeps only plain last
-  values and its failure; releasing it drops them and its bindings; stopping a keyed watch drops its pin. Derives over a failed reference member compute on its last value (a contribution built on it stays); only the
+  values and its failure; releasing it drops them and its bindings; stopping a keyed watch drops its pin. A host-keyed member of a
+  reference (§5) takes addresses of its kind, checked and turned into canonical keys before its reads and pins. Derives over a failed reference member compute on its last value (a contribution built on it stays); only the
   member's own watches get the `failed` call, and `ref.state` shows the failure (owner, 2026-10-29). A re-exposed member is
   the re-exposing object's reference member, followed the same way. Over a link the same rule: the replica keeps its
   last values readable while its hold is failed. Nothing outlives its object instance and nothing is handed between
@@ -1019,6 +1027,18 @@ host.serve(DraftStore, (_, self) => {               // local, empty params: may 
   nothing); `for await (const key of handle.keys(ctx))` pages keys (both take a context, owner, 2026-10-26) (indexed per owner and definition, also in memory). No
   live key list: a collection shown live is a singleton (an object holding a list or map); large collections are
   methods returning pages.
+- **Host-keyed documents** (decision "Documents and table rows can belong to a host", 2026-11-09; spec
+  `host-keyed/spec.md`): `keyed: Session` keys documents by addresses of a host kind: `KeyedHandle<T, Address<K>>`,
+  `tx.draft(meta, Session({ id }))`; `keys()` yields addresses. Only addresses of the kind are taken (a string, the
+  empty one included, is `invalid/args`). **The canonical key** is an address's key under the `str()` text rules (a
+  lone surrogate replaced, NUL refused); for an address a plugin hands in (a key, a cell, a member key) it is computed
+  from the params, never taken from its `.key`, while the host data calls take `address.key`. It is the document's
+  key, the record's `host`, a `host(...)` cell and a host data selection alike. **The discriminator:** a persisted host-keyed document's record has `host = key`, every other record
+  `host` NULL; a find or load whose record does not fit the definition's keys fails the object `broken` (no implicit
+  conversion; converting is an explicit store migration). Pins (`at(address)`), watches and retirements work by the
+  canonical key as for string keys; migration on access is unchanged. **Store maintenance** (a host data import or
+  delete, §10) is the one change of an object's documents outside its transactions: it holds the object's line,
+  reads what the object holds of the address inside its commit step and adopts it in one batch (§10).
 - **Values are immutable by convention** (Chord Delta's rule, as in Durable): `handle.value` and published values
   are shared, never mutated by their readers, and never copied or frozen; a draft belongs only to its transaction.
 
@@ -1108,9 +1128,11 @@ host.serve(DraftStore, (_, self) => {               // local, empty params: may 
 
 ### Lifetime, persistence
 
-- **No tags (owner, 2026-10-21):** deleting a session deletes its store and directory; instance data on the server that
-  refers to a session is a table with a `session` column, cleaned up by its owner (`deleteWhere`, reconciling from the
-  catalog).
+- **No tags (owner, 2026-10-21):** deleting a session deletes its store and directory. Instance data on the server
+  that refers to a session and must travel with it (export, import, delete) is host-keyed (decision "Documents and
+  table rows can belong to a host", 2026-11-09): documents keyed by `Session` or rows with a `host(Session)` column;
+  the store finds them by address (§10). Data that only refers to a session is cleaned up by its owner
+  (`deleteWhere`, reconciling from the catalog).
 - **In-memory documents are instance state (P2, owner, 2026-10-21):** attached to the live object, with no storage, no
   address, no seq and never in the outbox; their commit is prepare and adopt (inside the store's commit step when the
   transaction also writes persisted data).
@@ -1271,6 +1293,38 @@ host.serve(DraftStore, (_, self) => {               // local, empty params: may 
   of range (`CHECK`) fails only that transaction (`invalid/args`). Durable's Session fails on any commit error
   (`GuardedStorage`), as today.
 
+### Data belonging to a host (decision "Documents and table rows can belong to a host", 2026-11-09)
+
+Spec `host-keyed/spec.md` §2 to §5.
+
+- **Schema 3:** `chord_documents.host` (the canonical address key of a host-keyed document's host, NULL otherwise) with
+  a partial index. Archives stay `format: 1`; a record carries `host`, a column `host`, a host data archive's manifest
+  `host`.
+- **`host(Kind)` columns:** a non-`opt` `str` column holding canonical address keys (`{ type: "str", host: "<kind>" }`
+  in the catalog and the fingerprint), at most one per table, read as addresses. The definition adds the index `host`
+  over it unless the key starts with it; `evolveTable` cannot add a host column (no default). Queries compare it with `eq`, `ne`, `inArray` only.
+- **Filtered archives:** `exportHostData(store, address)` writes the address's records and rows in the archive
+  format (the tables with a host column of its kind, only its rows; its records), holding the commit queue.
+- **Import** (the host's `importHostData(parts, ctx, { address?, existing? })`, one commit): the archive is
+  checked as untrusted (a manifest `host`, every row and record of it, Chord records only; its table metadata is not
+  compared: a fingerprint is no security boundary);
+  existing data of the target is refused or, with `existing: "replace"`, retired and deleted in the same commit; a
+  table not recorded here is created from the archive; every row must hold the target in the recorded table's own host
+  column; an older or `migrating` archive table's rows migrate in
+  memory through the owner's `evolveTable` history (edits, `rows` and `update` steps, `$v` and `json(...)` cell
+  versions exact; the owner activated for it); a newer one is refused. Records get fresh ids and the commit's seq,
+  their values as bases at their versions (they migrate on access); rows never replace another address's row. A copy
+  under another address of the kind rewrites host cells and keys only. The commit's writes are ordinary outbox
+  writes (`document.create`, `put`, `document.retire`, `deleteWhere`).
+- **Delete** (`deleteHostData(address, ctx)`): one commit retiring the address's records and deleting its rows.
+- **Live claims:** import and delete are the host's only (the store-level functions are internal). A host data gate
+  serializes them and keeps activations' load phases out while one is exclusive; the operation holds the lines of
+  every live owner (of host-keyed documents of the kind, of tables with a host column of it, of the archive's and
+  stored records), reads what they hold of the address inside its commit step (documents through the step, live
+  queries re-run) and adopts it all in one `host.batch.commit` after `COMMIT`, as an ordinary commit (W1). The commit
+  is admitted only while the caller's context is live; an object that cannot read an imported
+  document fails alone.
+
 ---
 
 ## 11. Kinds of state
@@ -1298,7 +1352,9 @@ commits are the exact invalidation: a commit not writing the table runs nothing)
 (params decide it); **a limit is required** (`invalid/args` at declaration; the store's query language keeps the limit
 an argument of the runner, as `page` has it). A run that fails (a row the code cannot read) is a failed member, as a
 throwing derive (one failure call, `query_failed` once per episode, `[["r", rows]]` at the next good run); the object
-stays live. It is no native: a restart's successor runs its live queries again at its activation (section 21). Cost: one query per
+stays live. It is no native: a restart's successor runs its live queries again at its activation (section 21). A host
+data import or delete (§10) is the one other writer of an object's tables: it re-runs the object's live queries over
+tables with a host column of its kind inside its commit step and adopts them in its batch. Cost: one query per
 touching commit, bounded by the limit (100 rows: about 60 µs unwatched, 80 µs watched, `benchmarks.md`); **there may
 be dragons** for tables written hundreds of times a second. Incremental maintenance of the result (row-level changes
 kept in memory, a re-run only when a removal empties the window or a bulk write hides which rows changed) is left for
@@ -2021,6 +2077,11 @@ type ReloadReport = {
   them until its successor is live, which replaces them in one batch, or drops them when the successor fails or parks
   (F-c). **Routines** stop at the restart; their calls drain with the old attempt's; the successor's start when it
   goes live.
+- **Against a running host data operation** (decision "Documents and table rows can belong to a host"; spec
+  `host-keyed/spec.md` §5): a restarted object's successor (as every activation) runs its load phase (hydration,
+  persisted loads, table preparation, live query loads) through the host data gate: while an import or delete is
+  exclusive it waits, so it loads what the operation committed; an operation waits for the load phases under way. An
+  owner a running import activated for its table history passes the gate before the import becomes exclusive.
 - **Reload cycles** (rule 6): a wait of old work on an object whose activation waits, through its parked
   dependencies or the gates its opener waits at, on the old attempt that very work runs on fails at once with
   `unavailable/reload_cycle`, naming the chain (`app.f(fresh) → app.p`: old work creating an object whose new code
@@ -2096,8 +2157,8 @@ worker (the reload suite), not only by unit tests. "The page" is any client over
 | code holding natives (a restart) | as pure code; the old code's natives close (`reload`) at the seal, the new code's open before the fresh snapshot | as pure code | as pure code; natives reopened |
 | a contract change the new code still `accepts` | the old page keeps working through the mapping | answered through the mapping | unchanged |
 | a contract change not accepted, or a type removed | the reference waits with its last values (`failed { waiting }`) until the page's code updates or the type returns | calls fail at once with the cause (`contract_mismatch`, `unavailable` not served; §7) | unchanged |
-| a web or terminal plugin | the other plugins untouched, scroll kept; the reloaded plugin's components remount | the reloaded plugin's calls as above | component state starts over; `usePageState`/`scope.pageState` survive |
-| base code (the app's client and worker entries, Chord, React) | applied by restarting the server (the kit builds base bundles at start, the workers component its worker base when it is created; no reload applies them, and a worker forked meanwhile runs the server's boot code); the page reconnects to a new base and reloads (the terminal restarts its sandbox): the only case losing what is on screen | calls in flight end with the link | page state lost; in-memory server and worker state lost; stores unchanged |
+| a web or terminal plugin | the other plugins untouched, scroll kept; the reloaded plugin's components remount; a page fetches the plugin's new stylesheet inactive before the reload (beside its old one, at most 10 s), applies it with the new code and retires the old one a frame after the reload (a plugin whose new script failed keeps its old stylesheet with its old code, the new one never applied); limitation: UI an object contributes stays until its successor is live and can show unstyled during that restart | the reloaded plugin's calls as above | component state starts over; `usePageState`/`scope.pageState` survive |
+| base code (the app's client and worker entries, Chord, React) | applied by restarting the server (the kit builds the base bundles and each worker kind's worker base right after the server listens; no reload applies them, and a worker forked meanwhile runs the server's boot code); the page reconnects to a new base and reloads (the terminal restarts its sandbox): the only case losing what is on screen | calls in flight end with the link | page state lost; in-memory server and worker state lost; stores unchanged |
 
 Order: the server, then every running worker by the same rules, then the clients' scripts.
 
@@ -2122,10 +2183,17 @@ Order: the server, then every running worker by the same rules, then the clients
   calling facet's own plugin. A plugin's dependencies are installed into its directory (`installDependencies`, as
   coding-agent does: `--omit=dev --legacy-peer-deps --ignore-scripts`). esbuild is an optional peer dependency.
 - **The reload loop:** a watcher marks plugins dirty from the files each facet used (a copied contract dirties every
-  user) and flags changes of base code (the app restarts its hosts); a build is per plugin (a failed one keeps its old code); `rollout` runs the app's
-  steps in order (server, workers, clients; decision "Slice 7b's open points" (3)). A reload control (a button, a CLI,
-  an agent tool) is the app's. One base bundle per surface (host packages and the app runtime) is an app's startup
-  optimization, the web's in slice 11.
+  user) and flags changes of base code (the app restarts its hosts): `base` is content-compared (p3 step 0a), true
+  while a file differs from the bytes a running base artifact read (each base bundle hashes what its loader hands
+  esbuild; the server's own code is recorded after the start by bundling its entry, nothing written or run), is gone,
+  or is a source file new in a base directory; compared once when its watch starts and at each event (reads of one
+  path in order, the latest deciding), so a rewrite with the same bytes or a change and its revert leave no mark. One
+  exception, latched: a file of the server's own code whose timestamps show an edit after the process started is
+  recorded as differing whatever its bytes, since Node may have loaded other bytes than the scan read; it marks `base`
+  until the next restart, even when its bytes are restored (the exact rule: `src/node/app/README.md`, "Plugins"). A build is per plugin (a failed one keeps its old code);
+  `rollout` runs the app's steps in order (server, workers, clients; decision "Slice 7b's open points" (3)). A reload
+  control (a button, a CLI, an agent tool) is the app's. One base bundle per surface (host packages and the app runtime)
+  is an app's startup optimization, the web's in slice 11.
 - Project plugins, trust, snapshots, scopes and npm/git package installs: `apps/p2/docs/plugin-loading.md` (still the
   reference for those; not in 7c).
 
@@ -2433,31 +2501,34 @@ Windows, a socket file elsewhere that fails closed when stale, the stale file cl
 and after a child's exit by a signal, decision "Stale lock files are cleared by the starter"; a start waits for a
 draining old holder without polling).
 
-- **The worker base** (decision "Workers start from the base code the server booted with"): `entry` and the base code
-  it imports are bundled once by esbuild when the component is created (`workers.inputs`: the files read), as the
-  surfaces build their base bundles at start, and every worker of the kind is forked from that snapshot: an edit of the
-  app's source while the server runs (an agent half way through a change) reaches no worker; a server restart applies
-  it (the kit gives the inputs to the watcher's `base` mark). A base that does not build rejects `createWorkers` (the
-  server does not start with it). What it holds: the app's files and workspace packages linked into `node_modules` (by
-  their real paths); external, loaded by Node at each fork from where the build resolved them: Node builtins and every
-  package resolved under a `node_modules` directory (native addons and packages reading their own files work as
-  installed; they change only through an install, which needs a restart anyway). Resolution as the child's Node does it
-  (its `execArgv` `--conditions`, `main` only, `tsconfig.json` paths as esbuild reads them); every imported module runs
-  (`sideEffects: false` drops nothing); `import.meta.url`, `.dirname`, `.filename`, `__dirname` and `__filename` name
-  each module's source file. Split at each dynamic `import()` with a literal specifier: the entry and the chunks it
-  imports statically load at each fork, a lazily imported module and the packages it imports only when the worker
-  first imports it (an app's lazily loaded providers stay lazy; a module still runs after its imports, but modules
-  that do not import each other may run in another order than unbundled); a variable-specifier import resolves at run
-  time against its module's source file, outside the snapshot. ES modules with inline source maps, forked with
-  `--enable-source-maps` before the app's `execArgv` (stack traces name the source files); `execArgv` and `env` apply to
-  every fork as before (modules an `--import` names load from disk at each fork). The files live in one private
-  temporary directory (0700, written again into a new one when a cleaner removed one of them), removed at `close`. The
-  worker's side alone is `@earendil-works/chord/workers/child` (`workerMain`, `processLock`): a worker entry importing
-  it loads no esbuild. Plugins are unaffected: workers evaluate the server's built scripts. Cost: a build at start
-  (the kit's test worker 55-100 ms, p2's session worker 215-250 ms, 4.2 MB of code); a fork then loads the entry and
-  its static chunks (the kit's test worker 60 ms instead of 360 ms from source, p2's 350 ms instead of 760 ms; on a
-  phone, splitting and the child entry took p2's fork from 690 to 301 loaded modules, no provider SDK or esbuild among them, about 300 ms
-  less to `workerMain`).
+- **The worker base** (decision "Workers start from the base code the server booted with"): `entry` and the base code it
+  imports are bundled once by esbuild at `workers.build()` (the kit: right after the server listens, as it builds the
+  surfaces' base bundles; a start waits for it; `built.inputs`: the files read), and every worker of the kind is forked
+  from that snapshot: an edit of the app's source after the build (an agent half way through a change) reaches no
+  worker; a server restart applies it (the kit gives the inputs, each with its bytes' hash as the build read it, to the
+  watcher's `base` mark). A base that does not build fails every start of the kind (the kit reports it as `base_build`;
+  the server runs on). What it holds: the app's files and workspace
+  packages linked into `node_modules` (by their real paths); external, loaded by Node at each fork from where the build
+  resolved them: Node builtins and every package resolved under a `node_modules` directory (native addons and packages
+  reading their own files work as installed; they change only through an install, which needs a restart anyway).
+  Resolution as the child's Node does it (its `execArgv` `--conditions`, `main` only, `tsconfig.json` paths as esbuild
+  reads them); every imported module runs (`sideEffects: false` drops nothing); `import.meta.url`, `.dirname`,
+  `.filename`, `__dirname` and `__filename` name each module's source file. Split at each dynamic `import()` with a
+  literal specifier: the entry and the chunks it imports statically load at each fork, a lazily imported module and the
+  packages it imports only when the worker first imports it (an app's lazily loaded providers stay lazy; a module still
+  runs after its imports, but modules that do not import each other may run in another order than unbundled); a
+  variable-specifier import resolves at run time against its module's source file, outside the snapshot. ES modules,
+  each with its source map beside it (`<name>.mjs.map`, linked), forked without `--enable-source-maps`: Node would
+  parse the whole map at the first stack made text (Chord makes a kept error's stack text at once), about 1M positions
+  and 50 MiB of a p2 session worker's heap for its life; stack traces name the bundle's files and functions, and an app
+  that wants them mapped passes the flag in `execArgv`, at that cost. `execArgv` and `env` apply to every fork as before (modules an `--import` names load from disk at each fork).
+  The files live in one private temporary directory (0700, written again into a new one when a cleaner removed one of
+  them), removed at `close`. The worker's side alone is `@earendil-works/chord/workers/child` (`workerMain`,
+  `processLock`): a worker entry importing it loads no esbuild. Plugins are unaffected: workers evaluate the server's
+  built scripts. Cost: a build at start (the kit's test worker 55-100 ms, p2's session worker 215-250 ms, 4.2 MB of
+  code); a fork then loads the entry and its static chunks (the kit's test worker 60 ms instead of 360 ms from source,
+  p2's 350 ms instead of 760 ms; on a phone, splitting and the child entry took p2's fork from 690 to 301 loaded
+  modules, no provider SDK or esbuild among them, about 300 ms less to `workerMain`).
 - **Keep-alive** (D9, R3, Q5): the child reports when `host.activity`'s references, jobs and lingering objects and the
   app's `busy` counts flip between all zero and not (local calls do not count; the first state with `ready`, which
   also carries the load report); the server stops a worker idle for `idleMs` (5 min).
@@ -2487,21 +2558,74 @@ entry. Opinionated and small: an app is its API, its built-in plugins and a star
   the app in the home directory. One server; worker kinds are a list the app defines, each a host kind with its own
   params (sharding is the app's) and how it starts (entry, start data, principal, idle time); zero kinds is a server
   with clients only.
-- **Principals and users:** the principal is tiny (a kind and an id) and the app's type; the kit needs only its server
-  and worker variants. User data lives in objects keyed by the user's id. Optional kit plugins: users (accounts with an
-  app-supplied profile schema), authenticators (device pairing, invite links, an ephemeral pick-a-name login).
+- **Principals and users:** the principal is tiny (a kind and an id) and the app's type; the kit needs only the server's
+  principal, each worker's (with worker kinds) and the owner's, values of that type the app chooses (decision "The kit's
+  owner is a principal the app chooses": the owner may be one of the app's users; the kit adds no variant). The owner is
+  strict JSON and never the server's principal (refused at start); the kit serves it as start data (`AppInfo.owner`).
+  User data lives in objects keyed by the user's id. Optional kit plugins: users (accounts with an app-supplied profile
+  schema), authenticators (device pairing, invite links, an ephemeral pick-a-name login).
 - **Authentication:** no owner by loopback alone: the start script prints a link with a one-time token that sets a
-  signed owner cookie; deny by default (the HTTP component refuses requests without a principal unless the route or
-  socket is public); a session helper issues and revokes sessions; command-line clients send a token in a header (an
+  signed cookie of the owner's session; the owner link, the owner token file and device pairing sign in as the app's
+  owner principal, and the owner-only routes (pairing's approval, invites) recognize it by canonical JSON, each
+  principal's key computed once per principal object; a change of the owner between starts replaces the owner token file
+  and revokes its old session; deny by default (the HTTP component refuses requests without a principal unless the route
+  or socket is public); a session helper issues and revokes sessions; command-line clients send a token in a header (an
   owner token file readable only by the app's OS user; a device pairing flow from other machines).
 - **Storage:** one store for the server, a directory per worker under its kind and address with its store; plugins
-  never use data-directory paths. A files plugin per address (`put`, chunked transfers, a watchable index, caps) is
-  the default file storage; raw directories only where a real path is needed, owned by one object, under the worker's
-  directory. Export and import the data a host created (`exportData`, `importData`): the store's archive plus its
+  never use data-directory paths. `Files`, one per host (decision "Files v2"), is the default file storage: its
+  bytes as immutable blobs in the host's `files/`, its index in tables of the host's store; every file in a space at
+  a path, folders as index entries and moves in the index only, a version per write and copies sharing blobs (a blob
+  goes once nothing references it), small writes and chunked transfers, idempotency keys, fixed indexed metadata
+  (`source`, `ref`, `key`, `mime`, …) plus free `meta`, queries by folder, path, `ref` and `key`, live folder
+  listings (`FilesFolder`), a summary per space a worker pushes to its server's index, caps per host, and
+  `copyFiles` for a new address made from an existing one. Raw directories only where a real path is needed, owned
+  by one object, under the worker's directory. Export and import the data a host created (`exportData`, `importData`): the store's archive plus its
   files; export stops nothing (a running worker packs its own store; without one the server reads it under the
   worker's lock), import refuses an address that has data (decision "App kit naming and export").
+- **Data belonging to the address** (decision "Documents and table rows can belong to a host"; spec
+  `host-keyed/spec.md` §6): the kit's archive format 2 adds `server.archive`, the server's records and rows belonging
+  to the address (`exportHostData`, JSONL). The server's part and the worker's part are taken at two points in time
+  (no transaction spans two stores). `importData(archive, address, ctx, { existing })` refuses an address with data
+  (a directory, or server records or rows), replaces it with `existing: "replace"`, and copies under another address
+  of the kind (host cells and keys rewritten); `deleteData(address, ctx)` (refused while the worker runs) removes the
+  directory and the server's data. **Ordering, no durability promise** (owner, after the delta review: no journal):
+  under the worker's lock an import unpacks whole into staging (nothing changed yet), moves an existing directory
+  aside (replace), renames staging into place, and commits on the server last, the one commit; a failure before it, or
+  a definite refusal, undoes the renames and rejects; an unknown outcome (`storage_failed`) undoes nothing and is
+  reported in the rejection; the aside directory goes only after the commit. A delete commits on the server first,
+  then removes the directory. Crash windows: an import between placing the directory and the server's commit (fix:
+  import again with `existing: "replace"`); a delete after the server's commit (an orphan directory nobody refers to,
+  removed by a repeated `deleteData`); leftover staging directories.
 - **Plugins:** the app's root (required) and the user's root in the data directory; installs from git or npm; one
   "apply changes" call builds and rolls out to the server, then every running worker, exposed by the app as it likes.
+- **Restart needed:** `plugins.state.base` compares base code with what runs by content (§21, the reload loop, with
+  its one latched exception): the app's `base` files and directories hashed at start, the server's own code (a
+  best-effort static scan of its entry, `process.argv[1]`, bundled by esbuild with the server's conditions only to
+  record what it reads: the literal imports of the start script's graph, lazy ones included, never a computed
+  `import(x)` or a loader's module; an unresolved import left out, a failed scan reported), and the bytes each base
+  read (the page's, the terminal's, each worker kind's), compared once when the kit watches them and at every change.
+  The bases' records and the scan are added after the start, off its path (`app.baseWatched`; until it settles `base`
+  is not known; the close does not wait for it): the server answers meanwhile. The latched exception covers the
+  window between Node loading the server's modules and the scan reading them; an edit whose timestamps do not show it
+  (a coarse or skewed file system clock) goes unseen there. The page's and the terminal's base resolve packages with
+  the server process's conditions (`--conditions`/`-C` of its flags and `NODE_OPTIONS`), or the app's
+  `web.conditions`/`tui.conditions`; a worker kind's with its own `execArgv`.
+- **Startup cost:** `startServer` resolves once the server listens; nothing it built is kept between starts (owner
+  decision "A"). The web and terminal base bundles and each worker kind's worker base are built right after the listen,
+  at once, from the files as they are then (`app.basesBuilt` settles once every build ended): a page request (the page,
+  the surface's files, its `base` hash, a launcher's start) waits for its surface's build, a worker start for its
+  kind's. A base that fails to build is reported (`AppError` `base_build`) and fails only what needs it: the page and
+  the surface's files answer 503, the kind's workers fail their start; the server runs on, and a restart builds again.
+  An Apply waiting at a surface's step for its initial build stops when its context is aborted (the build goes on: it
+  is shared). The scan of the server's own code runs after the builds. Workers are forked with
+  `NODE_COMPILE_CACHE=<dataDir>/cache/node`, and each kind's worker base is written to
+  `<dataDir>/cache/workers/<kind>/` at its first fork (emptied first, removed at close), only while the start holds the
+  data directory's lock: a build that ends after its start closed writes nothing. The path stays the same, so Node's compile
+  cache knows the files (about 18 ms of the first worker's start). The server's own process must get
+  `NODE_COMPILE_CACHE` from its supervisor or start command (its modules load before the kit runs). A minimal server's
+  `startServer` takes about 30 ms; example 53's about 40 ms, its first worker answering about 320 ms after the start
+  began (was about 560 ms with the builds on the start's path); Node's loading of Chord's source before the start script
+  (about 390 ms, about 110 ms with a warm compile cache) is the remaining cost.
 
 ### Web and TUI (slice 11)
 
@@ -2509,10 +2633,12 @@ Decision "Slice 11's points", "Slice 11, P3" to "P9", and "Tutorial gaps" (1) (p
 
 - `chord/surfaces` serves the client surfaces (web and terminal) from the server; `chord/web` is a page's client host
   with its connection loop (p2's `keepConnected`), loading and applying the plugins' web facets. A base bundle per
-  client kind built on the server from the app's entry (content-hashed); at page load the kind's current plugin set as
-  one combined file named by its hash, later changed plugins one script each, each a script that registers itself (no
-  eval); new scripts apply in place (`host.reload` in the page); pages learn of them through an object the web
-  component serves (the current set); a base code change reloads the page.
+  client kind built on the server from the app's entry (content-hashed; packages resolved with the server process's
+  conditions unless the app gives its own, so a page runs the Chord source the server runs); at page load the kind's
+  current plugin set as one combined file named by its hash, later changed plugins one script each, each a script that
+  registers itself (no eval); new scripts apply in place (`host.reload` in the page), their stylesheets (named by their
+  content) loaded before and each plugin left with the stylesheet of the code it runs; pages learn of them through an
+  object the web component serves (the current set); a base code change reloads the page.
 - `chord/react`: `HostProvider`, `useHold`, `useWatch`, `useRegistry`, `useRefState`, and `usePageState(key, initial)`:
   `useState`'s pair kept by the page's host under a key, so a component remounted by a plugin reload (a new function)
   keeps it (§21, "UI on client hosts").
@@ -3011,4 +3137,5 @@ view algebra; keeping natives across reloads by name; Chord ending the process o
 flag on references; cross-relay reset coordination; count limits that refuse calls or holds; relays acking per hop, relay resets
 (`reset { hold }`, `reset { holds }`), relay recovery and id renumbering at relays (replaced by flow control per
 origin); a byte window, credit messages, snapshot admission and debt; `reset` from a consumer; a round-robin of
-relayed calls at the relay; `state: false` on references (C8); `inVariant`/`expectVariant` (C15); per-call deadlines.
+relayed calls at the relay; `state: false` on references (C8); `inVariant`/`expectVariant` (C15); per-call deadlines; references shared between UI
+components across a remount (decision "A reloaded UI part shows its loading state").

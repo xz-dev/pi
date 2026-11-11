@@ -33,7 +33,7 @@ them, removing the plugin removes them. Only objects of lifetime "host" may regi
 
 ```ts
 export default defineFacet((host) =>
-	contribute(host, "p2.web-envs", (self) => self.register(Slots, { "sidebar-foot:envs": EnvsButton })),
+	contribute(host, "p2.web-envs", (self) => self.register(Slots, { "envs-actions:ports": PortsButton })),
 );
 ```
 
@@ -155,7 +155,7 @@ through `durableRegistry` (`src/runtime/durable.ts:41`).
 | --- | --- | --- | --- |
 | Tools | `tools` (`defineTool`, `types.ts:293`) | `parameters`, `execute(args, api, ctx)` returning `output`/`structuredOutput`/`details`; `replay: "safe" \| "unsafe"` (rerun after a crash, `:298`); `callers: ["model" \| "tools"]` (`:317`); `structuredOutputSchema` (`:311`); `deferred` (`:322`); `executionMode`, `prepareArguments`, `outputLimits`; `api.executeTool` for nested calls (`:281`) | coding-tools, artifacts, send-file, ports, conversations, sessions, subagents, dev-tools, codemode, powershell; `agent` is `callers: ["tools"]`, replay-safe with a schema (`plugins/agent/tool.ts:53-57`) |
 | Prompt | `sections` (`section(key, render, {tag})`, `types.ts:349`) | rendered before each request, in extension order | prompt (`plugins/prompt/worker.ts:185-191`), coding-tools, ports, conversations, dev-tools |
-| Hooks | `hooks: [hook(Task, handlers)]` | `GenerationTask`: `beforeRequest`, `afterResponse`, `onYield`, `afterTools` (`types.ts:757`); `ToolTask`: `beforeTool`, `afterTool` (`:778`); `CompactionTask`: `beforeCompact` (`:795`); handlers get `HookApi` (doc reads, memos, models, `:745`) | none yet |
+| Hooks | `hooks: [hook(Task, handlers)]` | `GenerationTask`: `beforeRequest`, `afterResponse`, `onYield`, `afterTools` (`types.ts:757`); `ToolTask`: `beforeTool`, `afterTool` (`:778`); `CompactionTask`: `beforeCompact` (`:795`); handlers get `HookApi` (doc reads, memos, models, `:745`) | cache-warming (`afterResponse`; the request from `HarnessParts.requestOf(message)`, a read-only `ModelRequest`) |
 | Wraps | `wraps: [wrapTool(tool, fn) \| wrapSection(section, fn)]` (`types.ts:360`) | replace another extension's tool or section where selected | none yet |
 | Tasks | `tasks: [defineTask(…)]` | durable background work, resolved by name | subagents (`Anchor`, `Reporter`, `plugins/subagents/tools.ts:72,118,473`) |
 
@@ -235,7 +235,7 @@ self.register(SendRouters, {
 | `chat-bottom` | `plugins/chat/web.tsx:934` | single | terminals |
 | `chat-content` | `plugins/chat/web.tsx:1133` | wrapper (gets `children`) | artifacts (viewer contexts) |
 | `chat-attribution` | `plugins/chat/web.tsx:1134` | wrapper | conversations |
-| `sidebar-foot:providers\|envs\|devices\|ports\|logs` | `plugins/sessions/web.tsx:29-37` | five fixed `Slot`s, not a list | login, envs, devices, ports, logs |
+| `sidebar-actions:*` | `plugins/sessions/web.tsx` (`SlotList`) | list: icon buttons before the theme switch | settings |
 | `envs-actions:*` | `plugins/envs/EnvsPanel.tsx:524` (`SlotList`) | list | ports |
 | `workspace-terminal` | `src/web/Workspace.tsx:730` | single | terminals |
 | `chat-parent` | **nowhere** | — | subagents registers it (`plugins/subagents/web.tsx:22`) |
@@ -258,6 +258,10 @@ Pattern: the plugin's slot component renders its button and, when `useSheet(name
 
 ### 4.3 Composer, transcript, notices, theme
 
+- **Settings sections:** `SettingsSections` (`src/runtime/web-core.ts`): layer name → `{ label, title?, order, Sheet,
+  Shown? }`, one contribution per section. The Settings window lists them by `order` (then key) and opens the layer
+  as a page of the window; the app's layout keeps every `Sheet` mounted (`SettingsSectionSheets`,
+  `src/web/SettingsNav.tsx`). Used by login, mcp, envs, ports, devices, discord, voice, logs.
 - **Composer:** `ComposerExpanders` (`src/runtime/composer.ts:7`): `(host, session, text) => text?`, asked in key order
   for text starting with `/` (`plugins/chat/web.tsx:621`); prompt registers one (`plugins/prompt/composer.ts:10`).
   Chips: `composer:*` slots. Shared state: `useComposerState()` (`src/web/composer-state.tsx:123`: draft, files,
@@ -314,8 +318,8 @@ Prompt registers templates and skills (`plugins/prompt/tui.ts:87`).
 
 | Registry | Key → value | Order | Users |
 | --- | --- | --- | --- |
-| `TuiToolRenderers` | tool name → pi `ToolRenderers` (`renderCall`, `renderResult`, `renderShell`; `src/tui/tools/types.ts:15-62`) | overrides built-ins | artifacts, ports, send-file, subagents |
-| `TuiToolRendererResolvers` | `<order>:<plugin>` → `(toolName, next) => renderers` | key order, then the registry, then built-ins (`src/tui/tools/index.ts:20-28`) | quiet-tools (`10:`: one line per call, full content when expanded or failed) |
+| `TuiToolRenderers` | tool name → pi `ToolRenderers` (`renderCall`, `renderResult`, `renderShell`, p2's `nestedCalls`; `src/tui/tools/types.ts`) | — (without one: pi's generic card) | coding-tools, powershell, codemode, artifacts, ports, send-file, subagents, history |
+| `TuiToolRendererResolvers` | `<order>:<plugin>` → `(toolName, next) => renderers` | key order, then the registry (`src/tui/tools/index.ts`); the registry's `nestedCalls` stays | quiet-tools (`10:`: one line per call, full content when expanded or failed) |
 | `TuiSettingFields` | `<plugin>.<name>` → `/settings` row (label, values, fallback), stored at `settings.plugins.<plugin>.<name>` of the visitor's prefs; read with `pluginSetting`; resolvers get the settings, a change redraws every card (`src/runtime/tui-preferences.ts`) | after the built-in rows, key order | quiet-tools |
 | `TuiEntryRenderers` | entry kind → `(entry, ctx) => Component \| undefined` (replaces the display; `undefined` hides) | — | core `p2.shell` (`src/tui/core-commands.ts:290`) |
 | `TuiMarkdownTransformers` | `<order>:<plugin>` → pi `MarkdownTransformer` | key order | core `00:mermaid` |
@@ -352,7 +356,7 @@ actions can be requested; `K` actions fire on the visitor's own key and may ask 
 | `openUrl` | C | `{kind: "external", url}` (https) or `{kind: "origin", path}` | no |
 | `download` | C | `{kind: "file" \| "artifact", session, …}` | no |
 | `savePrefs` | C | `{patch}` for `prefs.json` | no |
-| `devCommand` | C | `{action: "reload"}` | yes |
+| `devCommand` | C | `{action: "reload" \| "restart"}` | yes |
 | `signOut` | C | `{all}` | yes |
 | `copy.selection` | gesture | selection text after the launcher saw the mouse release | no |
 | `attach.key`, `paste.key`, `copy.key`, `editor.external`, `suspend` | K | — (visitor's key) | no |
@@ -375,8 +379,7 @@ actions can be requested; `K` actions fire on the visitor's own key and may ask 
 5. **Naming.** TUI registries are `Tui*`; web ones are unprefixed (`Slots`, `ComposerExpanders`); `TranscriptEntries`
    lives in the chat plugin but is used by both UIs; worker `SendRouters` lives in chat, `ReadOnlyConversations`
    in the runtime, `SessionArchived` in sessions. Ordered registries are marked only by convention in key strings.
-6. **Slot lists that are not lists.** `sidebar-foot:*` is five fixed names (`plugins/sessions/web.tsx:29-37`): a
-   new plugin's `sidebar-foot:foo` never renders. `footer:*` in the TUI renders only the first entry. `chat-parent`
+6. **Slot lists that are not lists.** `footer:*` in the TUI renders only the first entry. `chat-parent`
    is registered and rendered nowhere. Wrapper slots (`chat-content`, `chat-attribution`) admit one plugin each.
 7. **Slots as lifecycle.** TUI plugins register invisible `service:*` / `widget-above:*` slots to get a per-runtime
    object, then find it with `ctx.surface(name)` (`plugins/prompt/tui.ts:74-80`, `plugins/models/tui.ts:116-118`).
@@ -404,7 +407,7 @@ Reference: `packages/coding-agent/docs/extensions.md`.
 
 | pi 1.0 | p2 today | Gap |
 | --- | --- | --- |
-| `pi.on()` lifecycle: `session_start`/`shutdown`, `before_agent_start`, `context`, `message_end`, `tool_call`/`tool_result`, `turn_end`, `agent_before_settle`, `session_before_compact`, `user_bash`, `input`, `provider_stream_event`, `cache_warming_decision` | Chord resources for start/shutdown; Durable hooks cover `context` (`beforeRequest`), `message_end` (notify-only `afterResponse`), `tool_call`/`tool_result`, `turn_end` (`afterTools`), settle (`onYield`), compaction; `SendRouters` covers `Chat.send` input only | No input hook for peer/subagent/agent inputs; no `user_bash` (shell is hard-coded in chat); no stream events; no whole-prompt override (sections and `wrapSection` instead). No plugin uses hooks yet, so they are untested in p2. |
+| `pi.on()` lifecycle: `session_start`/`shutdown`, `before_agent_start`, `context`, `message_end`, `tool_call`/`tool_result`, `turn_end`, `agent_before_settle`, `session_before_compact`, `user_bash`, `input`, `provider_stream_event`, `cache_warming_decision` | Chord resources for start/shutdown; Durable hooks cover `context` (`beforeRequest`), `message_end` (notify-only `afterResponse`), `tool_call`/`tool_result`, `turn_end` (`afterTools`), settle (`onYield`), compaction; `SendRouters` covers `Chat.send` input only | No input hook for peer/subagent/agent inputs; no `user_bash` (shell is hard-coded in chat); no stream events; no whole-prompt override (sections and `wrapSection` instead). Only cache-warming uses hooks (`afterResponse`, which gets the message only; the request it repeats comes from `HarnessParts.requestOf`); pi's `cache_warming_decision` has no p2 counterpart. |
 | `registerTool` with `exposure`, `namespace`, `annotations`, `prepareLoadout`, `reachesTools` | `callers`, `deferred`, replay policy | No annotations (no approval policy), no namespaces; `tool_search` not installed. |
 | `registerCommand`, `registerShortcut` | TUI only | No web commands or shortcuts. |
 | `registerFlag` | none | Plugins get configuration only via env vars or their own files; `settings.json` is closed. |
@@ -437,7 +440,7 @@ Ordered by value; each keeps one name and one shape across surfaces.
    shared); give registries an explicit `ordered: true` option (or an `order` field in values) instead of key
    conventions; make `SlotList` key-ordered like the TUI. Move shared registries (`TranscriptEntries`) to
    `src/runtime` or a neutral contract module.
-5. **Real lists.** `sidebar-foot:*` and TUI `footer:*` as ordered lists; delete or render `chat-parent`; make
+5. **Real lists.** TUI `footer:*` as an ordered list; delete or render `chat-parent`; make
    wrapper slots chains (`chat-content:*`).
 6. **A TUI service registry.** `TuiServices` (`name → (runtime) => { dispose() }`) for per-runtime holders, and
    render `widget-above:*`/`widget-below:*` as designed; replace `ctx.surface("chat") instanceof ChatSurface` with a

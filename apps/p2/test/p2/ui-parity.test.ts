@@ -135,8 +135,13 @@ describe("Pi Mobile UI regressions", { skip: !browserTests }, () => {
 		);
 		await poll(() => existsSync(join(profile, "DevToolsActivePort")), 20_000, "Chromium debugging port");
 		const port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
-		const pages = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()) as { webSocketDebuggerUrl: string }[];
-		const socket = new WebSocket(pages[0].webSocketDebuggerUrl);
+		const pages = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()) as {
+			type: string;
+			webSocketDebuggerUrl: string;
+		}[];
+		// Google Chrome also lists its component extensions' background pages; drive the tab.
+		const page = pages.find((target) => target.type === "page") ?? pages[0]!;
+		const socket = new WebSocket(page.webSocketDebuggerUrl);
 		await new Promise<void>((resolve, reject) => {
 			socket.once("open", resolve);
 			socket.once("error", reject);
@@ -146,6 +151,15 @@ describe("Pi Mobile UI regressions", { skip: !browserTests }, () => {
 		await browser.call("Network.enable");
 		await browser.call("Page.setLifecycleEventsEnabled", { enabled: true });
 		await browser.phone();
+		// The local owner's session, as a sign-in link opened on the host gives it.
+		const [name, value] = fixture.owner.cookie.split("=", 2) as [string, string];
+		await browser.call("Network.setCookie", {
+			name,
+			value,
+			url: `http://127.0.0.1:${fixture.server.port}/`,
+			httpOnly: true,
+			sameSite: "Lax",
+		});
 	});
 	after(async () => {
 		await browser?.close().catch(() => {});
@@ -157,11 +171,14 @@ describe("Pi Mobile UI regressions", { skip: !browserTests }, () => {
 	it("opens Providers in the viewport after closing the translated phone drawer", async () => {
 		await browser.open(`http://127.0.0.1:${fixture.server.port}/`);
 		await browser.evaluate('document.querySelector("button[aria-label=Sessions]").click()');
-		await browser.wait('[...document.querySelectorAll("button")].some(button => button.textContent === "Providers")');
-		await browser.evaluate(
-			'[...document.querySelectorAll("button")].find(button => button.textContent === "Providers").click()',
+		await browser.evaluate('document.querySelector(".drawer-foot .settings-open").click()');
+		await browser.wait(
+			'[...document.querySelectorAll(".settings-nav-item")].some(item => item.textContent === "Providers")',
 		);
-		await browser.wait('Boolean(document.querySelector("[role=dialog][aria-label=Providers]"))');
+		await browser.evaluate(
+			'[...document.querySelectorAll(".settings-nav-item")].find(item => item.textContent === "Providers").click()',
+		);
+		await browser.wait('Boolean(document.querySelector("[role=dialog] [aria-label=Providers]"))');
 		// The sheet starts below the viewport during its slide animation; measure the final layout.
 		await browser.wait(
 			'[...document.querySelector("[role=dialog]").getAnimations()].every(animation => animation.playState === "finished")',
@@ -176,11 +193,14 @@ describe("Pi Mobile UI regressions", { skip: !browserTests }, () => {
 	it("opens Devices and offers a private one-time token to the localhost owner", async () => {
 		await browser.open(`http://127.0.0.1:${fixture.server.port}/`);
 		await browser.evaluate('document.querySelector("button[aria-label=Sessions]").click()');
-		await browser.wait('[...document.querySelectorAll("button")].some(button => button.textContent === "Devices")');
-		await browser.evaluate(
-			'[...document.querySelectorAll("button")].find(button => button.textContent === "Devices").click()',
+		await browser.evaluate('document.querySelector(".drawer-foot .settings-open").click()');
+		await browser.wait(
+			'[...document.querySelectorAll(".settings-nav-item")].some(item => item.textContent === "Devices")',
 		);
-		await browser.wait('Boolean(document.querySelector("[role=dialog][aria-label=Devices] #owner-token"))');
+		await browser.evaluate(
+			'[...document.querySelectorAll(".settings-nav-item")].find(item => item.textContent === "Devices").click()',
+		);
+		await browser.wait('Boolean(document.querySelector("[role=dialog] [aria-label=Devices] #owner-token"))');
 		assert(await browser.evaluate<boolean>('/^[a-f0-9]{64}$/.test(document.querySelector("#owner-token").value)'));
 		assert(
 			await browser.evaluate<boolean>(
@@ -324,7 +344,7 @@ describe("Pi Mobile UI regressions", { skip: !browserTests }, () => {
 			);
 			await browser.wait(`document.querySelector('.composer textarea')?.clientHeight >= 96`);
 			await browser.evaluate(`document.querySelector('.composer').requestSubmit()`);
-			await browser.wait(`document.querySelector('.streaming .md')?.textContent.length > 100`);
+			await browser.wait(`document.querySelector('.streaming .elanor-markdown')?.textContent.length > 100`);
 			await browser.call("Input.dispatchMouseEvent", {
 				type: "mouseWheel",
 				x: before.x,
@@ -340,9 +360,11 @@ describe("Pi Mobile UI regressions", { skip: !browserTests }, () => {
 				`(async () => { let previous=${answerTop},stable=0;for(let frame=0;frame<90;frame++){await new Promise(requestAnimationFrame);const next=${answerTop};stable=next===previous?stable+1:0;previous=next;if(stable>=5)return;}throw new Error('Wheel scrolling did not settle');})()`,
 			);
 			const paused = await browser.evaluate<{ top: number; length: number }>(
-				`({top:${answerTop},length:document.querySelector('.streaming .md').textContent.length})`,
+				`({top:${answerTop},length:document.querySelector('.streaming .elanor-markdown').textContent.length})`,
 			);
-			await browser.wait(`document.querySelector('.streaming .md')?.textContent.length > ${paused.length + 150}`);
+			await browser.wait(
+				`document.querySelector('.streaming .elanor-markdown')?.textContent.length > ${paused.length + 150}`,
+			);
 			const after = await browser.evaluate<number>(answerTop);
 			assert(
 				Math.abs(after - paused.top) < 20,
@@ -403,15 +425,16 @@ describe("Pi Mobile UI regressions", { skip: !browserTests }, () => {
 			403,
 		);
 		await browser.evaluate('document.querySelector("button[aria-label=Sessions]").click()');
-		await browser.wait('[...document.querySelectorAll("button")].some(button => button.textContent === "Devices")');
-		await browser.evaluate(
-			'[...document.querySelectorAll("button")].find(button => button.textContent === "Devices").click()',
-		);
-		await browser.wait('Boolean(document.querySelector("[role=dialog][aria-label=Devices]"))');
+		await browser.evaluate('document.querySelector(".drawer-foot .settings-open").click()');
 		await browser.wait(
-			'document.querySelector("[role=dialog]").textContent.includes("Associated devices cannot mint")',
+			'[...document.querySelectorAll(".settings-nav-item")].some(item => item.textContent === "Devices")',
 		);
-		assert(await browser.evaluate<boolean>('!document.querySelector("#owner-token")'));
+		await browser.evaluate(
+			'[...document.querySelectorAll(".settings-nav-item")].find(item => item.textContent === "Devices").click()',
+		);
+		await browser.wait('Boolean(document.querySelector("[role=dialog] [aria-label=Devices]"))');
+		// Redeemed on loopback, the link is a local session: it mints owner links itself.
+		await browser.wait('Boolean(document.querySelector("#owner-token")?.value)');
 		await browser.evaluate(
 			'[...document.querySelectorAll("[role=dialog] button")].find(button => button.textContent.trim() === "Sign out all devices").click()',
 		);

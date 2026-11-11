@@ -1,12 +1,21 @@
 // Gondolin sandboxes (plugins/envs, type "gondolin"): their configuration, the launcher's arguments, and confinement:
 // a conversation working in a sandbox cannot leave it through the location tools, subagent placement or one-shot agents.
-// The VM itself runs only with P2_TEST_GONDOLIN=1 (it needs /dev/kvm and QEMU >= 7.2 or Docker, and downloads the guest
+// The VM itself runs only with P2_TEST_GONDOLIN=1 (it needs /dev/kvm, QEMU >= 7.2 and Node >= 22, and downloads the guest
 // image on first use), with pi-env's Linux daemon for this machine (static: the guest is Alpine) from P2_TEST_DAEMON or
 // pi-env's package.
 
 import assert from "node:assert/strict";
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, Socket } from "node:net";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -44,6 +53,14 @@ import {
 	sandboxRevision,
 } from "../../plugins/envs/sandbox-host.ts";
 import { LauncherCheckSchema } from "../../plugins/envs/sandbox-schema.ts";
+import {
+	allSecretValues,
+	deleteSecret,
+	listSecrets,
+	sandboxSecrets,
+	saveSecret,
+	secretsPath,
+} from "../../plugins/envs/secrets.ts";
 import type { EnvInfo } from "../../plugins/locations/contract.ts";
 import { createLocationExtension, sandboxAt } from "../../plugins/locations/tool.ts";
 import { Sessions } from "../../plugins/sessions/contract.ts";
@@ -118,9 +135,54 @@ test("launcher arguments: allowed hosts are always a list, values are quoted", (
 	const decode = (config: typeof box) => JSON.parse(Buffer.from(sandboxArgument(config), "base64").toString("utf8"));
 	// Gondolin allows every host when the list is omitted: an unset list must reach it as an empty one.
 	assert.deepEqual(decode({ ...box, allowHosts: undefined } as unknown as typeof box).allowHosts, []);
-	assert.deepEqual(decode(box), { mounts: box.mounts, allowHosts: box.allowHosts });
+	assert.deepEqual(decode(box), { mounts: box.mounts, allowHosts: box.allowHosts, diskGb: 32 });
 	assert.notEqual(sandboxRevision(box), sandboxRevision({ ...box, allowHosts: [] }));
 	assert.equal(runLauncher("/home/a b", ["daemon", "it's"]), `sh '/home/a b/p2-sandbox.sh' 'daemon' 'it'\\''s'`);
+});
+
+test("sandbox secrets: stored 0600, listed without values, sent only to allowed hosts, part of the revision", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "p2-sandbox-secrets-"));
+	try {
+		const allow = box.allowHosts;
+		await assert.rejects(
+			saveSecret(directory, "box1", "GITHUB_TOKEN", { value: "ghp_x", hosts: ["api.github.com"] }, allow),
+			/not an allowed host/,
+		);
+		await assert.rejects(saveSecret(directory, "box1", "bad-name", { value: "x", hosts: ["*.github.com"] }, allow));
+		await assert.rejects(
+			saveSecret(directory, "box1", "A", { value: "x\ny", hosts: ["*.github.com"] }, allow),
+			/one line/,
+		);
+		await saveSecret(
+			directory,
+			"box1",
+			"GITHUB_TOKEN",
+			{ value: "ghp_secret", hosts: ["*.github.com"], preset: "github" },
+			allow,
+		);
+		assert.equal(statSync(secretsPath(directory)).mode & 0o777, 0o600);
+		const listed = await listSecrets(directory, "box1");
+		assert.deepEqual(listed, [
+			{ name: "GITHUB_TOKEN", hosts: ["*.github.com"], preset: "github", setAt: listed[0]!.setAt },
+		]);
+		const first = await sandboxSecrets(directory, "box1");
+		assert.deepEqual(first.values, { GITHUB_TOKEN: "ghp_secret" });
+		assert.deepEqual(first.meta[0]?.aliases, ["GH_TOKEN"]);
+		// The configuration names the secret, never its value; a new value changes the revision.
+		const argument = Buffer.from(sandboxArgument(box, first.meta), "base64").toString("utf8");
+		assert(!argument.includes("ghp_secret") && argument.includes("GITHUB_TOKEN"));
+		await saveSecret(directory, "box1", "GITHUB_TOKEN", { hosts: ["*.github.com"] }, allow);
+		assert.deepEqual((await sandboxSecrets(directory, "box1")).values, { GITHUB_TOKEN: "ghp_secret" }, "kept");
+		await saveSecret(directory, "box1", "GITHUB_TOKEN", { value: "ghp_new", hosts: ["*.github.com"] }, allow);
+		const second = await sandboxSecrets(directory, "box1");
+		assert.notEqual(sandboxRevision(box, second.meta), sandboxRevision(box, first.meta));
+		assert.notEqual(sandboxRevision(box, second.meta), sandboxRevision(box));
+		assert.deepEqual(await allSecretValues(directory), ["ghp_new"]);
+		await deleteSecret(directory, "box1", "GITHUB_TOKEN");
+		assert.deepEqual(await listSecrets(directory, "box1"), []);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test("p2-sandbox.sh check reports the host as the manager expects", () => {
@@ -227,33 +289,67 @@ test(
 	async (t) => {
 		const daemon = process.env.P2_TEST_DAEMON ?? localDaemon();
 		if (!existsSync(daemon)) return t.skip(`no pi-env daemon at ${daemon}`);
-		// Under the home directory: in Docker, the launcher shares only the home with its container.
-		mkdirSync(join(homedir(), ".cache"), { recursive: true });
-		const home = mkdtempSync(join(homedir(), ".cache", "p2-gondolin-test-"));
-		// Named as p2 deploys it: in Docker the image is tagged with it, and another name would replace the container.
+		const home = mkdtempSync(join(tmpdir(), "p2-gondolin-test-"));
+		// Named as p2 deploys it (its installed Gondolin is shared with real use).
 		const launcher = join(home, launcherId(fileURLToPath(sandboxDir)));
 		mkdirSync(launcher);
-		for (const name of ["p2-sandbox.sh", "p2-sandbox.mjs", "Dockerfile"])
+		for (const name of ["p2-sandbox.sh", "p2-sandbox.mjs"])
 			copyFileSync(new URL(name, sandboxDir), join(launcher, name));
 		copyFileSync(new URL("host-package.json", sandboxDir), join(launcher, "package.json"));
 		copyFileSync(new URL("host-package-lock.json", sandboxDir), join(launcher, "package-lock.json"));
 		const shared = join(home, "shared");
 		mkdirSync(shared);
 		writeFileSync(join(shared, "hello.txt"), "from the host\n");
-		const config = { ...box, host: "unused", mounts: [{ host: shared, guest: "/workspace" }], allowHosts: [] };
+		const config = {
+			...box,
+			host: "unused",
+			mounts: [{ host: shared, guest: "/workspace" }],
+			allowHosts: ["httpbin.org"],
+			diskGb: 3,
+		};
+		// A secret the proxy puts into requests to httpbin.org (which echoes them); the VM sees a placeholder.
+		const secrets = [
+			{
+				name: "GITHUB_TOKEN",
+				hosts: ["httpbin.org"],
+				version: "1",
+				aliases: ["GH_TOKEN"],
+				gitHosts: ["httpbin.org"],
+			},
+		];
+		const values = JSON.stringify({ GITHUB_TOKEN: "real-secret-sentinel" });
+		const argument = sandboxArgument(config, secrets);
 		const name = `test-${process.pid}`;
-		// As p2 does: start first (a first start installs and boots for longer than pi-env waits for its daemon).
-		execFileSync("sh", [join(launcher, "p2-sandbox.sh"), "start", name, sandboxArgument(config)], {
+		// Without its values a supervisor never starts.
+		assert.throws(
+			() =>
+				execFileSync("sh", [join(launcher, "p2-sandbox.sh"), "daemon", name, argument, daemon, "--"], {
+					timeout: 60_000,
+					stdio: "pipe",
+				}),
+			/secrets|start/i,
+		);
+		// As p2 does: start first (a first start installs and boots for longer than pi-env waits for its daemon); the
+		// values come on stdin.
+		execFileSync("sh", [join(launcher, "p2-sandbox.sh"), "start", name, argument], {
 			timeout: 660_000,
+			input: values,
 		});
-		const connection = new Connection({
-			command: ["sh", join(launcher, "p2-sandbox.sh"), "daemon", name, sandboxArgument(config), daemon, "--"],
+		const launch = (...args: string[]) =>
+			execFileSync("sh", [join(launcher, "p2-sandbox.sh"), ...args], { encoding: "utf8", timeout: 660_000 });
+		const start = () =>
+			execFileSync("sh", [join(launcher, "p2-sandbox.sh"), "start", name, argument], {
+				encoding: "utf8",
+				timeout: 660_000,
+				input: values,
+			});
+		let connection = new Connection({
+			command: ["sh", join(launcher, "p2-sandbox.sh"), "daemon", name, argument, daemon, "--"],
 		});
 		t.after(() => {
 			connection.close();
-			execFileSync("sh", [join(launcher, "p2-sandbox.sh"), "stop", name]);
+			launch("forget", name);
 			rmSync(home, { recursive: true, force: true });
-			rmSync(join(homedir(), ".pi", "p2", "sandbox", "run", name), { recursive: true, force: true });
 		});
 		const info = await connection.info();
 		assert.equal(info.os, "linux");
@@ -278,6 +374,23 @@ test(
 		);
 		assert.equal(curl.ok, true);
 		assert.equal(output, "403", "hosts outside the allowed list are refused");
+		// Processes pi-env starts see the placeholder (and its alias and git helper), never the value; requests to the
+		// secret's host carry the value.
+		const shell = async (command: string) => {
+			let text = "";
+			const onOutput = (chunk: string) => {
+				text += chunk;
+			};
+			await env.exec(command, { cwd: "/workspace", onOutput }, BACKGROUND_CONTEXT);
+			return text.trim();
+		};
+		const placeholder = await shell('printf %s "$GITHUB_TOKEN"');
+		assert(placeholder.length > 0 && placeholder !== "real-secret-sentinel", `placeholder: ${placeholder}`);
+		assert.equal(await shell('printf %s "$GH_TOKEN"'), placeholder);
+		assert.equal(await shell('printf %s "$GIT_CONFIG_KEY_0"'), "credential.https://httpbin.org.helper");
+		assert(!(await shell("env")).includes("real-secret-sentinel"), "the value is nowhere in the VM's environment");
+		const echoed = await shell('curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://httpbin.org/headers');
+		assert(echoed.includes("Bearer real-secret-sentinel"), `the proxy injects the value: ${echoed}`);
 		// Refused before the host resolves the name (else it leaks to DNS): an unresolvable name gets the policy's 403,
 		// not the 502 of a failed lookup.
 		output = "";
@@ -292,6 +405,50 @@ test(
 			BACKGROUND_CONTEXT,
 		);
 		assert.equal(output, "403");
+
+		// The VM's own disk: its configured size, and what is installed (here a file in the home) survives a restart.
+		const run = async (command: string) => {
+			let text = "";
+			const onOutput = (chunk: string) => {
+				text += chunk;
+			};
+			await env.exec(command, { cwd: "/", onOutput }, BACKGROUND_CONTEXT);
+			return text.trim();
+		};
+		const sizeKb = Number(await run("df -k / | tail -1 | awk '{print $2}'"));
+		assert(sizeKb > 2_500_000, `the root file system has grown to the disk size (${sizeKb} KB)`);
+		assert.equal(await run("echo kept > /root/kept.txt && cat /root/kept.txt"), "kept");
+		connection.close();
+		launch("stop", name);
+		start();
+		connection = new Connection({
+			command: ["sh", join(launcher, "p2-sandbox.sh"), "daemon", name, argument, daemon, "--"],
+		});
+		const restarted = new RemoteExecutionEnv({ connection, id: "sandbox-test-2", cwd: "/" });
+		const kept = await restarted.readTextFile("/root/kept.txt", BACKGROUND_CONTEXT);
+		assert.deepEqual(kept, { ok: true, value: "kept\n" }, "the home survives a restart");
+		// A reset starts from the guest image again.
+		connection.close();
+		launch("reset", name);
+		start();
+		connection = new Connection({
+			command: ["sh", join(launcher, "p2-sandbox.sh"), "daemon", name, argument, daemon, "--"],
+		});
+		const fresh = new RemoteExecutionEnv({ connection, id: "sandbox-test-3", cwd: "/" });
+		assert.equal((await fresh.fileInfo("/root/kept.txt", BACKGROUND_CONTEXT)).ok, false, "a reset disk is fresh");
+		// A VM killed without unmounting (a crash, a host reboot): the disk's journal lets the next start mount it.
+		connection.close();
+		const disk = `${name}.qcow2`;
+		const qemu = execFileSync("pgrep", ["-f", `qemu-system.*${disk}`], { encoding: "utf8" })
+			.trim()
+			.split("\n");
+		for (const pid of qemu) process.kill(Number(pid), "SIGKILL");
+		await poll(() => launch("status", name).includes('"stopped"'), 30_000, "the supervisor notices the dead VM");
+		start();
+		connection = new Connection({
+			command: ["sh", join(launcher, "p2-sandbox.sh"), "daemon", name, argument, daemon, "--"],
+		});
+		assert.equal((await connection.info()).os, "linux", "the disk mounts again after a crash");
 	},
 );
 
@@ -320,10 +477,9 @@ test(
 		timeout: 900_000,
 	},
 	async (t) => {
-		// A loopback sshd as this user with the real home: in Docker the launcher shares the home with its container, and
-		// the guest image cache is reused.
-		mkdirSync(join(homedir(), ".cache"), { recursive: true });
-		const root = mkdtempSync(join(homedir(), ".cache", "p2-sandbox-ssh-"));
+		// A loopback sshd as this user with the real home: the launcher's installation and the guest image cache are
+		// reused.
+		const root = mkdtempSync(join(tmpdir(), "p2-sandbox-ssh-"));
 		const port = await freePort();
 		execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", join(root, "host_key")]);
 		writeFileSync(join(root, "authorized_keys"), "");
@@ -346,15 +502,23 @@ test(
 		const owner = fixture.browser();
 		const envs = owner.hold(Envs, {}, BACKGROUND_CONTEXT);
 		t.after(async () => {
-			await envs.sandboxStop({ name: "sbx" }, BACKGROUND_CONTEXT).catch(() => {});
-			for (const sandbox of ["sbx", "spare"])
-				rmSync(join(homedir(), ".pi", "p2", "sandbox", "run", sandboxKey(fixture.dataDir, sandbox)), {
-					recursive: true,
-					force: true,
-				});
-			await fixture.close();
-			server.kill();
-			rmSync(root, { recursive: true, force: true });
+			// Everything is removed even when closing the fixture fails.
+			try {
+				await envs.sandboxStop({ name: "sbx" }, BACKGROUND_CONTEXT).catch(() => {});
+				await fixture.close();
+			} finally {
+				if (server.exitCode === null && server.signalCode === null) {
+					const exited = new Promise((resolve) => server.once("exit", resolve));
+					server.kill();
+					await exited;
+				}
+				rmSync(root, { recursive: true, force: true });
+				for (const sandbox of ["sbx", "spare"]) {
+					const key = sandboxKey(fixture.dataDir, sandbox);
+					rmSync(join(homedir(), ".pi", "p2", "sandbox", "run", key), { recursive: true, force: true });
+					rmSync(join(homedir(), ".pi", "p2", "sandbox", "disks", `${key}.qcow2`), { force: true });
+				}
+			}
 		});
 		await poll(
 			() =>

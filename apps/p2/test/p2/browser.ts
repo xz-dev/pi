@@ -134,6 +134,17 @@ export class Browser {
 	wait(expression: string): Promise<void> {
 		return poll(() => this.evaluate<boolean>(`Boolean(${expression})`), 30_000, expression);
 	}
+	/** Gives this profile the local owner's session cookie, as the owner's sign-in link would. */
+	async signIn(owner: { readonly port: number; readonly cookie: string }): Promise<void> {
+		const [name, value] = owner.cookie.split("=", 2) as [string, string];
+		await this.call("Network.setCookie", {
+			name,
+			value,
+			url: `http://127.0.0.1:${owner.port}/`,
+			httpOnly: true,
+			sameSite: "Lax",
+		});
+	}
 	async metrics(width: number, height: number): Promise<void> {
 		await this.call("Emulation.setDeviceMetricsOverride", {
 			width,
@@ -163,6 +174,18 @@ export class Browser {
 			`(() => {const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`,
 		);
 		await this.clickPoint(point.x, point.y);
+	}
+	/**
+	 * Opens the Settings window from the sidebar's gear (a click in the page: on phones the drawer may be closed) and
+	 * then its section `label`, and waits for that section's page.
+	 */
+	async openSettings(label: string): Promise<void> {
+		await this.wait(`document.querySelector('.drawer-foot .settings-open')`);
+		await this.evaluate(`document.querySelector('.drawer-foot .settings-open').click()`);
+		const item = `[...document.querySelectorAll('.settings-nav-item')].find((e) => e.textContent === ${JSON.stringify(label)})`;
+		await this.wait(item);
+		await this.evaluate(`${item}.click()`);
+		await this.wait(`document.querySelector('.settings-pane > .settings-page')`);
 	}
 	async clickPoint(x: number, y: number): Promise<void> {
 		await this.call("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });

@@ -186,6 +186,14 @@ change; a slice's spec includes every entry of its section, and its build and re
 deleted (the slice's spec and code are the record). Moved here from `carry-over.md` (owner, 2026-10-24).
 
 
+### Host-keyed data (decision "Documents and table rows can belong to a host"; spec `host-keyed/spec.md` §9)
+
+- **Converting stored string-keyed documents to host keys** needs an explicit one-off store migration (the
+  discriminator refuses an implicit one); none is built.
+- **Adding a host column to an existing table:** `evolveTable` refuses (a host column has no default); a new base works.
+- **Migration on import needs the owner's code on the importing host:** a store without its owner served refuses an
+  archive whose table is older or was exported `migrating`.
+
 ### Any slice (protocol and checks)
 
 - **Bump `PROTOCOL_VERSION`** for any message or reason change once p3 has shipped (slice 3b added `retry`, `loading`
@@ -205,6 +213,11 @@ deleted (the slice's spec and code are the record). Moved here from `carry-over.
 - **`rebuild` of tables** (key and column-type changes): `evolveTable` has no edit for them; build one only when a
   real case needs it. (Slice 6a's second spec review; out of slice 7b's scope, `slice-7b.md` §12.)
 
+- **Content-compared plugin marks:** a plugin's `dirty` mark stays latched until the plugin is applied (a rewrite with
+  the same bytes, or a change and its revert, dirties it); compare a plugin's files with the bytes its last applied
+  build read (`BuiltFacet.inputs` already holds their hashes), as `base` now does. (p3 step 0a,
+  `apps/p3/docs/step-0a/book.md`.)
+
 ### Later: live queries (when a case needs it)
 
 - **Incremental maintenance of a live query's result** (decision "Live queries over an object's own tables"): an
@@ -222,7 +235,6 @@ deleted (the slice's spec and code are the record). Moved here from `carry-over.
 - `withLinkedAbortSignal` lives in `src/host/ctx.ts` and moves next to `withAbortSignal` in `src/context` (pi
   first): a call's context linked to long-lived abort signals until the call settles, instead of `AbortSignal.any`,
   which keeps cleanup entries per call while its sources live before Node 24.16.0 (nodejs/node#62367). (Slice 4a.)
-- An export for `nodeCompression` (`src/node/compression.ts`; no subpath exports it yet). (Slice 4b.)
 
 ### The sync layer (not a slice; when Radius sync is built)
 

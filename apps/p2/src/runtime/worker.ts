@@ -1,11 +1,13 @@
 // Locals, registries and natives a session worker host provides to plugins (Chord v2), and the worker's core facet.
 import { existsSync } from "node:fs";
-import { defineRegistry, local, type Native, type RegistryValue } from "@earendil-works/chord";
+import { defineRegistry, local, type Native, type RegistryValue, type Store } from "@earendil-works/chord";
+import { copyFiles } from "@earendil-works/chord/app/files";
 import type { Context } from "@earendil-works/chord/context";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import type { Watchable, WatchCall, WatchHandle } from "@earendil-works/chord/watch";
-import type { Models } from "@earendil-works/pi-ai/models";
+import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
+import type { Models, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai/models";
 import {
 	type ConversationId,
 	configure,
@@ -17,7 +19,6 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Connection, LocalExecutionEnv, localDaemon, RemoteExecutionEnv } from "@earendil-works/pi-env";
 import {
 	type Ctx,
@@ -30,8 +31,10 @@ import {
 	serveKeyed,
 } from "./chord.ts";
 import { durableContext, durableRegistry, ExtensionSwitches, Extensions } from "./durable.ts";
+import { hostFiles, sessionDirectory } from "./host-dirs.ts";
 import { isRooted, type Location, type LocationInput, sameLocation } from "./location.ts";
 import { topLevelConversations } from "./main-conversation.ts";
+import { durableStorage } from "./session-store.ts";
 import { type SessionInit, WorkerBoundary } from "./session-worker.ts";
 
 export { ExtensionSwitches, Extensions } from "./durable.ts";
@@ -186,13 +189,13 @@ export const HarnessEnvironments = keyedRegistry<HarnessEnvironmentEntry>("p2.ha
 
 /**
  * What keeps the worker process alive besides held references (Chord's own count): its Durable tasks, calls under way
- * (`call`), viewers plugins count themselves, and the relocation fence. A JSON watchable of those counts
- * (`workerMain`'s `busy`): the worker is idle when every count is zero.
+ * (`call`), viewers plugins count themselves, conversations whose prompt cache is kept warm, and the relocation fence.
+ * A JSON watchable of those counts (`workerMain`'s `busy`): the worker is idle when every count is zero.
  */
 export class Liveness implements Watchable<Readonly<Record<string, number>>> {
 	#relocating = false;
 	#stopping = false;
-	#counts: Readonly<Record<string, number>> = { activeCalls: 0, viewers: 0, durableTasks: 0 };
+	#counts: Readonly<Record<string, number>> = { activeCalls: 0, viewers: 0, durableTasks: 0, cacheWarming: 0 };
 	readonly #listeners = new Set<() => void>();
 	get value(): Readonly<Record<string, number>> {
 		return this.#counts;
@@ -230,7 +233,7 @@ export class Liveness implements Watchable<Readonly<Record<string, number>>> {
 		this.#counts = { ...this.#counts, [kind]: count };
 		for (const listener of [...this.#listeners]) listener();
 	}
-	add(kind: "activeCalls" | "viewers", delta: number): void {
+	add(kind: "activeCalls" | "viewers" | "cacheWarming", delta: number): void {
 		this.#set(kind, (this.#counts[kind] ?? 0) + delta);
 	}
 	setDurableTasks(count: number): void {
@@ -287,6 +290,11 @@ export type WorkerParts = {
 	 * section passes its Durable context), or a method acting as the worker (`withoutAbortSignal(ctx)`).
 	 */
 	readonly root: <T>(fn: (ctx: Ctx) => Promise<T>, context: Context) => Promise<T>;
+	/**
+	 * Copies this session's files (the kit's `Files`: its index and blobs) into the directory of the new session
+	 * `session`, which must not exist yet: a fork, whose worker waits while it copies. The session goes on meanwhile.
+	 */
+	readonly copyFilesTo: (session: string, context: Context) => Promise<void>;
 };
 
 /**
@@ -323,6 +331,20 @@ export type HarnessParts = {
 	 * environments nothing uses any more.
 	 */
 	relocate(location: Location, context: Context): Promise<void>;
+	/** The request that produced `response`, for `GenerationTask`'s `afterResponse` hooks; each response is taken once. */
+	requestOf(response: AssistantMessage): ModelRequest | undefined;
+};
+
+/**
+ * One provider request the Harness sent: the model, the messages after Durable's `beforeRequest` chain, and the
+ * attempt's options without its `signal`, `telemetry` and `onPayload`. Read-only: the messages are Durable's (frozen)
+ * entry messages; never mutate, copy or freeze any of it. Sending it again skips Durable's `beforeProviderRequest`
+ * hooks (no p2 extension has one).
+ */
+export type ModelRequest = {
+	readonly model: Model<Api>;
+	readonly messages: readonly Message[];
+	readonly options: ModelsSimpleStreamOptions;
 };
 
 /** The session's Harness (the core's contribution once it is open). */
@@ -376,15 +398,19 @@ export function workerCore(
 	init: WorkerInit,
 	liveness: Liveness,
 	location: SessionLocation,
+	store: Store,
 	root: WorkerParts["root"],
 ): Facet {
 	return defineFacet((host, self) => {
 		serveWorkerRegistries(host);
 		host.serve(WorkerProcess, { compose: (table) => table[0]?.value });
-		self.contribute(WorkerProcess, { init, liveness, location, root });
+		const own = sessionDirectory(init.dataDir, init.values.session.id);
+		const copyFilesTo = (session: string, context: Context) =>
+			copyFiles({ store, files: hostFiles(own) }, sessionDirectory(init.dataDir, session), context);
+		self.contribute(WorkerProcess, { init, liveness, location, root, copyFilesTo });
 		host.serve(HarnessNative, { compose: (table) => table[0]?.value });
 		host.serve(HarnessHost, (_params, self) => {
-			self.contribute(HarnessNative, openHarness(self, init, location));
+			self.contribute(HarnessNative, openHarness(self, init, location, store));
 			return {};
 		});
 		host.serve(WorkerBoundary, (_params, principal, self) => {
@@ -641,8 +667,8 @@ async function followSession(
  * with the root conversation created from the session's model and cwd. Scheduling starts with `resume()` once the
  * worker's plugins are loaded (the worker entry). Returns the contribution: the natives, read at each use.
  */
-function openHarness(self: Self, init: WorkerInit, location: SessionLocation): HarnessParts {
-	const { dataDir, values } = init;
+function openHarness(self: Self, init: WorkerInit, location: SessionLocation, store: Store): HarnessParts {
+	const { values } = init;
 	const session = values.session;
 	const config = self.registry(HarnessConfig);
 	const environments = self.registry(HarnessEnvironments);
@@ -654,10 +680,13 @@ function openHarness(self: Self, init: WorkerInit, location: SessionLocation): H
 		if (entry === undefined) throw new Error("No model configuration installed (models plugin)");
 		return entry;
 	};
-	// Model access is looked up at each use: the models plugin may reload or replace its configuration.
+	// Model access is looked up at each use: the models plugin may reload or replace its configuration. Every generation
+	// request passes through `streamSimple` here, after Durable and the Harness's identity wrapper completed it.
+	const requests = new WeakMap<AssistantMessage, ModelRequest>();
 	const models = new Proxy({} as Models, {
 		get: (_target, key) => {
 			const current = configured().models();
+			if (key === "streamSimple") return remembering(current, requests);
 			const value: unknown = Reflect.get(current, key, current);
 			return typeof value === "function" ? value.bind(current) : value;
 		},
@@ -702,7 +731,8 @@ function openHarness(self: Self, init: WorkerInit, location: SessionLocation): H
 		async (ctx) => {
 			// Generation needs model access: open once the models plugin has contributed it.
 			await whenPresent(config, "default", ctx.abortSignal ?? new AbortController().signal);
-			const storage = await openNodeSqliteStorage(`${dataDir}/sessions/${session.id}.sqlite`);
+			// Durable's records in the session's store, beside the kit's `Files`.
+			const storage = await durableStorage(store, ctx);
 			const harness = await DurableHarness.open(
 				storage,
 				{
@@ -765,6 +795,25 @@ function openHarness(self: Self, init: WorkerInit, location: SessionLocation): H
 				.retire([next, ...own])
 				.catch((error: unknown) => console.error("p2 worker: closing old environments:", error));
 		},
+		requestOf: (response) => {
+			const request = requests.get(response);
+			requests.delete(response);
+			return request;
+		},
+	};
+}
+
+/** `models.streamSimple` that remembers each request by its terminal message, for `HarnessParts.requestOf`. */
+function remembering(models: Models, requests: WeakMap<AssistantMessage, ModelRequest>): Models["streamSimple"] {
+	return (model, context, options) => {
+		const stream = models.streamSimple(model, context, options);
+		// Registered before the caller awaits result(): the entry exists when Durable's afterResponse hooks run.
+		// result() never rejects; pi-ai encodes failures as `stopReason: "error"`.
+		void stream.result().then((message) => {
+			const { signal: _signal, telemetry: _telemetry, onPayload: _onPayload, ...kept } = options ?? {};
+			requests.set(message, { model, messages: context.messages, options: kept });
+		});
+		return stream;
 	};
 }
 

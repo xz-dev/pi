@@ -1,21 +1,18 @@
 import { canView, contribute, defineFacet } from "@p2/app/v1";
-import { type RouteHandler, Routes, Server } from "@p2/app/v1/server";
+import { type RouteHandler, Routes, serverOf } from "@p2/app/v1/server";
 import { Catalog } from "../sessions/contract.ts";
-import { ArtifactError, Artifacts, instrumentArtifact } from "./store.ts";
+import { ArtifactSource } from "./contract.ts";
+import { ArtifactError, instrumentArtifact } from "./store.ts";
 
 const EXECUTABLE_CSP =
-	"default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; media-src data: blob: https:; connect-src https:; worker-src blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals allow-pointer-lock";
-const DOCUMENT_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox";
+	"default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; media-src data: blob: https:; connect-src https:; worker-src blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-modals allow-pointer-lock";
+const DOCUMENT_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; sandbox";
 
 export default defineFacet((host) => {
 	contribute(host, "p2.artifact-routes", (self) => {
-		const server = self.get(Server, {});
+		const server = serverOf(self);
 		const catalog = self.get(Catalog, {});
-		const artifacts = self.open(
-			async () => new Artifacts(server.info.value.dataDir),
-			() => {},
-		);
-		const serve: RouteHandler = async (request, response, { principal }, ctx) => {
+		const serve: RouteHandler = async (request, response, { principal, origin }, outer) => {
 			const query = new URL(request.url ?? "/", "http://localhost").searchParams;
 			const session = query.get("session") ?? "";
 			if (!canView(principal, session) || request.headers["sec-fetch-site"] === "cross-site") {
@@ -24,8 +21,18 @@ export default defineFacet((host) => {
 				return;
 			}
 			try {
-				await catalog.get({ id: session }, ctx);
-				const artifact = await artifacts.value.read(session, query.get("name") ?? "", Number(query.get("version")));
+				const name = query.get("name") ?? "";
+				const version = Number(query.get("version"));
+				if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name) || !Number.isSafeInteger(version) || version < 1)
+					throw new ArtifactError(404, "Artifact not found");
+				// The bytes are the session worker's: read in a root of the server's own (its `ArtifactSource` answers only
+				// the server), after the viewer was authorized above.
+				const artifact = await server().root(async (ctx) => {
+					// An unknown or archived session (whose worker never starts) is a 404 at once, never waited for.
+					const row = await catalog.get({ id: session }, ctx).catch(() => undefined);
+					if (row === undefined || row.archivedAt !== null) throw new ArtifactError(404, "Artifact not found");
+					return (await ctx.get(ArtifactSource, { session })).read({ name, version }, ctx);
+				}, outer);
 				const download = query.get("download") === "1";
 				const executable = artifact.info.type === "html" || artifact.info.type === "svg";
 				const body = Buffer.from(
@@ -35,7 +42,11 @@ export default defineFacet((host) => {
 				const extension =
 					artifact.info.type === "markdown" ? "md" : artifact.info.type === "text" ? "txt" : artifact.info.type;
 				response.writeHead(200, {
-					"Content-Security-Policy": executable ? EXECUTABLE_CSP : DOCUMENT_CSP,
+					// `frame-ancestors` checks every ancestor: through Radius the app itself sits in the Radius shell's frame,
+					// so `'self'` alone would block every preview there.
+					"Content-Security-Policy": `${executable ? EXECUTABLE_CSP : DOCUMENT_CSP}; frame-ancestors 'self'${
+						origin.relayShellOrigin === undefined ? "" : ` ${origin.relayShellOrigin}`
+					}`,
 					"Content-Type":
 						artifact.info.type === "html"
 							? "text/html; charset=utf-8"

@@ -1,6 +1,7 @@
 // The session catalog and its views (server): the sidebar's rows, creating and renaming sessions, and the lifecycle
 // operations (relocate, clone, fork, archive), each a method that answers once its visible effect committed and a job
-// for its long part, shown in `Sessions.operations` while it runs and when it failed.
+// for its long part, shown in `Sessions.operations` while it runs and when it failed. Creating is `SessionOperations`'
+// too, so the owner's `Sessions.create` and the conversations tool share it.
 import { randomUUID } from "node:crypto";
 import { mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -44,12 +45,14 @@ import {
 	OperationSchema,
 	type Session,
 	SessionArchived,
+	SessionCopied,
 	SessionMoves,
 	SessionOperations,
 	Sessions,
 	SessionTransfer,
 } from "./contract.ts";
-import { copySessionDirectories, copySessionStore, removeSessionCopy, removeSessionDirectories } from "./copy.ts";
+import { copySessionDirectory, removeSessionCopy } from "./copy.ts";
+import { serveLocks } from "./locks.ts";
 
 /** A row as `Sessions` v4 and `Catalog` v3 consumers read it: a null branch label is the session title. */
 function sessionV4(row: Session) {
@@ -236,7 +239,9 @@ function failureText(error: JobError): string {
 const ROW_WAIT_MS = 10_000;
 
 export default defineFacet((host) => {
+	serveLocks(host);
 	serveKeyed(host, SessionArchived);
+	serveKeyed(host, SessionCopied);
 	host.serve(
 		Catalog,
 		(_params, self) => {
@@ -296,9 +301,12 @@ export default defineFacet((host) => {
 		const natives = serverOf(self);
 		const envService = self.get(EnvService, {});
 		const envs = nativeOf(self, EnvManagers, "The SSH manager");
+		const models = self.get(ModelConfig, {});
+		const resources = nativeOf(self, ModelResources, "The model configuration");
 		const children = self.get(ChildStore, {});
 		const archivedStarts = self.get(ArchivedStarts, {});
 		const archived = self.registry(SessionArchived);
+		const copied = self.registry(SessionCopied);
 		const failed = self.state(Failed);
 		/** Copies whose row is being made: their worker waits like one whose files are being copied. */
 		const preparing = self.writable<readonly string[]>([]);
@@ -388,8 +396,7 @@ export default defineFacet((host) => {
 						},
 						async () => {
 							await removeSessionCopy(dataDir, copy);
-							await copySessionStore(dataDir, id, copy);
-							await copySessionDirectories(dataDir, id, copy);
+							await copySessionDirectory(dataDir, id, copy);
 						},
 						"cloning",
 					);
@@ -425,8 +432,9 @@ export default defineFacet((host) => {
 				const dataDir = server.info.value.dataDir;
 				try {
 					if (ctx.state.value.copying) {
-						await removeSessionDirectories(dataDir, copy);
-						await copySessionDirectories(dataDir, id, copy);
+						await removeSessionCopy(dataDir, copy);
+						// The source's files, copied by its worker (its store is open there; it goes on meanwhile).
+						await (await ctx.get(SessionTransfer, { session: id })).copyFiles({ to: copy }, ctx);
 						await ctx.state.change((progress) => {
 							progress.copying = false;
 						}, ctx);
@@ -542,6 +550,7 @@ export default defineFacet((host) => {
 			preparing.set([...preparing.value, copy]);
 			try {
 				const row = await copyOf(source, copy, mark, ctx);
+				for (const take of copied.value.values()) await take(source.id, copy, ctx);
 				await start();
 				return row;
 			} catch (error) {
@@ -580,6 +589,37 @@ export default defineFacet((host) => {
 		};
 		return {
 			operations,
+			create: async ({ id, env, cwd, createDirectory, title, model, thinkingLevel }, ctx) => {
+				// A chosen ID already in the catalog is a retry of the same request (its answer was lost).
+				const existing = id === undefined ? undefined : catalog.sessions.value.find((row) => row.id === id);
+				if (existing) return existing;
+				if (env) cwd = await envs().manager.workingDirectory(env, cwd, createDirectory);
+				else {
+					cwd = expandHome(cwd);
+					if (!isAbsolute(cwd)) throw new Error("The working directory must be an absolute path");
+					if (createDirectory) await mkdir(cwd, { recursive: true });
+					if (!(await stat(cwd)).isDirectory()) throw new Error("Working directory is not a directory");
+				}
+				const fallback = models.summary.value.defaultModel;
+				const chosen = model ?? fallback;
+				if (!chosen) throw new Error("Select a model or configure P2_PROVIDER and P2_MODEL");
+				// As Pi Mobile and setDefault: a model the configuration does not know never reaches a worker.
+				if (!resources().resources.models.getModel(chosen.provider, chosen.modelId))
+					throw new Error("Unknown model");
+				const level = thinkingLevel ?? fallback?.thinkingLevel;
+				return catalog.create(
+					{
+						...(id === undefined ? {} : { id }),
+						cwd,
+						env: env ?? null,
+						title: cleanTitle(title ?? "").slice(0, 100) || "New session",
+						titleEdited: Boolean(cleanTitle(title ?? "")),
+						model: { provider: chosen.provider, modelId: chosen.modelId },
+						thinkingLevel: isThinkingLevel(level) ? level : "high",
+					},
+					ctx,
+				);
+			},
 			move: async ({ id, ...target }, ctx) => {
 				await liveSession(id, ctx);
 				const location = await destination(target);
@@ -681,10 +721,6 @@ export default defineFacet((host) => {
 				return { variant: "guest", members: { sessions: sessionsView } };
 			}
 			if (!isOwner(principal)) throw forbidden("sessions are owner-only");
-			const models = self.get(ModelConfig, {});
-			const resources = nativeOf(self, ModelResources, "The model configuration");
-			self.get(EnvService, {});
-			const envs = nativeOf(self, EnvManagers, "The SSH manager");
 			const lifecycle = self.get(SessionOperations, {});
 			const defaultCwd = deriveTyped(
 				self,
@@ -696,7 +732,6 @@ export default defineFacet((host) => {
 				[catalog.sessions],
 				([sessions]) => sessions.find((session) => session.archivedAt === null)?.env ?? null,
 			);
-			const defaultModel = deriveTyped(self, [models.summary], ([summary]) => summary.defaultModel);
 			return {
 				variant: "owner",
 				members: {
@@ -704,37 +739,7 @@ export default defineFacet((host) => {
 					defaultCwd,
 					defaultEnv,
 					operations: lifecycle.operations,
-					create: async ({ id, env, cwd, createDirectory, title, model, thinkingLevel }, ctx) => {
-						// A chosen ID already in the catalog is a retry of the same request (its answer was lost).
-						const existing = id === undefined ? undefined : catalog.sessions.value.find((row) => row.id === id);
-						if (existing) return existing;
-						if (env) cwd = await envs().manager.workingDirectory(env, cwd, createDirectory);
-						else {
-							cwd = expandHome(cwd);
-							if (!isAbsolute(cwd)) throw new Error("The working directory must be an absolute path");
-							if (createDirectory) await mkdir(cwd, { recursive: true });
-							if (!(await stat(cwd)).isDirectory()) throw new Error("Working directory is not a directory");
-						}
-						const fallback = defaultModel.value;
-						const chosen = model ?? fallback;
-						if (!chosen) throw new Error("Select a model or configure P2_PROVIDER and P2_MODEL");
-						// As Pi Mobile and setDefault: a model the configuration does not know never reaches a worker.
-						if (!resources().resources.models.getModel(chosen.provider, chosen.modelId))
-							throw new Error("Unknown model");
-						const level = thinkingLevel ?? fallback?.thinkingLevel;
-						return catalog.create(
-							{
-								...(id === undefined ? {} : { id }),
-								cwd,
-								env: env ?? null,
-								title: cleanTitle(title ?? "").slice(0, 100) || "New session",
-								titleEdited: Boolean(cleanTitle(title ?? "")),
-								model: { provider: chosen.provider, modelId: chosen.modelId },
-								thinkingLevel: isThinkingLevel(level) ? level : "high",
-							},
-							ctx,
-						);
-					},
+					create: (args, ctx) => lifecycle.create(args, ctx),
 					relocate: (target, ctx) => lifecycle.relocate(target, ctx),
 					clone: ({ id, copy }, ctx) => lifecycle.clone({ id, copy: copy ?? randomUUID() }, ctx),
 					fork: ({ copy, ...from }, ctx) => lifecycle.fork({ ...from, copy: copy ?? randomUUID() }, ctx),
