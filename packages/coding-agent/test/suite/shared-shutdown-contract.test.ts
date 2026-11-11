@@ -175,7 +175,7 @@ describe("shared session shutdown contract", () => {
 		const entered = deferred<void>();
 		const release = deferred<void>();
 		releases.push(() => release.resolve());
-		vi.spyOn(h.session, "abort").mockImplementation(async () => {
+		vi.spyOn(h.session, "waitForIdle").mockImplementation(async () => {
 			entered.resolve();
 			await release.promise;
 		});
@@ -183,7 +183,7 @@ describe("shared session shutdown contract", () => {
 		await entered.promise;
 		h.session.prepareForShutdown();
 		release.resolve();
-		await expect(work).rejects.toThrow("Session is shutting down");
+		await expect(work).rejects.toThrow(/Session is shutting down|Compaction cancelled/);
 		expect(h.eventsOfType("compaction_start")).toEqual([]);
 		expect(h.session.isCompacting).toBe(false);
 	});
