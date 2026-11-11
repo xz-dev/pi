@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import * as procward from "../src/utils/procward.ts";
 
 type FakeUi = {
 	start: () => void;
@@ -9,6 +10,8 @@ type FakeUi = {
 
 type HandleCtrlZThis = {
 	ui: FakeUi;
+	isShuttingDown?: boolean;
+	shutdownRequested?: boolean;
 };
 
 type ProcessSignalHandler = () => void;
@@ -111,6 +114,29 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		expect(ui.start).toHaveBeenCalledTimes(1);
 		expect(ui.requestRender).toHaveBeenCalledWith(true);
 	});
+
+	test.each(["isShuttingDown", "shutdownRequested", "owner-loss"] as const)(
+		"does not restart UI/input on CONT while %s is pending",
+		(pending) => {
+			const ui: FakeUi = { start: vi.fn(), stop: vi.fn(), requestRender: vi.fn() };
+			const context: HandleCtrlZThis = {
+				ui,
+				isShuttingDown: pending === "isShuttingDown",
+				shutdownRequested: pending === "shutdownRequested",
+			};
+			vi.spyOn(procward, "processShutdownPending").mockReturnValue(pending === "owner-loss");
+			vi.spyOn(process, "kill").mockReturnValue(true);
+			let resume: ProcessSignalHandler | undefined;
+			vi.spyOn(process, "once").mockImplementation(((event: string, listener: () => void) => {
+				if (event === "SIGCONT") resume = listener;
+				return process;
+			}) as typeof process.once);
+			callHandleCtrlZ(context);
+			resume?.();
+			expect(ui.start).not.toHaveBeenCalled();
+			expect(ui.requestRender).not.toHaveBeenCalled();
+		},
+	);
 
 	test("cleans up the temporary handlers if suspension fails", () => {
 		const ui: FakeUi = {
