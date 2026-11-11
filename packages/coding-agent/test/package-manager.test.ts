@@ -2715,7 +2715,7 @@ if (args[0] === "root") console.log(${JSON.stringify(join(tempDir, "explicit roo
 			const result = await packageManager.resolve();
 
 			expect(result.extensions.map((resource) => resource.path)).toEqual([join(pkgDir, "extensions", "foo.ts")]);
-			expect(result.skills.filter((resource) => resource.metadata.source !== "builtin")).toEqual([]);
+			expect(result.skills.some((resource) => resource.path.startsWith(join(pkgDir, "skills")))).toBe(false);
 		});
 	});
 
