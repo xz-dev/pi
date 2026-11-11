@@ -70,14 +70,12 @@ async function bash(command, registry) {
 async function retained(registry, owned, cancel) {
 	const dir = path.join(directory, `${owned ? "owned" : "direct"}-${cancel ? "cancel" : "natural"}`);
 	mkdirSync(dir);
-	const result = await execCommand(
-		fixture,
-		["retained-task", dir],
-		directory,
-		undefined,
-		owned ? ownership(registry) : undefined,
-	);
-	assert.equal(result.code, 23);
+	// The existing native fixture requires one stdin byte; execCommand
+	// intentionally supplies none. Exercise the real bash pipeline unchanged
+	// on both sides, rather than treating its direct EOF panic as a Pi bug.
+	const target = `'${dir.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`;
+	const result = await bash(`printf x | ${fixtureCommand} retained-task ${target}`, owned ? registry : undefined);
+	assert.equal(result.exitCode, 23, JSON.stringify(result));
 	assert(existsSync(path.join(dir, "retained-ready")) && !existsSync(path.join(dir, "retained-finished")));
 	if (owned)
 		assert.deepEqual(
