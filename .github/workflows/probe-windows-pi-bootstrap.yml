@@ -1,0 +1,82 @@
+name: Actual Pi Windows bootstrap acceptance slice
+on:
+  push:
+    branches:
+      - ci-probe/windows-interop-20261111
+    paths:
+      - .github/workflows/probe-windows-pi-bootstrap.yml
+      - scripts/windows-pi-bootstrap-probe/**
+permissions:
+  contents: read
+jobs:
+  pi-bootstrap:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          architecture: ${{ matrix.arch }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
+      - name: Build actual source-pinned helper and existing platform addon, then run actual Pi bootstrap
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'pi-bootstrap-${{ matrix.arch }}-${{ matrix.runtime }}'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          Copy-Item 'scripts/windows-pi-bootstrap-probe/*' $out -Force
+          Copy-Item '.github/workflows/probe-windows-pi-bootstrap.yml' "$out/workflow.yml"
+          git show -s --format=fuller HEAD | Set-Content "$out/candidate-commit.txt"
+          $inputs = @{}
+          foreach ($file in git ls-files) {
+            if ($file -match '^packages/tui/native/win32/prebuilds/') { continue }
+            $inputs[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+          }
+          $inputs | ConvertTo-Json -Depth 3 | Set-Content "$out/production-inputs.json" -Encoding utf8
+          npm ci --ignore-scripts 2>&1 | Tee-Object "$out/npm-ci.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/tui/native/win32/build.mjs 2>&1 | Tee-Object "$out/addon-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/coding-agent/scripts/build-procward.mjs --triple '${{ matrix.target }}' 2>&1 | Tee-Object "$out/native-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $native = (Resolve-Path 'packages/coding-agent/native/procward/${{ matrix.target }}/procward.exe').Path
+          Copy-Item $native "$out/procward.exe"
+          Copy-Item 'packages/tui/native/win32/prebuilds/win32-${{ matrix.arch }}/win32-platform.node' "$out/win32-platform.node"
+          & '${{ matrix.runtime }}' 'scripts/windows-pi-bootstrap-probe/driver.mjs' $native "$out/result.json" '${{ matrix.runtime }}' '${{ matrix.arch }}' 1> "$out/driver-stdout.log" 2> "$out/driver-stderr.log"
+          $code = $LASTEXITCODE
+          "driver_exit=$code" | Set-Content "$out/driver-exit.txt"
+          foreach ($file in $inputs.Keys) {
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -cne $inputs[$file]) { throw "Production source changed: $file" }
+          }
+          'all production inputs unchanged; Windows prebuilds are source-built outputs' | Set-Content "$out/after.txt"
+          exit $code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: actual-pi-bootstrap-${{ matrix.arch }}-${{ matrix.runtime }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pi-bootstrap-${{ matrix.arch }}-${{ matrix.runtime }}
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
