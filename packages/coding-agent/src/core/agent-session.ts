@@ -1495,6 +1495,11 @@ export class AgentSession {
 	/** Permanently stop admitting new work before shutdown cancellation begins. */
 	prepareForShutdown(): void {
 		this._isShuttingDown = true;
+		if (this._processRegistry) {
+			// Request native cancellation before runtime abort or extension hooks can await.
+			// dispose() still awaits the same native lifetimes and cleanup outcomes.
+			void closePendingSessionSpawns(this._processRegistry).catch(() => {});
+		}
 	}
 
 	private _assertNotShuttingDown(): void {

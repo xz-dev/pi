@@ -179,6 +179,7 @@ describe("prepared built-in native lifetimes", () => {
 			const harness = await createHarness();
 			let execution: Promise<unknown> | undefined;
 			let disposal: Promise<void> | undefined;
+			let activeSession: AgentSession | undefined;
 			try {
 				const { session } = await createAgentSession({
 					cwd: directory,
@@ -188,6 +189,7 @@ describe("prepared built-in native lifetimes", () => {
 					modelRuntime: harness.session.modelRuntime,
 					tools: name === "user_bash" ? [] : [name],
 				});
+				activeSession = session;
 				sessions.push(session);
 				const tool = session.agent.state.tools.find((tool) => tool.name === name);
 				const registry = sessionProcessRegistries.get(session.sessionManager)!;
@@ -198,6 +200,8 @@ describe("prepared built-in native lifetimes", () => {
 				).catch((error) => error);
 				await expect.poll(() => events()).toContain("spawned");
 				expect(registry.list()).toEqual([]);
+				session.prepareForShutdown();
+				await expect.poll(() => events()).toContain("cancel");
 				let disposed = false;
 				disposal = session.dispose().then(() => {
 					disposed = true;
@@ -223,6 +227,7 @@ describe("prepared built-in native lifetimes", () => {
 				expect(registry.list()).toEqual([]);
 			} finally {
 				for (const name of ["start", "primary", "cleanup", "exit"]) writeFileSync(join(directory, name), "");
+				disposal ??= activeSession?.dispose();
 				await disposal;
 				await execution;
 				harness.cleanup();
