@@ -6,13 +6,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
+import { sessionProcessRegistries } from "../src/core/process-ownership.ts";
 import type { OwnedTaskProvenance } from "../src/core/process-registry.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createPowerShellToolDefinition } from "../src/core/tools/powershell.ts";
+import * as shell from "../src/utils/shell.ts";
 import { createHarness } from "./suite/harness.ts";
 
 let directory: string;
@@ -167,6 +170,56 @@ describe("SDK disposal during owned startup", () => {
 	);
 });
 
+describe("prepared built-in native lifetimes", () => {
+	test.each(["bash", "powershell"])("dispose drains %s before S without an active agent run", async (name) => {
+		delayedPeer("confirmed");
+		vi.spyOn(shell, "getPowerShellConfig").mockReturnValue({ shell: "pwsh", args: ["-Command"] });
+		const harness = await createHarness();
+		let execution: Promise<unknown> | undefined;
+		let disposal: Promise<void> | undefined;
+		try {
+			const { session } = await createAgentSession({
+				cwd: directory,
+				agentDir: join(directory, "agent"),
+				sessionManager: SessionManager.inMemory(directory),
+				model: harness.getModel(),
+				modelRuntime: harness.session.modelRuntime,
+				tools: [name],
+			});
+			sessions.push(session);
+			const tool = session.agent.state.tools.find((tool) => tool.name === name)!;
+			const registry = sessionProcessRegistries.get(session.sessionManager)!;
+			execution = tool.execute("pre-S", { command: "never executed" }).catch((error) => error);
+			await expect.poll(() => events()).toContain("spawned");
+			expect(registry.list()).toEqual([]);
+			let disposed = false;
+			disposal = session.dispose().then(() => {
+				disposed = true;
+			});
+			await expect.poll(() => events()).toContain("cancel");
+			expect(disposed).toBe(false);
+			await expect(tool.execute("late", { command: "not admitted" })).rejects.toThrow("stale");
+			writeFileSync(join(directory, "start"), "");
+			await expect.poll(() => registry.list()).toMatchObject([{ status: "reaping" }]);
+			writeFileSync(join(directory, "primary"), "");
+			await expect.poll(() => events()).toContain("X");
+			expect(disposed).toBe(false);
+			writeFileSync(join(directory, "cleanup"), "");
+			await expect.poll(() => events()).toContain("eof");
+			expect(disposed).toBe(false);
+			writeFileSync(join(directory, "exit"), "");
+			await disposal;
+			await execution;
+			expect(registry.list()).toEqual([]);
+		} finally {
+			for (const name of ["start", "primary", "cleanup", "exit"]) writeFileSync(join(directory, name), "");
+			await disposal;
+			await execution;
+			harness.cleanup();
+		}
+	});
+});
+
 describe("shell triggering-turn provenance", () => {
 	test.each([
 		{ name: "bash", later: false },
@@ -247,4 +300,47 @@ describe("shell triggering-turn provenance", () => {
 			harness.cleanup();
 		}
 	});
+});
+
+test("native disposal does not wait for an unrelated JavaScript tool that ignores abort", async () => {
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const harness = await createHarness({
+		extensionFactories: [
+			{
+				name: "ignores-abort",
+				factory: (pi) => {
+					pi.registerTool({
+						name: "ignores_abort",
+						label: "test",
+						description: "Controlled JavaScript tool",
+						parameters: Type.Object({}),
+						async execute() {
+							entered.resolve();
+							await release.promise;
+							return { content: [{ type: "text", text: "released" }], details: undefined };
+						},
+					});
+				},
+			},
+		],
+	});
+	let prompt: Promise<void> | undefined;
+	try {
+		harness.setResponses([fauxAssistantMessage(fauxToolCall("ignores_abort", {}))]);
+		prompt = harness.session.prompt("start controlled tool");
+		await entered.promise;
+		let disposed = false;
+		const disposal = harness.session.dispose().then(() => {
+			disposed = true;
+		});
+		await setImmediate();
+		expect(disposed).toBe(true);
+		await disposal;
+	} finally {
+		release.resolve();
+		await prompt;
+		await harness.session.dispose();
+		harness.cleanup();
+	}
 });
