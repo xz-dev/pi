@@ -27,7 +27,7 @@ export interface OwnedSpawn {
 	readonly args: string[];
 	readonly stdio: ["ignore" | "pipe", "pipe", "pipe", "pipe"];
 	readonly ready: Promise<OwnedTask | undefined>;
-	/** X reports the command result, independently of later C + EOF. */
+	/** Direct-runtime command result, independently of later C + EOF; completion keeps full native X. */
 	readonly primaryExit: Promise<number | undefined>;
 	/** Attach the spawned child's duplex control endpoint at fd 3. */
 	finalize(child: ChildProcess): void;
@@ -38,9 +38,6 @@ export interface OwnedSpawn {
 export function prepareOwnedSpawn(options: OwnedExecOptions, command: string, args: string[]): OwnedSpawn | undefined {
 	if (options.procwardBinary === undefined) return undefined;
 	assertSessionProcessesOpen(options.registry);
-	// Windows needs a native HANDLE adapter; do not claim it is already wired.
-	if (process.platform === "win32") throw new Error("procward task HANDLE transport is not implemented");
-
 	let control: Duplex | undefined;
 	let task: OwnedTask | undefined;
 	let record = "";
@@ -64,7 +61,11 @@ export function prepareOwnedSpawn(options: OwnedExecOptions, command: string, ar
 	});
 	let resolvePrimary: (value: number | undefined) => void = () => {};
 	const primaryExit = new Promise<number | undefined>((resolve) => {
-		resolvePrimary = resolve;
+		resolvePrimary = (code) => {
+			// Bun Windows exposes the low byte; its direct-launch differential
+			// gate must catch runtime changes. Keep native X/completion intact.
+			resolve(code !== undefined && process.platform === "win32" && process.versions.bun ? code & 0xff : code);
+		};
 	});
 
 	const settle = (expired = false) => {
@@ -114,6 +115,8 @@ export function prepareOwnedSpawn(options: OwnedExecOptions, command: string, ar
 		// libuv's Unix UV_CREATE_PIPE uses socketpair(SOCK_STREAM). Extra
 		// stdio pipes are duplex; no listener, socket path or retained peer is
 		// needed. See Node deps/uv/src/unix/process.c: uv__process_init_stdio.
+		// On Windows this is the child's CRT descriptor, not a HANDLE. Native
+		// duplicates its underlying HANDLE privately and closes the CRT source.
 		stdio: ["ignore", "pipe", "pipe", "pipe"],
 		ready,
 		primaryExit,
