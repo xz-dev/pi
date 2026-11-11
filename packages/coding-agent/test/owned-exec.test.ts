@@ -110,6 +110,47 @@ describe.skipIf(process.platform === "win32")("procward task control adapter", (
 	});
 });
 
+test.skipIf(process.platform === "win32")(
+	"controlled Windows adapter uses the native CRT stdio slot, not a HANDLE",
+	async () => {
+		vi.stubGlobal("process", { ...process, platform: "win32" });
+		try {
+			// This is a controlled Unix Node peer; actual Windows CRT execution is
+			// a separate platform gate, not something this dispatch test proves.
+			const { owned, child } = fixture("PROCWARD/1 S {pid} kernel\nPROCWARD/1 X 7\nPROCWARD/1 C kernel\n");
+			expect(owned.args).toEqual(["run", "--retain-descendants", "--control-fd", "3", "--", "command", "argument"]);
+			expect(owned.stdio).toEqual(["ignore", "pipe", "pipe", "pipe"]);
+			expect(await waitForChildProcess(child, owned.primaryExit)).toBe(7);
+			expect(await owned.completion).toEqual({ exitCode: 7, scope: "kernel", unconfirmed: false });
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	},
+);
+
+test.skipIf(process.platform === "win32").each([
+	{ runtime: "node", wire: 4275878552, direct: 4275878552 },
+	{ runtime: "bun", wire: 4275878552, direct: 152 },
+	{ runtime: "bun", wire: 256, direct: 0 },
+	{ runtime: "bun", wire: 7, direct: 7 },
+])(
+	"controlled $runtime Windows primary result matches direct launch without narrowing native X=$wire",
+	async ({ runtime, wire, direct }) => {
+		vi.stubGlobal("process", {
+			...process,
+			platform: "win32",
+			versions: { ...process.versions, bun: runtime === "bun" ? "1.4.4" : undefined },
+		});
+		try {
+			const { owned } = fixture(`PROCWARD/1 S {pid} kernel\nPROCWARD/1 X ${wire}\nPROCWARD/1 C kernel\n`);
+			expect(await owned.primaryExit).toBe(direct);
+			expect(await owned.completion).toEqual({ exitCode: wire, scope: "kernel", unconfirmed: false });
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	},
+);
+
 test("an absent helper does not allocate a control channel", () => {
 	expect(
 		prepareOwnedSpawn(
