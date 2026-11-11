@@ -27,14 +27,14 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const contract = { ownerPid: process.ppid, launchId: "a".repeat(32), lifecycleFd: fd };
 
 if (mode === "stop") {
-	const stop = observeOwnerLoss(contract, loss);
+	const observer = observeOwnerLoss(contract, loss);
 	await pause(250);
 	const active = descriptors().length;
-	stop();
+	observer.stop();
 	await pause(200);
 	const remaining = descriptors().length;
 	const reused = openSync("/dev/null", "r");
-	stop();
+	observer.stop();
 	await pause(100);
 	fstatSync(reused);
 	closeSync(reused);
