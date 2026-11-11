@@ -1,4 +1,4 @@
-import { isBunBinary, resolveProcwardBinary } from "./config.ts";
+import { isBunBinary, resolveProcwardBinary, resolveWindowsOwnershipHelper } from "./config.ts";
 import { ownCliProcess } from "./utils/procward.ts";
 
 // Wrap this process in a procward owner before any CLI side effects, so the
@@ -7,6 +7,7 @@ import { ownCliProcess } from "./utils/procward.ts";
 // which case the CLI must not start again.
 const bootstrapStatus = ownCliProcess(process.argv.slice(2), {
 	resolveBinary: resolveProcwardBinary,
+	resolveWindowsHelper: resolveWindowsOwnershipHelper,
 	standalone: isBunBinary,
 });
 if (bootstrapStatus !== undefined) {
