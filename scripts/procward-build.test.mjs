@@ -169,6 +169,7 @@ test("direct Bun wrapper embeds process-owner only for enabled builds and propag
 test("npm skip-build rejects mismatched capability before packing", t => {
 	const f = fixture(t);
 	const directory = join(f.directory, "packages/coding-agent");
+	put(join(f.directory, "package.json"), JSON.stringify({ private: true, workspaces: ["packages/*"] }));
 	put(join(directory, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.0" }));
 	buildProcward({ root: f.directory, directory, env: { ...f.env, PROCWARD: "0" } });
 	stampBundle(directory);
