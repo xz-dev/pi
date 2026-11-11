@@ -68,7 +68,7 @@ export function buildProcward({ root = repoRoot, directory = packageDir, target,
 		if (triple) args.push("--target", triple);
 		if (offline) args.push("--offline");
 		// Cargo owns incremental validation of current sources/target; never reuse staged binaries.
-		const result = spawnSync("cargo", args, { cwd: root, env, stdio: "inherit" });
+		const result = spawnSync("cargo", args, { cwd: vendor, env, stdio: "inherit" });
 		if (result.error || result.status !== 0) {
 			throw new Error("procward build failed: Cargo and vendored sources are required; use PROCWARD=0 to omit ownership", { cause: result.error });
 		}
