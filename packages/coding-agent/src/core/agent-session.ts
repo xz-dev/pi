@@ -2037,13 +2037,12 @@ export class AgentSession {
 	 * @param onStarted Called once the run's messages are prepared, before the first request.
 	 */
 	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
+		let messages: AgentMessage[];
 		this._assertNotShuttingDown();
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
-		let messages: AgentMessage[];
 		try {
 			messages = await this._prepareRun(trigger);
-			this._assertNotShuttingDown();
 		} catch (error) {
 			this._isAgentRunActive = false;
 			this._flushPendingBashMessages();
@@ -2129,6 +2128,7 @@ export class AgentSession {
 		}
 		this._assertNotShuttingDown();
 		// Inject any pending "nextTurn" messages as context alongside the starting message
+		this._assertNotShuttingDown();
 		messages.push(...this._pendingNextTurnMessages);
 		this._pendingNextTurnMessages = [];
 		for (const msg of result.messages) {
@@ -2498,10 +2498,10 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		this._assertNotShuttingDown();
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
@@ -2514,10 +2514,10 @@ export class AgentSession {
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		this._assertNotShuttingDown();
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}

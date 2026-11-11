@@ -150,28 +150,31 @@ describe("permanent session shutdown", () => {
 		expect(harness.sessionManager.getEntries()).toHaveLength(entries);
 	});
 
-	it("rejects a prompt whose input preflight resumes after prepare", async () => {
-		const entered = deferred<void>();
-		const release = deferred<void>();
-		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("input", async () => {
-						entered.resolve();
-						await release.promise;
-						return { action: "continue" };
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		const prompt = harness.session.prompt("preflight");
-		await entered.promise;
-		harness.session.prepareForShutdown();
-		release.resolve();
-		await expect(prompt).rejects.toThrow("Session is shutting down");
-		expect(harness.session.messages).toEqual([]);
-	});
+	it.each(["prompt", "steer", "followUp"] as const)(
+		"rejects %s when input preflight resumes after prepare",
+		async (action) => {
+			const entered = deferred<void>();
+			const release = deferred<void>();
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", async () => {
+							entered.resolve();
+							await release.promise;
+							return { action: "continue" };
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const prompt = harness.session[action]("preflight");
+			await entered.promise;
+			harness.session.prepareForShutdown();
+			release.resolve();
+			await expect(prompt).rejects.toThrow("Session is shutting down");
+			expect(harness.session.messages).toEqual([]);
+		},
+	);
 
 	it("stops a prepared run before the first provider request when shutdown crosses before_agent_start", async () => {
 		const entered = deferred<void>();
