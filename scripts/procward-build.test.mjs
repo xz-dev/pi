@@ -37,7 +37,7 @@ fs.writeFileSync(output, "HELPER SENTINEL: MUST NOT EXECUTE");
 	put(join(bin, "bun"), `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-const asset = args.find(x => x.startsWith("--asset="));
+const asset = args.find(x => x.startsWith("--asset=") && x.endsWith("/process-owner"));
 const owner = asset && asset.slice(8);
 fs.appendFileSync(process.env.CALL_LOG, JSON.stringify({command:"bun",args,license:owner && fs.readFileSync(owner+"/LICENSE","utf8"),helper:owner && fs.readFileSync(owner+"/procward","utf8")})+"\\n");
 if (process.env.BUN_SIGNAL) process.kill(process.pid, process.env.BUN_SIGNAL);
@@ -142,7 +142,15 @@ test("direct Bun wrapper embeds process-owner only for enabled builds and propag
 	let bun = calls(f.log).at(-1);
 	assert.equal(bun.command, "bun");
 	assert.ok(bun.args.includes("--define=PI_PROCWARD_INCLUDED=true"));
-	assert.match(bun.args.find(x => x.startsWith("--asset=")), /\/process-owner$/);
+	assert.match(bun.args.find(x => x.startsWith("--asset=") && x.endsWith("/process-owner")), /\/process-owner$/);
+	assert.ok(bun.args.includes("--asset=.pi/skills"));
+	assert.deepEqual(bun.args, [
+		"build", "--compile", "--no-compile-autoload-bunfig", "--no-compile-autoload-dotenv",
+		"--define=PI_PROCWARD_INCLUDED=true", "--asset=.pi/skills",
+		bun.args.find(x => x.startsWith("--asset=") && x.endsWith("/process-owner")),
+		"./dist/bun/cli-portable.js", "./src/utils/image-resize-worker.ts", "./src/extensions/codemode/worker.ts",
+		"--outfile", "dist/pi",
+	]);
 	assert.match(bun.helper, /MUST NOT EXECUTE/);
 	assert.equal(bun.license, "BSD-3-Clause test notice\n");
 	const off = { ...f.env, PROCWARD: "0", BUN_STATUS: "23" };
@@ -152,7 +160,7 @@ test("direct Bun wrapper embeds process-owner only for enabled builds and propag
 	assert.equal(buildHostBinary(f.directory, { ...off, BUN_SIGNAL: "SIGTERM" }), 143);
 	bun = calls(f.log).at(-1);
 	assert.ok(bun.args.includes("--define=PI_PROCWARD_INCLUDED=false"));
-	assert.equal(bun.args.some(x => x.startsWith("--asset=")), false);
+	assert.deepEqual(bun.args.filter(x => x.startsWith("--asset=")), ["--asset=.pi/skills"]);
 	assert.equal(calls(f.log).filter(x => x.command === "cargo").length, 1);
 	assert.throws(() => buildHostBinary(f.directory, f.env), /preceding matching/);
 	assert.throws(() => buildHostBinary(f.directory, { ...off, PATH: "/nonexistent" }), /ENOENT/);
