@@ -189,6 +189,29 @@ describe("default session process ownership (Node-only protocol peer)", () => {
 		expect(data(await tool(s, "process_list").execute("list", {})).processes).toEqual([]);
 	});
 
+	test("shutdown permanently rejects session admissions, including tree hook races", async () => {
+		const s = await session();
+		const first = s.sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+		const last = s.sessionManager.appendMessage({ role: "user", content: "last", timestamp: Date.now() });
+		vi.spyOn(s.extensionRunner, "hasHandlers").mockImplementation((type) => type === "session_before_tree");
+		vi.spyOn(s.extensionRunner, "emit").mockImplementation(async () => {
+			s.prepareForShutdown();
+			return undefined;
+		});
+		await expect(s.navigateTree(first)).rejects.toThrow("shutting down");
+		expect(s.sessionManager.getLeafId()).toBe(last);
+		await expect(s.navigateTree(last)).rejects.toThrow("shutting down");
+		await expect(s.prompt("late")).rejects.toThrow("shutting down");
+		await expect(s.steer("late")).rejects.toThrow("shutting down");
+		await expect(s.followUp("late")).rejects.toThrow("shutting down");
+		await expect(s.sendCustomMessage({ customType: "late", content: "late", display: false })).rejects.toThrow(
+			"shutting down",
+		);
+		await expect(s.compact()).rejects.toThrow("shutting down");
+		await expect(s.reload()).rejects.toThrow("shutting down");
+		await expect(s.executeBash("late")).rejects.toThrow("shutting down");
+	});
+
 	test("opt-out registers no management tools and executes without resolving even an invalid helper", async () => {
 		vi.stubEnv("PI_NO_PROCESS_OWNERSHIP", "1");
 		vi.stubEnv("PI_PROCWARD_BIN", join(directory, "does-not-exist"));
@@ -394,7 +417,7 @@ describe("default session process ownership (Node-only protocol peer)", () => {
 		await s.dispose();
 		expect(await execution).toMatchObject({ cancelled: true, exitCode: undefined });
 		expect(sessionProcessRegistries.get(s.sessionManager)?.list()).toEqual([]);
-		await expect(s.executeBash("after close")).rejects.toThrow("closed");
+		await expect(s.executeBash("after close")).rejects.toThrow("shutting down");
 	});
 
 	test.each(["user_bash", "mcp", "pi.exec"] as const)(

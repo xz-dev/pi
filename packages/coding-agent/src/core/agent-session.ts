@@ -1525,6 +1525,9 @@ export class AgentSession {
 	 */
 	async dispose(): Promise<void> {
 		this.prepareForShutdown();
+		const registry = this._processRegistry;
+		// Close native admission and request cancellation before any shutdown hook or await.
+		const pending = registry ? closePendingSessionSpawns(registry) : undefined;
 		this._cancelSessionOperations();
 
 		this._extensionRunner.invalidate(
@@ -1537,14 +1540,11 @@ export class AgentSession {
 			this._cacheWarmer.cancel();
 		}
 		cleanupSessionResources(this.sessionId);
-		const registry = this._processRegistry;
-		// An aborted tool can still be awaiting startup and its first ownership record.
-		if (!registry) return Promise.resolve();
-		// Cancel pending transports before waiting for S; startup may never produce it.
-		const pending = closePendingSessionSpawns(registry);
-		return Promise.all([pending, this.agent.waitForIdle(), Promise.allSettled([...this._bashExecutions])])
-			.then(() => {})
-			.finally(() => registry.close());
+		try {
+			await Promise.all([pending, Promise.allSettled([...this._bashExecutions])]);
+		} finally {
+			await registry?.close();
+		}
 	}
 
 	// =========================================================================

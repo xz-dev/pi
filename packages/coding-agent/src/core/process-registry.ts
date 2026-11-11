@@ -38,16 +38,49 @@ export interface OwnedSession {
 	close(): Promise<void>;
 }
 
+interface OwnedLifetime {
+	readonly completion: Promise<OwnedCompletion>;
+	cancel(): Promise<OwnedCompletion>;
+}
+
+const pendingSpawns = new WeakMap<OwnedSession, Set<OwnedLifetime>>();
+const closedSessions = new WeakSet<OwnedSession>();
+
+/** Reject new session-scoped executions after disposal starts. */
+export function assertSessionProcessesOpen(registry: OwnedSession | undefined): void {
+	if (registry && closedSessions.has(registry)) throw new Error("Session process ownership is closed");
+}
+
+/** Account for every admitted native lifetime before spawn or the first startup await. */
+export function trackSessionSpawn(registry: OwnedSession, spawn: OwnedLifetime): void {
+	assertSessionProcessesOpen(registry);
+	let pending = pendingSpawns.get(registry);
+	if (!pending) {
+		pending = new Set();
+		pendingSpawns.set(registry, pending);
+	}
+	pending.add(spawn);
+	void spawn.completion.then(() => pending.delete(spawn));
+}
+
+/** Close admission and cancel even launches that have not yet reported S. */
+export function closePendingSessionSpawns(registry: OwnedSession): Promise<void> {
+	closedSessions.add(registry);
+	const cancellations = [...(pendingSpawns.get(registry) ?? [])].map((spawn) => spawn.cancel());
+	return Promise.all(cancellations).then(() => {});
+}
+
 /** Create one registry for the lifetime of an AgentSession, including runtime reloads. */
 export function createProcessRegistry(selfProcwardPid?: number): OwnedSession {
 	let nextId = 1;
 	const tasks = new Map<number, OwnedTask>();
-	return {
+	const registry: OwnedSession = {
 		selfProcwardPid,
 		startedAt: Date.now(),
 		list: () => [...tasks.values()].sort((a, b) => a.startedAt - b.startedAt || a.id - b.id),
 		get: (id) => tasks.get(id),
 		register: (task) => {
+			// S can arrive after close for a launch admitted before shutdown.
 			const entry: OwnedTask = { ...task, id: nextId++, status: "running", startedAt: Date.now() };
 			tasks.set(entry.id, entry);
 			return entry;
@@ -63,15 +96,18 @@ export function createProcessRegistry(selfProcwardPid?: number): OwnedSession {
 			tasks.delete(id);
 		},
 		close: async () => {
-			await Promise.all(
-				[...tasks.values()].map(async (task) => {
+			const pending = closePendingSessionSpawns(registry);
+			await Promise.all([
+				pending,
+				...[...tasks.values()].map(async (task) => {
 					try {
 						await task.cancel();
 					} catch {
 						task.status = "unconfirmed";
 					}
 				}),
-			);
+			]);
 		},
 	};
+	return registry;
 }

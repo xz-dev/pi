@@ -1,7 +1,14 @@
 /** Per-task procward control. Native lifecycle tests run in procward's VM runner. */
 import type { ChildProcess } from "node:child_process";
 import { Duplex } from "node:stream";
-import type { OwnedCompletion, OwnedSession, OwnedTask, OwnedTaskProvenance } from "../process-registry.ts";
+import {
+	assertSessionProcessesOpen,
+	type OwnedCompletion,
+	type OwnedSession,
+	type OwnedTask,
+	type OwnedTaskProvenance,
+	trackSessionSpawn,
+} from "../process-registry.ts";
 
 export type { OwnedCompletion } from "../process-registry.ts";
 
@@ -30,6 +37,7 @@ export interface OwnedSpawn {
 
 export function prepareOwnedSpawn(options: OwnedExecOptions, command: string, args: string[]): OwnedSpawn | undefined {
 	if (options.procwardBinary === undefined) return undefined;
+	assertSessionProcessesOpen(options.registry);
 	// Windows needs a native HANDLE adapter; do not claim it is already wired.
 	if (process.platform === "win32") throw new Error("procward task HANDLE transport is not implemented");
 
@@ -100,7 +108,7 @@ export function prepareOwnedSpawn(options: OwnedExecOptions, command: string, ar
 		return completion;
 	};
 
-	return {
+	const owned: OwnedSpawn = {
 		command: options.procwardBinary,
 		args: ["run", "--retain-descendants", "--control-fd", "3", "--", command, ...args],
 		// libuv's Unix UV_CREATE_PIPE uses socketpair(SOCK_STREAM). Extra
@@ -175,4 +183,6 @@ export function prepareOwnedSpawn(options: OwnedExecOptions, command: string, ar
 			if (cancellationRequested) sendCancellation();
 		},
 	};
+	trackSessionSpawn(options.registry, owned);
+	return owned;
 }
