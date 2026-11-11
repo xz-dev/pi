@@ -127,6 +127,13 @@ export function consumeManagedContract(
 	return { ownerPid: Number(ownerPid), launchId, lifecycleFd: Number(env.lifecycleFd) };
 }
 
+/** Shared first-loss state for the lifecycle endpoint's single observer. */
+export interface OwnerLossObserver {
+	stop(): void;
+	/** Fixed-origin monotonic milliseconds, comparable across Node/Bun workers. */
+	readonly observedAt: number | undefined;
+}
+
 /**
  * Observe the lifecycle pipe for owner loss after a validated contract.
  *
@@ -136,7 +143,10 @@ export function consumeManagedContract(
  * cannot prevent that deadline from firing. This observer exclusively owns
  * the endpoint until its worker exits; callers must not close or reuse it.
  */
-export function observeOwnerLoss(contract: ManagedContract, onLoss: (reason: string) => void): () => void {
+export function observeOwnerLoss(
+	contract: ManagedContract,
+	onLoss: (reason: string, observedAt: number) => void,
+): OwnerLossObserver {
 	return startLifecycleObserver(contract, onLoss);
 }
 
@@ -145,15 +155,15 @@ export function consumeAndObserveManagedContract(
 	env: ContractEnvironment,
 	selfPid: number,
 	parentPid: number,
-	onLoss: (reason: string) => void,
-): void {
-	let stop: (() => void) | undefined;
+	onLoss: (reason: string, observedAt: number) => void,
+): OwnerLossObserver {
+	let observer: OwnerLossObserver | undefined;
 	try {
 		const contract = consumeManagedContract(env, selfPid, parentPid, (fd) => {
 			const shared = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT + MAX_RECORD_BYTES);
 			const state = new Int32Array(shared, 0, 1);
 			// consumeManagedContract validates environment fields before invoking the reader.
-			stop = startLifecycleObserver(
+			observer = startLifecycleObserver(
 				{ ownerPid: Number(env.ownerPid), launchId: env.contractId!, lifecycleFd: fd },
 				onLoss,
 				shared,
@@ -167,19 +177,21 @@ export function consumeAndObserveManagedContract(
 		if (!contract) throw new Error("procward: missing bootstrap contract");
 		// Reading READY may outlive the parent; recheck the kernel relationship at acceptance.
 		if (contract.ownerPid !== process.ppid) throw new Error("procward: owner is not the immediate parent");
+		return observer!;
 	} catch (error) {
-		stop?.();
+		observer?.stop();
 		throw error;
 	}
 }
 
 function startLifecycleObserver(
 	contract: ManagedContract,
-	onLoss: (reason: string) => void,
+	onLoss: (reason: string, observedAt: number) => void,
 	ready?: SharedArrayBuffer,
-): () => void {
+): OwnerLossObserver {
 	// The inherited OS descriptor is a trust boundary; reject invalid Bun fds before taking ownership.
 	if (process.versions.bun) fstatSync(contract.lifecycleFd);
+	const observation = new BigInt64Array(new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT));
 	const workerSource = `
 import { parentPort, workerData } from "node:worker_threads";
 import { Socket } from "node:net";
@@ -199,8 +211,11 @@ function loss(reason) {
  if (pendingReady) { readiness(-1); pipe.destroy(); return; }
  if (lost) return;
  lost = true;
+ // Bun's hrtime is worker-relative; fixed performance origins align both realms.
+ Atomics.store(new BigInt64Array(workerData.observation), 0, BigInt(Math.round((performance.timeOrigin + performance.now()) * 1000)));
  // This timer remains independent of a blocked main loop.
- setTimeout(() => process.kill(workerData.pid, "SIGKILL"), 7000);
+ setTimeout(() => process.kill(workerData.pid, "SIGKILL"),
+  Math.max(0, 7000 - (performance.timeOrigin + performance.now() - Number(Atomics.load(new BigInt64Array(workerData.observation), 0)) / 1000)));
  parentPort.postMessage(reason);
 }
 const pipe = process.versions.bun
@@ -222,15 +237,45 @@ pipe.once("end", () => loss(record.length === 0 ? "eof" : "invalid-record"));
 pipe.once("error", () => loss("read-error"));
 `;
 	const worker = new Worker(new URL(`data:text/javascript;base64,${Buffer.from(workerSource).toString("base64")}`), {
-		workerData: { fd: contract.lifecycleFd, launchId: contract.launchId, pid: process.pid, ready },
+		workerData: {
+			fd: contract.lifecycleFd,
+			launchId: contract.launchId,
+			pid: process.pid,
+			ready,
+			observation: observation.buffer,
+		},
 		resourceLimits: { maxOldGenerationSizeMb: 32 },
 	});
 	// Bun's stream owns a duplicate; release the inherited endpoint only after the worker exits.
 	if (process.versions.bun) worker.once("exit", () => closeSync(contract.lifecycleFd));
-	worker.once("message", (reason: string) => onLoss(reason));
-	worker.once("error", () => onLoss("worker-error"));
+	let notified = false;
+	const notify = (reason: string) => {
+		if (notified) return;
+		notified = true;
+		// A dead worker fails closed, but cannot supply an independent watchdog.
+		Atomics.compareExchange(
+			observation,
+			0,
+			0n,
+			BigInt(Math.round((performance.timeOrigin + performance.now()) * 1000)),
+		);
+		onLoss(reason, Number(Atomics.load(observation, 0)) / 1000);
+	};
+	worker.once("message", notify);
+	worker.once("error", () => notify("worker-error"));
+	let stopping = false;
+	worker.once("exit", () => {
+		if (!stopping) notify("worker-exit");
+	});
 	worker.unref();
-	return () => {
-		void worker.terminate();
+	return {
+		get observedAt() {
+			const value = Atomics.load(observation, 0);
+			return value === 0n ? undefined : Number(value) / 1000;
+		},
+		stop() {
+			stopping = true;
+			void worker.terminate();
+		},
 	};
 }

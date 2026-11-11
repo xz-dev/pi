@@ -573,7 +573,7 @@ describe("default session process ownership (Node-only protocol peer)", () => {
 				throw new Error("own handoff must not resolve helper");
 			},
 			consumeContract: () => ({ ownerPid, launchId: "b".repeat(32), lifecycleFd: 4 }),
-			observeLoss: () => () => {},
+			observeLoss: () => ({ stop() {}, observedAt: undefined }),
 		});
 		const s = await session();
 		const listed = data(await tool(s, "process_list").execute("self", {})).processes;
