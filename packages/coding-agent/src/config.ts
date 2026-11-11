@@ -843,6 +843,26 @@ export function resolveProcwardBinary(): string | undefined {
 	return findOnPath(binaryName);
 }
 
+/** Resolve the existing Windows platform addon without loading the CLI/TUI module graph. */
+export function resolveWindowsOwnershipHelper(): string | undefined {
+	if (!procwardIncluded || process.platform !== "win32") return undefined;
+	if (process.arch !== "x64" && process.arch !== "arm64") return undefined;
+	const relative = join("win32", "prebuilds", `win32-${process.arch}`, "win32-platform.node");
+	if (isBunBinary) {
+		const native = materializeNativeAddons();
+		const candidate = native ? join(native, relative) : undefined;
+		return candidate && existsSync(candidate) ? candidate : undefined;
+	}
+	const candidates = [join(getPackageDir(), "native", relative)];
+	try {
+		const tui = createRequire(import.meta.url).resolve("@earendil-works/pi-tui/package.json");
+		candidates.push(join(dirname(tui), "native", relative));
+	} catch {
+		// Bundled Node distributions carry the native tree next to their own package assets.
+	}
+	return candidates.find((candidate) => existsSync(candidate));
+}
+
 /** Map the running process to the Rust target triple build-procward.sh names its output by. */
 function procHostTriple(): string {
 	const arch = process.arch === "x64" ? "x86_64" : process.arch === "arm64" ? "aarch64" : process.arch;

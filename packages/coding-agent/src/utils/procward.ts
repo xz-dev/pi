@@ -24,6 +24,7 @@ import { constants as osConstants } from "node:os";
 import {
 	CONTRACT_ENV_KEYS,
 	consumeAndObserveManagedContract,
+	consumeAndObserveWindowsManagedContract,
 	type consumeManagedContract,
 	type OwnerLossObserver,
 	observeOwnerLoss,
@@ -121,6 +122,8 @@ export function clearBootstrapNonce(): void {
 export interface ProcwardBootstrap {
 	/** Resolve the vendored procward helper, or undefined when absent. */
 	readonly resolveBinary: () => string | undefined;
+	/** Resolve the existing platform addon only when accepting a Windows handoff. */
+	readonly resolveWindowsHelper?: () => string | undefined;
 	/** Validate the managed-child contract for this process (test seam). */
 	readonly consumeContract?: typeof consumeManagedContract;
 	/** This process's PID and parent PID (test seam). */
@@ -206,14 +209,18 @@ function validateOwnHandoff(bootstrap: ProcwardBootstrap): void {
 		ownerPid: process.env.PROCWARD_OWNER_PID,
 		contractId: process.env.PROCWARD_CONTRACT_ID,
 		lifecycleFd: process.env.PROCWARD_LIFECYCLE_FD,
+		lifecycleHandle: process.env.PROCWARD_LIFECYCLE_HANDLE,
 	};
 	if (env.protocol === undefined) throw new Error("pi: bootstrap handoff is missing its contract");
-	if (process.env.PROCWARD_LIFECYCLE_HANDLE !== undefined) {
-		throw new Error("pi: Windows process-ownership handoff is not supported by this adapter");
-	}
 	const selfPid = bootstrap.selfPid ?? process.pid;
 	const parentPid = bootstrap.parentPid ?? process.ppid;
 	const onLoss = bootstrap.onOwnerLoss ?? defaultOwnerLoss;
+	if (env.lifecycleHandle !== undefined) {
+		const helper = bootstrap.resolveWindowsHelper?.();
+		if (!helper) throw new Error("pi: Windows process-ownership platform helper is missing; rebuild or reinstall pi");
+		ownerLossObserver = consumeAndObserveWindowsManagedContract(env, selfPid, onLoss, helper);
+		return;
+	}
 	if (bootstrap.consumeContract) {
 		const contract = bootstrap.consumeContract(env, selfPid, parentPid);
 		if (!contract) throw new Error("pi: invalid bootstrap handoff");
