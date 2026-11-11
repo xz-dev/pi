@@ -19,6 +19,7 @@ import { basename, delimiter, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
+import { procwardIncluded } from "./utils/procward-build.ts";
 import { stripBom } from "./utils/text.ts";
 
 // =============================================================================
@@ -789,9 +790,10 @@ export function getQuickJSWasmPath(): string {
  *    building the vendored helper.
  *
  * Returns undefined when no helper exists. Enabled ownership fails closed;
- * absence is not an opt-out. Build-off runtime policy belongs to packaging.
+ * absence is not an opt-out. Feature-off artifacts never inspect helper paths.
  */
 export function resolveProcwardBinary(): string | undefined {
+	if (!procwardIncluded) return undefined;
 	const override = process.env.PI_PROCWARD_BIN;
 	if (override) {
 		try {

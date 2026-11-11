@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { getPublicWorkspacePackages } from "./release-packages.mjs";
 import { execNpmSync } from "./npm-command.mjs";
 
+import { assertProcwardBundleBuild } from "../packages/coding-agent/scripts/build-procward.mjs";
 const manifestSchemaVersion = 1;
 
 function isInsidePath(child, parent) {
@@ -82,6 +83,9 @@ export function produceArtifactSet({ repoRoot, outDir, build = true, offlineMode
 	}
 	const artifactSource = source === undefined ? getGitSource(root) : source;
 	const packages = getPublicWorkspacePackages(join(root, "packages"));
+	for (const pkg of packages) {
+		if (pkg.name === "@earendil-works/pi-coding-agent") assertProcwardBundleBuild(pkg.directory);
+	}
 	const packedPackages = packPackages(packages, join(artifactDirectory, "tarballs"));
 	const manifest = {
 		schemaVersion: manifestSchemaVersion,

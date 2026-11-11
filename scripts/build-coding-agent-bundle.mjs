@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
+import { assertProcwardBuild } from "../packages/coding-agent/scripts/build-procward.mjs";
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 const codingAgentDir = join(repoRoot, "packages", "coding-agent");
@@ -151,6 +152,7 @@ for (const entry of [
 	}
 }
 
+assertProcwardBuild(codingAgentDir);
 rmSync(bundleDir, { force: true, recursive: true });
 mkdirSync(bundleDir, { recursive: true });
 
@@ -256,4 +258,5 @@ chmodSync(join(bundleDir, "rpc-entry.js"), 0o755);
 
 const files = new Set(metafiles.flatMap((metafile) => Object.keys(metafile.outputs))).size + 1;
 const mib = (outputBytes(metafiles) + cliLauncher.length) / (1024 * 1024);
+copyFileSync(join(codingAgentDistDir, "utils/procward-build.js"), join(bundleDir, "procward-build.js"));
 console.log(`Built ${relative(repoRoot, bundleDir)} (${files} files, ${mib.toFixed(1)} MiB)`);
