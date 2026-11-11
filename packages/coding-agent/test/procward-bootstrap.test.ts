@@ -174,7 +174,7 @@ describe("ownCliProcess", () => {
 		vi.stubEnv("PROCWARD_OWNER_PID", "200");
 		vi.stubEnv("PROCWARD_CONTRACT_ID", launchId);
 		vi.stubEnv("PROCWARD_LIFECYCLE_FD", "7");
-		const observeLoss = vi.fn(() => () => {});
+		const observeLoss = vi.fn(() => ({ stop() {}, observedAt: undefined }));
 		const resolveBinary = vi.fn(() => "/unused");
 		expect(
 			ownCliProcess([], {
