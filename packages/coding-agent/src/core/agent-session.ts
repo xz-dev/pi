@@ -3760,7 +3760,6 @@ export class AgentSession {
 	 *
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
-
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		this._assertNotShuttingDown();
 		const generation = this._compactionGeneration;
@@ -4183,6 +4182,7 @@ export class AgentSession {
 				willRetry,
 				signal,
 			})) as SessionBeforeCompactResult | undefined;
+			this._assertNotShuttingDown();
 
 			if (extensionResult?.cancel) {
 				flags.cancelledByExtension = true;
