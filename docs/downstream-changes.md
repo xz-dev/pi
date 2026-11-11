@@ -130,10 +130,12 @@ Pi stores sessions as plain JSONL, exactly as upstream writes them, and does not
 
 Not in current releases: `patch/process-ownership` is held out of sync and packaging while it is reworked. The release build and acceptance skip the owner daemon and the owner-lifecycle gate until the patch returns.
 
-Pi owns every subprocess tree it starts and stops it when the task or Pi ends, as an ordinary user, with no root, cgroups or setup.
+Pi's experimental ownership integration wraps the CLI and local tool subprocesses in [procward](https://github.com/xz-dev/procward), built from the vendored source in `vendor/procward`. It requests process-tree cleanup when the session exits and retains unconfirmed cleanup outcomes for inspection. Controlled protocol peers test the integration; native release acceptance remains pending. The Windows task HANDLE adapter is not implemented, so Windows ownership is not supported by this integration yet.
 
-- Details: [Process ownership](process-ownership.md): owners, per-platform guarantees, macOS limits, remote execution and verification.
-- Kernel-enforced on Linux, FreeBSD and Windows. Best effort on macOS, where a fast `setsid` escape is possible; use a container for a hard boundary.
+- Opt out per invocation with `--no-process-ownership`, or for nested invocations with `PI_NO_PROCESS_OWNERSHIP=1`. Enabled builds fail closed if the helper is missing; a missing helper is not an implicit runtime opt-out.
+- Build control: `PROCWARD=0` selects helper omission at build time, not a runtime opt-out. Release packaging and intentional build-off behavior require separate validation; these notes do not assert installed-artifact acceptance.
+- macOS caveat: best effort, not a hard containment boundary. Do not infer native macOS acceptance from controlled protocol tests; use a container when a hard boundary is required.
+- Details: [Process ownership](process-ownership.md): integration, opt-outs, platform limits and verification.
 - Patch branch: [`patch/process-ownership`](https://github.com/xz-dev/pi/tree/patch/process-ownership)
 
 ## TUI and display
@@ -251,8 +253,7 @@ Extension tooling, skills, and subprocess environment.
 
 Patches with no direct user-facing surface: test stability, fork CI plumbing, benchmark bounds.
 
-- Capture registry-test WeakRefs while the reader is still held, before release permits collection; the original nonempty and collected assertions remain unchanged.
-  - Patch branch: [`patch/chord-registry-gc-observation`](https://github.com/xz-dev/pi/tree/patch/chord-registry-gc-observation)
+- Retired `patch/chord-registry-gc-observation`: upstream `cd5e3d2a6242250db693d1a3e49bb7a3184c76c9` captures test WeakRefs before releasing readers, and `7e713da291119a91bdf91b0f8bba1bb801782fc9` gives file-summary fixtures deterministic timestamps. The upstream collection and exact ordering assertions remain; no skip is added.
 
 
 - Diagnose native environment tests with an independent build-target architecture oracle, retained-output tool fixtures, per-stream output equality, real foreground-job readiness and monotonic cold listing cancellation/recovery observations.
