@@ -5,6 +5,8 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import tempfile
 from unittest.mock import MagicMock, patch
 import unittest
 
@@ -197,6 +199,43 @@ class NetworkBoundary(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 vm.loopback_only(identity, 'ubuntu')
         connection.sendall.assert_not_called()
+
+
+class UbuntuMirror(unittest.TestCase):
+    def test_runner_mirrorlist_and_guest_sources_keep_suites_components_and_signing(self):
+        cases = {
+            'apt-mirrors.txt': 'http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://archive.ubuntu.com/ubuntu/\tpriority:2\n',
+            'apt-mirrors-security.txt': 'https://security.ubuntu.com/ubuntu/\n',
+            'sources.list': 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://archive.ubuntu.com/ubuntu noble main universe\n',
+            'sources.list.d/ubuntu.sources': 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\nSuites: noble noble-updates noble-security\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n',
+            'sources.list.d/vendor.list': 'deb [signed-by=/vendor/key] https://packages.microsoft.com/ubuntu/24.04/prod noble main\n',
+        }
+        with tempfile.TemporaryDirectory(prefix='procward-apt-mirror-') as directory:
+            root = Path(directory)
+            for name, contents in cases.items():
+                path = root / 'etc/apt' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents)
+            script = Path(__file__).with_name('ubuntu-apt-mirror.sh')
+            subprocess.run(['sh', str(script), str(root)], check=True)
+            first = {}
+            for name, original in cases.items():
+                actual = (root / 'etc/apt' / name).read_text()
+                expected = original
+                for host in ['azure.archive', 'archive', 'security']:
+                    expected = expected.replace(f'http://{host}.ubuntu.com/ubuntu/', 'https://mirror.csclub.uwaterloo.ca/ubuntu/')
+                    expected = expected.replace(f'https://{host}.ubuntu.com/ubuntu/', 'https://mirror.csclub.uwaterloo.ca/ubuntu/')
+                expected = expected.replace('http://archive.ubuntu.com/ubuntu ', 'https://mirror.csclub.uwaterloo.ca/ubuntu/ ')
+                expected = expected.replace('http://ports.ubuntu.com/ubuntu-ports/', 'https://mirror.csclub.uwaterloo.ca/ubuntu-ports/')
+                self.assertEqual(actual, expected)
+                first[name] = actual
+            subprocess.run(['sh', str(script), str(root)], check=True)
+            self.assertEqual({name: (root / 'etc/apt' / name).read_text() for name in cases}, first)
+
+    def test_absent_apt_files_do_not_create_or_replace_configuration(self):
+        with tempfile.TemporaryDirectory(prefix='procward-apt-empty-') as directory:
+            subprocess.run(['sh', str(Path(__file__).with_name('ubuntu-apt-mirror.sh')), directory], check=True)
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
 
 if __name__ == '__main__':

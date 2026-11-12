@@ -14,10 +14,11 @@ pub struct Task {
     result: Option<u32>,
 }
 impl Task {
-    pub fn open(raw: u64) -> io::Result<Self> {
+    pub fn open(endpoint: crate::config::ControlEndpoint) -> io::Result<Self> {
         #[cfg(unix)]
         let transport = {
             use std::os::fd::FromRawFd;
+            let crate::config::ControlEndpoint::Fd(raw) = endpoint;
             let raw = i32::try_from(raw)
                 .ok()
                 .filter(|n| *n > 2)
@@ -42,17 +43,23 @@ impl Task {
                 Storage::FileSystem::WriteFile,
                 System::Pipes::{PIPE_NOWAIT, PeekNamedPipe, SetNamedPipeHandleState},
             };
-            let raw = usize::try_from(raw)
-                .ok()
-                .filter(|n| *n != 0)
-                .ok_or_else(|| io::Error::other("invalid control handle"))?;
-            let mut flags = 0;
-            if unsafe { windows_sys::Win32::Foundation::GetHandleInformation(raw as _, &mut flags) }
-                == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            let file = unsafe { File::from_raw_handle(raw as _) };
+            let file = match endpoint {
+                crate::config::ControlEndpoint::Fd(raw) => file_from_crt_fd(raw)?,
+                crate::config::ControlEndpoint::Handle(raw) => {
+                    let raw = usize::try_from(raw)
+                        .ok()
+                        .filter(|n| *n != 0)
+                        .ok_or_else(|| io::Error::other("invalid control handle"))?;
+                    let mut flags = 0;
+                    if unsafe {
+                        windows_sys::Win32::Foundation::GetHandleInformation(raw as _, &mut flags)
+                    } == 0
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    unsafe { File::from_raw_handle(raw as _) }
+                }
+            };
             let mode = PIPE_NOWAIT;
             let mut available = 0;
             let mut written = 0;
@@ -231,5 +238,154 @@ fn scope() -> &'static str {
         "best-effort"
     } else {
         "kernel"
+    }
+}
+
+#[cfg(windows)]
+type InvalidParameterHandler = unsafe extern "C" fn(*const u16, *const u16, *const u16, u32, usize);
+
+// Use the process's CRT, including its inherited STARTUPINFO descriptor table.
+#[cfg(windows)]
+unsafe extern "C" {
+    fn _get_osfhandle(fd: i32) -> isize;
+    fn _close(fd: i32) -> i32;
+    fn _set_thread_local_invalid_parameter_handler(
+        handler: Option<InvalidParameterHandler>,
+    ) -> Option<InvalidParameterHandler>;
+    #[cfg(test)]
+    fn _open_osfhandle(handle: isize, flags: i32) -> i32;
+}
+
+#[cfg(windows)]
+fn crt_handle(fd: i32) -> io::Result<isize> {
+    unsafe extern "C" fn invalid_parameter(
+        _: *const u16,
+        _: *const u16,
+        _: *const u16,
+        _: u32,
+        _: usize,
+    ) {
+    }
+    // Invalid inherited descriptors must return an error, not invoke the CRT's abort handler.
+    // This override is thread-local and restored before any fallible Rust operation.
+    let previous = unsafe { _set_thread_local_invalid_parameter_handler(Some(invalid_parameter)) };
+    let raw = unsafe { _get_osfhandle(fd) };
+    unsafe { _set_thread_local_invalid_parameter_handler(previous) };
+    if raw == -1 || raw == -2 {
+        return Err(io::Error::other("invalid control CRT fd"));
+    }
+    Ok(raw)
+}
+
+#[cfg(windows)]
+fn file_from_crt_fd(raw: u64) -> io::Result<File> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle},
+        System::Threading::GetCurrentProcess,
+    };
+    let fd = i32::try_from(raw)
+        .ok()
+        .filter(|fd| *fd > 2)
+        .ok_or_else(|| io::Error::other("invalid control CRT fd"))?;
+    let handle = crt_handle(fd)?;
+    let mut duplicate = std::ptr::null_mut();
+    let process = unsafe { GetCurrentProcess() };
+    if unsafe {
+        DuplicateHandle(
+            process,
+            handle as _,
+            process,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_handle(duplicate) };
+    // File owns only the duplicate. Leaving the CRT entry open leaks the control
+    // pipe into payloads; closing its raw HANDLE directly leaves a stale CRT entry.
+    if unsafe { _close(fd) } != 0 {
+        return Err(io::Error::other("could not close control CRT fd"));
+    }
+    Ok(file)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
+    use windows_sys::Win32::{
+        Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT},
+        Security::SECURITY_ATTRIBUTES,
+        System::Pipes::CreatePipe,
+    };
+
+    #[test]
+    fn crt_fd_transfer_closes_source_and_never_double_closes_a_reused_slot() {
+        let security = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let (mut read, mut write) = (std::ptr::null_mut(), std::ptr::null_mut());
+        assert_ne!(
+            unsafe { CreatePipe(&mut read, &mut write, &security, 4096) },
+            0
+        );
+        let reader = unsafe { File::from_raw_handle(read) };
+        let mut writer = unsafe { File::from_raw_handle(write) };
+        let fd = unsafe { _open_osfhandle(reader.into_raw_handle() as isize, 0x8000) };
+        assert!(fd > 2);
+        let mut transport = file_from_crt_fd(fd as u64).unwrap();
+        assert!(crt_handle(fd).is_err());
+        let mut flags = 0;
+        assert_ne!(
+            unsafe { GetHandleInformation(transport.as_raw_handle(), &mut flags) },
+            0
+        );
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        writer.write_all(b"x").unwrap();
+        let mut byte = [0];
+        transport.read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"x");
+
+        let replacement = File::open("NUL").unwrap();
+        let replacement =
+            unsafe { _open_osfhandle(replacement.into_raw_handle() as isize, 0x8000) };
+        assert_eq!(replacement, fd);
+        drop(transport);
+        assert!(crt_handle(replacement).is_ok());
+        assert_eq!(unsafe { _close(replacement) }, 0);
+    }
+
+    #[test]
+    fn invalid_crt_fd_is_rejected_without_aborting_or_replacing_the_callers_handler() {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe extern "C" fn handler(
+            _: *const u16,
+            _: *const u16,
+            _: *const u16,
+            _: u32,
+            _: usize,
+        ) {
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let before = CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        let original = unsafe { _set_thread_local_invalid_parameter_handler(Some(handler)) };
+        let result = file_from_crt_fd(2_000_000_000);
+        let restored = unsafe { _set_thread_local_invalid_parameter_handler(original) };
+        assert!(result.is_err());
+        assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), before);
+        assert!(std::ptr::fn_addr_eq(
+            restored.unwrap(),
+            handler as InvalidParameterHandler
+        ));
+        for fd in [0, 1, 2, u64::MAX] {
+            assert!(file_from_crt_fd(fd).is_err());
+        }
     }
 }

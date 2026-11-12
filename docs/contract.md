@@ -169,10 +169,19 @@ already omits this notice, with or without `--quiet`.
 
 ## Per-task control, result and cleanup
 
-Use `procward run --control-fd N -- <command>` on Unix, or
-`--control-handle N` on Windows. The endpoint is an inherited duplex Unix-domain
-stream socket or Windows byte-mode duplex named pipe, respectively. It must be
-valid before launch; procward takes ownership and makes it non-inheritable.
+Use `procward run --control-fd N -- <command>` with an inherited Unix descriptor
+or Windows CRT descriptor. Windows also accepts `--control-handle N` for a raw
+inherited HANDLE. These two forms cannot be combined. A CRT descriptor, such as
+Node/Bun's extra `stdio[3]`, is an index in the child's CRT table, not a HANDLE;
+use `--control-fd 3` for that endpoint.
+
+The endpoint is a duplex Unix-domain stream socket or Windows byte-mode duplex
+named pipe. It must be valid before launch; procward takes ownership and makes
+it non-inheritable. On Windows, descriptor mode duplicates the CRT's underlying
+HANDLE without inheritance, closes the source through the CRT, and then uses
+the same endpoint validation and task protocol as raw-HANDLE mode. This avoids
+both an inherited source leak and a stale CRT entry that could close a reused
+HANDLE. It does not add a rendezvous protocol or change stdio.
 Task mode creates no new session/private PTY, even if inherited stdio is a tty.
 The primary's application lifecycle pipe remains separate from task control.
 
@@ -218,7 +227,8 @@ Add `--retain-descendants` to a task-controlled invocation:
 procward run --retain-descendants --control-fd N -- command args
 ```
 
-Windows uses `--control-handle N` instead. The option requires task control and
+Windows also supports `--control-fd N` for an inherited CRT descriptor, or
+`--control-handle N` for a raw HANDLE. The option requires task control and
 cannot be repeated. Without it, primary exit still starts cleanup exactly as
 before; standalone `run` and existing task invocations retain their behavior.
 

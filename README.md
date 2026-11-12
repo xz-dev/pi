@@ -47,8 +47,10 @@ quiet mode does not change ownership or cleanup behavior.
 Task controllers can add `--retain-descendants` to receive the primary result
 while ordinary background work continues under ownership. The tree ends on
 natural completion, cancellation or owner/controller loss. This option requires
-`--control-fd` (Unix) or `--control-handle` (Windows); it does not detach or
-redirect the command. See the [task contract](docs/contract.md#retaining-ordinary-task-descendants).
+`--control-fd` (Unix descriptor or Windows CRT descriptor) or
+`--control-handle` (Windows raw HANDLE); it does not detach or redirect the command.
+Windows controllers using ordinary extra inherited stdio, such as Node's
+`stdio[3]`, use `--control-fd 3`, not `--control-handle 3`. See the [task contract](docs/contract.md#retaining-ordinary-task-descendants).
 
 ## Development
 

@@ -5,6 +5,19 @@ The Linux paths in `ci.yml` and `release.yml` use the local composite action
 successful remote matrix**. Actual CI and non-publishing release runs must pass
 before integration/release. Local `ci/vm-test.py` remains supported and unchanged.
 
+## Signed Ubuntu package mirror
+
+Canonical's 2026-11-11 mirror DNS outage stopped the provider's QEMU install
+before a guest or test could start; the independent runtime budgets did not
+expire. See [the runner incident](https://github.com/actions/runner-images/issues/15296).
+Both the disposable Ubuntu runner and Ubuntu guest now use Waterloo's registered
+[Ubuntu archive mirror](https://launchpad.net/ubuntu/+mirror/mirror.csclub.uwaterloo.ca-archive),
+including its `ubuntu-ports` archive. `ci/ubuntu-apt-mirror.sh` changes only archive
+URLs, retaining suites, components, existing `Signed-By` keyrings and APT signature
+verification. It does not install packages, change DNS, add keys or allow unsigned
+repositories. The existing APT commands still fetch and verify packages; Alpine's
+APK setup is unchanged. No product/VM timeout, resource or acceptance gate changes.
+
 ## Matrix and official targets
 
 | Exact Rust target | Full-system image | GitHub runner | Ordinary CI profile |
