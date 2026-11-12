@@ -140,13 +140,23 @@ test("runtime staging installs exact locked closure only in CI, verifies version
 				readFileSync(join(work, path), "utf8"),
 				readFileSync(new URL(`../${path}`, import.meta.url), "utf8"),
 			);
-		const runtime = join(work, "packages", "coding-agent", "src", "core", "exec.ts");
+		// The staged runtime gate and fixtures must be the current-design files, byte for byte.
+		for (const [stagedPath, sourcePath] of [
+			["packages/coding-agent/test/windows-owner-runtime.mjs", "fixtures/owner/windows-runtime.mjs"],
+			["packages/coding-agent/test/windows-owner.cs", "fixtures/owner/windows-owner.cs"],
+			["packages/coding-agent/test/windows-ipc.mjs", "fixtures/owner/windows-ipc.mjs"],
+		])
+			assert.equal(
+				readFileSync(join(work, stagedPath), "utf8"),
+				readFileSync(new URL(`../${sourcePath}`, import.meta.url), "utf8"),
+			);
+		const runtime = join(work, "packages", "coding-agent", "test", "windows-owner-runtime.mjs");
 		const imports = [...readFileSync(runtime, "utf8").matchAll(/\bfrom\s+["'](\.[^"']+)["']/g)];
 		assert.ok(imports.length > 0, "runtime gate must exercise staged relative imports");
 		for (const [, specifier] of imports)
 			assert.equal(
 				readFileSync(resolve(dirname(runtime), specifier), "utf8"),
-				readFileSync(new URL(specifier, new URL("../packages/coding-agent/src/core/exec.ts", import.meta.url)), "utf8"),
+				readFileSync(resolve(fileURLToPath(new URL("./fixtures/owner", import.meta.url)), specifier), "utf8"),
 			);
 		for (const field of ["version", "resolved", "integrity"]) {
 			const wrong = structuredClone(installedLock);

@@ -4,6 +4,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
+function alive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		if (error.code === "ESRCH") return false;
+		throw error;
+	}
+}
 const quote = (value) => `'${value.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`;
 async function challenge(directory) {
 	const nonce = randomBytes(16).toString("hex");
@@ -75,6 +84,29 @@ export async function runInstalledOwnerContract(context, { runtime, fixtures, di
 	const survivorAfterCancellation = await challenge(directories[1]);
 	assert.notEqual(survivorAfterCancellation, acknowledged[1]);
 	assert(!existsSync(join(directories[0], "finished")), "cancelled worker exited through its natural-release gate");
+	// Bash tool timeout cancels through the same owned scope, including detached descendants.
+	const timeoutDirectory = join(directory, "timeout");
+	mkdirSync(timeoutDirectory);
+	const timeoutCommand = `${quote(runtime)} ${quote(join(fixtures, "descendant.mjs"))} timeout-primary ${quote(timeoutDirectory)}`;
+	const timedOut = await context.executeTool("bash", { command: timeoutCommand, timeout: 3 });
+	assert.equal(timedOut.isError, true, JSON.stringify(timedOut));
+	assert.match(JSON.stringify(timedOut.result), /Command timed out after 3 seconds/);
+	const timeoutLeaf = Number(readFileSync(join(timeoutDirectory, "leaf.pid"), "utf8"));
+	assert(Number.isSafeInteger(timeoutLeaf) && timeoutLeaf > 0);
+	const cleanupDeadline = performance.now() + 7000;
+	for (;;) {
+		const listing = await context.executeTool("process_list", {});
+		const stillListed = listing.result.structuredContent.processes.some(
+			(entry) => entry.kind === "task" && entry.command.includes(timeoutDirectory.replaceAll("\\", "/")),
+		);
+		if (!stillListed && !alive(timeoutLeaf)) break;
+		assert(performance.now() < cleanupDeadline, "timed-out owned scope kept its task or detached descendant");
+		await delay(20);
+	}
+	assert(
+		alive(Number(readFileSync(join(directories[1], "leaf.pid"), "utf8"))),
+		"timeout cleanup killed an unrelated owned task",
+	);
 	return {
 		foreground,
 		selfOwnerPid: self.procwardPid,
@@ -84,6 +116,7 @@ export async function runInstalledOwnerContract(context, { runtime, fixtures, di
 		causalAfter1600ms: acknowledged,
 		cancellation: results,
 		survivorAfterCancellation,
+		timeout: { leafPid: timeoutLeaf, cleaned: true },
 		survivorPid: Number(readFileSync(join(directories[1], "leaf.pid"), "utf8")),
 	};
 }

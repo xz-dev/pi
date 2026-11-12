@@ -219,7 +219,9 @@ export function assertOwnerLifecycleRows(evidence, os, { allowDevelopmentHelper 
 				proof.cancellation[1].scope !== "kernel" ||
 				proof.cancellation[1].exitCode !== 23 ||
 				!/^[0-9a-f]{32}$/.test(proof.survivorAfterCancellation ?? "") ||
-				proof.survivorAfterCancellation === proof.causalAfter1600ms?.[1]
+				proof.survivorAfterCancellation === proof.causalAfter1600ms?.[1] ||
+				proof.timeout?.cleaned !== true ||
+				!Number.isSafeInteger(proof.timeout.leafPid)
 			)
 				throw new Error(`installed ownership tool chain unconfirmed: ${row.name}`);
 		}

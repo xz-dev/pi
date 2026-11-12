@@ -17,10 +17,18 @@ function fixture() {
 	const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
 	mkdirSync(source);
 	writeFileSync(join(source, "package-lock.json"), JSON.stringify(lock));
-	for (const name of WINDOWS_OWNER_GATE_SOURCES) {
-		const file = join(source, "packages", "coding-agent", name);
+	for (const name of [
+		...WINDOWS_OWNER_GATE_SOURCES,
+		"scripts/fixtures/owner/windows-runtime.mjs",
+		"scripts/fixtures/owner/windows-owner.cs",
+		"scripts/fixtures/owner/windows-ipc.mjs",
+	]) {
+		const file = name.startsWith("scripts/") ? join(source, name) : join(source, "packages", "coding-agent", name);
 		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, `current:${name}\n`);
+		writeFileSync(
+			file,
+			name.startsWith("scripts/") ? readFileSync(new URL(`../${name}`, import.meta.url)) : `current:${name}\n`,
+		);
 	}
 	return { directory, source, work, lock };
 }
@@ -62,9 +70,17 @@ test("Windows staging accepts only actual procward consumer sources, not deleted
 				readFileSync(join(f.work, "packages", "coding-agent", name)),
 				readFileSync(join(f.source, "packages", "coding-agent", name)),
 			);
+		for (const [staged, source] of [
+			["test/windows-owner-runtime.mjs", "scripts/fixtures/owner/windows-runtime.mjs"],
+			["test/windows-owner.cs", "scripts/fixtures/owner/windows-owner.cs"],
+			["test/windows-ipc.mjs", "scripts/fixtures/owner/windows-ipc.mjs"],
+		])
+			assert.deepEqual(
+				readFileSync(join(f.work, "packages", "coding-agent", staged)),
+				readFileSync(new URL(`../${source}`, import.meta.url)),
+			);
 		for (const name of [
 			"src/utils/process-owner.ts",
-			"test/windows-owner-runtime.mjs",
 			"test/fixtures/windows-owner.cs",
 			"test/fixtures/windows-owner-ipc.mjs",
 			"test/fixtures/windows-owner-launcher.mjs",

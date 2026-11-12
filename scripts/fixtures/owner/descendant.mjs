@@ -36,6 +36,18 @@ if (mode === "retained-leaf") {
 		await delay(2);
 	}
 	process.exit(23);
+} else if (mode === "timeout-primary") {
+	// A primary that never returns; its detached leaf must die with the timed-out owned scope.
+	const directory = process.argv[3];
+	const leaf = spawn(process.execPath, [process.argv[1], "retained-leaf", directory], {
+		detached: true,
+		stdio: "ignore",
+	});
+	leaf.on("error", (error) => {
+		throw error;
+	});
+	leaf.unref();
+	setTimeout(() => process.exit(98), 600_000);
 } else if (mode === "leaf") {
 	writeFileSync(process.env.PI_OWNER_PID_FILE, String(process.pid));
 	setTimeout(() => process.exit(99), 600_000);

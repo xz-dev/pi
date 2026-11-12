@@ -1,8 +1,10 @@
 # Installed procward ownership acceptance
 
-Keep observable guarantees, not the removed guardian/K/lease/attach/permit API.
-The old38-name runtime gate remains fail-closed until every applicable guarantee
-below has a current executable owner; reducing its count is not acceptance.
+The old 38-entry runtime list tested the removed guardian framework: K signal, lease
+loss, guardian/bootstrap/launcher deaths, attach phases and permit expiry no longer
+exist in the two-level procward design and are intentionally not counted. The 38th
+entry count must never be used as evidence again. The current runtime gate keeps
+the observable guarantees that still bind:
 
 | Guarantee | Native responsibility | Pi and installed responsibility |
 | --- | --- | --- |

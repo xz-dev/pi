@@ -22,25 +22,15 @@ export const WINDOWS_OWNER_GATE_SOURCES = [
 	"src/utils/text.ts",
 ];
 export const WINDOWS_OWNER_TEST_NAMES = [
-	"shipped CLI respawn and console/ConPTY Ctrl-C",
-	"unsigned statuses, exact separate binary stdio and Unicode/empty argv",
-	...["tree", "nested"].flatMap((mode) =>
-		["exit", "K", "lease-loss", "guardian-death"].map(
-			(stop) => `${mode}: ${stop} empties all recursive/new-console descendants; unrelated same-user peer lives`,
-		),
-	),
-	...[false, true].map((lost) => `delayed native cleanup (>50 ms), lease loss=${lost} cannot fake acknowledgment`),
-	...["attach-opening", "attach-opened"].map((phase) => `${phase}: worker exit revokes identity before assignment`),
+	"shipped CLI help and console/ConPTY Ctrl-C",
+	"full native u32 status, exact stdio bytes, Unicode/empty argv, cwd/env/stdin",
+	"primary exit empties all recursive/new-console descendants; unrelated same-user peer lives",
+	"CANCEL and controller EOF cancel the whole scope",
 	"breakaway is denied",
-	"fault flags disabled without opt-in; assignment/transport fail before payload; query failure never sends C",
-	...["spawned", "transferred", "received", "assigned", "ready", "launch"].flatMap((phase) =>
-		["guardian", "bootstrap", "launcher-death"].map(
-			(victim) => `${phase}: ${victim} death revokes launch or contains payload; no Job/control handle leak`,
-		),
-	),
-	"direct Node/Bun fork message, TCP handle transfer and disconnect through attached Job",
-	"exec caller abort and timeout use lease, never terminate guardian before cleanup",
-	"test phase permit expiry is bounded and cannot authorize payload",
+	"absent executable and invalid control request fail closed before payload",
+	"retained descendants outlive the primary and CANCEL completes cleanup",
+	"Node/Bun fork message, TCP handle transfer and disconnect through the Job",
+	"execCommand abort and timeout cancel the owned tree before the caller returns",
 	"Windows PowerShell and Git Bash preserve shell-specific quoting",
 ];
 
@@ -182,6 +172,16 @@ export function stageWindowsOwnerGate(work, { env, run, source = fileURLToPath(n
 		const destination = join(work, "packages", "coding-agent", file);
 		mkdirSync(dirname(destination), { recursive: true });
 		writeFileSync(destination, bytes);
+	}
+	// Stage the current-design runtime gate and its fixtures next to the staged product sources.
+	for (const [fixture, destination] of [
+		["windows-runtime.mjs", "windows-owner-runtime.mjs"],
+		["windows-owner.cs", "windows-owner.cs"],
+		["windows-ipc.mjs", "windows-ipc.mjs"],
+	]) {
+		const target = join(work, "packages", "coding-agent", "test", destination);
+		mkdirSync(dirname(target), { recursive: true });
+		copyFileSync(join(source, "scripts", "fixtures", "owner", fixture), target);
 	}
 	mkdirSync(join(work, "scripts"), { recursive: true });
 	copyFileSync(fileURLToPath(import.meta.url), join(work, "scripts", "smoke-windows-owner-gate.mjs"));

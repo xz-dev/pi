@@ -20,7 +20,14 @@ async function waitFor(predicate) {
 
 // Mock only the public tool boundary. These tests do not attest native cleanup;
 // the installed CLI must supply the real process_list/process_kill implementations.
-async function contract({ unconfirmed = false, self = true } = {}) {
+async function exitedPid() {
+	const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+	await once(child, "close");
+	return child.pid;
+}
+
+async function contract({ unconfirmed = false, self = true, timeoutLeafSurvives = false } = {}) {
+	const timeoutLeaf = timeoutLeafSurvives ? process.pid : await exitedPid();
 	const directory = mkdtempSync(join(tmpdir(), "pi-installed-contract-"));
 	const tasks = new Map();
 	const calls = [];
@@ -35,11 +42,17 @@ async function contract({ unconfirmed = false, self = true } = {}) {
 		const context = {
 			async executeTool(name, args) {
 				calls.push({ name, args });
+				if (name === "bash" && args.timeout !== undefined) {
+					assert.equal(args.timeout, 3);
+					writeFileSync(join(directory, "timeout", "leaf.pid"), String(timeoutLeaf));
+					return { isError: true, result: { content: [{ type: "text", text: "Command timed out after 3 seconds" }] } };
+				}
 				if (name === "bash") {
 					const id = ++counter;
 					const dir = join(directory, id === 1 ? "first" : "survivor");
 					writeFileSync(join(dir, "ready"), "ready");
-					writeFileSync(join(dir, "leaf.pid"), String(100 + id));
+					// The survivor must be a live process: timeout cleanup may not kill unrelated owned work.
+					writeFileSync(join(dir, "leaf.pid"), String(id === 1 ? 101 : process.pid));
 					tasks.set(id, {
 						id,
 						kind: "task",
@@ -88,11 +101,12 @@ async function contract({ unconfirmed = false, self = true } = {}) {
 			toolCallId: "installed-owner",
 		});
 		assert.deepEqual(result.foreground, [23, 23]);
-		assert.equal(result.survivorPid, 102);
+		assert.equal(result.survivorPid, process.pid);
+		assert.deepEqual(result.timeout, { leafPid: timeoutLeaf, cleaned: true });
 		assert.notEqual(result.causalAfter1600ms[1], result.survivorAfterCancellation);
 		assert.deepEqual(
 			calls.map((call) => call.name),
-			["bash", "bash", "process_list", "process_kill", "process_list"],
+			["bash", "bash", "process_list", "process_kill", "process_list", "bash", "process_list"],
 		);
 		return result;
 	} finally {
@@ -108,6 +122,27 @@ test("installed contract never credits unconfirmed cleanup", async () => {
 });
 test("installed contract rejects missing default-on session ownership before claiming success", async () => {
 	await assert.rejects(contract({ self: false }), /session owner missing/);
+});
+
+test("installed contract rejects a bash timeout whose detached descendant survives", { timeout: 20000 }, async () => {
+	await assert.rejects(contract({ timeoutLeafSurvives: true }), /timed-out owned scope kept/);
+});
+
+test("timeout workload keeps its primary running with a live detached leaf until killed", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "pi-installed-timeout-"));
+	const child = spawn(process.execPath, [join(fixtures, "descendant.mjs"), "timeout-primary", directory], {
+		stdio: "ignore",
+	});
+	try {
+		await waitFor(() => existsSync(join(directory, "leaf.pid")));
+		assert.equal(child.exitCode, null);
+		process.kill(Number(readFileSync(join(directory, "leaf.pid"), "utf8")), 0);
+	} finally {
+		child.kill("SIGKILL");
+		writeFileSync(join(directory, "release"), "release");
+		await waitFor(() => existsSync(join(directory, "finished")));
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test("retained Node workload returns23 before its detached worker completes and accepts causal work", async () => {

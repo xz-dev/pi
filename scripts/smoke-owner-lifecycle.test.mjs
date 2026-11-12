@@ -75,6 +75,7 @@ async function dropped(
 				{ id: 1, status: "confirmed", exitCode: 23, scope: "kernel", unconfirmed: false },
 			],
 			survivorAfterCancellation: "3".repeat(32),
+			timeout: { leafPid: 30, cleaned: true },
 		};
 		for (const name of ["normal-installed-task", "kill-installed-task"])
 			childRows.push({ ...structuredClone(childRows[0]), name, pi: { bun: "1.3.14", installed } });
