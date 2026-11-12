@@ -165,16 +165,19 @@ export class AgentSessionRuntime {
 	}
 
 	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
-		// Settle any active response first so the aborted turn (including tool
-		// results) is persisted to the outgoing session before it is replaced.
-		await this.session.abort();
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason,
-			targetSessionFile,
-		});
-		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		this.session.prepareForShutdown();
+		try {
+			// Persist the aborted turn before replacing the outgoing session.
+			await this.session.abort();
+			await emitSessionShutdownEvent(this.session.extensionRunner, {
+				type: "session_shutdown",
+				reason,
+				targetSessionFile,
+			});
+			this.beforeSessionInvalidate?.();
+		} finally {
+			await this.session.dispose();
+		}
 	}
 
 	private apply(result: CreateAgentSessionRuntimeResult): void {
@@ -413,14 +416,21 @@ export class AgentSessionRuntime {
 	 * is saved would lose the login (#11692).
 	 */
 	async dispose(): Promise<void> {
-		await this.session.abort();
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason: "quit",
-		});
-		this.beforeSessionInvalidate?.();
-		this.session.dispose();
-		await this.services.modelRuntime.settleCredentialWrites();
+		this.session.prepareForShutdown();
+		try {
+			await this.session.abort();
+			await emitSessionShutdownEvent(this.session.extensionRunner, {
+				type: "session_shutdown",
+				reason: "quit",
+			});
+			this.beforeSessionInvalidate?.();
+		} finally {
+			try {
+				await this.session.dispose();
+			} finally {
+				await this.services.modelRuntime.settleCredentialWrites();
+			}
+		}
 	}
 }
 
