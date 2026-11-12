@@ -2218,12 +2218,14 @@ export class AgentSession {
 		// Extension commands manage their own LLM interaction via pi.sendMessage()
 		if (expandPromptTemplates && text.startsWith("/")) {
 			const handled = await this._tryExecuteExtensionCommand(text);
-			this._assertNotShuttingDown();
 			if (handled) {
-				// Extension command executed, no prompt to send
+				// Extension command executed, no prompt to send. A command may legitimately
+				// replace this session (newSession/fork/switchSession), shutting it down (#2860).
 				preflightResult?.("handled");
 				return;
 			}
+			// Unhandled text would continue into the agent; never after shutdown began.
+			this._assertNotShuttingDown();
 		}
 
 		if (this._compactionAbortController !== undefined || this._branchSummaryAbortController !== undefined) {
