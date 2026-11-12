@@ -191,6 +191,9 @@ jobs:
           }
           Set-Location $env:GITHUB_WORKSPACE
           $env:PI_OFFLINE = '1'
+          # pwsh prepends PowerShell 7 module paths; Windows PowerShell 5.1 children used for the
+          # nonadmin credential drop must see the machine module path, as in the bash release smoke.
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
           node scripts/smoke-installed-owner.mjs "$out/build/pi-windows-x64-baseline.exe" windows-x64-baseline "$out/installed-development.json" "$out/procward-development.exe" 1> "$out/installed-stdout.log" 2> "$out/installed-stderr.log"
           $code = $LASTEXITCODE
           "installed_exit=$code" | Set-Content "$out/exit.txt"
