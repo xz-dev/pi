@@ -22,11 +22,13 @@ contains no transport or process manager. `descendant.mjs` is only a gated
 workload. Unit mocks validate fixture assertions, not native cleanup.
 
 The existing scratch workflow has an explicitly selected installed-only phase:
-one canonical Windows x64 build, not another transport matrix. Before formal
-native release/pinning, it may use the existing source-built development helper
-for the two installed-task rows. `smoke-installed-owner.mjs` can report only
-`passed-development-only`; the regular final validator rejects that marker.
-Four ordinary CLI rows still use their embedded helper and populate/check the
-real resource cache. Do not count this development result as final Windows,
-SDK/MCP, console/IPC or release acceptance. The default final gate retains its
-original watchdogs and requires no helper override.
+one canonical Windows x64 build, not another transport matrix. It runs the
+regular `smoke-owner-lifecycle.mjs` validator against the helper embedded from
+the authenticated vendored source; no helper override is set, and any row that
+reports one is rejected. A pass covers this one target's installed lifecycle,
+public tools and runtime gate, not SDK/MCP, other platforms or release
+publication. The final gate keeps its original watchdogs.
+
+`windows-runtime.mjs` (staged as `test/windows-owner-runtime.mjs`) is the
+current Windows runtime gate. Its owned-versus-direct comparisons keep the
+tested Bun public-status boundary (low byte) without narrowing native X.

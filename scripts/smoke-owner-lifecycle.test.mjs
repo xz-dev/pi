@@ -10,7 +10,6 @@ import { windowsOwnerGateDependencies } from "./smoke-windows-owner-gate.mjs";
 import {
 	artifactBunFromOwnerRows,
 	assertOwnerLifecycle,
-	assertOwnerLifecycleRows,
 	ownerPrivilegeDropRequired,
 	smokeOwnerLifecycleAsNonadmin,
 } from "./smoke-owner-lifecycle.mjs";
@@ -437,11 +436,11 @@ test("provision failure and existing account fail closed without a privileged fa
 	}
 });
 
-test("development helper rows can be examined but never count as final embedded acceptance", async () => {
+test("a helper override never counts as final embedded acceptance", async () => {
 	const { evidence } = await dropped("win32");
+	assert.doesNotThrow(() => assertOwnerLifecycle(evidence, "windows"));
 	evidence.rows.find((row) => row.name === "normal-installed-task").pi.developmentNativeOverride = true;
 	assert.throws(() => assertOwnerLifecycle(evidence, "windows"), /development helper cannot attest/);
-	assert.doesNotThrow(() => assertOwnerLifecycleRows(evidence, "windows", { allowDevelopmentHelper: true }));
 });
 
 test("account cleanup failure is a warning, not acceptance credit or a failed smoke", async () => {

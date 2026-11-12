@@ -15,7 +15,8 @@ if (process.argv[2] === "child") {
 		console.error(detail);
 		process.exit(97);
 	};
-	setTimeout(() => fail("fork IPC deadline"), 10000).unref();
+	// Shorter than the gate's 10s owner bound so a runtime without handle passing fails deterministically.
+	setTimeout(() => fail("fork IPC deadline"), 4000).unref();
 	const child = fork(process.argv[1], ["child"], { execArgv: [], stdio: ["ignore", "ignore", "inherit", "ipc"] });
 	child.on("error", (error) => fail(String(error)));
 	const next = (kind) =>

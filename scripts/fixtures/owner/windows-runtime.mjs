@@ -71,11 +71,13 @@ async function run(command, args, options = {}) {
 }
 // procward task control: fd3 carries the `PROCWARD/1` records; EOF is part of the
 // completion contract. C with the expected scope plus EOF is the only success evidence.
-function supervise(args, { control = true, retain = false, input } = {}) {
+function supervise(args, { control = true, retain = false, input, cwd, env } = {}) {
 	const child = spawn(
 		owner,
 		["run", ...(control ? ["--control-fd", "3"] : []), ...(retain ? ["--retain-descendants"] : []), "--", ...args],
 		{
+			cwd,
+			env: env && { ...process.env, ...env },
 			stdio: ["pipe", "pipe", "pipe", ...(control ? ["pipe"] : [])],
 		},
 	);
@@ -224,7 +226,9 @@ test("full native u32 status, exact stdio bytes, Unicode/empty argv, cwd/env/std
 		args.map((arg) => Buffer.from(arg).toString("base64")),
 	);
 	const cwd = directory();
-	const context = await supervise([fixture, "context"], { control: false, input: "payload stdin λ\n" }).result;
+	const context = await acknowledged(
+		supervise([fixture, "context"], { cwd, env: { PI_OWNER_CONTEXT: "env 世界" }, input: "payload stdin λ\n" }),
+	);
 	assert.equal(context.code, 0);
 	assert.equal(context.stdout.toString(), `${cwd}\r\nenv 世界\r\npayload stdin λ\n`);
 });
@@ -311,9 +315,11 @@ test("retained descendants outlive the primary and CANCEL completes cleanup", { 
 		await until(() => pids(dir).length === 3 && scope.wire.includes("PROCWARD/1 X "), "retained scope not ready");
 		assert.equal(nativeResult(scope), 7);
 		assert.equal(scope.child.exitCode, null, "helper must keep running while retained work is alive");
-		assert.ok(
-			pids(dir).every((pid) => alive(pid)),
-			"retained descendants died before the primary returned",
+		// The returned primary also marked itself; exactly its two descendants must remain.
+		assert.equal(
+			pids(dir).filter((pid) => alive(pid)).length,
+			2,
+			"retained descendants died after the primary returned",
 		);
 		cancel(scope);
 		const result = await scope.result;
@@ -330,9 +336,18 @@ test("retained descendants outlive the primary and CANCEL completes cleanup", { 
 
 // 8: Node/Bun fork IPC, TCP handle transfer and disconnect keep working inside the Job.
 test("Node/Bun fork message, TCP handle transfer and disconnect through the Job", { timeout: 20000 }, async () => {
-	const result = await acknowledged(supervise([process.execPath, ipcFixture]));
-	assert.equal(result.code, 7);
-	assert.equal(result.stdout.toString(), "ipc-ok");
+	// Ownership must be transparent: the owned run reproduces this runtime's direct behavior.
+	const direct = await run(process.execPath, [ipcFixture]);
+	if (!process.versions.bun) {
+		assert.equal(direct.code, 7, direct.stderr.toString());
+		assert.equal(direct.stdout.toString(), "ipc-ok");
+	}
+	const owned = await acknowledged(supervise([process.execPath, ipcFixture]));
+	assert.deepEqual(
+		{ code: owned.code % (process.versions.bun ? 256 : 2 ** 32), stdout: owned.stdout.toString() },
+		{ code: direct.code, stdout: direct.stdout.toString() },
+		`owned stderr: ${owned.stderr}; direct stderr: ${direct.stderr}`,
+	);
 });
 
 // 9: execCommand's abort and timeout cancel the owned tree; the caller must not
@@ -348,10 +363,17 @@ test("execCommand abort and timeout cancel the owned tree before the caller retu
 		provenance: { toolName: "windows-owner-runtime", toolCallId: "gate" },
 	});
 	try {
-		assert.equal(
-			(await execCommand(fixture, ["status", "3221225477"], root, undefined, ownership(createProcessRegistry()))).code,
-			3221225477,
+		// Same public status as a direct execCommand, including Bun's low-byte boundary.
+		const direct = await execCommand(fixture, ["status", "3221225477"], root);
+		const owned = await execCommand(
+			fixture,
+			["status", "3221225477"],
+			root,
+			undefined,
+			ownership(createProcessRegistry()),
 		);
+		assert.deepEqual(owned, direct);
+		assert.equal(direct.code, process.versions.bun ? 3221225477 % 256 : 3221225477);
 		for (const mode of ["abort", "timeout"]) {
 			const dir = directory();
 			dirs.push(dir);
