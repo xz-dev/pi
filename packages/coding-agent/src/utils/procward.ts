@@ -40,6 +40,7 @@ const BOOTSTRAP_NONCE = "PI_PROCWARD_BOOTSTRAP_NONCE";
 let ownerLossObserver: OwnerLossObserver | undefined;
 let ownerLossDeadline: NodeJS.Timeout | undefined;
 let shutdownPending = false;
+let bridgeSignalSent = false;
 
 /** Arm the owner-loss budget before entering any mode's shutdown/re-entry guard. */
 export function prepareProcessShutdown(): void {
@@ -53,6 +54,15 @@ export function processShutdownPending(): boolean {
 	const observedAt = ownerLossObserver?.observedAt;
 	if (observedAt !== undefined) armOwnerLossDeadline(observedAt);
 	return shutdownPending || observedAt !== undefined;
+}
+
+/**
+ * Whether another shutdown signal should skip graceful cleanup. The owner-loss bridge sends
+ * one SIGTERM to itself; native then sends its own TERM. That pair is a single request, so it
+ * must not force exit before hooks run; the absolute owner-loss deadline still bounds it.
+ */
+export function repeatedShutdownSignal(count: number): boolean {
+	return count > (bridgeSignalSent ? 2 : 1);
 }
 
 function armOwnerLossDeadline(observedAt: number): void {
@@ -242,5 +252,8 @@ function defaultOwnerLoss(reason: string, observedAt: number): void {
 	const alreadyClosing = shutdownPending;
 	shutdownPending = true;
 	process.stderr.write(`pi: process owner gone (${reason}); shutting down\n`);
-	if (!alreadyClosing) process.kill(process.pid, "SIGTERM");
+	if (!alreadyClosing) {
+		bridgeSignalSent = true;
+		process.kill(process.pid, "SIGTERM");
+	}
 }
