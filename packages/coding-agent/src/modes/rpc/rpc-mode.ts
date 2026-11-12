@@ -25,7 +25,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
-import { prepareProcessShutdown, repeatedShutdownSignal } from "../../utils/procward.ts";
+import { exitOnRepeatedShutdownSignal, prepareProcessShutdown } from "../../utils/procward.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
@@ -387,10 +387,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				killTrackedDetachedChildren();
 				if (!shuttingDown) {
 					void shutdown(exitCode, signal);
-				} else if (repeatedShutdownSignal(signalCount)) {
+				} else {
 					// Process managers often close stdin and send SIGTERM together, so one signal
 					// during shutdown is not a request to skip cleanup; a repeated one is.
-					process.exit(exitCode);
+					exitOnRepeatedShutdownSignal(signalCount, exitCode);
 				}
 			});
 		}

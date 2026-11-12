@@ -137,6 +137,7 @@ async function run(scenario: string, runtime = process.execPath): Promise<Receip
 					child.kill("SIGCONT");
 					setTimeout(() => child.kill("SIGTERM"), 100).unref();
 				} else if (scenario.startsWith("already-closing")) child.stdin?.end();
+				else if (scenario.startsWith("external-repeat")) child.kill("SIGTERM");
 				else if (scenario === "native-term-before-loss") {
 					// The main thread can handle native TERMs before the worker publishes the loss.
 					child.kill("SIGTERM");
@@ -171,6 +172,8 @@ async function run(scenario: string, runtime = process.execPath): Promise<Receip
 			) {
 				setTimeout(loss, 150).unref();
 			}
+			// A user or process manager repeats SIGTERM while the owner is alive and the hook hangs.
+			if (event.event === "hook-start" && scenario.startsWith("external-repeat")) child.kill("SIGTERM");
 			if (event.event === "message-held") {
 				// Loss is already published in shared memory, but no JS loss callback ran.
 				child.kill("SIGCONT");
@@ -251,6 +254,19 @@ describe.skipIf(process.platform === "win32")("production owner-loss bridge → 
 			expect(receipt.signal).toBe("SIGKILL");
 			expect(receipt.timeline.filter((event) => event.event === "hook-start")).toHaveLength(1);
 			assertBound(receipt, 7000);
+		},
+		16_000,
+	);
+	test.each(["external-repeat", "external-repeat-print"])(
+		"a repeated external SIGTERM under a live owner still forces exit (%s)",
+		async (scenario) => {
+			const receipt = await run(scenario);
+			expect(receipt.code).toBe(143);
+			expect(receipt.stderr).not.toContain("owner gone");
+			const ready = receipt.timeline.find((event) => event.event === "mode-ready")!;
+			// The hook never yields; only the repeated signal can end the process.
+			expect(receipt.timeline.find((event) => event.event === "hook-end")).toBeUndefined();
+			expect(receipt.timeline.at(-1)!.at - ready.at).toBeLessThan(2000);
 		},
 		16_000,
 	);

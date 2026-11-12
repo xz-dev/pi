@@ -55,20 +55,34 @@ export function processShutdownPending(): boolean {
 	return shutdownPending || observedAt !== undefined;
 }
 
+// procward publishes owner loss before it signals Pi, but the worker can report that loss
+// shortly after the main thread handles the signal.
+const OWNER_LOSS_PUBLISH_WINDOW_MS = 250;
+
 /**
- * Whether another shutdown signal should skip graceful cleanup. Under a validated procward
- * owner, its TERMs and the owner-loss bridge's never ask to skip hooks, and they can arrive
- * before the worker publishes the loss. procward's grace and fatal deadlines, or after owner
- * loss the absolute owner-loss deadline, bound shutdown instead. Without an owner a repeated
- * signal still forces exit, as before.
+ * Exit for a repeated shutdown signal, as without ownership, unless the signals belong to owner
+ * loss. procward and the owner-loss bridge can each deliver SIGTERM; those never skip shutdown
+ * hooks, and the absolute owner-loss deadline bounds them instead. A repeated signal from a user
+ * or process manager while the owner is alive still forces exit, after a short window in which
+ * the worker can publish a loss that is already on the lifecycle pipe.
  */
-export function repeatedShutdownSignal(count: number): boolean {
-	if (ownerLossObserver) {
-		const observedAt = ownerLossObserver.observedAt;
-		if (observedAt !== undefined) armOwnerLossDeadline(observedAt);
-		return false;
+export function exitOnRepeatedShutdownSignal(count: number, exitCode: number): void {
+	if (count < 2) return;
+	const observer = ownerLossObserver;
+	if (!observer) {
+		process.exit(exitCode);
+		return;
 	}
-	return count > 1;
+	const ownerLoss = (): boolean => {
+		const observedAt = observer.observedAt;
+		if (observedAt === undefined) return false;
+		armOwnerLossDeadline(observedAt);
+		return true;
+	};
+	if (ownerLoss()) return;
+	setTimeout(() => {
+		if (!ownerLoss()) process.exit(exitCode);
+	}, OWNER_LOSS_PUBLISH_WINDOW_MS);
 }
 
 function armOwnerLossDeadline(observedAt: number): void {
