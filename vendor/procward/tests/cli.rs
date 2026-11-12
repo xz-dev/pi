@@ -304,6 +304,66 @@ fn quiet_preserves_command_streams_and_visible_exec_errors() {
 }
 
 #[test]
+fn startup_error_is_visible_when_no_diagnostic_thread_can_be_created() {
+    use std::os::unix::process::CommandExt;
+    for quiet in [false, true] {
+        let mut cmd = command();
+        cmd.arg("run");
+        if quiet {
+            cmd.arg("--quiet");
+        }
+        cmd.args(["--", "/bin/sh", "-c", "printf unexpected-payload"]);
+        // Keep this child's captured pipe owned by its eventual UID, just
+        // as ordinary callers do; then deny processes/threads after dropping root.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::fchown(2, 10001, 10001) == -1
+                    || libc::setgroups(0, std::ptr::null()) == -1
+                    || libc::setgid(10001) == -1
+                    || libc::setuid(10001) == -1
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                let limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_NPROC, &limit) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = Run::start(cmd).finish();
+        assert_eq!(output.status.code(), Some(125), "{output:?}");
+        assert!(output.stdout.is_empty(), "payload ran: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("(os error 11)"),
+            "quiet={quiet} lost the startup diagnostic: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn diagnostic_does_not_change_inherited_stderr_pipe_flags() {
+    let (read, write) = rustix::pipe::pipe().unwrap();
+    let flags = rustix::fs::fcntl_getfl(&write).unwrap();
+    assert!(!flags.contains(rustix::fs::OFlags::NONBLOCK));
+    let status = command()
+        .arg("invalid-command")
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(write.try_clone().unwrap()))
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(125));
+    assert_eq!(rustix::fs::fcntl_getfl(&write).unwrap(), flags);
+    drop(write);
+    let mut bytes = Vec::new();
+    fs::File::from(read).read_to_end(&mut bytes).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("expected run"));
+}
+
+#[test]
 fn quiet_rejects_duplicate_options_without_launching_payload() {
     let scratch = Scratch::new();
     let marker = scratch.0.join("payload");
