@@ -18,11 +18,12 @@ export function inspectOwnerArtifact(embeddedRoot, resourcesRoot) {
 	return { owner, ownerSha256: createHash("sha256").update(embedded).digest("hex"), artifactVersion: pkg.version, artifactTarget: target.id };
 }
 
-export default async function () {
+// Pi calls the factory with its API only; unit drivers may inject an inspector for stub executables.
+export default async function (_pi, { inspect = inspectOwnerArtifact } = {}) {
 	let user;
 	try { user = String(userInfo().uid); } catch { user = process.env.USER || process.env.USERNAME || "unknown"; }
 	const embeddedRoot = process.platform === "win32" ? "B:/~BUN/root" : "/$bunfs/root";
-	const artifact = inspectOwnerArtifact(embeddedRoot, join(tmpdir(), `pi-resources-${user}`));
+	const artifact = inspect(embeddedRoot, join(tmpdir(), `pi-resources-${user}`));
 	const child = spawn(process.env.PI_OWNER_RUNTIME, [join(process.env.PI_OWNER_FIXTURES, "descendant.mjs"), "bridge"], { stdio: "ignore" });
 	await new Promise((resolve, reject) => {
 		child.once("error", reject);

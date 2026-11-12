@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { passedOwnerRows } from "./fixtures/owner-lifecycle.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,7 +17,8 @@ import { pathToFileURL } from "node:url";
 const exit = process.exit.bind(process);
 const cleanup = () => { try { process.kill(Number(readFileSync(process.env.PI_OWNER_PID_FILE, "utf8")), "SIGKILL"); } catch {} };
 ${cleanup ? 'process.exit = (code) => { cleanup(); exit(code); }; process.on("SIGTERM", () => { cleanup(); exit(143); });' : ""}
-await (await import(pathToFileURL(process.argv.at(-1)).href)).default();
+// A stub executable has no embedded package; give the real fixture a fixed identity.
+await (await import(pathToFileURL(process.argv.at(-1)).href)).default(undefined, { inspect: () => ({ owner: "stub", ownerSha256: "0".repeat(64), artifactVersion: "0.0.0", artifactTarget: "linux-x64-gnu-baseline" }) });
 `);
 	return driver;
 }
@@ -324,7 +326,7 @@ test("owner lifecycle fails leaked descendants without polling or expiry credit"
 });
 
 test("owner lifecycle acceptance rejects elevated identity, missing rows, peer loss, and Windows leaks", () => {
-	const evidence = { status: "passed", artifactBunVersion: "1.3.14", identity: { elevated: false, mediumIntegrity: true }, rows: ["normal-double-fork", "kill-double-fork", "normal-setsid", "kill-setsid"].map((name) => ({ name, pi: { bun: "1.3.14" }, status: "passed", aliveBefore: true, aliveAfter: false, peerAlive: true, immediateChecks: 1 })) };
+	const evidence = { status: "passed", artifactBunVersion: "1.3.14", identity: { elevated: false, mediumIntegrity: true }, rows: passedOwnerRows("windows") };
 	assertOwnerLifecycle(evidence, "windows");
 	for (const mutate of [
 		(value) => { value.identity.elevated = true; },
@@ -340,6 +342,7 @@ test("owner lifecycle acceptance rejects elevated identity, missing rows, peer l
 		assert.throws(() => assertOwnerLifecycle(changed, "windows"), /owner lifecycle/);
 	}
 	assert.throws(() => assertOwnerLifecycle(evidence, "darwin"), /inventory/);
+	evidence.rows = passedOwnerRows("linux");
 	evidence.rows.push({ ...evidence.rows[0], name: "darwin-fast-escape", aliveAfter: true, status: "known-limitation", limitation: "unseen setsid reparent before sweep" });
 	assertOwnerLifecycle(evidence, "darwin");
 });

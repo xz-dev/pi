@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { INSTALLED_TASK_PROOF } from "./fixtures/owner-lifecycle.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -63,19 +64,7 @@ async function dropped(
 	);
 	const childRows = structuredClone(rows);
 	if (platform === "win32") {
-		const installed = {
-			foreground: [23, 23],
-			selfOwnerPid: 20,
-			taskIds: [1, 2],
-			taskOwnerPids: [21, 22],
-			causalAfter1600ms: ["1".repeat(32), "2".repeat(32)],
-			cancellation: [
-				{ id: 0, status: "not-cancellable" },
-				{ id: 1, status: "confirmed", exitCode: 23, scope: "kernel", unconfirmed: false },
-			],
-			survivorAfterCancellation: "3".repeat(32),
-			timeout: { leafPid: 30, cleaned: true },
-		};
+		const installed = structuredClone(INSTALLED_TASK_PROOF);
 		for (const name of ["normal-installed-task", "kill-installed-task"])
 			childRows.push({ ...structuredClone(childRows[0]), name, pi: { bun: "1.3.14", installed } });
 	}
