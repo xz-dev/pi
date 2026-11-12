@@ -53,12 +53,21 @@ def dependencies(binary, target):
             if "NEEDED" in text or "INTERP" in text:
                 raise RuntimeError(f"musl binary is not fully static: {binary}\n{text}")
         else:
-            allowed = {"libc.so.6", "libgcc_s.so.1", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "libutil.so.7", "libthr.so.3", "libc.so.7", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1", "ld-linux-riscv64-lp64d.so.1"}
-            needed = re.findall(r"\(NEEDED\).*\[([^]]+)\]", text)
-            if set(needed) - allowed:
+            needed = needed_libraries(text)
+            if not needed or set(needed) - ALLOWED_NEEDED:
                 raise RuntimeError(f"unexpected dynamic dependency in {binary}: {needed}")
     print(f"Dependencies: {binary}\n{text}", flush=True)
     return text
+
+
+# FreeBSD's libutil soname changes between releases (.so.9 on 14, .so.10 on 15), so a
+# portable binary must not need it.
+ALLOWED_NEEDED = {"libc.so.6", "libgcc_s.so.1", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "libthr.so.3", "libc.so.7", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1", "ld-linux-riscv64-lp64d.so.1"}
+
+
+def needed_libraries(readelf_text):
+    # GNU and LLVM readelf print "(NEEDED)"; FreeBSD 14's ELF Tool Chain readelf prints "NEEDED".
+    return re.findall(r"\bNEEDED\)?\s.*?\[([^]]+)\]", readelf_text)
 
 
 def debug_symbols(binary, target):
