@@ -11,6 +11,8 @@
 
 # Archived patch artifacts preserve whitespace exactly
 packages/agent/docs/**/*.diff -whitespace
+# Preserve the authenticated procward source and its vendored dependencies byte-for-byte.
+vendor/procward/** -whitespace
 
 # Common binary assets
 *.png binary

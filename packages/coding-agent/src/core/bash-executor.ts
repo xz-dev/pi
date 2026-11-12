@@ -10,6 +10,7 @@ import type { WriteStream } from "node:fs";
 import { splitIncompleteAnsiSuffix, stripAnsi } from "../utils/ansi.ts";
 import { createOutputFileStream } from "../utils/output-files.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
+import type { OwnedTaskProvenance } from "./process-registry.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
 
@@ -18,6 +19,8 @@ import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
 // ============================================================================
 
 export interface BashExecutorOptions {
+	/** Origin of an owned user-bash execution. */
+	provenance?: OwnedTaskProvenance;
 	/** Callback for streaming output chunks (already sanitized) */
 	onChunk?: (chunk: string) => void;
 	/** AbortSignal for cancellation */
@@ -120,7 +123,11 @@ export async function executeBashWithOperations(
 
 	let exitCode: number | null = null;
 	try {
-		({ exitCode } = await operations.exec(command, cwd, { onData, signal: options?.signal }));
+		({ exitCode } = await operations.exec(command, cwd, {
+			onData,
+			signal: options?.signal,
+			provenance: options?.provenance,
+		}));
 	} catch (err) {
 		// An aborted command still returns the output it produced so far
 		if (!options?.signal?.aborted) {

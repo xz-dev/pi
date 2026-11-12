@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
+/LICENSE text eol=lf
+/README.md text eol=lf
+/docs/third-party-licenses.md text eol=lf

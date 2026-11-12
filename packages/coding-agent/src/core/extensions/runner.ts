@@ -19,6 +19,7 @@ import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import { sessionProcessRegistries } from "../process-ownership.ts";
 import type { SessionManager } from "../session-manager.ts";
 import {
 	type BuildSystemPromptOptions,
@@ -503,6 +504,9 @@ export class ExtensionRunner {
 			unregisterVirtualModel?: (provider: string, id: string) => void;
 		},
 	): void {
+		// All extension processes use the session's existing task registry.
+		const processRegistry = sessionProcessRegistries.get(this.sessionManager);
+		if (processRegistry) sessionProcessRegistries.set(this.runtime, processRegistry);
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;

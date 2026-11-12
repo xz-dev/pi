@@ -6,6 +6,8 @@ import { constants as bufferConstants } from "node:buffer";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { waitForChildProcess } from "../utils/child-process.ts";
+import { ownedChildEnv, prepareSessionSpawn, type SessionSpawnProvenance } from "./process-ownership.ts";
+import type { OwnedSession } from "./process-registry.ts";
 
 const DEFAULT_EXEC_MAX_BUFFER = Math.min(256 * 1024 * 1024, bufferConstants.MAX_STRING_LENGTH);
 const FORCE_KILL_DELAY_MS = 5000;
@@ -49,17 +51,28 @@ export async function execCommand(
 	args: string[],
 	cwd: string,
 	options?: ExecOptions,
+	ownership?: { registry: OwnedSession | undefined; purpose: string; provenance: SessionSpawnProvenance },
 ): Promise<ExecResult> {
 	const maxBuffer = options?.maxBuffer ?? DEFAULT_EXEC_MAX_BUFFER;
 	if (!Number.isInteger(maxBuffer) || maxBuffer < 0 || maxBuffer > bufferConstants.MAX_STRING_LENGTH) {
 		throw new RangeError(`maxBuffer must be an integer between 0 and ${bufferConstants.MAX_STRING_LENGTH} bytes`);
 	}
 
-	const proc = spawn(command, args, {
-		cwd,
-		shell: false,
-		stdio: ["ignore", "pipe", "pipe"],
-	});
+	const owned =
+		ownership && prepareSessionSpawn(ownership.registry, command, args, ownership.purpose, ownership.provenance);
+	const proc = owned
+		? spawn(owned.command, owned.args, {
+				cwd,
+				shell: false,
+				stdio: owned.stdio,
+				env: ownedChildEnv(process.env),
+			})
+		: spawn(command, args, {
+				cwd,
+				shell: false,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+	owned?.finalize(proc);
 
 	let stdout = "";
 	let stderr = "";
@@ -76,6 +89,10 @@ export async function execCommand(
 	const killProcess = () => {
 		if (killed) return;
 		killed = true;
+		if (owned) {
+			void owned.cancel();
+			return;
+		}
 		proc.kill("SIGTERM");
 		forceKillId = setTimeout(() => {
 			// `proc.killed` only says a signal was sent, so check whether the child actually exited.
@@ -127,7 +144,7 @@ export async function execCommand(
 	let code: number | null;
 	try {
 		// Do not hang on inherited stdio handles held open by detached descendants.
-		code = await waitForChildProcess(proc);
+		code = await waitForChildProcess(proc, owned?.primaryExit);
 	} catch (error) {
 		if (!(error instanceof Error)) throw error;
 		// Child-process errors (e.g. ENOENT) are failed executions, not host failures.
@@ -137,6 +154,7 @@ export async function execCommand(
 		clearTimeout(timeoutId);
 		clearTimeout(forceKillId);
 		options?.signal?.removeEventListener("abort", killProcess);
+		if (owned && killed) await owned.completion;
 	}
 
 	// On truncation, discard any incomplete UTF-8 suffix buffered by either decoder.
