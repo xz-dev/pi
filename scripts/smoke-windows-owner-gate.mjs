@@ -6,6 +6,21 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const WINDOWS_OWNER_GATE_TIMEOUT_MS = 900_000;
+export const WINDOWS_OWNER_GATE_SOURCES = [
+	"package.json",
+	"src/config.ts",
+	"src/core/exec.ts",
+	"src/core/process-ownership.ts",
+	"src/core/process-registry.ts",
+	"src/core/tools/owned-exec.ts",
+	"src/utils/child-process.ts",
+	"src/utils/procward.ts",
+	"src/utils/procward-build.ts",
+	"src/utils/managed-child.ts",
+	"src/utils/windows-process-ownership.ts",
+	"src/utils/paths.ts",
+	"src/utils/text.ts",
+];
 export const WINDOWS_OWNER_TEST_NAMES = [
 	"shipped CLI respawn and console/ConPTY Ctrl-C",
 	"unsigned statuses, exact separate binary stdio and Unicode/empty argv",
@@ -96,6 +111,11 @@ export function assertWindowsOwnerDependencies(expected, installedLock, tree) {
 export function stageWindowsOwnerGate(work, { env, run, source = fileURLToPath(new URL("../", import.meta.url)) }) {
 	if (env.CI !== "true" && env.GITHUB_ACTIONS !== "true")
 		throw new Error("Windows gate dependency installation is CI-only");
+	// Fail on missing current product inputs before any dependency installation.
+	const sources = WINDOWS_OWNER_GATE_SOURCES.map((file) => ({
+		file,
+		bytes: readFileSync(join(source, "packages", "coding-agent", file)),
+	}));
 	const dependencies = windowsOwnerGateDependencies(
 		JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8")),
 	);
@@ -158,23 +178,10 @@ export function stageWindowsOwnerGate(work, { env, run, source = fileURLToPath(n
 		}
 	}
 	writeFileSync(join(work, "windows-gate-runtime-inputs.json"), JSON.stringify(runtimeInputs));
-	const files = [
-		"package.json",
-		"src/core/exec.ts",
-		"src/config.ts",
-		"src/utils/child-process.ts",
-		"src/utils/process-owner.ts",
-		"src/utils/paths.ts",
-		"src/utils/text.ts",
-		"test/windows-owner-runtime.mjs",
-		"test/fixtures/windows-owner.cs",
-		"test/fixtures/windows-owner-ipc.mjs",
-		"test/fixtures/windows-owner-launcher.mjs",
-	];
-	for (const file of files) {
+	for (const { file, bytes } of sources) {
 		const destination = join(work, "packages", "coding-agent", file);
 		mkdirSync(dirname(destination), { recursive: true });
-		copyFileSync(join(source, "packages", "coding-agent", file), destination);
+		writeFileSync(destination, bytes);
 	}
 	mkdirSync(join(work, "scripts"), { recursive: true });
 	copyFileSync(fileURLToPath(import.meta.url), join(work, "scripts", "smoke-windows-owner-gate.mjs"));

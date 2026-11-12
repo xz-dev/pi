@@ -6,10 +6,15 @@ on:
     paths:
       - .github/workflows/probe-windows-pi-bootstrap.yml
       - scripts/windows-pi-bootstrap-probe/**
+      - scripts/fixtures/owner/**
+      - scripts/smoke-installed-owner.mjs
 permissions:
   contents: read
 jobs:
   pi-bootstrap:
+    # Installed-only carriers reuse the accepted four-cell source inputs; they
+    # run one canonical installed binary instead of rebuilding that old matrix.
+    if: "${{ !startsWith(github.event.head_commit.message, 'diagnostic carrier: installed owner') }}"
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -118,4 +123,87 @@ jobs:
           path: ${{ runner.temp }}/pi-bootstrap-${{ matrix.arch }}-${{ matrix.runtime }}
           if-no-files-found: warn
           include-hidden-files: true
+          retention-days: 14
+  installed-owner-x64:
+    if: "startsWith(github.event.head_commit.message, 'diagnostic carrier: installed owner')"
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          repository: xz-dev/procward
+          ref: 1c23f35514994d04c2831fe1671235cbd9fbd366
+          path: candidate-native
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          architecture: x64
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
+      - name: Build one canonical installed executable and exercise actual public tools as nonadmin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'installed-owner-x64'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $inputs = @{}
+          foreach ($file in git ls-files) {
+            if ($file -match '^packages/tui/native/win32/prebuilds/') { continue }
+            $inputs[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+          }
+          $inputs | ConvertTo-Json -Depth 3 | Set-Content "$out/production-inputs.json" -Encoding utf8
+          Copy-Item '.github/workflows/probe-windows-pi-bootstrap.yml' "$out/workflow.yml"
+          npm ci --ignore-scripts 2>&1 | Tee-Object "$out/npm-ci.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/tui/native/win32/build.mjs 2>&1 | Tee-Object "$out/addon-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run hydrate:model-data 2>&1 | Tee-Object "$out/model-hydration.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:offline 2>&1 | Tee-Object "$out/package-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = node -p 'require("./packages/coding-agent/package.json").version'
+          bash scripts/build-binaries.sh --skip-install --skip-deps --skip-build --platform windows-x64-baseline --out "$out/build" --distribution-version "$version" --hydrate-target-deps 2>&1 | Tee-Object "$out/canonical-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location "$env:GITHUB_WORKSPACE/candidate-native"
+          if ((git rev-parse HEAD) -cne '1c23f35514994d04c2831fe1671235cbd9fbd366') { throw 'Wrong candidate source' }
+          $nativeInputs = @{}
+          foreach ($file in git ls-files) { $nativeInputs[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() }
+          $nativeInputs | ConvertTo-Json -Depth 3 | Set-Content "$out/native-inputs.json" -Encoding utf8
+          python .github/scripts/build-dist.py x86_64-pc-windows-msvc 2>&1 | Tee-Object "$out/candidate-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item 'target/x86_64-pc-windows-msvc/dist/procward.exe' "$out/procward-development.exe"
+          foreach ($file in $nativeInputs.Keys) {
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -cne $nativeInputs[$file]) { throw "Candidate source changed: $file" }
+          }
+          Set-Location $env:GITHUB_WORKSPACE
+          $env:PI_OFFLINE = '1'
+          node scripts/smoke-installed-owner.mjs "$out/build/pi-windows-x64-baseline.exe" windows-x64-baseline "$out/installed-development.json" "$out/procward-development.exe" 1> "$out/installed-stdout.log" 2> "$out/installed-stderr.log"
+          $code = $LASTEXITCODE
+          "installed_exit=$code" | Set-Content "$out/exit.txt"
+          foreach ($file in $inputs.Keys) {
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -cne $inputs[$file]) { throw "Production source changed: $file" }
+          }
+          'all tracked production inputs unchanged; prebuilds are owned outputs' | Set-Content "$out/after.txt"
+          exit $code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: installed-owner-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/installed-owner-x64
+          include-hidden-files: true
+          if-no-files-found: warn
           retention-days: 14

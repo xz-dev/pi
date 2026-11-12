@@ -175,18 +175,21 @@ export function artifactBunFromOwnerRows(rows) {
 	return { artifactBunVersion: reasons.length ? null : versions[0], artifactBunError: reasons.join("; ") || null };
 }
 
-export function assertOwnerLifecycle(evidence, os) {
+export function assertOwnerLifecycleRows(evidence, os, { allowDevelopmentHelper = false } = {}) {
 	assertNonadminIdentity(evidence?.identity, os);
 	const expected = [
 		"normal-double-fork",
 		"kill-double-fork",
 		"normal-setsid",
 		"kill-setsid",
+		...(os === "windows" ? ["normal-installed-task", "kill-installed-task"] : []),
 		...(os === "darwin" ? ["darwin-fast-escape"] : []),
 	];
 	if (JSON.stringify(evidence.rows?.map(({ name }) => name)) !== JSON.stringify(expected))
 		throw new Error("owner lifecycle row inventory mismatch");
 	for (const row of evidence.rows) {
+		if (row.pi?.developmentNativeOverride && !allowDevelopmentHelper)
+			throw new Error("development helper cannot attest the final embedded product");
 		if (
 			row.guardExpired === true ||
 			row.aliveBefore !== true ||
@@ -200,19 +203,47 @@ export function assertOwnerLifecycle(evidence, os) {
 				throw new Error("Darwin fast escape must be labeled known-limitation");
 		} else if (row.status !== "passed" || row.aliveAfter !== false)
 			throw new Error(`owner lifecycle containment failed: ${row.name}`);
+		if (row.name.endsWith("installed-task")) {
+			const proof = row.pi?.installed;
+			if (
+				JSON.stringify(proof?.foreground) !== "[23,23]" ||
+				!Number.isSafeInteger(proof.selfOwnerPid) ||
+				proof.selfOwnerPid <= 0 ||
+				proof.taskIds?.length !== 2 ||
+				proof.taskIds.some((id) => !Number.isSafeInteger(id) || id <= 0) ||
+				proof.taskIds[0] === proof.taskIds[1] ||
+				proof.cancellation?.[0]?.status !== "not-cancellable" ||
+				proof.cancellation?.[1]?.id !== proof.taskIds[0] ||
+				proof.cancellation[1].status !== "confirmed" ||
+				proof.cancellation[1].unconfirmed !== false ||
+				proof.cancellation[1].scope !== "kernel" ||
+				proof.cancellation[1].exitCode !== 23 ||
+				!/^[0-9a-f]{32}$/.test(proof.survivorAfterCancellation ?? "") ||
+				proof.survivorAfterCancellation === proof.causalAfter1600ms?.[1]
+			)
+				throw new Error(`installed ownership tool chain unconfirmed: ${row.name}`);
+		}
 	}
 	if (os === "windows") {
 		const { artifactBunVersion, artifactBunError } = artifactBunFromOwnerRows(evidence.rows);
 		if (!artifactBunVersion || evidence.artifactBunVersion !== artifactBunVersion)
 			throw new Error(`owner lifecycle artifact Bun version invalid: ${artifactBunError ?? "differs from owner rows"}`);
 	}
+}
+
+export function assertOwnerLifecycle(evidence, os) {
+	assertOwnerLifecycleRows(evidence, os);
 	if (evidence.status !== "passed") throw new Error("owner lifecycle did not pass");
 }
 
 export async function smokeOwnerLifecycle(
 	executable,
 	target,
-	{ timeoutMs = 60_000, windowsGateRoot = process.env.PI_WINDOWS_GATE_ROOT } = {},
+	{
+		timeoutMs = 60_000,
+		windowsGateRoot = process.env.PI_WINDOWS_GATE_ROOT,
+		developmentHelper = process.env.PI_OWNER_DEVELOPMENT_HELPER,
+	} = {},
 ) {
 	const started = performance.now();
 	const evidence = {
@@ -245,6 +276,7 @@ export async function smokeOwnerLifecycle(
 			"kill-double-fork",
 			"normal-setsid",
 			"kill-setsid",
+			...(target.os === "windows" ? ["normal-installed-task", "kill-installed-task"] : []),
 			...(target.os === "darwin" ? ["darwin-fast-escape"] : []),
 		]) {
 			const pidFile = join(work, `${name}.pid`);
@@ -252,6 +284,7 @@ export async function smokeOwnerLifecycle(
 			const release = join(work, `${name}.release`);
 			const row = { name, status: "failed", immediateChecks: 0 };
 			evidence.rows.push(row);
+			const installedTask = name.endsWith("installed-task");
 			const env = {
 				...ownerLifecycleEnvironment(process.env),
 				PI_OFFLINE: "1",
@@ -263,9 +296,11 @@ export async function smokeOwnerLifecycle(
 				PI_OWNER_PID_FILE: pidFile,
 				PI_OWNER_READY: ready,
 				PI_OWNER_RELEASE: release,
+				PI_OWNER_TASK_DIR: join(work, `${name}-tasks`),
 				PI_OWNER_CASE:
 					name === "darwin-fast-escape" ? "fast-escape" : name.endsWith("double-fork") ? "double-fork" : "setsid",
 			};
+			if (installedTask && developmentHelper) env.PI_PROCWARD_BIN = developmentHelper;
 			const child = spawn(
 				executable,
 				[
@@ -276,7 +311,8 @@ export async function smokeOwnerLifecycle(
 					"--no-themes",
 					"--no-context-files",
 					"-e",
-					join(fixtures, "extension.mjs"),
+					join(fixtures, installedTask ? "installed-probe.mjs" : "extension.mjs"),
+					...(installedTask ? ["--provider", "owner-acceptance", "--model", "owner-1", "owner acceptance"] : []),
 				],
 				{ cwd: work, env, stdio: ["ignore", "ignore", "pipe"] },
 			);
@@ -383,7 +419,13 @@ export async function smokeOwnerLifecycle(
 export async function smokeOwnerLifecycleAsNonadmin(
 	executable,
 	target,
-	{ platform = process.platform, env = process.env, identityProbe = ownerIdentity, run = spawnSync } = {},
+	{
+		platform = process.platform,
+		env = process.env,
+		identityProbe = ownerIdentity,
+		run = spawnSync,
+		developmentHelper,
+	} = {},
 ) {
 	let identity;
 	try {
@@ -399,11 +441,14 @@ export async function smokeOwnerLifecycleAsNonadmin(
 	}
 	if (!ownerPrivilegeDropRequired(platform, identity, env)) {
 		if (platform !== "win32" || env.PI_WINDOWS_GATE_ROOT)
-			return smokeOwnerLifecycle(executable, target, { timeoutMs: target.emulated ? 180_000 : 60_000 });
+			return smokeOwnerLifecycle(executable, target, {
+				timeoutMs: target.emulated ? 180_000 : 60_000,
+				developmentHelper,
+			});
 		const scratch = mkdtempSync(join(tmpdir(), "pi-windows-gate-"));
 		try {
 			stageWindowsOwnerGate(scratch, { env, run });
-			return await smokeOwnerLifecycle(executable, target, { windowsGateRoot: scratch });
+			return await smokeOwnerLifecycle(executable, target, { windowsGateRoot: scratch, developmentHelper });
 		} catch (error) {
 			return { status: "failed", identity, rows: [], ...artifactBunFromOwnerRows([]), error: error.message };
 		} finally {
@@ -483,6 +528,8 @@ export async function smokeOwnerLifecycleAsNonadmin(
 		const staged = join(work, target.executable);
 		copyFileSync(process.execPath, runtime);
 		copyFileSync(executable, staged);
+		const stagedDevelopmentHelper = developmentHelper ? join(work, "procward-development.exe") : undefined;
+		if (stagedDevelopmentHelper) copyFileSync(developmentHelper, stagedDevelopmentHelper);
 		const scripts = join(work, "scripts");
 		mkdirSync(join(scripts, "lib"), { recursive: true });
 		copyFileSync(fileURLToPath(import.meta.url), join(scripts, "smoke-owner-lifecycle.mjs"));
@@ -515,6 +562,7 @@ export async function smokeOwnerLifecycleAsNonadmin(
 			PI_OFFLINE: "1",
 		};
 		if (platform === "win32") childEnv.PI_WINDOWS_GATE_ROOT = work;
+		if (stagedDevelopmentHelper) childEnv.PI_OWNER_DEVELOPMENT_HELPER = stagedDevelopmentHelper;
 		privilegeDrop.path = childEnv.PATH;
 		const args = [join(scripts, "smoke-owner-lifecycle.mjs"), staged, target.id, join(work, "child-evidence.json")];
 		let result;

@@ -132,24 +132,21 @@ test("runtime staging installs exact locked closure only in CI, verifies version
 		);
 		assert.deepEqual(JSON.parse(readFileSync(join(work, "windows-gate-dependencies.json"), "utf8")), dependencies);
 		for (const path of [
-			"packages/coding-agent/src/utils/process-owner.ts",
-			"packages/coding-agent/test/windows-owner-runtime.mjs",
-			"packages/coding-agent/test/fixtures/windows-owner.cs",
+			"packages/coding-agent/src/utils/procward.ts",
+			"packages/coding-agent/src/utils/windows-process-ownership.ts",
+			"packages/coding-agent/src/core/tools/owned-exec.ts",
 		])
 			assert.equal(
 				readFileSync(join(work, path), "utf8"),
 				readFileSync(new URL(`../${path}`, import.meta.url), "utf8"),
 			);
-		const runtime = join(work, "packages", "coding-agent", "test", "windows-owner-runtime.mjs");
+		const runtime = join(work, "packages", "coding-agent", "src", "core", "exec.ts");
 		const imports = [...readFileSync(runtime, "utf8").matchAll(/\bfrom\s+["'](\.[^"']+)["']/g)];
 		assert.ok(imports.length > 0, "runtime gate must exercise staged relative imports");
 		for (const [, specifier] of imports)
 			assert.equal(
 				readFileSync(resolve(dirname(runtime), specifier), "utf8"),
-				readFileSync(
-					new URL(specifier, new URL("../packages/coding-agent/test/windows-owner-runtime.mjs", import.meta.url)),
-					"utf8",
-				),
+				readFileSync(new URL(specifier, new URL("../packages/coding-agent/src/core/exec.ts", import.meta.url)), "utf8"),
 			);
 		for (const field of ["version", "resolved", "integrity"]) {
 			const wrong = structuredClone(installedLock);

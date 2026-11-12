@@ -10,6 +10,7 @@ import { windowsOwnerGateDependencies } from "./smoke-windows-owner-gate.mjs";
 import {
 	artifactBunFromOwnerRows,
 	assertOwnerLifecycle,
+	assertOwnerLifecycleRows,
 	ownerPrivilegeDropRequired,
 	smokeOwnerLifecycleAsNonadmin,
 } from "./smoke-owner-lifecycle.mjs";
@@ -62,6 +63,22 @@ async function dropped(
 					: "linux-x64-musl-baseline",
 	);
 	const childRows = structuredClone(rows);
+	if (platform === "win32") {
+		const installed = {
+			foreground: [23, 23],
+			selfOwnerPid: 20,
+			taskIds: [1, 2],
+			taskOwnerPids: [21, 22],
+			causalAfter1600ms: ["1".repeat(32), "2".repeat(32)],
+			cancellation: [
+				{ id: 0, status: "not-cancellable" },
+				{ id: 1, status: "confirmed", exitCode: 23, scope: "kernel", unconfirmed: false },
+			],
+			survivorAfterCancellation: "3".repeat(32),
+		};
+		for (const name of ["normal-installed-task", "kill-installed-task"])
+			childRows.push({ ...structuredClone(childRows[0]), name, pi: { bun: "1.3.14", installed } });
+	}
 	if (platform === "darwin")
 		childRows.push({
 			...childRows[0],
@@ -155,10 +172,8 @@ async function dropped(
 							launcher.indexOf("preflight") < launcher.indexOf("$ErrorActionPreference='Stop'"),
 							"preflight must not stop the launcher",
 						);
-						assert.equal(
-							existsSync(join(stage, "packages", "coding-agent", "test", "windows-owner-runtime.mjs")),
-							true,
-						);
+						assert.equal(existsSync(join(stage, "packages", "coding-agent", "src", "utils", "procward.ts")), true);
+						assert.equal(existsSync(join(stage, "scripts", "fixtures", "owner", "installed-probe.mjs")), true);
 						assert.equal(options.timeout, 1_200_000);
 					}
 					if (silentChild) return { status: 0, stdout: "", stderr: "child stderr tail" };
@@ -419,6 +434,13 @@ test("provision failure and existing account fail closed without a privileged fa
 		);
 		if (options.existing) assert.equal(calls.length, 1);
 	}
+});
+
+test("development helper rows can be examined but never count as final embedded acceptance", async () => {
+	const { evidence } = await dropped("win32");
+	evidence.rows.find((row) => row.name === "normal-installed-task").pi.developmentNativeOverride = true;
+	assert.throws(() => assertOwnerLifecycle(evidence, "windows"), /development helper cannot attest/);
+	assert.doesNotThrow(() => assertOwnerLifecycleRows(evidence, "windows", { allowDevelopmentHelper: true }));
 });
 
 test("account cleanup failure is a warning, not acceptance credit or a failed smoke", async () => {
