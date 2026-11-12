@@ -22,6 +22,9 @@ try {
 	assert.equal(evidence.privilegeDrop?.verifiedNonadmin, true, JSON.stringify(evidence));
 	assertOwnerLifecycleRows(evidence, "windows", { allowDevelopmentHelper: true });
 	assert.equal(evidence.rows.length, 6);
+	// The development helper is the only permitted final-gate refusal; every other gate must pass.
+	if (evidence.status !== "passed") assert.match(evidence.error ?? "", /^owner privilege drop child failed: development helper cannot attest the final embedded product$/);
+	assert.equal(evidence.windowsRuntimeGate?.status, "passed", `Windows runtime gate: ${evidence.windowsRuntimeGate?.error}`);
 	for (const row of evidence.rows.filter((entry) => entry.name.endsWith("installed-task"))) {
 		assert.equal(row.pi.developmentNativeOverride, true);
 		assert.equal(row.pi.developmentOwnerSha256, before.candidate);
