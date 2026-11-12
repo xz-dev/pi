@@ -37,7 +37,7 @@ Features:
 - WebSocket recovery and incremental context for OpenAI Responses and Codex
 - [Response checkpoints](docs/downstream-changes.md#response-checkpoints) across reconnects and session restarts
 - Lossless [request-body compression](docs/request-compression.md) for model JSON posts and Responses WebSocket frames, with the active algorithm beside the protocol
-- [Experimental process ownership](docs/downstream-changes.md#process-ownership): vendored procward integration, with explicit opt-outs and unconfirmed cleanup retained for inspection. Not in current releases; native release acceptance remains pending
+- [Process ownership](docs/downstream-changes.md#process-ownership): every subprocess tree Pi starts stops with its task or with Pi, with `process_list`/`process_kill` tools and `--no-process-ownership` to opt out
 - Custom fail-fast patterns for terminal gateway errors
 - Actual connection and request mode beside Working (`SSE`, `WS/full`, `WS/continuation`, or another reported protocol)
 - Detach long tool calls, keep chatting (`tool_task`)

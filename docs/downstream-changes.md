@@ -128,14 +128,14 @@ Pi stores sessions as plain JSONL, exactly as upstream writes them, and does not
 
 ## Process ownership
 
-Not in current releases: `patch/process-ownership` is held out of sync and packaging while it is reworked. The release build and acceptance skip the owner daemon and the owner-lifecycle gate until the patch returns.
+Pi owns every subprocess it starts and stops the whole tree, including `cmd &`, double forks and `setsid` descendants, when a task is cancelled or times out or when Pi exits. Command output, exit status, interaction, timeouts and the moment a command returns are unchanged.
 
-Pi's experimental ownership integration wraps the CLI and local tool subprocesses in [procward](https://github.com/xz-dev/procward), built from the vendored source in `vendor/procward`. It requests process-tree cleanup when the session exits and retains unconfirmed cleanup outcomes for inspection. Controlled protocol peers test the integration; native release acceptance remains pending. The Windows task HANDLE adapter is not implemented, so Windows ownership is not supported by this integration yet.
-
-- Opt out per invocation with `--no-process-ownership`, or for nested invocations with `PI_NO_PROCESS_OWNERSHIP=1`. Enabled builds fail closed if the helper is missing; a missing helper is not an implicit runtime opt-out.
-- Build control: `PROCWARD=0` selects helper omission at build time, not a runtime opt-out. Release packaging and intentional build-off behavior require separate validation; these notes do not assert installed-artifact acceptance.
-- macOS caveat: best effort, not a hard containment boundary. Do not infer native macOS acceptance from controlled protocol tests; use a container when a hard boundary is required.
-- Details: [Process ownership](process-ownership.md): integration, opt-outs, platform limits and verification.
+- Use case: background jobs and MCP servers no longer outlive the session; the model can see running tasks with `process_list` and stop them with `process_kill`.
+- Default on. Opt out per invocation with `--no-process-ownership`, or for nested invocations with `PI_NO_PROCESS_OWNERSHIP=1`; both skip the helper entirely. An enabled build with a missing helper fails instead of silently opting out.
+- Build control: `PROCWARD=0` builds without the helper (Gentoo `USE=procward`). It is a build capability, not a runtime switch.
+- Work that must outlive Pi: the built-in `persistent-background-tasks` skill hands it to an external service manager or an existing tmux server.
+- Limits: not a security sandbox. macOS cleanup is best effort, not kernel containment. On Windows, Job close on owner loss can end Pi before shutdown hooks run.
+- Details: [Process ownership](process-ownership.md): integration, process tools, platform guarantees and verification.
 - Patch branch: [`patch/process-ownership`](https://github.com/xz-dev/pi/tree/patch/process-ownership)
 
 ## TUI and display
