@@ -20,6 +20,11 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Select signed Ubuntu mirror before provider QEMU dependencies
+      shell: bash
+      run: |
+        sudo sh ci/ubuntu-apt-mirror.sh
+        sudo apt-get update
     - name: Bind immutable source to the actual host boot
       shell: bash
       run: python3 ci/actions-vm.py prepare '${{ inputs.target }}' '${{ inputs.mode }}'

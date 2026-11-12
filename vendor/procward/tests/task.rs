@@ -7,6 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(windows)]
+#[path = "support/crt_task.rs"]
+mod crt_task;
 #[path = "support/retained_task.rs"]
 mod retained;
 
