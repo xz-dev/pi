@@ -232,6 +232,66 @@ describe("permanent session shutdown", () => {
 		expect(harness.session.isStreaming).toBe(false);
 	});
 
+	it("discards background compaction synchronously even when an earlier abort hook throws", async () => {
+		const entered = deferred<void>();
+		const release = deferred<void>();
+		releaseTools.push(() => release.resolve());
+		let signal: AbortSignal | undefined;
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 10000 }],
+			tools: [
+				{
+					name: "pad",
+					label: "pad",
+					description: "pad",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "p".repeat(2000) }], details: undefined }),
+				},
+			],
+			settings: {
+				compaction: {
+					enabled: true,
+					reserveTokens: 2000,
+					keepRecentTokens: 1500,
+					background: true,
+					backgroundStartRatio: 0.5,
+				},
+			},
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						signal = event.signal;
+						entered.resolve();
+						await release.promise;
+						return { cancel: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			...Array.from({ length: 9 }, () => fauxAssistantMessage(fauxToolCall("pad", {}))),
+			fauxAssistantMessage("done"),
+		]);
+		const prompt = harness.session.prompt("start background summary");
+		await entered.promise;
+		await prompt;
+		const background = Reflect.get(harness.session, "_backgroundCompaction") as { settled: Promise<void> };
+		vi.spyOn(harness.session, "abortRetry").mockImplementation(() => {
+			throw new Error("abort hook failure");
+		});
+		const disposal = harness.session.dispose();
+		expect(signal?.aborted).toBe(true);
+		expect(harness.session.isBackgroundCompacting).toBe(false);
+		await disposal;
+		const entries = harness.sessionManager.getEntries().length;
+		const events = harness.events.length;
+		release.resolve();
+		await background.settled;
+		expect(harness.sessionManager.getEntries()).toHaveLength(entries);
+		expect(harness.events).toHaveLength(events);
+	});
+
 	it.each(["quit", "replacement"] as const)("awaits session disposal before %s follow-through", async (kind) => {
 		const harness = await createHarness();
 		harnesses.push(harness);
