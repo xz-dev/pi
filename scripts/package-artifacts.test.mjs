@@ -21,7 +21,7 @@ test("produces a verified, content-addressed artifact set", (t) => {
 	t.after(() => rmSync(temporaryRoot, { recursive: true, force: true }));
 	const repoRoot = join(temporaryRoot, "repo with spaces");
 	mkdirSync(repoRoot);
-	writeFileSync(join(repoRoot, "package.json"), '{"name":"fixture","private":true}\n');
+	writeFileSync(join(repoRoot, "package.json"), '{"name":"fixture","private":true,"workspaces":["packages/*","packages/target/published"]}\n');
 	writePackage(
 		join(repoRoot, "packages", "shared"),
 		{ name: "@pi-package-test/shared", version: "1.0.0", files: ["dist"] },
@@ -32,20 +32,31 @@ test("produces a verified, content-addressed artifact set", (t) => {
 		{ name: "@pi-package-test/target", version: "1.0.0", files: ["dist"] },
 		{ "dist/index.js": 'export const target = true;\n' },
 	);
+	writePackage(
+		join(repoRoot, "packages", "target", "test", "example"),
+		{ name: "example-fixture", version: "1.0.0" },
+		{ "index.js": "export {};\n" },
+	);
+	writePackage(
+		join(repoRoot, "packages", "target", "published"),
+		{ name: "@pi-package-test/nested", version: "1.0.0", files: ["dist"] },
+		{ "dist/index.js": "export {};\n" },
+	);
 	execFileSync("git", ["init", "--quiet"], { cwd: repoRoot });
+	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: repoRoot });
 	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot });
 	execFileSync("git", ["config", "user.name", "Test"], { cwd: repoRoot });
 	execFileSync("git", ["add", "."], { cwd: repoRoot });
 	execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: repoRoot });
 
 	const artifactSet = produceArtifactSet({ build: false, outDir: join(repoRoot, ".artifacts", "package set"), repoRoot });
-	assert.deepEqual(artifactSet.packages.map((pkg) => pkg.name), ["@pi-package-test/shared", "@pi-package-test/target"]);
+	assert.deepEqual(artifactSet.packages.map((pkg) => pkg.name), ["@pi-package-test/nested", "@pi-package-test/shared", "@pi-package-test/target"]);
 	for (const pkg of artifactSet.packages) {
 		assert.match(pkg.tarball, /-[0-9a-f]{12}\.tgz$/);
 		assert.match(pkg.integrity, /^sha512-/);
 	}
 	assert.equal(artifactSet.source.dirty, false);
-	assert.equal(readArtifactSet(artifactSet.manifestPath).packages.length, 2);
+	assert.equal(readArtifactSet(artifactSet.manifestPath).packages.length, 3);
 
 	writeFileSync(join(repoRoot, "packages/shared/dist/index.js"), 'export const marker = "changed";\n');
 	const changedArtifactSet = produceArtifactSet({ build: false, outDir: join(repoRoot, ".artifacts", "changed package set"), repoRoot });

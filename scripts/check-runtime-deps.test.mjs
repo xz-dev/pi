@@ -12,6 +12,7 @@ async function check(t, manifest, source, extraFiles = {}) {
 	const root = await mkdtemp(join(tmpdir(), "pi-runtime-deps-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
 	const files = {
+		"package.json": JSON.stringify({ private: true, workspaces: ["packages/*"] }),
 		"packages/example/package.json": JSON.stringify({ name: "example", version: "1.0.0", ...manifest }),
 		"packages/example/src/index.ts": source,
 		...extraFiles,

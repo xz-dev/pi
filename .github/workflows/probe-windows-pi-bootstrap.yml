@@ -1,0 +1,194 @@
+name: Actual Pi Windows bootstrap acceptance slice
+on:
+  push:
+    branches:
+      - ci-probe/windows-interop-20261111
+    paths:
+      - .github/workflows/probe-windows-pi-bootstrap.yml
+      - scripts/windows-pi-bootstrap-probe/**
+      - scripts/fixtures/owner/**
+      - scripts/smoke-owner-lifecycle.mjs
+      - scripts/smoke-windows-owner-gate.mjs
+permissions:
+  contents: read
+jobs:
+  pi-bootstrap:
+    # Installed-only carriers reuse the accepted four-cell source inputs; they
+    # run one canonical installed binary instead of rebuilding that old matrix.
+    if: "${{ !startsWith(github.event.head_commit.message, 'diagnostic carrier: installed owner') }}"
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          architecture: ${{ matrix.arch }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          repository: xz-dev/procward
+          ref: 6ee59376c42ae0c389ce2ed98d33d32d8fd16258
+          path: candidate-native
+          persist-credentials: false
+      - name: Build actual source-pinned helper and existing platform addon, then run actual Pi bootstrap
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'pi-bootstrap-${{ matrix.arch }}-${{ matrix.runtime }}'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          Copy-Item 'scripts/windows-pi-bootstrap-probe/*' $out -Force
+          Copy-Item '.github/workflows/probe-windows-pi-bootstrap.yml' "$out/workflow.yml"
+          git show -s --format=fuller HEAD | Set-Content "$out/candidate-commit.txt"
+          $inputs = @{}
+          foreach ($file in git ls-files) {
+            if ($file -match '^packages/tui/native/win32/prebuilds/') { continue }
+            $inputs[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+          }
+          $inputs | ConvertTo-Json -Depth 3 | Set-Content "$out/production-inputs.json" -Encoding utf8
+          npm ci --ignore-scripts 2>&1 | Tee-Object "$out/npm-ci.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/tui/native/win32/build.mjs 2>&1 | Tee-Object "$out/addon-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/coding-agent/scripts/build-procward.mjs --triple '${{ matrix.target }}' 2>&1 | Tee-Object "$out/native-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $native = (Resolve-Path 'packages/coding-agent/native/procward/${{ matrix.target }}/procward.exe').Path
+          Copy-Item $native "$out/procward.exe"
+          Copy-Item 'packages/tui/native/win32/prebuilds/win32-${{ matrix.arch }}/win32-platform.node' "$out/win32-platform.node"
+          & '${{ matrix.runtime }}' 'scripts/windows-pi-bootstrap-probe/driver.mjs' $native "$out/result.json" '${{ matrix.runtime }}' '${{ matrix.arch }}' 1> "$out/driver-stdout.log" 2> "$out/driver-stderr.log"
+          $code = $LASTEXITCODE
+          "driver_exit=$code" | Set-Content "$out/driver-exit.txt"
+          if ($code -eq 0) {
+            npm run hydrate:model-data 2>&1 | Tee-Object "$out/model-hydration.log"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run build:offline 2>&1 | Tee-Object "$out/pi-build.log"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Set-Location "$env:GITHUB_WORKSPACE/candidate-native"
+            if ((git rev-parse HEAD) -cne '6ee59376c42ae0c389ce2ed98d33d32d8fd16258') { throw 'Wrong candidate native source' }
+            $candidateInputs = @{}
+            foreach ($file in git ls-files) { $candidateInputs[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() }
+            $candidateInputs | ConvertTo-Json -Depth 3 | Set-Content "$out/task-native-inputs.json" -Encoding utf8
+            git rev-parse HEAD | Set-Content "$out/task-native-source.txt"
+            rustc -vV | Set-Content "$out/task-rustc.txt"
+            python .github/scripts/build-dist.py '${{ matrix.target }}' 2>&1 | Tee-Object "$out/task-native-build.log"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Copy-Item 'target/${{ matrix.target }}/dist/procward.exe' "$out/task-procward.exe"
+            Copy-Item 'target/${{ matrix.target }}/dist/examples/fixture.exe' "$out/task-fixture.exe"
+            Copy-Item 'artifacts/${{ matrix.target }}/dependencies.txt' "$out/task-dependencies.txt"
+            foreach ($file in $candidateInputs.Keys) {
+              if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -cne $candidateInputs[$file]) { throw "Candidate native source changed: $file" }
+            }
+            Set-Location $env:GITHUB_WORKSPACE
+            # Existing development override only: never change the authenticated production source pin.
+            $env:PI_PROCWARD_BIN = Join-Path $out 'task-procward.exe'
+            Remove-Item Env:PI_NO_PROCESS_OWNERSHIP -ErrorAction SilentlyContinue
+            & '${{ matrix.runtime }}' 'scripts/windows-pi-bootstrap-probe/tasks.mjs' $env:PI_PROCWARD_BIN (Join-Path $out 'task-fixture.exe') (Join-Path $out 'tasks') (Join-Path $out 'tasks-result.json') 1> "$out/tasks-stdout.log" 2> "$out/tasks-stderr.log"
+            $code = $LASTEXITCODE
+            "task_exit=$code" | Set-Content "$out/task-exit.txt"
+            Remove-Item Env:PI_PROCWARD_BIN
+          }
+          foreach ($file in $inputs.Keys) {
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -cne $inputs[$file]) { throw "Production source changed: $file" }
+          }
+          'all production inputs unchanged; Windows prebuilds are source-built outputs' | Set-Content "$out/after.txt"
+          exit $code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: actual-pi-bootstrap-${{ matrix.arch }}-${{ matrix.runtime }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pi-bootstrap-${{ matrix.arch }}-${{ matrix.runtime }}
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
+  installed-owner-x64:
+    if: "startsWith(github.event.head_commit.message, 'diagnostic carrier: installed owner')"
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          architecture: x64
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
+      # The installed CLI embeds the helper compiled from the authenticated vendored source;
+      # no helper override is used, so the result is final embedded evidence for this target.
+      - name: Build one canonical installed executable and exercise actual public tools as nonadmin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'installed-owner-x64'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $inputs = @{}
+          foreach ($file in git ls-files) {
+            if ($file -match '^packages/tui/native/win32/prebuilds/') { continue }
+            $inputs[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+          }
+          $inputs | ConvertTo-Json -Depth 3 | Set-Content "$out/production-inputs.json" -Encoding utf8
+          Copy-Item '.github/workflows/probe-windows-pi-bootstrap.yml' "$out/workflow.yml"
+          npm ci --ignore-scripts 2>&1 | Tee-Object "$out/npm-ci.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/tui/native/win32/build.mjs 2>&1 | Tee-Object "$out/addon-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run hydrate:model-data 2>&1 | Tee-Object "$out/model-hydration.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:offline 2>&1 | Tee-Object "$out/package-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = node -p 'require("./packages/coding-agent/package.json").version'
+          bash scripts/build-binaries.sh --skip-install --skip-deps --skip-build --platform windows-x64-baseline --out "$out/build" --distribution-version "$version" --hydrate-target-deps 2>&1 | Tee-Object "$out/canonical-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PI_OFFLINE = '1'
+          # pwsh prepends PowerShell 7 module paths; Windows PowerShell 5.1 children used for the
+          # nonadmin credential drop must see the machine module path, as in the bash release smoke.
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+          Remove-Item Env:PI_PROCWARD_BIN -ErrorAction SilentlyContinue
+          node scripts/smoke-owner-lifecycle.mjs "$out/build/pi-windows-x64-baseline.exe" windows-x64-baseline "$out/installed-final.json" 1> "$out/installed-stdout.log" 2> "$out/installed-stderr.log"
+          $code = $LASTEXITCODE
+          "installed_exit=$code" | Set-Content "$out/exit.txt"
+          foreach ($file in $inputs.Keys) {
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -cne $inputs[$file]) { throw "Production source changed: $file" }
+          }
+          'all tracked production inputs unchanged; prebuilds are owned outputs' | Set-Content "$out/after.txt"
+          exit $code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: installed-owner-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/installed-owner-x64
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14

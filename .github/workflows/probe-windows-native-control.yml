@@ -1,0 +1,103 @@
+name: Real Windows native task-control interoperability
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci-probe/windows-interop-20261111
+    paths:
+      - .github/workflows/probe-windows-native-control.yml
+      - scripts/windows-native-control-probe/**
+permissions:
+  contents: read
+jobs:
+  native-control:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+        arch: [x64, arm64]
+        include:
+          - runner: windows-2025
+            arch: x64
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          repository: xz-dev/procward
+          ref: 37a8279992af704fde65e9d4212c4d6038ccda35
+          path: native-source
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          architecture: ${{ matrix.arch }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
+      - name: Freeze native source, compile using production Cargo configuration, run selected public spawn path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'native-control-${{ matrix.arch }}-${{ matrix.runtime }}'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $src = Join-Path $env:GITHUB_WORKSPACE 'scripts/windows-native-control-probe'
+          Copy-Item "$src/*" -Destination $out -Force
+          Copy-Item "$env:GITHUB_WORKSPACE/.github/workflows/probe-windows-native-control.yml" "$out/workflow.yml"
+          node --test "$src/driver.test.mjs" 2>&1 | Tee-Object "$out/parser.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location "$env:GITHUB_WORKSPACE/native-source"
+          if ((git rev-parse HEAD) -cne '37a8279992af704fde65e9d4212c4d6038ccda35') { throw 'Wrong native source commit' }
+          if ((git rev-parse 'HEAD^{tree}') -cne 'd99a0c84f52588e57f6ff35ace59b29a83840a30') { throw 'Wrong native source tree' }
+          if ($env:RUSTFLAGS -or $env:CARGO_ENCODED_RUSTFLAGS) { throw 'Unexpected compiler override' }
+          $config = Get-Content '.cargo/config.toml' -Raw
+          if ($config -notmatch 'target-feature=\+crt-static') { throw 'Production static CRT configuration missing' }
+          $inputs = @{}
+          foreach ($file in git ls-files) {
+            $inputs[$file] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+          }
+          $inputs | ConvertTo-Json -Depth 3 | Set-Content "$out/native-inputs.json" -Encoding utf8
+          @("pi_commit=$env:GITHUB_SHA", "native_commit=$(git rev-parse HEAD)", "native_tree=$(git rev-parse 'HEAD^{tree}')", "runner_arch=$env:RUNNER_ARCH", "node=$(node --version)", "bun=$(bun --version)", "rustc=$(rustc --version)") | Set-Content "$out/versions.txt"
+          rustc -vV | Tee-Object "$out/rustc.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path "$out/rustc.txt" -SimpleMatch 'host: ${{ matrix.target }}')) { throw 'Wrong native compiler host' }
+          python .github/scripts/build-dist.py '${{ matrix.target }}' 2>&1 | Tee-Object "$out/build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item 'artifacts/${{ matrix.target }}/dependencies.txt' "$out/dependencies.txt"
+          if ((Get-Content "$out/dependencies.txt" -Raw) -match '(?i)(msvcrt|msvcr\d*|vcruntime|msvcp|ucrtbase|api-ms-win-crt)[^\s]*\.dll') { throw 'Dynamic CRT import in the actual helper' }
+          Copy-Item 'artifacts/${{ matrix.target }}/measurements.json' "$out/measurements.json"
+          $binary = (Resolve-Path 'target/${{ matrix.target }}/dist/procward.exe').Path
+          $fixture = (Resolve-Path 'target/${{ matrix.target }}/dist/examples/fixture.exe').Path
+          Copy-Item $binary "$out/procward.exe"
+          Copy-Item $fixture "$out/fixture.exe"
+          & '${{ matrix.runtime }}' "$src/driver.mjs" "$out/procward.exe" "$out/fixture.exe" "$out/cases" '${{ matrix.runtime }}' '${{ matrix.arch }}' 1> "$out/driver-stdout.log" 2> "$out/driver-stderr.log"
+          $driverExit = $LASTEXITCODE
+          "driver_exit=$driverExit" | Set-Content "$out/driver-exit.txt"
+          foreach ($file in $inputs.Keys) {
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            if ($actual -cne $inputs[$file]) { throw "Native source changed: $file" }
+          }
+          git diff --exit-code
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'all tracked native inputs unchanged' | Set-Content "$out/native-after.txt"
+          exit $driverExit
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: native-control-${{ matrix.arch }}-${{ matrix.runtime }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-control-${{ matrix.arch }}-${{ matrix.runtime }}
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14

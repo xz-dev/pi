@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { extname, join, resolve } from "node:path";
+import { readDecodedRequestBody } from "./lib/request-body.mjs";
 
 const WORKER_MARKER = "PI_CODEMODE_WORKER_OK";
 const SUCCESS_MARKER = "PI_CODEMODE_BINARY_SMOKE_OK";
@@ -33,9 +34,8 @@ function sendCompletion(response, chunks) {
 }
 
 async function readRequest(request) {
-	let body = "";
-	for await (const chunk of request) body += chunk.toString();
-	return body;
+	// The host may transparently compress JSON uploads (zstd/gzip/deflate/br).
+	return readDecodedRequestBody(request);
 }
 
 function toolResultContainsMarker(body) {
@@ -61,7 +61,14 @@ async function main() {
 			response.writeHead(404).end();
 			return;
 		}
-		const body = await readRequest(request);
+		let body;
+		try {
+			body = await readRequest(request);
+		} catch (error) {
+			// Refuse undecodable/oversized uploads instead of leaving the client hung.
+			response.writeHead(400).end(String(error));
+			return;
+		}
 		requestCount++;
 		const id = `chatcmpl-codemode-smoke-${requestCount}`;
 		if (requestCount === 1) {
