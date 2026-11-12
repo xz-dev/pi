@@ -38,6 +38,15 @@ class ReleaseTests(unittest.TestCase):
                 dist.startup(Path('/nonexistent/product'), '')
         command.assert_called_once_with(dist.sys.executable, 'ci/linux-test-guard.py', '--check-only')
 
+    def test_dynamic_dependencies_are_read_in_every_readelf_format(self):
+        gnu = " 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]\n"
+        elftc = " 0x0000000000000001 NEEDED               Shared library: [libutil.so.9]\n 0x0000000000000001 NEEDED               Shared library: [libc.so.7]\n"
+        self.assertEqual(dist.needed_libraries(gnu), ["libc.so.6"])
+        self.assertEqual(dist.needed_libraries(elftc), ["libutil.so.9", "libc.so.7"])
+        # libutil's soname differs across supported FreeBSD releases.
+        self.assertNotIn("libutil.so.9", dist.ALLOWED_NEEDED)
+        self.assertNotIn("libutil.so.7", dist.ALLOWED_NEEDED)
+
     def test_packaging_requires_unchanged_measured_binary(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
