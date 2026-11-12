@@ -24,6 +24,9 @@ test("the default bridge uses the remaining absolute five-second budget and neve
 	const exit = vi.spyOn(process, "exit").mockImplementation(() => {
 		throw exited;
 	});
+	// Without an observed owner loss, a second signal skips graceful cleanup as before.
+	expect(repeatedShutdownSignal(2)).toBe(true);
+	expect(repeatedShutdownSignal(1)).toBe(false);
 	ownCliProcess([], {
 		resolveBinary: () => {
 			throw new Error("no native helper");
@@ -34,14 +37,12 @@ test("the default bridge uses the remaining absolute five-second budget and neve
 			return { stop() {}, observedAt: 1000 };
 		},
 	});
-	// Without a bridge signal, a second external signal skips graceful cleanup as before.
-	expect(repeatedShutdownSignal(2)).toBe(true);
 	onLoss!("owner-loss", 1000);
 	expect(timer).toHaveBeenCalledExactlyOnceWith(expect.any(Function), 2000);
 	expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, "SIGTERM");
-	// The bridge TERM plus native TERM is one request; only a third signal forces exit.
+	// After observed owner loss, further TERMs never skip hooks; the deadline bounds exit.
 	expect(repeatedShutdownSignal(2)).toBe(false);
-	expect(repeatedShutdownSignal(3)).toBe(true);
+	expect(repeatedShutdownSignal(5)).toBe(false);
 	now = 5000;
 	prepareProcessShutdown();
 	onLoss!("eof", 5000);

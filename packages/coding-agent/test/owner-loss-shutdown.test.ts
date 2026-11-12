@@ -143,6 +143,12 @@ async function run(scenario: string, runtime = process.execPath): Promise<Receip
 						child.kill("SIGTERM");
 						child.kill("SIGCONT");
 					}
+					// Real procward can deliver TERM more than once while terminating its session.
+					if (scenario === "native-term-repeat") {
+						child.kill("SIGTERM");
+						child.kill("SIGTERM");
+						child.kill("SIGCONT");
+					}
 				}
 			}
 			// procward's documented order: Pi's bridge observes loss, then native sends TERM and CONT.
@@ -205,6 +211,7 @@ describe.skipIf(process.platform === "win32")("production owner-loss bridge → 
 		"print-pending",
 		"native-term-cont",
 		"native-term-after-loss",
+		"native-term-repeat",
 	])(
 		"bounds %s by first observation +5s",
 		async (scenario) => {

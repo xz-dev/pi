@@ -115,7 +115,7 @@ if (scenario === "startup") {
 			await new Promise(() => {});
 		};
 	}
-	if (["cont-before-message", "native-term-cont", "native-term-after-loss", "healthy-cont"].includes(scenario)) {
+	if (["cont-before-message", "native-term-cont", "native-term-after-loss", "native-term-repeat", "healthy-cont"].includes(scenario)) {
 		// Exercise the real suspend callback, but stub only the host group-stop operation.
 		const originalKill = process.kill;
 		process.kill = ((pid, signal) => {
