@@ -64,7 +64,10 @@ async function lifecycle(runtime: string, transport: string, mode: string): Prom
 	if (transport !== "socketpair") {
 		expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
 		const sentinel = openSync(fifo, constants.O_RDWR | constants.O_NONBLOCK);
-		reader = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+		// The sentinel is a writer, so a blocking open returns at once. Open the inherited reader
+		// blocking: whether a spawning runtime clears O_NONBLOCK on a shared description varies by
+		// Node version, and the nonblocking case reopens fd 3 in the child explicitly.
+		reader = openSync(fifo, constants.O_RDONLY);
 		writer = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
 		closeSync(sentinel);
 	}
@@ -140,7 +143,8 @@ describe.skipIf(process.platform !== "linux")("controlled runtime lifecycle comp
 					if (mode === "valid" || mode === "fragmented") {
 						expect(result.caught).toBeUndefined();
 						expect(result.readyMs).toBeLessThan(2000);
-						expect(result.elapsedMs - result.readyMs!).toBeGreaterThanOrEqual(400);
+						// The fixture's own 400ms pause after READY; both ends are rounded to whole milliseconds.
+						expect(result.elapsedMs - result.readyMs!).toBeGreaterThanOrEqual(399);
 					} else if (mode === "never") {
 						expect(result.caught?.message).toBe("procward: READY startup deadline exceeded");
 						expect(result.elapsedMs).toBeGreaterThanOrEqual(2000);
