@@ -13,6 +13,57 @@ use std::{
     process::Command,
 };
 
+// FreeBSD's openpty and login_tty live in libutil, whose soname changes between releases
+// (libutil.so.9 on 14, .so.10 on 15). Build the same pair from libc calls there, as
+// rustix-openpty already does on Linux, so one binary runs on every supported release.
+#[cfg(target_os = "freebsd")]
+mod pty {
+    use rustix::{
+        fd::{AsRawFd, OwnedFd},
+        fs::{CWD, Mode, openat},
+        io,
+        pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
+        termios::{OptionalActions, Termios, Winsize, tcsetattr, tcsetwinsize},
+    };
+    pub use rustix_openpty::Pty;
+
+    pub fn openpty(termios: Option<&Termios>, winsize: Option<&Winsize>) -> io::Result<Pty> {
+        let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC;
+        let controller = openpt(flags)?;
+        grantpt(&controller)?;
+        unlockpt(&controller)?;
+        let user = openat(
+            CWD,
+            ptsname(&controller, Vec::new())?,
+            flags.into(),
+            Mode::empty(),
+        )?;
+        if let Some(termios) = termios {
+            tcsetattr(&user, OptionalActions::Now, termios)?;
+        }
+        if let Some(winsize) = winsize {
+            tcsetwinsize(&user, *winsize)?;
+        }
+        Ok(Pty { controller, user })
+    }
+
+    // Same steps as FreeBSD libutil login_tty(3): new session (or keep the current one),
+    // TIOCSCTTY, the terminal as stdio, then close the original descriptor.
+    pub fn login_tty(fd: OwnedFd) -> io::Result<()> {
+        let _ = rustix::process::setsid();
+        rustix::process::ioctl_tiocsctty(&fd)?;
+        rustix::stdio::dup2_stdin(&fd)?;
+        rustix::stdio::dup2_stdout(&fd)?;
+        rustix::stdio::dup2_stderr(&fd)?;
+        if fd.as_raw_fd() <= 2 {
+            std::mem::forget(fd);
+        }
+        Ok(())
+    }
+}
+#[cfg(not(target_os = "freebsd"))]
+use rustix_openpty as pty;
+
 pub fn interactive() -> io::Result<bool> {
     let input = unsafe { BorrowedFd::borrow_raw(0) };
     let output = unsafe { BorrowedFd::borrow_raw(1) };
@@ -165,7 +216,7 @@ impl Terminal {
         }
         let state = SavedTerminal::open()?;
         let size = termios::tcgetwinsize(&state.physical)?;
-        let pty = rustix_openpty::openpty(Some(&state.saved), Some(&size))?;
+        let pty = pty::openpty(Some(&state.saved), Some(&size))?;
         fs::fcntl_setfl(&pty.controller, OFlags::NONBLOCK)?;
         Ok(Some(Self {
             state,
@@ -451,7 +502,7 @@ pub fn exec(args: &[OsString]) -> io::Result<u8> {
     } else {
         None
     };
-    rustix_openpty::login_tty(unsafe { OwnedFd::from_raw_fd(raw) })?;
+    pty::login_tty(unsafe { OwnedFd::from_raw_fd(raw) })?;
     if let Some(stderr) = saved_stderr {
         rustix::stdio::dup2_stderr(stderr)?;
     }
@@ -732,7 +783,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    // FreeBSD 14 libutil::openpty uses ptsname's shared static buffer.
+    // libc openpty implementations may use ptsname's shared static buffer.
     // Keep these PTY allocations apart so each slave belongs to its master.
     static PTY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -741,7 +792,7 @@ mod tests {
         let _guard = PTY_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let pty = rustix_openpty::openpty(None, None).unwrap();
+        let pty = pty::openpty(None, None).unwrap();
         let mut saved = termios::tcgetattr(&pty.user).unwrap();
         saved.local_modes ^= termios::LocalModes::ECHO;
         saved.special_codes[termios::SpecialCodeIndex::VINTR] = 7;
@@ -764,7 +815,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if std::env::var_os("PROCWARD_READ_RACE").is_some() {
-            rustix_openpty::login_tty(
+            pty::login_tty(
                 rio::fcntl_dupfd_cloexec(unsafe { BorrowedFd::borrow_raw(0) }, 3).unwrap(),
             )
             .unwrap();
@@ -864,7 +915,7 @@ mod tests {
             );
             return;
         }
-        let pty = rustix_openpty::openpty(None, None).unwrap();
+        let pty = pty::openpty(None, None).unwrap();
         let mut host = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
