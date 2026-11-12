@@ -56,15 +56,16 @@ export function processShutdownPending(): boolean {
 }
 
 /**
- * Whether another shutdown signal should skip graceful cleanup. Once owner loss is observed,
- * procward and the owner-loss bridge can each deliver SIGTERM; none of them asks to skip hooks,
- * and the absolute owner-loss deadline already bounds shutdown. Otherwise a repeated signal
- * still forces exit, as before.
+ * Whether another shutdown signal should skip graceful cleanup. Under a validated procward
+ * owner, its TERMs and the owner-loss bridge's never ask to skip hooks, and they can arrive
+ * before the worker publishes the loss. procward's grace and fatal deadlines, or after owner
+ * loss the absolute owner-loss deadline, bound shutdown instead. Without an owner a repeated
+ * signal still forces exit, as before.
  */
 export function repeatedShutdownSignal(count: number): boolean {
-	const observedAt = ownerLossObserver?.observedAt;
-	if (observedAt !== undefined) {
-		armOwnerLossDeadline(observedAt);
+	if (ownerLossObserver) {
+		const observedAt = ownerLossObserver.observedAt;
+		if (observedAt !== undefined) armOwnerLossDeadline(observedAt);
 		return false;
 	}
 	return count > 1;
