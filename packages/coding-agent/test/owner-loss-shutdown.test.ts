@@ -204,7 +204,9 @@ async function run(scenario: string, runtime = process.execPath): Promise<Receip
 function assertBound(receipt: Receipt, budget: number): void {
 	const sent = receipt.timeline.find((event) => event.event === "peer-loss-sent")!;
 	const timer = receipt.timeline.find((event) => event.event === "timer" && event.observationOrigin! >= sent.at - 20);
-	const exited = receipt.timeline.at(-1)!;
+	// Measure the child's own exit; a busy test runner can observe the close much later.
+	// Only a SIGKILL exit has no exit callback, so it falls back to the runner's observation.
+	const exited = receipt.timeline.find((event) => event.event === "exit-callback") ?? receipt.timeline.at(-1)!;
 	const origin = timer?.observationOrigin ?? sent.at;
 	// 350ms is measurement/scheduling allowance, not an extension of either product deadline.
 	expect(exited.at - origin, JSON.stringify(receipt)).toBeGreaterThan(budget - 150);
