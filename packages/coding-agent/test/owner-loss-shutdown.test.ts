@@ -137,7 +137,15 @@ async function run(scenario: string, runtime = process.execPath): Promise<Receip
 					child.kill("SIGCONT");
 					setTimeout(() => child.kill("SIGTERM"), 100).unref();
 				} else if (scenario.startsWith("already-closing")) child.stdin?.end();
-				else if (!scenario.startsWith("print-")) {
+				else if (scenario === "native-term-before-loss") {
+					// The main thread can handle native TERMs before the worker publishes the loss.
+					child.kill("SIGTERM");
+					child.kill("SIGTERM");
+					setTimeout(() => {
+						loss();
+						child.kill("SIGCONT");
+					}, 50).unref();
+				} else if (!scenario.startsWith("print-")) {
 					loss();
 					if (scenario === "native-term-cont") {
 						child.kill("SIGTERM");
@@ -212,6 +220,7 @@ describe.skipIf(process.platform === "win32")("production owner-loss bridge → 
 		"native-term-cont",
 		"native-term-after-loss",
 		"native-term-repeat",
+		"native-term-before-loss",
 	])(
 		"bounds %s by first observation +5s",
 		async (scenario) => {

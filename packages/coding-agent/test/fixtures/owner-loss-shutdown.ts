@@ -121,6 +121,7 @@ if (scenario === "startup") {
 			"native-term-cont",
 			"native-term-after-loss",
 			"native-term-repeat",
+			"native-term-before-loss",
 			"healthy-cont",
 		].includes(scenario)
 	) {
