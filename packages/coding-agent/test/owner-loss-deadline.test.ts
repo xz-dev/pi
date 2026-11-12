@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from "vitest";
 import type { observeOwnerLoss } from "../src/utils/managed-child.ts";
-import { ownCliProcess, prepareProcessShutdown, repeatedShutdownSignal } from "../src/utils/procward.ts";
+import { exitOnRepeatedShutdownSignal, ownCliProcess, prepareProcessShutdown } from "../src/utils/procward.ts";
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -24,9 +24,6 @@ test("the default bridge uses the remaining absolute five-second budget and neve
 	const exit = vi.spyOn(process, "exit").mockImplementation(() => {
 		throw exited;
 	});
-	// Without an observed owner loss, a second signal skips graceful cleanup as before.
-	expect(repeatedShutdownSignal(2)).toBe(true);
-	expect(repeatedShutdownSignal(1)).toBe(false);
 	ownCliProcess([], {
 		resolveBinary: () => {
 			throw new Error("no native helper");
@@ -41,8 +38,9 @@ test("the default bridge uses the remaining absolute five-second budget and neve
 	expect(timer).toHaveBeenCalledExactlyOnceWith(expect.any(Function), 2000);
 	expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, "SIGTERM");
 	// After observed owner loss, further TERMs never skip hooks; the deadline bounds exit.
-	expect(repeatedShutdownSignal(2)).toBe(false);
-	expect(repeatedShutdownSignal(5)).toBe(false);
+	exitOnRepeatedShutdownSignal(2, 143);
+	exitOnRepeatedShutdownSignal(5, 143);
+	expect(exit).not.toHaveBeenCalled();
 	now = 5000;
 	prepareProcessShutdown();
 	onLoss!("eof", 5000);

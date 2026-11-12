@@ -150,7 +150,7 @@ if (scenario === "startup") {
 		prototype.handleCtrlZ.call(context);
 		process.on("SIGCONT", () => record("cont-callback", { pending: processShutdownPending() }));
 	}
-	if (scenario.startsWith("print-")) {
+	if (scenario.startsWith("print-") || scenario === "external-repeat-print") {
 		// Print has already entered its shared final disposal when the peer injects loss.
 		void runPrintMode(host, { mode: "json" });
 	} else {
