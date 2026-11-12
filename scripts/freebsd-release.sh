@@ -31,6 +31,9 @@ if [[ $target == freebsd-x64 ]]; then
 		sh "$work/rustup-init.sh" -y --profile minimal --default-toolchain none --no-modify-path
 	fi
 	export PATH="$HOME/.cargo/bin:$PATH"
+	# vendor/procward has no toolchain file, so give its build the same stable toolchain the other
+	# canonical targets use (dtolnay/rust-toolchain stable). The daemon's toolchain file still wins there.
+	rustup default stable
 else
 	# rustup ships no aarch64-unknown-freebsd host (tier 3): use FreeBSD's packaged Rust, recorded as unpinned.
 	command -v cargo >/dev/null || pkg install -y rust
