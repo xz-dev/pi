@@ -148,7 +148,7 @@ test("runtime staging installs exact locked closure only in CI, verifies version
 		])
 			assert.equal(
 				readFileSync(join(work, stagedPath), "utf8"),
-				readFileSync(new URL(`../${sourcePath}`, import.meta.url), "utf8"),
+				readFileSync(new URL(`./${sourcePath}`, import.meta.url), "utf8"),
 			);
 		const runtime = join(work, "packages", "coding-agent", "test", "windows-owner-runtime.mjs");
 		const imports = [...readFileSync(runtime, "utf8").matchAll(/\bfrom\s+["'](\.[^"']+)["']/g)];
