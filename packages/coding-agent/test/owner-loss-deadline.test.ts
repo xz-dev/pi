@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from "vitest";
 import type { observeOwnerLoss } from "../src/utils/managed-child.ts";
-import { ownCliProcess, prepareProcessShutdown } from "../src/utils/procward.ts";
+import { ownCliProcess, prepareProcessShutdown, repeatedShutdownSignal } from "../src/utils/procward.ts";
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -34,9 +34,14 @@ test("the default bridge uses the remaining absolute five-second budget and neve
 			return { stop() {}, observedAt: 1000 };
 		},
 	});
+	// Without a bridge signal, a second external signal skips graceful cleanup as before.
+	expect(repeatedShutdownSignal(2)).toBe(true);
 	onLoss!("owner-loss", 1000);
 	expect(timer).toHaveBeenCalledExactlyOnceWith(expect.any(Function), 2000);
 	expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, "SIGTERM");
+	// The bridge TERM plus native TERM is one request; only a third signal forces exit.
+	expect(repeatedShutdownSignal(2)).toBe(false);
+	expect(repeatedShutdownSignal(3)).toBe(true);
 	now = 5000;
 	prepareProcessShutdown();
 	onLoss!("eof", 5000);
