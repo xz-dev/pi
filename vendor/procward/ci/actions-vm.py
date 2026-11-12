@@ -194,6 +194,7 @@ def main():
         # immediately afterwards, before our packages/toolchain/build setup.
         packages = ('apk add --no-cache python3 curl ca-certificates build-base binutils git bash nftables'
                     if args.provider == 'alpine' else
+                    'sh "$GITHUB_WORKSPACE/ci/ubuntu-apt-mirror.sh" && '
                     'apt-get update && apt-get install -y --no-install-recommends python3 curl ca-certificates gcc libc6-dev binutils git nftables')
         setup = (f'test "$(cat /proc/sys/kernel/random/boot_id)" != "{request["host_boot_id"]}" '
                  f'&& test "$(id -u)" = 0 && {packages} '

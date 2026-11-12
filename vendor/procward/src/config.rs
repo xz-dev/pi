@@ -8,9 +8,16 @@ pub struct Config {
     pub deadline: Duration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlEndpoint {
+    Fd(u64),
+    #[cfg(windows)]
+    Handle(u64),
+}
+
 pub struct RunOptions {
     pub cleanup: Config,
-    pub control: Option<u64>,
+    pub control: Option<ControlEndpoint>,
     pub retain_descendants: bool,
     pub quiet: bool,
     pub command_index: usize,
@@ -97,23 +104,25 @@ pub fn options(args: &[OsString]) -> Result<RunOptions, (u8, String)> {
             index += 1;
             continue;
         }
-        if option
-            == if cfg!(windows) {
-                "--control-handle"
-            } else {
-                "--control-fd"
-            }
-        {
+        let native_handle = cfg!(windows) && option == "--control-handle";
+        if option == "--control-fd" || native_handle {
             if control.is_some() {
                 return Err((2, "duplicate task control option".into()));
             }
-            control = Some(
-                args.get(index + 1)
-                    .and_then(|v| v.to_str())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .filter(|n| *n > 2)
-                    .ok_or_else(|| (2, "task control needs a native endpoint".into()))?,
-            );
+            let raw = args
+                .get(index + 1)
+                .and_then(|v| v.to_str())
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|n| *n > 2)
+                .ok_or_else(|| (2, "task control needs a native endpoint".into()))?;
+            let endpoint = ControlEndpoint::Fd(raw);
+            #[cfg(windows)]
+            let endpoint = if native_handle {
+                ControlEndpoint::Handle(raw)
+            } else {
+                endpoint
+            };
+            control = Some(endpoint);
             index += 2;
             continue;
         }
@@ -144,4 +153,44 @@ pub fn options(args: &[OsString]) -> Result<RunOptions, (u8, String)> {
         125,
         "expected run [options] -- <command> [args...]; see --help".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ControlEndpoint, options};
+    use std::ffi::OsString;
+
+    #[test]
+    fn control_fd_is_a_descriptor_not_a_native_handle() {
+        let args = ["--control-fd", "3", "--", "payload"].map(OsString::from);
+        assert_eq!(
+            options(&args).unwrap().control,
+            Some(ControlEndpoint::Fd(3))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_handle_retains_its_distinct_type() {
+        let args = ["--control-handle", "512", "--", "payload"].map(OsString::from);
+        assert_eq!(
+            options(&args).unwrap().control,
+            Some(ControlEndpoint::Handle(512))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_control_forms_are_mutually_exclusive_in_both_orders() {
+        for flags in [
+            ["--control-fd", "--control-handle"],
+            ["--control-handle", "--control-fd"],
+        ] {
+            let args = [flags[0], "3", flags[1], "512", "--", "payload"].map(OsString::from);
+            assert_eq!(
+                options(&args).err().unwrap(),
+                (2, "duplicate task control option".into())
+            );
+        }
+    }
 }
