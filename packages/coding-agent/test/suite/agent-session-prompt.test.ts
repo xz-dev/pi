@@ -563,6 +563,41 @@ describe("AgentSession prompt characterization", () => {
 		);
 	});
 
+	// Issue #10267: preparation failure must clear the busy flag and release idle waiters.
+	it.each(["user", "custom"] as const)("clears busy state after %s run preparation fails", async (kind) => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const entered = Promise.withResolvers<void>();
+		const preparation = Promise.withResolvers<never>();
+		const runner = harness.session.extensionRunner;
+		if (!runner) throw new Error("extension runner missing");
+		const prepare = vi.spyOn(runner, "emitBeforeAgentStart").mockImplementationOnce(() => {
+			entered.resolve();
+			return preparation.promise;
+		});
+		const run =
+			kind === "user"
+				? harness.session.prompt("hello")
+				: harness.session.sendCustomMessage(
+						{ customType: "task-done", content: "background task finished", display: true },
+						{ triggerTurn: true },
+					);
+		const rejected = expect(run).rejects.toThrow("preparation failed");
+		await entered.promise;
+		expect(harness.session.isStreaming).toBe(true);
+		expect(harness.session.isIdle).toBe(false);
+		const idle = harness.session.waitForIdle();
+		preparation.reject(new Error("preparation failed"));
+		await rejected;
+		await idle;
+		expect(harness.session.isStreaming).toBe(false);
+		expect(harness.session.isIdle).toBe(true);
+		prepare.mockRestore();
+		harness.setResponses([fauxAssistantMessage("ready")]);
+		await harness.session.prompt("next");
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
 	// Issue #10267, #5581: a run started by sendMessage(..., { triggerTurn: true }) skipped
 	// before_agent_start, so its second request patched away the sections handlers had added.
 	describe("runs started by a custom message", () => {

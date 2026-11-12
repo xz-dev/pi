@@ -90,8 +90,10 @@ describe("SessionManager.newSession with custom id", () => {
 			timestamp: Date.now(),
 		});
 
+		const generationBeforeBranch = session.getGeneration();
 		session.createBranchedSession(firstId);
 
+		expect(session.getGeneration()).toBeGreaterThan(generationBeforeBranch);
 		expect(session.getSessionId()).toMatch(UUID_V7_RE);
 		expect(session.getHeader()!.id).toBe(session.getSessionId());
 	});
