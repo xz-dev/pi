@@ -371,7 +371,8 @@ export function createShellToolDefinition(
 			onUpdate?,
 			ctx?: ExtensionContext,
 		) {
-			const branch = ctx?.sessionManager.getBranch() ?? [];
+			// Tool callers may pass a context with only cwd (SDK and tests); provenance is then unknown.
+			const branch = ctx?.sessionManager?.getBranch() ?? [];
 			// Anchor at this persisted call so later messages cannot replace its trigger.
 			const callIndex = branch.findLastIndex(
 				(entry) =>
