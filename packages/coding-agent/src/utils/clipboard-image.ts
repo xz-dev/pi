@@ -210,8 +210,8 @@ export async function readClipboardImage(options?: {
 
 	let image: ClipboardImage | null | undefined;
 
-	if (platform === "linux") {
-		const wsl = isWSL(env);
+	if (platform === "linux" || platform === "freebsd") {
+		const wsl = platform === "linux" && isWSL(env);
 		if (isWaylandSession(env) || wsl) {
 			image = await readClipboardImageViaWlPaste();
 		}
