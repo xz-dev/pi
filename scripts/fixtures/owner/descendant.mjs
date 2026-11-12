@@ -13,13 +13,16 @@ if (mode === "leaf") {
 	});
 	await new Promise((resolve, reject) => {
 		middle.once("error", reject);
-		middle.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`owner fixture middle: ${code}`)));
+		middle.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`owner fixture middle: ${code}`))));
 	});
 } else if (mode === "middle") {
-	const leaf = process.platform === "win32"
-		? spawn(process.execPath, [process.argv[1], "leaf"], { detached: true, stdio: "ignore" })
-		: spawn("/bin/sh", ["-c", 'printf "%s\\n" "$$" > "$PI_OWNER_PID_FILE"; exec sleep 600'], { stdio: "ignore" });
-	leaf.on("error", (error) => { throw error; });
+	const leaf =
+		process.platform === "win32"
+			? spawn(process.execPath, [process.argv[1], "leaf"], { detached: true, stdio: "ignore" })
+			: spawn("/bin/sh", ["-c", 'printf "%s\\n" "$$" > "$PI_OWNER_PID_FILE"; exec sleep 600'], { stdio: "ignore" });
+	leaf.on("error", (error) => {
+		throw error;
+	});
 	leaf.unref();
 	const deadline = Date.now() + 10_000;
 	while (!existsSync(process.env.PI_OWNER_PID_FILE)) {
