@@ -116,6 +116,7 @@ describe("Codex retry policy", () => {
 
 	it.each([false, true])("tries auto WS four times before SSE with retry.enabled=%s", async (enabled) => {
 		vi.useFakeTimers();
+		vi.spyOn(Math, "random").mockReturnValue(0);
 		const { run, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementation((socket) => socket.fail());
 		const policy: RetryPolicy = { enabled, maxRetries: 1, baseDelayMs: 10, maxAgentDelayMs: 15 };
@@ -152,6 +153,7 @@ describe("Codex retry policy", () => {
 		"retries partial WS attempts without replay, then resets SSE budget (enabled=%s)",
 		async (enabled) => {
 			vi.useFakeTimers();
+			vi.spyOn(Math, "random").mockReturnValue(0);
 			const { run, onSend, sent, fetchMock } = mockTransport();
 			onSend.mockImplementation((socket) => {
 				socket.emit({ type: "response.created", response: { id: "partial" } });
@@ -635,6 +637,7 @@ describe("Codex transport recovery", () => {
 
 	it("keeps explicitly requested provider-level SSE retries within the same request", async () => {
 		vi.useFakeTimers();
+		vi.spyOn(Math, "random").mockReturnValue(0);
 		const timers = vi.spyOn(globalThis, "setTimeout");
 		const { run, recover, onSend, sent, fetchMock } = mockTransport();
 		onSend.mockImplementation((socket) => socket.fail());
