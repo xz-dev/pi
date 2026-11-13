@@ -427,6 +427,63 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 ): Promise<AssistantMessage> {
+	// The transport hook is scoped to this request: callbacks arriving after the
+	// request settled (adapter internals, or a cancelled/replaced request) or
+	// after the run's signal aborted must not emit stale labels.
+	let requestSettled = false;
+	let lastTransport: string | undefined;
+	// Events expose model identifiers only; headers and other caller-supplied
+	// credentials stay on the full model object passed to onTransport.
+	const eventModel = { id: config.model.id, api: config.model.api, provider: config.model.provider };
+	const notifyTransport = async (transport: string | undefined) => {
+		await emit({ type: "transport_status", transport, model: eventModel });
+		try {
+			await config.onTransport?.(transport, config.model);
+		} catch {
+			// Optional observer errors must not fail the request.
+		}
+	};
+	const clearTransport = async () => {
+		if (lastTransport === undefined) return;
+		lastTransport = undefined;
+		await notifyTransport(undefined);
+	};
+	// Abort retires the request synchronously and clears a known transport
+	// promptly; a late-arriving stream factory can no longer report or clear.
+	const onAbort = () => {
+		requestSettled = true;
+		void clearTransport().catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
+
+	// The stream function receives the original options plus the scoped
+	// onTransport hook; everything else passes through unchanged.
+	const scopedStreamFn: StreamFn = (model, llmContext, options) =>
+		streamFunction(model, llmContext, {
+			...options,
+			onTransport: async (transport) => {
+				if (requestSettled || signal?.aborted) return;
+				lastTransport = transport;
+				await notifyTransport(transport);
+			},
+		});
+
+	try {
+		return await consumeAssistantResponse(context, config, signal, emit, scopedStreamFn);
+	} finally {
+		requestSettled = true;
+		signal?.removeEventListener("abort", onAbort);
+		await clearTransport();
+	}
+}
+
+async function consumeAssistantResponse(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFunction: StreamFn,
+): Promise<AssistantMessage> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
 	throwIfAborted(signal);
