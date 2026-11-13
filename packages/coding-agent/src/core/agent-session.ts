@@ -25,8 +25,10 @@ import {
 	type AgentState,
 	type AgentTool,
 	type AgentToolCallOutcome,
+	type BackgroundToolCalls,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	type ManagedExecutionNotification,
 	type PrepareNextTurnContext,
 	runToolCall,
 	type StreamFn,
@@ -150,6 +152,7 @@ import {
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+import { createToolTaskTool } from "./tools/tool-task.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
 	findLatestResponse,
@@ -555,6 +558,7 @@ export class AgentSession {
 		this._installAgentBoundaryHooks();
 		this._installHiddenDeclarationsProjection();
 		this._installAgentForcedPromptProjection();
+		this._syncManagedToolExecutions();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -721,6 +725,51 @@ export class AgentSession {
 	 * registered tool execution to the extension context. Tool call and tool result interception now
 	 * happens here instead of in wrappers.
 	 */
+	private _syncManagedToolExecutions(): void {
+		const configured = this.settingsManager.getBackgroundToolCalls();
+		const backgroundToolCalls: BackgroundToolCalls = { ...configured };
+		for (const toolName of ["bash", "powershell"] as const) {
+			if (configured[toolName]) continue;
+			backgroundToolCalls[toolName] = {
+				detachAfterSeconds: 600,
+				shouldDetach: (argumentsValue) => {
+					const timeout = (argumentsValue as { timeout?: unknown } | undefined)?.timeout;
+					return timeout === undefined || (typeof timeout === "number" && timeout > 1200);
+				},
+			};
+		}
+		delete backgroundToolCalls.tool_task;
+		this.agent.backgroundToolCalls = backgroundToolCalls;
+		this.agent.managedExecutions.setCompletionHandler((notification) => this._notifyManagedExecution(notification));
+	}
+
+	/**
+	 * tool_task stays out of the tool loadout until a tool call actually moves to
+	 * the background, so ordinary requests do not carry its schema.
+	 */
+	private _activateToolTaskForManagedExecutions(): void {
+		if (this.agent.managedExecutions.list().length === 0 || !this._toolRegistry.has("tool_task")) return;
+		const activeToolNames = this.getActiveToolNames();
+		if (activeToolNames.includes("tool_task")) return;
+		this.setActiveToolsByName([...activeToolNames, "tool_task"]);
+	}
+
+	private async _notifyManagedExecution(notification: ManagedExecutionNotification): Promise<void> {
+		if (this._isShuttingDown) return;
+		// The notice tells the model to call tool_task, so the next request must offer it.
+		this._activateToolTaskForManagedExecutions();
+		const text = `Managed tool execution ${notification.id} (${notification.toolName}) ${notification.status}. Use tool_task wait with this task ID to retrieve its result.`;
+		await this.sendCustomMessage(
+			{
+				customType: "managed-tool-execution-completed",
+				content: [{ type: "text", text }],
+				display: false,
+				details: notification,
+			},
+			{ triggerTurn: true, deliverAs: this.isStreaming ? "steer" : undefined },
+		);
+	}
+
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = (context) => this._beforeToolCall(context);
 		this.agent.afterToolCall = (context) => this._afterToolCall(context);
@@ -977,6 +1026,7 @@ export class AgentSession {
 			const context = await this._compactBeforeNextAssistantResponse(turn.context);
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
+			this._activateToolTaskForManagedExecutions();
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
 			const options = normalizeBuildSystemPromptOptions({
 				...runOptions,
@@ -1514,6 +1564,11 @@ export class AgentSession {
 	async dispose(): Promise<void> {
 		this.prepareForShutdown();
 		this._cancelSessionOperations();
+		try {
+			this.agent.managedExecutions.dispose();
+		} catch {
+			// Managed cleanup must not skip the remaining synchronous cleanup.
+		}
 
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
@@ -1983,10 +2038,10 @@ export class AgentSession {
 	 * @param onStarted Called once the run's messages are prepared, before the first request.
 	 */
 	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
+		let messages: AgentMessage[];
 		this._assertNotShuttingDown();
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
-		let messages: AgentMessage[];
 		try {
 			messages = await this._prepareRun(trigger);
 			this._assertNotShuttingDown();
@@ -2444,10 +2499,10 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		this._assertNotShuttingDown();
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
@@ -2460,10 +2515,10 @@ export class AgentSession {
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		this._assertNotShuttingDown();
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
@@ -3855,6 +3910,10 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+		this._baseToolDefinitions.set(
+			"tool_task",
+			createToolDefinitionFromAgentTool(createToolTaskTool(this.agent.managedExecutions)),
+		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -3910,6 +3969,7 @@ export class AgentSession {
 		const previousDefaultTools = new Set(getDefaultTools());
 		await this.settingsManager.reload();
 		this._assertNotShuttingDown();
+		this._syncManagedToolExecutions();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
 		await this._resourceLoader.reload();
@@ -4296,6 +4356,9 @@ export class AgentSession {
 					label = result.label;
 				}
 			}
+
+			// Shutdown may have begun while session_before_tree was awaited.
+			this._assertNotShuttingDown();
 
 			// Run default summarizer if needed
 			let summaryText: string | undefined;
