@@ -159,6 +159,9 @@ if (scenario === "startup") {
 	const ready = setInterval(() => {
 		if (process.listenerCount("SIGTERM") === 0) return;
 		clearInterval(ready);
+		// Report each delivered SIGTERM so the test can send a repeat only after the first arrived; two back-to-back
+		// kill() calls can merge into one pending signal.
+		if (scenario.startsWith("external-repeat")) process.on("SIGTERM", () => record("sigterm"));
 		record("mode-ready");
 		if (scenario === "delay-callback") {
 			record("main-block-start");
