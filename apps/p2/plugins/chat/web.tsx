@@ -1,4 +1,5 @@
-// Main view: the transcript of the open session with its composer, or the new-session screen.
+// Main view: the transcript of the open session with its composer, or the new-session screen; the model commands of
+// the command menu (commands.tsx).
 
 import {
 	Access,
@@ -8,6 +9,7 @@ import {
 	grantMode,
 	type Held,
 	isChordError,
+	keptIn,
 	liveIn,
 	serveKeyed,
 	UI_LINGER,
@@ -19,12 +21,17 @@ import {
 	buildTranscript,
 	ChevronIcon,
 	CloseIcon,
+	CommandPages,
+	Commands,
+	type CommandTarget,
 	ContextUsage,
 	CostPanel,
 	closeLayers,
+	conversationKey,
 	conversationRoute,
 	type Detail,
 	DownIcon,
+	ErrorToast,
 	errorText,
 	type FileCompletion,
 	FileCompletionPopover,
@@ -33,6 +40,8 @@ import {
 	forgetSession,
 	type Gap,
 	type Kept,
+	KeyboardKey,
+	KeyboardShortcut,
 	keep,
 	keepSessions,
 	keptSizes,
@@ -41,17 +50,20 @@ import {
 	lightTap,
 	loadKept,
 	locationLabel,
+	Menu,
 	MenuIcon,
 	Messages,
 	type ModelChoice,
 	ModelPicker,
 	modelName,
+	NEW_SESSION,
 	navigate,
 	OneShotAgents,
 	OpenConversation,
 	OpenTerminal,
 	OpenWorkspaceFile,
 	openLayer,
+	openSidebar,
 	type PickedFile,
 	PiLogo,
 	PlusIcon,
@@ -68,8 +80,6 @@ import {
 	Slots,
 	StopIcon,
 	seedSizes,
-	setDrawer,
-	setSidebarCollapsed,
 	ToolActivities,
 	ToolActivityContext,
 	type Transcript,
@@ -77,10 +87,12 @@ import {
 	transcriptOf,
 	transcriptRows,
 	useChatScroll,
+	useCommandRouteTarget,
 	useComposerState,
 	useConnected,
 	useFileCompletion,
 	useHost,
+	useLongPress,
 	useNavigation,
 	useNewSessionState,
 	useObject,
@@ -110,13 +122,19 @@ import { createPortal } from "react-dom";
 import { Drafts } from "../drafts/contract.ts";
 import { Envs } from "../envs/contract.ts";
 import { DirectoryPicker, directoryPickerLayer } from "../envs/contract.web.tsx";
+import { GlyphIcon } from "../glyphs/GlyphIcon.tsx";
 import { Models } from "../models/contract.ts";
 import type { ResourceSnapshot } from "../models/resources.ts";
+import { Projects } from "../projects/contract.ts";
+import { placeSeed } from "../projects/glyph-seed.ts";
 import { type Session, Sessions } from "../sessions/contract.ts";
 import { SessionMetrics, SessionStatus, WorkerControl } from "../status/contract.ts";
 import { type Child, conversationLocation, SubagentControl, Subagents } from "../subagents/contract.ts";
+import { openMain } from "../subagents/contract.web.ts";
 import { SessionTree } from "../tree/contract.ts";
-import { Chat, ChatCosts, TranscriptEntries } from "./contract.ts";
+import { MODEL_COMMANDS, MODEL_PAGES } from "./commands.tsx";
+import { Chat, ChatCosts, conversationTargetId, TranscriptEntries } from "./contract.ts";
+import { newSessionChoice, thinkingLevelOf } from "./model-choice.ts";
 import { type Outgoing, outboxOf } from "./outbox.ts";
 import { sessionStart } from "./session-start.ts";
 
@@ -175,7 +193,6 @@ function outgoingItem(
 const outgoingTranscript = (messages: readonly Outgoing[]): Transcript => ({
 	items: messages.map((message) => message.item),
 	earlier: false,
-	artifacts: [],
 	busy: false,
 	working: false,
 	compactions: [],
@@ -228,6 +245,8 @@ type PageObjects = {
 	readonly models: Held<typeof Models> | undefined;
 	/** The owner's only. */
 	readonly envs: Held<typeof Envs> | undefined;
+	/** The owner's only: projects.json and the sessions' projects, for the top bar's project glyph. */
+	readonly projects: Held<typeof Projects> | undefined;
 };
 
 const PageObjectsContext = createContext<PageObjects | undefined>(undefined);
@@ -312,22 +331,20 @@ function ModelControl({ resources, choice }: { resources: ResourceSnapshot | und
 	);
 }
 
-/** The composer's error; tapping it dismisses it. */
-function ErrorToast({ error, onDismiss }: { error: string | undefined; onDismiss: () => void }) {
-	return error ? (
-		<button type="button" className="toast" onClick={onDismiss}>
-			{error}
-		</button>
-	) : null;
-}
+/** One way to send the composer's message: its menu label and what it does. */
+type SendChoice = { readonly label: string; readonly run: () => void };
 
-/** Textarea with send, stop, steer and attachments; Enter sends with a fine pointer, Escape stops. */
+/**
+ * Textarea with send, stop and attachments. Enter (with a fine pointer) and a tap on Send do `send`; Alt+Enter does
+ * `alternate` (while a run is busy: a follow-up instead of steering; idle: the message in a new branch). Where there is
+ * an alternate, Send also opens a menu of both: a long press (touch), a right-click, the Menu key or Shift+F10,
+ * or ArrowUp while it has focus (Elanor's menu). Escape stops a busy run.
+ */
 function Composer({
 	busy,
-	steer,
-	setSteer,
 	disabled,
-	onSend,
+	send,
+	alternate,
 	onStop,
 	attaching,
 	replying,
@@ -336,10 +353,10 @@ function Composer({
 	children,
 }: {
 	busy: boolean;
-	steer: boolean;
-	setSteer: (steer: boolean) => void;
 	disabled: boolean;
-	onSend: () => void;
+	send: SendChoice;
+	/** The other way to send, if there is one here. */
+	alternate?: SendChoice;
 	onStop?: () => void;
 	attaching?: Attaching;
 	/** The message being answered, shown above the text with a way to drop the reply. */
@@ -352,9 +369,17 @@ function Composer({
 	// The draft straight from the app's composer state, not through the screen's dock content: that arrives a layout
 	// effect after a keystroke, so the controlled textarea rendered the previous text first, which put the caret at the
 	// end on every keystroke and broke a phone keyboard's composition (its first tap on Send only closed the keyboard).
-	const { draft, setDraft } = useComposerState();
+	const { draft, setDraft, registerTextarea } = useComposerState();
 	const ownRef = useRef<HTMLTextAreaElement>(null);
 	const textarea = textareaRef ?? ownRef;
+	// The app's composer state focuses it on request (`focus`): opening a session, a reply, restored text.
+	const ref = useCallback(
+		(element: HTMLTextAreaElement | null) => {
+			textarea.current = element;
+			registerTextarea(element);
+		},
+		[textarea, registerTextarea],
+	);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: resizing follows the rendered draft, as in Pi Mobile.
 	useLayoutEffect(() => {
 		const element = textarea.current;
@@ -366,6 +391,25 @@ function Composer({
 	}, [draft]);
 	const files = attaching?.files ?? [];
 	const content = draft.trim() !== "" || files.length > 0;
+	const [choosing, setChoosing] = useState(false);
+	const choices = alternate && content && !disabled ? [send, alternate] : undefined;
+	const offered = choices !== undefined;
+	// The menu closes when its choices go (sent, no way to branch now).
+	useEffect(() => {
+		if (!offered) setChoosing(false);
+	}, [offered]);
+	const sendButton = useRef<HTMLButtonElement>(null);
+	const press = useLongPress(() => {
+		if (offered) setChoosing(true);
+	});
+	// Opened from the keyboard or a mouse, the menu's first item takes the focus (no trigger tells Elanor's menu how it
+	// opened); a touch leaves it on the menu.
+	const popup = useRef<HTMLDivElement>(null);
+	const focusFirst = useRef(false);
+	const openFromKeys = () => {
+		focusFirst.current = true;
+		setChoosing(true);
+	};
 	return (
 		<form
 			className="composer"
@@ -373,7 +417,7 @@ function Composer({
 			onSubmit={(event) => {
 				event.preventDefault();
 				// A form in a sheet a composer control opened (chat-mode's name) is a React child: its submit bubbles here.
-				if (event.target === event.currentTarget) onSend();
+				if (event.target === event.currentTarget) send.run();
 			}}
 		>
 			{replying && (
@@ -405,10 +449,10 @@ function Composer({
 			)}
 			{completion && <FileCompletionPopover completion={completion} />}
 			<textarea
-				ref={textarea}
+				ref={ref}
 				rows={1}
 				value={draft}
-				placeholder={busy ? (steer ? "Steer the current run…" : "Queue a follow-up…") : "Message Pi…"}
+				placeholder={busy ? "Steer the current run…" : "Message Pi…"}
 				aria-label="Message"
 				onChange={(event) => {
 					setDraft(event.target.value);
@@ -436,7 +480,8 @@ function Composer({
 					}
 					if (event.key === "Enter" && !event.shiftKey && window.matchMedia("(pointer: fine)").matches) {
 						event.preventDefault();
-						onSend();
+						// Without another way here (a guest, a subagent), Alt+Enter sends as Enter does.
+						(event.altKey && alternate && !disabled ? alternate : send).run();
 					}
 				}}
 			/>
@@ -455,16 +500,6 @@ function Composer({
 						/>
 					</label>
 				)}
-				{busy && (
-					<button
-						type="button"
-						className={`chip toggle ${steer ? "on" : ""}`}
-						aria-pressed={steer}
-						onClick={() => setSteer(!steer)}
-					>
-						Steer
-					</button>
-				)}
 				{children}
 				<span className="spacer" />
 				{busy && onStop && (
@@ -472,8 +507,69 @@ function Composer({
 						<StopIcon />
 					</button>
 				)}
+				{choices && (
+					// Elanor's menu, opened by Send's own gestures (a trigger would open on the click that sends). It takes the
+					// focus and gives it back when it closes.
+					<Menu.Root
+						open={choosing}
+						onOpenChange={setChoosing}
+						onOpenChangeComplete={(open) => {
+							if (open && focusFirst.current)
+								popup.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
+							focusFirst.current = false;
+						}}
+						modal={false}
+					>
+						<Menu.Portal>
+							<Menu.Positioner className="send-menu" anchor={sendButton} side="top" align="end" sideOffset={4}>
+								<Menu.Popup ref={popup} className="send-options" aria-label="Ways to send">
+									{choices.map((choice, index) => (
+										<Menu.Item
+											key={choice.label}
+											onClick={choice.run}
+											endAdornment={
+												<KeyboardShortcut>
+													{index === 0 ? (
+														<KeyboardKey>Enter</KeyboardKey>
+													) : (
+														<>
+															<KeyboardKey>Alt</KeyboardKey>+<KeyboardKey>Enter</KeyboardKey>
+														</>
+													)}
+												</KeyboardShortcut>
+											}
+										>
+											{choice.label}
+										</Menu.Item>
+									))}
+								</Menu.Popup>
+							</Menu.Positioner>
+						</Menu.Portal>
+					</Menu.Root>
+				)}
 				{(!busy || content) && (
-					<button type="submit" className="round send" aria-label="Send" disabled={!content || disabled}>
+					<button
+						ref={sendButton}
+						type="submit"
+						className="round send"
+						aria-label="Send"
+						title={choices ? `${send.label} (long press for more)` : send.label}
+						disabled={!content || disabled}
+						{...(choices ? { "aria-haspopup": "menu" as const, "aria-expanded": choosing } : {})}
+						{...press.handlers}
+						onContextMenu={(event) => {
+							if (!choices) return;
+							event.preventDefault();
+							// Android's long press fires this too: the press opens the list once, and its touch makes no click.
+							if (press.touching()) press.fire();
+							else openFromKeys();
+						}}
+						onKeyDown={(event) => {
+							if (!choices || event.key !== "ArrowUp") return;
+							event.preventDefault();
+							openFromKeys();
+						}}
+					>
 						<SendIcon />
 					</button>
 				)}
@@ -505,6 +601,8 @@ type ComposerProps = Omit<Parameters<typeof Composer>[0], "textareaRef">;
  * and its footer. Absent: nothing below the bar above (a one-shot agent's view).
  */
 type DockContent = {
+	/** The screen's key (`conversationKey`): an open's focus request goes to the composer of its own screen. */
+	readonly screen: string;
 	readonly above?: ReactNode;
 	readonly composer?: { readonly toBottom?: ReactNode } & (
 		| { readonly bar: ReactNode }
@@ -569,6 +667,11 @@ function useFrame(): Frame {
 function Dock({ frame, dockRef }: { frame: Frame; dockRef: (element: HTMLDivElement | null) => void }) {
 	const content = useSyncExternalStore(frame.contents.subscribe, frame.contents.snapshot);
 	const composer = content?.composer;
+	const { screenShown } = useComposerState();
+	// After the commit that put the screen's composer, or none, in place: the textarea is the one this screen shows.
+	useLayoutEffect(() => screenShown(content?.screen), [content, screenShown]);
+	// A list page replaces the chat: no chat screen shows, so opening the one shown before waits for it again.
+	useLayoutEffect(() => () => screenShown(undefined), [screenShown]);
 	return (
 		<div className="dock" ref={dockRef}>
 			{content?.above}
@@ -603,11 +706,20 @@ function TopBar({
 	moving?: boolean;
 }) {
 	const connected = useConnected();
-	const nav = useNavigation();
-	const route = useRoute();
 	// Only the owner reads environments (`PageObjects.envs`): guests see the location without the sandbox lock.
-	const envs = useReadable(usePageObjects().envs?.envs);
+	const objects = usePageObjects();
+	const envs = useReadable(objects.envs?.envs);
 	const sandboxed = envs?.find((env) => env.name === session?.env)?.config.type === "gondolin";
+	// The project glyph the sidebar shows for this session (guests read no projects: the path's own glyph).
+	const kept = keptIn(objects.projects, "owner");
+	const projects = useReadable(kept?.projects);
+	const memberships = useReadable(kept?.sessions);
+	const glyph = session && (
+		<GlyphIcon
+			seed={placeSeed(projects ?? [], session.env ?? null, session.cwd, memberships?.[session.id])}
+			size={11}
+		/>
+	);
 	const lock = sandboxed && (
 		<span className="title-lock">
 			<LockIcon size={11} />
@@ -615,15 +727,9 @@ function TopBar({
 	);
 	return (
 		<header className="topbar">
-			<button
-				type="button"
-				className="icon-button menu sidebar-open"
-				onClick={() =>
-					window.matchMedia("(min-width: 900px)").matches ? setSidebarCollapsed(false) : setDrawer(true)
-				}
-				aria-label="Sessions"
-			>
+			<button type="button" className="icon-button menu sidebar-open" onClick={openSidebar} aria-label="Sessions">
 				<MenuIcon />
+				<Slot name="menu-badge" />
 			</button>
 			<div className="title">
 				{child ? (
@@ -631,11 +737,7 @@ function TopBar({
 						<h1>
 							<span className="sub-tag">{child.kind === "agent" ? "agent" : "subagent"}</span> {child.name}
 						</h1>
-						<button
-							type="button"
-							className="crumb"
-							onClick={() => session && void nav.backOrPush(conversationRoute(route, session.id, session.main))}
-						>
+						<button type="button" className="crumb" onClick={() => session && openMain(session.id, session.main)}>
 							← {session?.title}
 						</button>
 					</>
@@ -655,17 +757,22 @@ function TopBar({
 									) : (
 										<>
 											{lock}
+											{glyph}
 											{locationLabel(session.env, session.cwd)}
 										</>
 									)}
 								</button>
 							) : (
-								<p>{locationLabel(session.env, session.cwd)}</p>
+								<p>
+									{glyph}
+									{locationLabel(session.env, session.cwd)}
+								</p>
 							))}
 					</>
 				)}
 			</div>
 			{!connected && <span className="offline">Offline</span>}
+			<Slot name="view-actions" />
 			<Slot name="artifact-actions" />
 			<Slot name="terminal-actions" />
 			<Slot name="workspace-actions" />
@@ -731,6 +838,28 @@ function useRestoredDrafts(
 	}, [drafts, pending, restore]);
 }
 
+/**
+ * What the command menu acts on while a conversation shows: a subagent's conversation, else the session while its own
+ * conversation shows; nothing for a one-shot agent (read-only) or before the session and its subagents are known.
+ */
+function viewTarget(
+	session: Session | undefined,
+	conversation: number,
+	child: Child | undefined,
+): CommandTarget | undefined {
+	if (!session || child?.kind === "agent") return undefined;
+	if (child)
+		return {
+			type: "conversation",
+			id: conversationTargetId(session.id, conversation),
+			kind: "Conversation",
+			label: child.name,
+		};
+	return session.main === conversation
+		? { type: "session", id: session.id, kind: "Session", label: session.title }
+		: undefined;
+}
+
 function SessionChat({ sessionId, conversationId }: { sessionId: string; conversationId: number }) {
 	const nav = useNavigation();
 	const openConversation = useCallback(
@@ -780,7 +909,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 			// What this device kept of a session the server no longer has goes with it (an archived one stays).
 			if (!session) void forgetSession(sessionId);
 			toast(session ? "Session is archived" : "Session not found");
-			void nav.replace(conversationRoute(current, undefined), current);
+			void nav.replace(NEW_SESSION, current);
 		}
 	}, [listed, session, nav, sessionId, toast]);
 	// Who this browser is, as the server last said: kept while reconnecting (`useOwner`), so the composer stays.
@@ -798,6 +927,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	const child = children?.[sessionId]?.find((entry) => entry.conversationId === conversationId);
 	// A code mode script's one-shot agent: read-only, opened from the script's tool card.
 	const oneShot = child?.kind === "agent";
+	useCommandRouteTarget(viewTarget(session, conversationId, child));
 	// Where the viewed conversation works: a subagent may have its own location (e.g. a git worktree, or another machine).
 	const viewLocation = conversationLocation(session, child);
 	const viewCwd = viewLocation?.cwd;
@@ -880,9 +1010,6 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	const {
 		draft,
 		setDraft,
-		steer,
-		setSteer,
-		error,
 		setError,
 		files,
 		setFiles,
@@ -893,6 +1020,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 		setReplyTo,
 		canReply,
 		mentionName,
+		focus,
 	} = composer;
 	// `/tree` from a message (docs/tree.md): the owner, in the main conversation. A reference of its own, as the switch
 	// reaches the session row (whose `main` moves this view) before its result; a user message's text fills the composer.
@@ -919,9 +1047,9 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	const startReply = useCallback(
 		(target: { entryId: number; name: string }) => {
 			setReplyTo(target);
-			document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+			focus();
 		},
-		[setReplyTo],
+		[setReplyTo, focus],
 	);
 	// Kept while reconnecting, as the composer is (`canWrite`).
 	const replying = canWrite && canReply ? replyTo : undefined;
@@ -947,9 +1075,9 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 		(texts: readonly string[], after = false) => {
 			if (!texts.length) return;
 			setDraft((current) => (after ? joinDraft(current, ...texts) : joinDraft(...texts, current)));
-			document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+			focus();
 		},
-		[setDraft],
+		[setDraft, focus],
 	);
 	// Who may write is known before the chat object is live (`canWrite`): drafts hold at once.
 	useRestoredDrafts(sessionId, conversationId, canWrite, restore);
@@ -1063,7 +1191,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	 * the outbox delivers it when it can (outbox.ts). Sending keeps the reader's scroll position; the scroll-down button
 	 * follows the answer when wanted.
 	 */
-	const send = () => {
+	const send = (whenBusy: "steer" | "followUp") => {
 		const text = draft.trim();
 		if ((!text && !files.length) || !canWrite) return;
 		lightTap();
@@ -1073,15 +1201,70 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 			id,
 			text,
 			files: [...files],
-			whenBusy: steer ? "steer" : "followUp",
+			whenBusy,
 			...(replying ? { replyTo: replying } : {}),
 			item: outgoingItem(id, text, files, author ?? (owner ? OWNER_AUTHOR : undefined)),
 		});
 		setDraft("");
 		setFiles([]);
 		setReplyTo(undefined);
-		setSteer(true);
 	};
+	/**
+	 * Sends the composer's message in a new branch (docs/tree.md): the worker forks this conversation at its end and
+	 * makes the fork the main one (`SessionTree.branch`, labelled with the message); the message then goes to the fork's
+	 * outbox and the view follows. This conversation keeps ending where it did. A refused branch puts the message back.
+	 */
+	const sendInBranch = () => {
+		const text = draft.trim();
+		if (!text && !files.length) return;
+		lightTap();
+		setStopped(undefined);
+		const picked = [...files];
+		setDraft("");
+		setFiles([]);
+		setReplyTo(undefined);
+		const held = host.hold(SessionTree, { session: sessionId }, BACKGROUND_CONTEXT);
+		whenLive(held)
+			.then(() => {
+				const tree = liveIn(held, "owner");
+				if (!tree) throw new Error("Only the owner branches the session");
+				const label = text || picked.map((file) => file.file.name).join(", ");
+				return tree.branch({ conversation: conversationId, label }, BACKGROUND_CONTEXT);
+			})
+			.then(({ conversation }) => {
+				const id = crypto.randomUUID();
+				outboxOf(`${sessionId}#${conversation}`).add({
+					id,
+					text,
+					files: picked,
+					whenBusy: "steer",
+					item: outgoingItem(id, text, picked, author ?? OWNER_AUTHOR),
+				});
+				void nav.replace(conversationRoute(nav.route, sessionId, conversation));
+			})
+			.catch((reason: unknown) => {
+				restore([text]);
+				setFiles((current) => [...picked, ...current]);
+				setError(errorText(reason));
+			})
+			.finally(() => held.release());
+	};
+	// Idle, the other way to send is a new branch: the owner, in the main conversation, once it has entries. While a
+	// run is busy, Send steers it and the other way queues a follow-up.
+	const branchable = canBranch && known && newestEntry > 0;
+	const branching = useMemo(
+		() => (canBranch ? { from: branchFrom, end: newestEntry } : undefined),
+		[canBranch, branchFrom, newestEntry],
+	);
+	const sends: { send: SendChoice; alternate?: SendChoice } = busy
+		? {
+				send: { label: "Steer", run: () => send("steer") },
+				alternate: { label: "Follow up", run: () => send("followUp") },
+			}
+		: {
+				send: { label: "Send", run: () => send("steer") },
+				...(branchable ? { alternate: { label: "Send in a new branch", run: sendInBranch } } : {}),
+			};
 	// The outbox sends while this conversation's chat object is live; the latest values, for its sender.
 	const latest = useRef({ chat: writer, host, sessionId, conversationId, busy });
 	latest.current = { chat: writer, host, sessionId, conversationId, busy };
@@ -1206,8 +1389,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 		session
 			? {
 					model: agentModel ?? session.model,
-					thinkingLevel:
-						transcript?.agent.thinkingLevel ?? (session.thinkingLevel as ModelChoice["thinkingLevel"]),
+					thinkingLevel: transcript?.agent.thinkingLevel ?? thinkingLevelOf(session.thinkingLevel),
 				}
 			: undefined,
 		(_, next) => next,
@@ -1374,6 +1556,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	);
 	const place = useChatScreen(
 		{
+			screen: conversationKey({ session: sessionId, conversation: conversationId }),
 			above: subagentBar,
 			// A one-shot agent's view has no composer: its bar above has the Stop.
 			...(oneShot && canWrite
@@ -1387,10 +1570,8 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 									queued: queuedRows,
 									props: {
 										busy,
-										steer,
-										setSteer,
 										disabled: copyTarget,
-										onSend: send,
+										...sends,
 										onStop: stop,
 										attaching,
 										completion: fileCompletion,
@@ -1453,7 +1634,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 				/>
 			)}
 
-			<ErrorToast error={error} onDismiss={() => setError(undefined)} />
+			<ErrorToast />
 			{place(
 				<div className="scroller transcript" ref={follow.scroller}>
 					{failure && connected ? (
@@ -1491,7 +1672,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 												<OpenWorkspaceFile.Provider value={canWrite ? openWorkspaceFile : undefined}>
 													<OpenTerminal.Provider value={owner ? openTerminal : undefined}>
 														<ReplyTo.Provider value={participant && canReply ? startReply : undefined}>
-															<BranchFrom.Provider value={canBranch ? branchFrom : undefined}>
+															<BranchFrom.Provider value={branching}>
 																<RevealEntry.Provider value={reveal}>
 																	<FillGap.Provider value={fillGap}>
 																		<Messages
@@ -1540,6 +1721,9 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	);
 }
 
+/** The new-session screen as the command menu's target: a model change there applies to the session about to start. */
+const NEW_SESSION_TARGET: CommandTarget = { type: "new-session", id: "new", kind: "New session", label: "" };
+
 function NewSession() {
 	const connected = useConnected();
 	const host = useHost();
@@ -1550,18 +1734,23 @@ function NewSession() {
 	const sessions = liveIn(catalog, "owner");
 	const [resources, setDefault] = useModelResources(useComposerState().fail);
 	const recent = useMemo(() => (listed ?? []).toSorted((a, b) => b.updatedAt - a.updatedAt), [listed]);
-	const { location: selectedLocation, setLocation, choice: selectedChoice, setChoice } = useNewSessionState();
+	const {
+		location: selectedLocation,
+		setLocation,
+		join,
+		setJoin,
+		choice: selectedChoice,
+		setChoice,
+	} = useNewSessionState();
 	const location =
 		selectedLocation ?? (recent[0] ? { env: recent[0].env ?? null, cwd: recent[0].cwd } : { env: null, cwd: "~" });
-	const fallback = resources?.settings.defaultModel ?? recent[0]?.model;
-	const choice: ModelChoice | undefined =
-		selectedChoice ??
-		(fallback ? { model: fallback, thinkingLevel: resources?.settings.thinkingLevel ?? "high" } : undefined);
+	const choice = newSessionChoice(selectedChoice, resources, recent[0]);
+	useCommandRouteTarget(NEW_SESSION_TARGET);
 	const contextWindow = resources?.models.find(
 		(entry) => entry.provider === choice?.model.provider && entry.modelId === choice?.model.modelId,
 	)?.contextWindow;
 	const composer = useComposerState();
-	const { draft, setDraft, files, setFiles, error, setError, steer, setSteer, setStopped } = composer;
+	const { draft, setDraft, files, setFiles, setError, setStopped } = composer;
 	const cwdSheet = useSheet("cwd");
 	const modelSheet = useSheet("model");
 	const attaching = attachingOf(composer);
@@ -1590,15 +1779,14 @@ function NewSession() {
 				id,
 				text,
 				files: [...files],
-				whenBusy: steer ? "steer" : "followUp",
+				whenBusy: "steer",
 				item: outgoingItem(id, text, files, OWNER_AUTHOR),
 			},
 			// The page chooses the session's ID: a retried creation answers the same session.
-			{ session: crypto.randomUUID(), location, choice },
+			{ session: crypto.randomUUID(), location, choice, ...(join ? { join } : {}) },
 		);
 		setDraft("");
 		setFiles([]);
-		setSteer(true);
 	};
 	// The session is created while the owner's catalog is live; the session opens once it exists, if this screen still
 	// shows (the outbox delivers the messages whenever the session is opened).
@@ -1615,7 +1803,7 @@ function NewSession() {
 			return;
 		}
 		sessionStart.connect({
-			create: async ({ session, location, choice }) => {
+			create: async ({ session, location, choice, join }) => {
 				// The new session's worker starts beside the creation, not after it (its start waits for the row): held
 				// here and lingering for the session's view, which holds it next.
 				const chat = host.hold(Chat, { session, conversation: 1 }, BACKGROUND_CONTEXT);
@@ -1635,10 +1823,15 @@ function NewSession() {
 					chat.release();
 					throw error;
 				}
+				// A project's "+": the session joins the project once it exists, so a refused creation leaves no membership
+				// behind; a failed join leaves the session as it is, and the toast says why.
+				if (join) void join.run(session).catch(composer.fail);
 			},
 			// The server's own errors (a missing directory, an unknown model) refuse; a lost connection is tried again.
 			refused: (error) => !isChordError(error) || refused(error),
 			created: (session) => {
+				// The next new session starts in no project unless its "+" is used again.
+				setJoin(undefined);
 				if (shownHere.current) navigate({ session }, { replace: true });
 			},
 			restore: (messages, error) => {
@@ -1648,7 +1841,7 @@ function NewSession() {
 			},
 		});
 		return () => sessionStart.connect(undefined);
-	}, [connected, sessions, host, setDraft, setFiles, setError]);
+	}, [connected, sessions, host, setDraft, setFiles, setError, setJoin, composer.fail]);
 	// Leaving the page loses a session not created yet: the browser asks first.
 	useEffect(() => {
 		if (!start) return;
@@ -1658,9 +1851,10 @@ function NewSession() {
 	}, [start]);
 	const place = useChatScreen(
 		{
+			screen: conversationKey(NEW_SESSION),
 			composer: owner
 				? {
-						props: { busy: false, steer, setSteer, disabled: false, onSend: send, attaching },
+						props: { busy: false, disabled: false, send: { label: "Send", run: send }, attaching },
 						footer: (
 							<div className="session-usage">
 								<div className="session-controls">
@@ -1707,7 +1901,7 @@ function NewSession() {
 					onClose={closeLayers}
 				/>
 			)}
-			<ErrorToast error={error} onDismiss={() => setError(undefined)} />
+			<ErrorToast />
 			{place(
 				<div className={outgoing ? "scroller transcript" : "scroller"} ref={follow.scroller}>
 					{outgoing && rows ? (
@@ -1725,6 +1919,7 @@ function NewSession() {
 							>
 								<FolderIcon />
 								<span>{locationLabel(location.env, location.cwd)}</span>
+								{join && <small className="cwd-join">in {join.label}</small>}
 								<ChevronIcon size={14} />
 							</button>
 							{owner && resources && !resources.credentials.length && (
@@ -1769,9 +1964,10 @@ function Main() {
 	const status = useObject(SessionStatus, {});
 	const models = useObject(Models, owner ? {} : undefined);
 	const envs = useObject(Envs, owner ? {} : undefined);
+	const projects = useObject(Projects, owner ? {} : undefined);
 	const objects = useMemo(
-		() => ({ sessions, access, subagents, status, models, envs }),
-		[sessions, access, subagents, status, models, envs],
+		() => ({ sessions, access, subagents, status, models, envs, projects }),
+		[sessions, access, subagents, status, models, envs, projects],
 	);
 	const grant = useReadable(liveIn(access, "guest")?.grant);
 	// A guest stays within the sessions shared with it; anywhere else it lands in the one shared or joined last.
@@ -1803,8 +1999,11 @@ function Main() {
 							<SessionChat key={conversation} sessionId={route.session} conversationId={shownConversation} />
 						</Slot>
 					</Slot>
-				) : (
+				) : route.newSession ? (
 					<NewSession />
+				) : (
+					// Home: what a plugin shows there (the Familiar opens its session), else the new-session screen.
+					<Slot name="home" fallback={<NewSession />} />
 				)}
 				{/* The transcript of the screen above goes into the view (`useChatScreen`), the dock floats over its bottom. */}
 				<div className="chat">
@@ -1822,4 +2021,6 @@ export default defineFacet((host, self) => {
 	// The chat plugin defines the transcript's entry displays (chat-mode adds its own): served on the page too.
 	serveKeyed(host, TranscriptEntries);
 	self.contribute(Slots, { main: Main });
+	self.contribute(Commands, MODEL_COMMANDS);
+	self.contribute(CommandPages, MODEL_PAGES);
 });

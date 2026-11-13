@@ -13,10 +13,7 @@ import type {
 	TranscriptView,
 } from "@earendil-works/pi-durable";
 
-type ArtifactState = { artifacts: ArtifactInfo[] };
-
 import { type AgentMessage, agentMessage, peerMessage } from "../runtime/entries.ts";
-import type { ArtifactInfo } from "../runtime/schemas.ts";
 
 type ConversationPeer = { id: string; title: string };
 
@@ -29,6 +26,11 @@ import { isInterruptedError } from "../runtime/tool-calls.ts";
 // Pure display model of a Durable view: tool calls are joined with their live
 // slot and result entry, so one card follows a call from request to result.
 export type ToolStatus = "pending" | "running" | "done" | "error" | "interrupted";
+
+/** A live slot's status as shown: a parked call (`sleeping`, `waiting`) is still busy, shown as running. */
+function shownStatus(status: "pending" | "running" | "sleeping" | "waiting"): ToolStatus {
+	return status === "sleeping" || status === "waiting" ? "running" : status;
+}
 export type ToolView = {
 	id: string;
 	name: string;
@@ -105,7 +107,6 @@ export type Transcript = {
 	items: Item[];
 	/** More entries exist before the first item (`TranscriptStore.loadEarlier`). */
 	earlier: boolean;
-	artifacts: ArtifactInfo[];
 	busy: boolean;
 	working: boolean;
 	retry?: { at: number; error: string };
@@ -142,22 +143,6 @@ function resultTool(result: ToolResultMessage, name = result.toolName): ToolView
 		...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
 		at: result.timestamp - (result.durationMs ?? 0),
 	};
-}
-
-function artifactInfo(value: unknown): ArtifactInfo | undefined {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return;
-	const details = value as Record<string, unknown>;
-	if (
-		typeof details.name !== "string" ||
-		!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(details.name) ||
-		typeof details.title !== "string" ||
-		!["html", "svg", "markdown", "text"].includes(String(details.type)) ||
-		typeof details.version !== "number" ||
-		!Number.isSafeInteger(details.version) ||
-		details.version <= 0
-	)
-		return;
-	return details as ArtifactInfo;
 }
 
 /**
@@ -204,7 +189,7 @@ function nestedCalls(
 							: isInterruptedError(summary?.error)
 								? "interrupted"
 								: "error"
-						: slot.status,
+						: shownStatus(slot.status),
 				depth,
 				...(slot.status === "running" && slot.output ? { output: slot.output } : {}),
 				...(summary?.durationMs === undefined ? {} : { durationMs: summary.durationMs }),
@@ -315,7 +300,6 @@ export function buildTranscript(
 	const compactionFailure = live?.compactionFailure;
 	const compactionError = compactionFailure ? `Compaction failed: ${compactionFailure.error}` : undefined;
 	const inbox = view.docs["pi.inbox"] as unknown as InboxState | undefined;
-	const artifactState = view.docs["p2.artifacts"] as unknown as ArtifactState | undefined;
 	const busy = Boolean(live?.run);
 	const results = new Map<string, ToolResultMessage>();
 	let latest: EntryRecord | undefined;
@@ -492,7 +476,7 @@ export function buildTranscript(
 			const status: ToolStatus = slot
 				? slot.status === "done"
 					? "error"
-					: slot.status
+					: shownStatus(slot.status)
 				: busy && current
 					? "pending"
 					: "interrupted";
@@ -546,9 +530,6 @@ export function buildTranscript(
 	return {
 		items,
 		earlier: view.items[0]?.kind === "earlier",
-		artifacts: Array.isArray(artifactState?.artifacts)
-			? artifactState.artifacts.flatMap((artifact) => artifactInfo(artifact) ?? []).toReversed()
-			: [],
 		busy,
 		// Keep one stable activity signal through thinking, text, tools and compaction.
 		// It disappears only when the viewed conversation is actually idle.

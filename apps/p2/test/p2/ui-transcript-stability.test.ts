@@ -160,7 +160,9 @@ describe("transcript stability", { skip: !browserTests }, () => {
 	});
 
 	it("renders only the new and changed rows, and keeps the others' DOM, while turns arrive and stream", async () => {
-		const session = await seeded("Long", bigSessionEntries(800, 400));
+		// Long, yet well below the faux model's compaction threshold (128k less the reserve): a blocking compaction
+		// would hold the streamed answer back. 800 entries came within 450 tokens of it.
+		const session = await seeded("Long", bigSessionEntries(760, 400));
 		const chat = await holdIn(owner, Chat, { session, conversation: 1 }, "participant");
 		const stop = follow(chat.view, () => {});
 		try {
@@ -250,7 +252,7 @@ describe("transcript stability", { skip: !browserTests }, () => {
 					// The turn's rows after the person's message: the artifact where it was made, between the two wheels.
 					assert.deepEqual(
 						await browser.evaluate<string[]>(
-							`(() => { const rows=[...document.querySelectorAll('[data-row]')]; const at=rows.findIndex((row)=>row.dataset.row===${message}); return rows.slice(at+1).map((row)=>row.querySelector('[data-testid=activity]')?'activity':row.querySelector('.inline-artifact')?'inline':row.querySelector('.assistant')?'answer':row.dataset.row); })()`,
+							`(() => { const rows=[...document.querySelectorAll('[data-row]')]; const at=rows.findIndex((row)=>row.dataset.row===${message}); return rows.slice(at+1).map((row)=>row.querySelector('[data-testid=activity]')?'activity':row.querySelector('.artifact-inline')?'inline':row.querySelector('.assistant')?'answer':row.dataset.row); })()`,
 						),
 						["activity", "inline", "activity", "answer"],
 					);

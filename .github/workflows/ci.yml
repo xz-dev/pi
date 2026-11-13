@@ -34,6 +34,18 @@ jobs:
       - name: Check
         run: bash scripts/check-allow-model-catalog-drift.sh
 
+      # The checkout has no tags; the released changelog sections are compared with the newest release tag.
+      # Downstream: release tags live upstream (the fork publishes xz-v* tags and never edits package changelogs).
+      - name: Fetch the newest release tag
+        env:
+          UPSTREAM: https://github.com/earendil-works/pi.git
+        run: |
+          tag=$(git ls-remote --tags --sort=-v:refname "$UPSTREAM" 'v*.*.*' | grep -v '\^{}' | head -1 | sed 's#.*refs/tags/##')
+          git fetch --depth=1 "$UPSTREAM" "refs/tags/$tag:refs/tags/$tag"
+
+      - name: Check released changelog sections
+        run: npm run check:released-changelogs
+
   # Tests are split across parallel jobs so the slowest suites do not run back to back.
   test:
     name: test (${{ matrix.name }})

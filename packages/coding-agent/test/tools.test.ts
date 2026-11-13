@@ -797,6 +797,26 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("4001");
 		});
 
+		// #12062: a short line followed by one line far past the limit returned no output at all.
+		it("should show the end of an over-long last line after a short line", async () => {
+			const longLine = `${"y".repeat(219_000)}END`;
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, { onData }) => {
+					const data = Buffer.from(`first line\n${longLine}\n`, "utf-8");
+					for (let i = 0; i < data.length; i += 8192) onData(data.subarray(i, i + 8192));
+					return { exitCode: 0 };
+				},
+			};
+			const bash = createBashTool(testDir, { operations });
+
+			const result = await bash.execute("test-call-long-last-line", { command: "grep -n x bundle.min.js" });
+			const output = getTextOutput(result);
+
+			expect(result.details?.truncation?.lastLinePartial).toBe(true);
+			expect(output).toContain("yyyyEND");
+			expect(output).toMatch(/\[Showing last 50\.0KB of line 2 /);
+		});
+
 		it("should decode UTF-8 characters split across output chunks", async () => {
 			const euro = Buffer.from("€\n", "utf-8");
 			const operations: BashOperations = {
@@ -1215,6 +1235,22 @@ describe("Coding Agent Tools", () => {
 			});
 
 			expect(getTextOutput(result)).toContain("No files found matching pattern");
+		});
+
+		// #12020: fd matches nothing for a leading "./", so the tool drops it.
+		it("should ignore a leading ./ in the pattern", async () => {
+			mkdirSync(join(testDir, "src"));
+			writeFileSync(join(testDir, "src", "a.ts"), "a");
+			writeFileSync(join(testDir, "package.json"), "{}");
+
+			for (const pattern of ["./src/*.ts", "./src/**/*.ts", "././src/*.ts"]) {
+				const result = await findTool.execute("test-call-find-dot-slash", { pattern, path: testDir });
+				expect(getTextOutput(result)).toBe("src/a.ts");
+			}
+			// Without a "/" left, "./*.json" matches basenames at any depth, like "*.json".
+			writeFileSync(join(testDir, "src", "b.json"), "{}");
+			const json = await findTool.execute("test-call-find-dot-slash-json", { pattern: "./*.json", path: testDir });
+			expect(getTextOutput(json).split("\n").sort()).toEqual(["package.json", "src/b.json"]);
 		});
 
 		// #7121: exactly `limit` matches must not report that the limit was reached.

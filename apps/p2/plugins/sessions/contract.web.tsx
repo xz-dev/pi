@@ -1,14 +1,30 @@
-// What the sessions drawer shares with other plugins' drawer entries (`drawer-head:*` slots, browser): the rows as the
-// drawer shows them, and listing sessions apart from the folders because an entry of their own shows them.
-import type { SessionSummary } from "@p2/app/v1/web";
-import { createContext } from "react";
+// What the sessions plugin shares with other plugins' web facets: for entries in the sidebar (the `drawer-brand` slot)
+// the rows as the sidebar shows them, their state mark, and listing sessions apart from the rollups because an entry of
+// their own shows them; for session commands in the command menu, the session a command acts on (command-session.tsx);
+// for conversation rows, the mark a subagent's row has.
+import { sharedContext } from "@p2/app/v1/web";
+import type { SidebarRow } from "./sidebar/model.ts";
+
+export {
+	commandSession,
+	NotArchived,
+	openPanelIn,
+	useCommandSession,
+	useOpenFromMenu,
+	useSessions,
+} from "./command-session.tsx";
+export { RunMark, SessionDot, WorkingMark } from "./sidebar/marks.tsx";
+export type { SidebarRow } from "./sidebar/model.ts";
 
 export type DrawerRows = {
-	/** Every row of the drawer, with its worker state, including the ones listed apart. */
-	readonly sessions: readonly SessionSummary[];
-	/** Leaves `ids` out of the folders under `key` (one entry per plugin); `[]` lists them there again. */
+	/** Every row of the sidebar, with its worker state, including the ones listed apart. */
+	readonly sessions: readonly SidebarRow[];
+	/** Leaves `ids` out of the rollups under `key` (one entry per plugin); `[]` lists them there again. */
 	readonly listApart: (key: string, ids: readonly string[]) => void;
 };
 
-/** The drawer's rows for its `drawer-head` entries. */
-export const DrawerRowsContext = createContext<DrawerRows>({ sessions: [], listApart: () => {} });
+/** The sidebar's rows for other plugins' entries in it (one context for every plugin's script: `sharedContext`). */
+export const DrawerRowsContext = sharedContext<DrawerRows>("p2.sessions.drawer-rows", {
+	sessions: [],
+	listApart: () => {},
+});

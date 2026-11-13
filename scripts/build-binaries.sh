@@ -146,8 +146,10 @@ for target in "${PLATFORMS_REQUESTED[@]}"; do
 		fi
 		asset_args+=(--asset="$build_dir/native")
 	fi
-	# Do not load project .env files into the standalone process (upstream #10473).
-	bun build --compile "${bun_build_flags[@]}" --define="PI_PROCWARD_INCLUDED=$PROCWARD_INCLUDED" --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" "${asset_args[@]}" ./src/bun/cli-portable.ts ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$target_dir/$executable"
+	# Do not load project .env files into the standalone process (upstream #10473). Enable
+	# package.json autoload so extension dependencies resolve through their package.json
+	# main/exports entries instead of only a root index.* (upstream #12012).
+	bun build --compile "${bun_build_flags[@]}" --define="PI_PROCWARD_INCLUDED=$PROCWARD_INCLUDED" --no-compile-autoload-bunfig --no-compile-autoload-dotenv --compile-autoload-package-json --target="$bun_target" "${asset_args[@]}" ./src/bun/cli-portable.ts ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$target_dir/$executable"
 	rm -rf "$build_dir"
 	# The release artifact is the raw executable, not a ZIP: publish
 	# `pi-<target>`/`pi-<target>.exe` directly.
