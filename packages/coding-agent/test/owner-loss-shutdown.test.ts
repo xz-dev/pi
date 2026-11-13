@@ -124,6 +124,17 @@ async function run(scenario: string, runtime = process.execPath): Promise<Receip
 	const events = child.stdio[4];
 	if (!events || !("on" in events)) throw new Error("missing event transport");
 	let nativeSignalsSent = false;
+	// A user or process manager repeats SIGTERM while the owner is alive and the hook hangs. Print mode can start its
+	// hook before its signal handler is registered, so the repeat waits until the hook runs and the child reported the
+	// first SIGTERM as delivered: two back-to-back kill() calls can merge into one pending signal.
+	let externalTermDelivered = false;
+	let hookStarted = false;
+	let externalRepeatSent = false;
+	const repeatExternalTerm = () => {
+		if (!externalTermDelivered || !hookStarted || externalRepeatSent) return;
+		externalRepeatSent = true;
+		child.kill("SIGTERM");
+	};
 	events.on("data", (chunk: Buffer) => {
 		pending += chunk.toString();
 		let end = pending.indexOf("\n");
@@ -138,8 +149,9 @@ async function run(scenario: string, runtime = process.execPath): Promise<Receip
 					child.kill("SIGCONT");
 					setTimeout(() => child.kill("SIGTERM"), 100).unref();
 				} else if (scenario.startsWith("already-closing")) child.stdin?.end();
-				else if (scenario.startsWith("external-repeat")) child.kill("SIGTERM");
-				else if (scenario === "native-term-before-loss") {
+				else if (scenario.startsWith("external-repeat")) {
+					child.kill("SIGTERM");
+				} else if (scenario === "native-term-before-loss") {
 					// The main thread can handle native TERMs before the worker publishes the loss.
 					child.kill("SIGTERM");
 					child.kill("SIGTERM");
@@ -173,8 +185,14 @@ async function run(scenario: string, runtime = process.execPath): Promise<Receip
 			) {
 				setTimeout(loss, 150).unref();
 			}
-			// A user or process manager repeats SIGTERM while the owner is alive and the hook hangs.
-			if (event.event === "hook-start" && scenario.startsWith("external-repeat")) child.kill("SIGTERM");
+			if (event.event === "hook-start" && scenario.startsWith("external-repeat")) {
+				hookStarted = true;
+				repeatExternalTerm();
+			}
+			if (event.event === "sigterm" && scenario.startsWith("external-repeat")) {
+				externalTermDelivered = true;
+				repeatExternalTerm();
+			}
 			if (event.event === "message-held") {
 				// Loss is already published in shared memory, but no JS loss callback ran.
 				child.kill("SIGCONT");
