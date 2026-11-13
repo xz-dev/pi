@@ -417,6 +417,7 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	private _isShuttingDown = false;
 	private _promptPreflightCount = 0;
 	private _agentRunAbortRequested = false;
 	private _idleWaitPromise: Promise<void> | undefined;
@@ -573,6 +574,7 @@ export class AgentSession {
 		headers?: Record<string, string>;
 		env?: Record<string, string>;
 	}> {
+		this._assertNotShuttingDown();
 		let result: AuthResult | undefined;
 		try {
 			result = await this._modelRuntime.getAuth(model, { signal });
@@ -583,6 +585,7 @@ export class AgentSession {
 			}
 			throw error;
 		}
+		this._assertNotShuttingDown();
 		if (result && (result.auth.apiKey || result.auth.headers)) {
 			const requestModel = result.auth.baseUrl ? { ...model, baseUrl: result.auth.baseUrl } : model;
 			return {
@@ -614,6 +617,7 @@ export class AgentSession {
 		env?: Record<string, string>;
 		thinkingLevel: ThinkingLevel;
 	}> {
+		this._assertNotShuttingDown();
 		// Route a virtual model first: summaries size their input and output from the model they get.
 		const { model, thinkingLevel } = isVirtualModel(selectedModel)
 			? await this._modelRuntime.resolveModel(selectedModel, convertToLlm(this.messages), {
@@ -622,6 +626,7 @@ export class AgentSession {
 					signal,
 				})
 			: { model: selectedModel, thinkingLevel: this.thinkingLevel };
+		this._assertNotShuttingDown();
 		if (this.agent.streamFunction === streamSimple) {
 			return { ...(await this._getRequiredRequestAuth(model, signal)), thinkingLevel };
 		}
@@ -631,6 +636,7 @@ export class AgentSession {
 
 		try {
 			const result = await this._modelRuntime.getAuth(model, { signal });
+			this._assertNotShuttingDown();
 			if (!result) return { model, thinkingLevel };
 			const requestModel = result.auth.baseUrl ? { ...model, baseUrl: result.auth.baseUrl } : model;
 			return {
@@ -641,6 +647,7 @@ export class AgentSession {
 				thinkingLevel,
 			};
 		} catch (error) {
+			this._assertNotShuttingDown();
 			if (signal?.aborted) throw error;
 			return { model, thinkingLevel };
 		}
@@ -1472,20 +1479,39 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Remove all listeners and disconnect from agent.
-	 * Call this when completely done with the session.
-	 */
-	dispose(): void {
-		try {
-			this.abortRetry();
-			this.abortCompaction();
-			this.abortBranchSummary();
-			this.abortBash();
-			this.agent.abort();
-		} catch {
-			// Dispose must succeed even if an abort hook throws.
+	/** Permanently stop admitting new work before shutdown cancellation begins. */
+	prepareForShutdown(): void {
+		this._isShuttingDown = true;
+	}
+
+	private _assertNotShuttingDown(): void {
+		if (this._isShuttingDown) throw new Error("Session is shutting down");
+	}
+
+	private _cancelSessionOperations(): void {
+		this._agentRunAbortRequested = true;
+		for (const cancel of [
+			() => this.abortRetry(),
+			() => this.abortCompaction(),
+			() => this.abortBranchSummary(),
+			() => this.abortBash(),
+			() => this.agent.abort(),
+		]) {
+			try {
+				cancel();
+			} catch {
+				// One abort hook must not skip the remaining synchronous cleanup.
+			}
 		}
+	}
+
+	/**
+	 * Permanently close admission, cancel operations and disconnect listeners synchronously.
+	 * Completion does not wait for noncooperative extension or tool code.
+	 */
+	async dispose(): Promise<void> {
+		this.prepareForShutdown();
+		this._cancelSessionOperations();
 
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
@@ -1954,11 +1980,13 @@ export class AgentSession {
 	 * @param onStarted Called once the run's messages are prepared, before the first request.
 	 */
 	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
+		this._assertNotShuttingDown();
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
 		let messages: AgentMessage[];
 		try {
 			messages = await this._prepareRun(trigger);
+			this._assertNotShuttingDown();
 		} catch (error) {
 			this._isAgentRunActive = false;
 			this._flushPendingBashMessages();
@@ -2007,6 +2035,7 @@ export class AgentSession {
 	 * system patch first when the prompt changed.
 	 */
 	private async _prepareRun(trigger: BeforeAgentStartTrigger): Promise<AgentMessage[]> {
+		this._assertNotShuttingDown();
 		// Check if we need to compact before sending (catches aborted responses).
 		// The starting message is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
@@ -2014,8 +2043,10 @@ export class AgentSession {
 			await this._checkCompaction(lastAssistant, false);
 		}
 
+		this._assertNotShuttingDown();
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 		const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);
+		this._assertNotShuttingDown();
 		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
 		// which updates the live loadout instead. An explicit edit wins; otherwise the live
 		// loadout is authoritative, so a setActiveTools() call is not undone here.
@@ -2039,6 +2070,7 @@ export class AgentSession {
 				timestamp: Date.now(),
 			});
 		}
+		this._assertNotShuttingDown();
 		// Inject any pending "nextTurn" messages as context alongside the starting message
 		messages.push(...this._pendingNextTurnMessages);
 		this._pendingNextTurnMessages = [];
@@ -2127,11 +2159,13 @@ export class AgentSession {
 		source: InputSource,
 		streamingBehavior?: "steer" | "followUp",
 	): Promise<{ text: string; images: ImageContent[] | undefined } | undefined> {
+		this._assertNotShuttingDown();
 		if (!this._extensionRunner.hasHandlers("input")) {
 			return { text, images };
 		}
 
 		const inputResult = await this._extensionRunner.emitInput(text, images, source, streamingBehavior);
+		this._assertNotShuttingDown();
 		if (inputResult.action === "handled") {
 			return undefined;
 		}
@@ -2173,6 +2207,7 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		this._assertNotShuttingDown();
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
 			return;
@@ -2184,10 +2219,13 @@ export class AgentSession {
 		if (expandPromptTemplates && text.startsWith("/")) {
 			const handled = await this._tryExecuteExtensionCommand(text);
 			if (handled) {
-				// Extension command executed, no prompt to send
+				// Extension command executed, no prompt to send. A command may legitimately
+				// replace this session (newSession/fork/switchSession), shutting it down (#2860).
 				preflightResult?.("handled");
 				return;
 			}
+			// Unhandled text would continue into the agent; never after shutdown began.
+			this._assertNotShuttingDown();
 		}
 
 		if (this._compactionAbortController !== undefined || this._branchSummaryAbortController !== undefined) {
@@ -2260,6 +2298,7 @@ export class AgentSession {
 		const hasConfiguredAuth =
 			this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
 			(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+		this._assertNotShuttingDown();
 		if (!hasConfiguredAuth) {
 			const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
 			if (isOAuth) {
@@ -2341,6 +2380,7 @@ export class AgentSession {
 		behavior: "steer" | "followUp",
 		source: InputSource,
 	): Promise<QueuedInputDisposition> {
+		this._assertNotShuttingDown();
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
 		}
@@ -2401,6 +2441,7 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+		this._assertNotShuttingDown();
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -2416,6 +2457,7 @@ export class AgentSession {
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+		this._assertNotShuttingDown();
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -2474,6 +2516,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
+		this._assertNotShuttingDown();
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -2918,6 +2961,13 @@ export class AgentSession {
 		this._resolveIdleWaitIfIdle();
 	}
 
+	private _startManualCompaction(): AbortController {
+		this._assertNotShuttingDown();
+		const controller = new AbortController();
+		this._compactionAbortController = controller;
+		return controller;
+	}
+
 	/**
 	 * Manually compact the session context.
 	 *
@@ -2933,9 +2983,11 @@ export class AgentSession {
 	 *
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
+
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		this._assertNotShuttingDown();
 		await this.abort();
-		this._compactionAbortController = new AbortController();
+		const abortController = this._startManualCompaction();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
 		let cancelledByExtension = false;
@@ -2969,7 +3021,7 @@ export class AgentSession {
 					customInstructions,
 					reason: "manual",
 					willRetry: false,
-					signal: this._compactionAbortController.signal,
+					signal: abortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (result?.cancel) {
@@ -2983,6 +3035,7 @@ export class AgentSession {
 				}
 			}
 
+			this._assertNotShuttingDown();
 			let summary: string;
 			let firstKeptEntryId: string;
 			let tokensBefore: number;
@@ -3002,7 +3055,7 @@ export class AgentSession {
 					preparation,
 					model,
 					customInstructions,
-					this._compactionAbortController.signal,
+					abortController.signal,
 					"manual",
 				);
 				summary = result.summary;
@@ -3012,7 +3065,7 @@ export class AgentSession {
 				details = result.details;
 			}
 
-			if (this._compactionAbortController.signal.aborted) {
+			if (abortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 
@@ -3056,7 +3109,7 @@ export class AgentSession {
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const aborted = this._compactionAbortController.signal.aborted || cancelledByExtension;
+			const aborted = abortController.signal.aborted || cancelledByExtension;
 			const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
 			this._clearManualCompactionState();
 			this._emit({
@@ -3312,6 +3365,7 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
+			this._assertNotShuttingDown();
 			let summary: string;
 			let firstKeptEntryId: string;
 			let tokensBefore: number;
@@ -3826,6 +3880,7 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		this._assertNotShuttingDown();
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish before reloading.");
 		}
@@ -3836,6 +3891,7 @@ export class AgentSession {
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
+		this._assertNotShuttingDown();
 		oldRunner.invalidate();
 		const getDefaultTools = () =>
 			this._usesDefaultTools
@@ -3846,9 +3902,11 @@ export class AgentSession {
 				: [];
 		const previousDefaultTools = new Set(getDefaultTools());
 		await this.settingsManager.reload();
+		this._assertNotShuttingDown();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
 		await this._resourceLoader.reload();
+		this._assertNotShuttingDown();
 		// Activate tools newly added to defaultTools. Removed ones stay active, and tools disabled
 		// during the session stay disabled unless the setting newly adds them.
 		const addedDefaultTools = getDefaultTools().filter((name) => !previousDefaultTools.has(name));
@@ -3868,7 +3926,9 @@ export class AgentSession {
 			this._extensionErrorListener;
 		if (hasBindings) {
 			await options?.beforeSessionStart?.();
+			this._assertNotShuttingDown();
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
+			this._assertNotShuttingDown();
 			this._extensionRunner.reportUnhandledMcpServers();
 			await this.extendResourcesFromExtensions("reload");
 		}
@@ -4019,6 +4079,7 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
 	): Promise<BashResult> {
+		this._assertNotShuttingDown();
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
@@ -4141,6 +4202,7 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		this._assertNotShuttingDown();
 		if (this.isStreaming || this._promptPreflightCount > 0) {
 			throw new Error("Wait for the current response to finish before navigating the session tree.");
 		}
@@ -4205,6 +4267,7 @@ export class AgentSession {
 					preparation,
 					signal: abortController.signal,
 				})) as SessionBeforeTreeResult | undefined;
+				this._assertNotShuttingDown();
 
 				if (result?.cancel) {
 					return { cancelled: true };
@@ -4261,6 +4324,8 @@ export class AgentSession {
 				summaryDetails = extensionSummary.details;
 				summaryUsage = extensionSummary.usage;
 			}
+
+			this._assertNotShuttingDown();
 
 			// Determine the new leaf position based on target type
 			let newLeafId: string | null;
