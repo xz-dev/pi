@@ -57,6 +57,8 @@ Background work stays owned and stops with Pi. For a service that must keep runn
 
 When Pi's own owner disappears, Pi runs its shutdown hooks for at most five seconds from the first observation, and a separate watchdog ends it after seven. On Windows, closing the Job can end Pi before hooks run.
 
+A repeated termination signal from a user or process manager still ends Pi without waiting for hooks, after at most 250 ms in which Pi checks whether the signals came from owner loss. Known limitation: if Pi is suspended with Ctrl+Z when its owner disappears, the interactive UI can resume for a moment before the bounded shutdown, because Pi can handle the resume signal before it reads the loss.
+
 ## Verification
 
 Release acceptance runs the installed executable of every target as an unprivileged user. It checks that normal exit and termination stop double-forked and `setsid` descendants while an unrelated process of the same user survives. On Windows it also runs the Node and Bun runtime gate and drives the real `bash`, `process_list` and `process_kill` tools of the installed CLI: background tasks outlive their command, one task is cancelled with confirmed kernel cleanup while the other keeps working, and a `bash` timeout cleans up its tree. Pi's Linux ownership tests that need a separate kernel are not part of the release workflow; they are run before delivery in separately booted local virtual machines. Native lifecycle tests run in procward's own CI and release workflow.
