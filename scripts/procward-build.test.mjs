@@ -147,7 +147,7 @@ test("direct Bun wrapper embeds process-owner only for enabled builds and propag
 	assert.ok(bun.args.includes("--asset=.pi/skills"));
 	assert.deepEqual(bun.args, [
 		"build", "--compile", "--no-compile-autoload-bunfig", "--no-compile-autoload-dotenv",
-		"--define=PI_PROCWARD_INCLUDED=true", "--asset=.pi/skills",
+		"--compile-autoload-package-json", "--define=PI_PROCWARD_INCLUDED=true", "--asset=.pi/skills",
 		bun.args.find(x => x.startsWith("--asset=") && x.endsWith("/process-owner")),
 		"./dist/bun/cli-portable.js", "./src/utils/image-resize-worker.ts", "./src/extensions/codemode/worker.ts",
 		"--outfile", "dist/pi",
