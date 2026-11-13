@@ -11,6 +11,7 @@ import type { ExecResult } from "../src/core/exec.ts";
 import { sessionProcessRegistries } from "../src/core/process-ownership.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
 import type { ProcessKillResult } from "../src/core/tools/process-kill.ts";
 import type { ProcessListEntry } from "../src/core/tools/process-list.ts";
@@ -236,6 +237,43 @@ describe("default session process ownership (Node-only protocol peer)", () => {
 		expect(listed).toHaveLength(1);
 		expect(listed[0].command).toContain("pwsh -Command");
 		expect(listed[0].provenance).toMatchObject({ toolName: "powershell", toolCallId: "pwsh-call" });
+	});
+
+	test("a detached managed bash execution stays owned until tool_task cancels it", async (context) => {
+		const harness = await createHarness();
+		try {
+			// Managed executions come from patch/managed-tool-executions, which the distribution composes with this
+			// patch. The setting is parsed rather than typed so this branch also compiles without that patch.
+			const settingsManager = SettingsManager.inMemory(
+				JSON.parse('{"backgroundToolCalls":{"bash":{"detachAfterSeconds":0.2}}}'),
+			);
+			const s = await session({
+				model: harness.getModel(),
+				modelRuntime: harness.session.modelRuntime,
+				settingsManager,
+			});
+			if (!("managedExecutions" in s.agent)) return context.skip();
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("bash", { command: "wait-cancel" }, { id: "managed-bash" })),
+				fauxAssistantMessage("detached"),
+			]);
+			await s.prompt("Run the long job");
+			const running = data(await tool(s, "process_list").execute("list", {})).processes;
+			expect(running).toMatchObject([
+				{ status: "running", provenance: { toolName: "bash", toolCallId: "managed-bash" } },
+			]);
+			const tasks = (await tool(s, "tool_task").execute("tasks", { action: "list" })).details as {
+				tasks: { id: string }[];
+			};
+			expect(tasks.tasks).toHaveLength(1);
+			await tool(s, "tool_task").execute("cancel", { action: "cancel", id: tasks.tasks[0].id });
+			// The managed abort reaches the owner as CANCEL; the entry leaves only after confirmed cleanup.
+			await vi.waitFor(async () => {
+				expect(data(await tool(s, "process_list").execute("after", {})).processes).toEqual([]);
+			});
+		} finally {
+			harness.cleanup();
+		}
 	});
 
 	test("user_bash preserves foreground output and tracks the triggering user command", async () => {
