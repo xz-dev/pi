@@ -61,6 +61,7 @@ const DEFAULT_PROJECT_TRUST_BY_LABEL = new Map(
 
 export interface SettingsConfig {
 	autoCompact: boolean;
+	backgroundCompaction: boolean;
 	defaultModel: string;
 	currentModel?: Model<any>;
 	availableDefaultModels: readonly Model<any>[];
@@ -107,6 +108,7 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onBackgroundCompactionChange: (enabled: boolean) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onImageWidthCellsChange: (width: number) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
@@ -886,6 +888,17 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
+		// Background compaction stays adjacent to Auto-compact regardless of the
+		// image/skill/cursor splices above; insert after them relative to its master row.
+		const autoCompactIndex = items.findIndex((item) => item.id === "autocompact");
+		items.splice(autoCompactIndex + 1, 0, {
+			id: "background-compaction",
+			label: "Background compaction",
+			description: "Summarize ahead of the threshold while the agent keeps working (requires Auto-compact)",
+			currentValue: config.backgroundCompaction ? "On" : "Off",
+			values: ["Off", "On"],
+		});
+
 		// Add borders
 		this.addChild(new DynamicBorder());
 
@@ -897,6 +910,9 @@ export class SettingsSelectorComponent extends Container {
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
+						break;
+					case "background-compaction":
+						callbacks.onBackgroundCompactionChange(newValue === "On");
 						break;
 					case "show-images":
 						callbacks.onShowImagesChange(newValue === "true");

@@ -4,7 +4,7 @@ import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { keyText } from "./keybinding-hints.ts";
 
-export type StatusIndicatorKind = "working" | "retry" | "compaction" | "branchSummary";
+export type StatusIndicatorKind = "working" | "retry" | "compaction" | "branchSummary" | "backgroundCompaction";
 
 export class StatusIndicator extends Loader {
 	readonly kind: StatusIndicatorKind;
@@ -32,6 +32,47 @@ export class StatusIndicator extends Loader {
 
 	dispose(): void {
 		this.stop();
+	}
+}
+
+export type StatusIndicatorRenderer = Pick<StatusIndicator, "renderInBorder" | "renderSpinnerInBorder">;
+
+/** A view of independently owned indicators; it creates no animation timers. */
+export class StatusIndicatorGroup implements Component, StatusIndicatorRenderer {
+	private readonly indicators: readonly StatusIndicator[];
+	private readonly borderColor: (text: string) => string;
+
+	constructor(indicators: readonly StatusIndicator[], borderColor: (text: string) => string) {
+		this.indicators = indicators;
+		this.borderColor = borderColor;
+	}
+
+	invalidate(): void {
+		for (const indicator of this.indicators) indicator.invalidate();
+	}
+
+	render(width: number): string[] {
+		const available = Math.max(0, width - 2);
+		const label = this.indicators
+			.map((indicator) => indicator.renderInBorder(available))
+			.join(theme.fg("muted", " | "));
+		return ["", width > 0 ? ` ${truncateToWidth(label, available, "")}${width > 1 ? " " : ""}` : ""];
+	}
+
+	renderInBorder(width: number): string {
+		return truncateToWidth(
+			this.indicators.map((indicator) => indicator.renderInBorder(width)).join(this.borderColor(" ── ")),
+			width,
+			"",
+		);
+	}
+
+	renderSpinnerInBorder(width: number): string {
+		return truncateToWidth(
+			this.indicators.map((indicator) => indicator.renderSpinnerInBorder(width)).join(this.borderColor(" ── ")),
+			width,
+			"",
+		);
 	}
 }
 
