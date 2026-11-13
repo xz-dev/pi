@@ -129,9 +129,13 @@ describe("DefaultPackageManager", () => {
 			expect(result.extensions).toEqual([]);
 			expect(result.prompts).toEqual([]);
 			expect(result.themes).toEqual([]);
-			expect(result.skills.every((r) => r.metadata.source === "auto" && r.metadata.origin === "top-level")).toBe(
-				true,
-			);
+			expect(
+				result.skills.every(
+					(r) =>
+						(r.metadata.source === "auto" || r.metadata.source === "builtin") &&
+						r.metadata.origin === "top-level",
+				),
+			).toBe(true);
 		});
 
 		it("should resolve local extension paths from settings", async () => {
@@ -277,7 +281,7 @@ Content`,
 
 				expect({
 					extensions: result.extensions.length,
-					skills: result.skills.length,
+					skills: result.skills.filter((r) => r.metadata.source !== "builtin").length,
 					prompts: result.prompts.length,
 					themes: result.themes.length,
 				}).toEqual({

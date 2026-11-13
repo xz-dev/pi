@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { normalizeSessionName, parseArgs } from "../src/cli/args.ts";
+import { normalizeSessionName, parseArgs, printHelp } from "../src/cli/args.ts";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -433,6 +433,29 @@ describe("parseArgs", () => {
 		test("parses --offline flag", () => {
 			const result = parseArgs(["--offline"]);
 			expect(result.offline).toBe(true);
+		});
+	});
+
+	describe("--no-process-ownership flag", () => {
+		test("parses --no-process-ownership flag", () => {
+			const result = parseArgs(["--no-process-ownership"]);
+			expect(result.noProcessOwnership).toBe(true);
+		});
+
+		test("appears in help output", () => {
+			const lines: string[] = [];
+			const originalLog = console.log;
+			console.log = (...args: unknown[]) => {
+				lines.push(args.map(String).join(" "));
+			};
+			try {
+				printHelp();
+			} finally {
+				console.log = originalLog;
+			}
+			const help = lines.join("\n");
+			expect(help).toContain("--no-process-ownership");
+			expect(help).toContain("PI_NO_PROCESS_OWNERSHIP");
 		});
 	});
 

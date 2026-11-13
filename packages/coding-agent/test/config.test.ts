@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { delimiter, join } from "path";
+import { delimiter, dirname, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
 	detectInstallChange,
@@ -12,6 +12,7 @@ import {
 	getSelfUpdateUnavailableInstruction,
 	getUpdateInstruction,
 	makeConfiguredSelfUpdateCommand,
+	resolveProcwardBinary,
 } from "../src/config.ts";
 
 const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath");
@@ -325,17 +326,18 @@ describe("detectInstallMethod", () => {
 	});
 
 	test("self-update respects configured npmCommand", () => {
-		const { prefix } = createNpmPrefixInstall();
-		const root = join(prefix, "lib", "node_modules");
+		const { prefix, packageDir } = createNpmPrefixInstall();
+		// The configured command is part of this fixture, not the host npm:
+		// Gentoo's npm uses lib64, whereas this fixture deliberately uses lib.
 		const binDir = join(prefix, "bin");
+		const root = dirname(dirname(packageDir));
 		const npmPath = join(binDir, process.platform === "win32" ? "npm.cmd" : "npm");
-		mkdirSync(binDir, { recursive: true });
-		writeFileSync(
-			npmPath,
+		const script =
 			process.platform === "win32"
-				? `@echo off\r\necho ${root}\r\n`
-				: `#!/bin/sh\nprintf '%s\\n' '${root.replaceAll("'", "'\\''")}'\n`,
-		);
+				? `@echo off\r\nif "%1"=="--prefix" if "%2"=="${prefix}" if "%3"=="root" if "%4"=="-g" echo ${root}\r\n`
+				: `#!/bin/sh\n[ "$1" = "--prefix" ] && [ "$2" = '${prefix.replaceAll("'", "'\\''")}' ] && [ "$3" = "root" ] && [ "$4" = "-g" ] || exit 1\nprintf '%s\\n' '${root.replaceAll("'", "'\\''")}'\n`;
+		mkdirSync(binDir, { recursive: true });
+		writeFileSync(npmPath, script);
 		chmodSync(npmPath, 0o755);
 		process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
 
@@ -597,5 +599,60 @@ describe("configured self-update command", () => {
 			display:
 				"wrapper install @earendil-works/pi-coding-agent@1.2.3 --name=@earendil-works/pi-coding-agent --version 1.2.3 {unknown}",
 		});
+	});
+});
+
+describe("resolveProcwardBinary", () => {
+	const originalProcwardBin = process.env.PI_PROCWARD_BIN;
+
+	afterEach(() => {
+		if (originalProcwardBin === undefined) {
+			delete process.env.PI_PROCWARD_BIN;
+		} else {
+			process.env.PI_PROCWARD_BIN = originalProcwardBin;
+		}
+	});
+
+	function writeExecutable(path: string): void {
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, "#!/bin/sh\n", { mode: 0o755 });
+	}
+
+	test("PI_PROCWARD_BIN override wins when executable", () => {
+		const { packageDir } = createNpmPrefixInstall("pi-procward-override-");
+		writeExecutable(join(packageDir, "native", "procward", "host", "procward"));
+		const override = join(packageDir, "custom-procward");
+		writeExecutable(override);
+		process.env.PI_PROCWARD_BIN = override;
+
+		expect(resolveProcwardBinary()).toBe(override);
+	});
+
+	test("PI_PROCWARD_BIN override throws when not executable", () => {
+		const override = join(tmpdir(), "pi-procward-missing-binary");
+		process.env.PI_PROCWARD_BIN = override;
+
+		expect(() => resolveProcwardBinary()).toThrow(/PI_PROCWARD_BIN is not executable/);
+	});
+
+	test("package resources resolve by host triple then host shorthand", () => {
+		const { packageDir } = createNpmPrefixInstall("pi-procward-package-");
+		const triple = `${process.arch === "x64" ? "x86_64" : "aarch64"}-${
+			process.platform === "darwin" ? "apple-darwin" : "unknown-linux-gnu"
+		}`;
+		writeExecutable(join(packageDir, "native", "procward", triple, "procward"));
+
+		expect(resolveProcwardBinary()).toBe(join(packageDir, "native", "procward", triple, "procward"));
+	});
+
+	test("PATH is the last resort and absence yields undefined", () => {
+		createNpmPrefixInstall("pi-procward-path-");
+		const binDir = mkdtempSync(join(tmpdir(), "pi-procward-path-bin-"));
+		process.env.PATH = binDir;
+
+		expect(resolveProcwardBinary()).toBeUndefined();
+
+		writeExecutable(join(binDir, "procward"));
+		expect(resolveProcwardBinary()).toBe(join(binDir, "procward"));
 	});
 });

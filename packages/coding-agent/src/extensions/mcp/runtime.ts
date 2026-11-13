@@ -4,6 +4,7 @@
  * server is configured.
  */
 
+import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -35,6 +36,8 @@ import {
 	type OAuthChallenge,
 } from "@earendil-works/pi-mcp/oauth";
 import { VERSION } from "../../config.ts";
+import { ownedChildEnv, prepareSessionSpawn } from "../../core/process-ownership.ts";
+import type { OwnedSession } from "../../core/process-registry.ts";
 import { resolveConfigValueOrThrow, resolveHeadersOrThrow } from "../../core/resolve-config-value.ts";
 import { sliceTail } from "../../core/tools/truncate.ts";
 import type { McpServerEntry } from "./config.ts";
@@ -101,6 +104,7 @@ export function createDefaultTransport(
 	entry: McpServerEntry,
 	cwd: string,
 	authProvider: AuthProvider | undefined,
+	registry?: OwnedSession,
 ): McpTransport {
 	const { config, name } = entry;
 	if ("url" in config) {
@@ -115,6 +119,31 @@ export function createDefaultTransport(
 		env[key] = resolveConfigValueOrThrow(value, `MCP server "${name}" env "${key}"`);
 	}
 	return new StdioTransport({
+		spawn: registry
+			? (command, args, options) => {
+					const owned = prepareSessionSpawn(registry, command, [...args], `MCP server ${name} (${entry.source})`, {
+						toolName: "mcp_server",
+						toolCallId: crypto.randomUUID(),
+						serverName: name,
+						configSource: entry.source,
+					});
+					if (!owned) throw new Error("Missing MCP process owner");
+					owned.stdio[0] = "pipe";
+					const child = spawn(owned.command, owned.args, {
+						...options,
+						detached: false,
+						stdio: owned.stdio,
+						env: ownedChildEnv(options.env ?? {}),
+					});
+					owned.finalize(child);
+					return {
+						child,
+						cancel: async () => {
+							await owned.cancel();
+						},
+					};
+				}
+			: undefined,
 		command: expandHome(config.command),
 		args: config.args?.map(expandHome),
 		cwd: resolve(cwd, expandHome(config.cwd ?? ".")),
