@@ -63,6 +63,7 @@ async function capturePayload(model: Model<Api>, options?: DirectSamplingOptions
 	let capturedPayload: SamplingPayload | undefined;
 
 	await stream(model, makeContext(), {
+		transport: "sse",
 		...options,
 		...capturingOptions((payload) => {
 			capturedPayload = payload;
@@ -80,6 +81,7 @@ async function captureSimplePayload(model: Model<Api>, options?: SimpleStreamOpt
 	let capturedPayload: SamplingPayload | undefined;
 
 	await streamSimple(model, makeContext(), {
+		transport: "sse",
 		...options,
 		...capturingOptions((payload) => {
 			capturedPayload = payload;

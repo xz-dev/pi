@@ -46,6 +46,8 @@ async function capturePayload(
 	await stream(createModel(promptCacheKeyMode), context, {
 		apiKey: "test-key",
 		sessionId: "session-123",
+		// Downstream: auto prefers WebSocket when a session id is set; this test inspects the SSE request body.
+		transport: "sse",
 		cacheRetention,
 	}).result();
 

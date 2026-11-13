@@ -28,6 +28,7 @@ async function capturePayload(
 ): Promise<Record<string, unknown>> {
 	let payload: Record<string, unknown> | undefined;
 	await streamOpenAIResponses(requestModel, context, {
+		transport: "sse",
 		apiKey,
 		maxTokens: 1000,
 		temperature: 0.5,
