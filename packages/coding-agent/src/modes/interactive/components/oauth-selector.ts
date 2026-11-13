@@ -6,6 +6,7 @@ import {
 	getKeybindings,
 	getSelectPageIndex,
 	Input,
+	renderSelectionWindow,
 	Spacer,
 	TruncatedText,
 	type TUI,
@@ -13,7 +14,9 @@ import {
 import { isPreferredProvider } from "../../../core/preferred-providers.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import { keyDisplayText } from "./keybinding-hints.ts";
 import { getProviderBrandStyle, type ProviderBrandStyle, startBrandAnimation } from "./provider-brand.ts";
+import { compactSelector, SelectorPanel } from "./selector-panel.ts";
 
 export type AuthSelectorProvider = {
 	id: string;
@@ -62,7 +65,7 @@ const MAX_VISIBLE = 8;
  * Component that renders an auth provider selector. With `tui`, the selected row of a preferred partner provider
  * shows its animated brand style.
  */
-export class OAuthSelectorComponent extends Container implements Focusable {
+export class OAuthSelectorComponent extends SelectorPanel implements Focusable {
 	readonly capturesViewportInput: boolean = true;
 	private searchInput: Input;
 
@@ -170,13 +173,32 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.updateList();
 	}
 
+	private getStartIndex(): number {
+		return Math.max(0, Math.min(this.selectedIndex - 4, this.filteredProviders.length - 8));
+	}
+
+	protected getCompactView(width: number, height: number): Container {
+		const count = this.filteredProviders.length === 0 ? 1 : Math.min(8, this.filteredProviders.length);
+		const rows = this.listContainer.children.slice(0, count).map((child) => child.render(width));
+		return compactSelector(
+			width,
+			height,
+			[this.searchInput],
+			(rowsAvailable) => renderSelectionWindow(rows, this.selectedIndex - this.getStartIndex(), rowsAvailable).lines,
+			[
+				new TruncatedText(
+					`${keyDisplayText("tui.select.confirm")} ${this.mode} · ${keyDisplayText("tui.select.cancel")} cancel`,
+					0,
+					0,
+				),
+			],
+		);
+	}
+
 	private updateList(): void {
 		this.listContainer.clear();
 
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(MAX_VISIBLE / 2), this.filteredProviders.length - MAX_VISIBLE),
-		);
+		const startIndex = this.getStartIndex();
 		const endIndex = Math.min(startIndex + MAX_VISIBLE, this.filteredProviders.length);
 
 		for (let i = startIndex; i < endIndex; i++) {

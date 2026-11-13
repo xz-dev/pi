@@ -6,6 +6,7 @@ import { ProcessTerminal, setKeybindings, type TUI, TuiMainScreen } from "@earen
 import { KeybindingsManager } from "../core/keybindings.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
 import { ConfigSelectorComponent, type ScopedResolvedPaths } from "../modes/interactive/components/config-selector.ts";
+import { SelectorHost } from "../modes/interactive/components/selector-host.ts";
 import { initTheme, stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
 
 export interface ConfigSelectorOptions {
@@ -56,7 +57,9 @@ export async function selectConfig(options: ConfigSelectorOptions): Promise<void
 			options.projectModeAvailable,
 		);
 
-		ui.addChild(selector);
+		const host = new SelectorHost(ui, () => []);
+		host.addChild(selector);
+		ui.addChild(host);
 		ui.setFocus(selector.getResourceList());
 		ui.start();
 	});
