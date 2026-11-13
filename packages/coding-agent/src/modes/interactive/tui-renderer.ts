@@ -2,7 +2,7 @@ import type { Terminal, WheelScrollLines } from "@earendil-works/pi-tui";
 import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
-import { keyDisplayText } from "./components/keybinding-hints.ts";
+import { scrollToEndLabel } from "./components/keybinding-hints.ts";
 import { theme } from "./theme/theme.ts";
 
 export interface InteractiveTuiOptions {
@@ -27,11 +27,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 			searchMatchStyle: (text) => theme.underline(styleSearchMatch(text)),
 			searchCurrentMatchStyle: (text) => theme.bold(theme.inverse(styleSearchMatch(text))),
 			searchNavigationButtonStyle: (text, hovered) => (hovered ? theme.underline(text) : text),
-			scrollToEndIndicator: () => {
-				const shortcut = keyDisplayText("tui.altScreen.bottom");
-				const label = ` ↓ Jump to latest message${shortcut ? ` · ${shortcut}` : ""} `;
-				return theme.bg("selectedBg", theme.fg("text", label));
-			},
+			scrollToEndIndicator: () => theme.bg("selectedBg", theme.fg("text", scrollToEndLabel())),
 			openUrl: openBrowser,
 			onRightClickPaste: options.onRightClickPaste,
 			copyOnSelect: options.fullscreenCopyOnSelect,
