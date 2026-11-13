@@ -3,9 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-    # The release commit is pushed together with the next commit, so a push to main never builds it; the tag run does,
-    # and preview-packages.yml releases its packages on pkg.earendil.com.
-    tags: ['v*.*.*']
   pull_request:
     branches: [main]
 
@@ -32,31 +29,19 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Previews are published for main, release tags and PRs from branches of this repo only (see preview-packages.yml).
-      - name: Pack preview packages
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          # Pull request runs check out a merge commit; tarballs are keyed by the PR head commit.
-          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: node scripts/preview-packages.mjs pack --sha "$SHA" --out "$RUNNER_TEMP/preview-packages"
-
-      - name: Upload preview packages
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: preview-packages
-          path: ${{ runner.temp }}/preview-packages
-          retention-days: 3
-          if-no-files-found: error
-
+      # Downstream: tolerate only the documented model-catalog drift class and
+      # skip the upstream tests listed in scripts/catalog-drift-test-skips.txt.
       - name: Check
-        run: npm run check
+        run: bash scripts/check-allow-model-catalog-drift.sh
 
       # The checkout has no tags; the released changelog sections are compared with the newest release tag.
+      # Downstream: release tags live upstream (the fork publishes xz-v* tags and never edits package changelogs).
       - name: Fetch the newest release tag
+        env:
+          UPSTREAM: https://github.com/earendil-works/pi.git
         run: |
-          tag=$(git ls-remote --tags --sort=-v:refname origin 'v*.*.*' | grep -v '\^{}' | head -1 | sed 's#.*refs/tags/##')
-          git fetch --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
+          tag=$(git ls-remote --tags --sort=-v:refname "$UPSTREAM" 'v*.*.*' | grep -v '\^{}' | head -1 | sed 's#.*refs/tags/##')
+          git fetch --depth=1 "$UPSTREAM" "refs/tags/$tag:refs/tags/$tag"
 
       - name: Check released changelog sections
         run: npm run check:released-changelogs
@@ -71,7 +56,6 @@ jobs:
         include:
           - name: coding-agent
           - name: durable
-          - name: chord
           - name: other
     steps:
       - name: Checkout
@@ -85,7 +69,7 @@ jobs:
 
       # fd and ripgrep are used by coding-agent tools tests and tui autocomplete tests.
       - name: Install system dependencies
-        if: matrix.name != 'durable' && matrix.name != 'chord'
+        if: matrix.name != 'durable'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fd-find ripgrep
@@ -103,20 +87,8 @@ jobs:
 
       - name: Test
         env:
-          SUITE: ${{ matrix.name }}
-        run: |
-          if [ "$SUITE" != other ]; then
-            npm run test --workspace "packages/$SUITE"
-            exit 0
-          fi
-          # Every other workspace, so new packages are tested without editing this workflow.
-          args=()
-          for dir in packages/*/; do
-            case "$dir" in packages/coding-agent/ | packages/durable/ | packages/chord/) continue ;; esac
-            args+=(--workspace "${dir%/}")
-          done
-          npm run test:scripts
-          npm run test --if-present "${args[@]}"
+          PI_TEST_WORKSPACE_GROUP: ${{ matrix.name }}
+        run: ./test.sh
 
   mcp-conformance:
     runs-on: ubuntu-latest
