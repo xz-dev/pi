@@ -2,6 +2,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { estimateProjectedContextTokens, estimateTokens } from "../../src/core/compaction/index.ts";
+import { getEntriesAfterLatestCompaction } from "../../src/core/session-manager.ts";
 import { VIRTUAL_MODEL_STATE_ENTRY } from "../../src/core/virtual-models.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -247,10 +248,11 @@ describe("input compaction ordering", () => {
 			});
 			if (change === "physical-to-virtual") {
 				expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
-				const branch = harness.sessionManager.getBranch();
-				expect(branch.findIndex((entry) => entry.type === "compaction")).toBeGreaterThan(
-					branch.findIndex((entry) => entry.type === "message" && getMessageText(entry.message) === "original"),
-				);
+				// The input was persisted before compaction, so it is kept history, not later input.
+				const after = getEntriesAfterLatestCompaction(harness.sessionManager.getBranch()) ?? [];
+				expect(
+					after.some((entry) => entry.type === "message" && getMessageText(entry.message) === "original"),
+				).toBe(false);
 			}
 		},
 	);
@@ -443,10 +445,13 @@ describe("input compaction ordering", () => {
 			);
 			expect(compactionIndex).toBeGreaterThan(-1);
 			expect(inputIndex).toBeGreaterThan(compactionIndex);
+			// The summary sits at its kept boundary; the input is the first conversation entry
+			// recorded after it, and only system patches may precede it.
+			const after = getEntriesAfterLatestCompaction(branch) ?? [];
+			const afterInput = after.findIndex((entry) => entry.id === branch[inputIndex].id);
+			expect(afterInput).toBeGreaterThan(-1);
 			expect(
-				branch
-					.slice(compactionIndex + 1, inputIndex)
-					.every((entry) => entry.type === "message" && entry.message.role === "system"),
+				after.slice(0, afterInput).every((entry) => entry.type === "message" && entry.message.role === "system"),
 			).toBe(true);
 			expect(branch[inputIndex + 1]).toMatchObject({ type: "message", message: { role: "assistant" } });
 			const compaction = branch[compactionIndex];
@@ -459,10 +464,12 @@ describe("input compaction ordering", () => {
 			expect(harness.events.findIndex((event) => event.type === "compaction_end")).toBeLessThan(delivered);
 			if (kind === "virtual") {
 				expect(routes).toEqual(["user"]);
-				expect(branch[compactionIndex - 1]).toMatchObject({
-					type: "custom",
-					customType: VIRTUAL_MODEL_STATE_ENTRY,
-				});
+				// Router state was recorded before the compaction and is kept below its summary.
+				const state = branch.findIndex(
+					(entry) => entry.type === "custom" && entry.customType === VIRTUAL_MODEL_STATE_ENTRY,
+				);
+				expect(state).toBeGreaterThan(compactionIndex);
+				expect(after.some((entry) => entry.id === branch[state].id)).toBe(false);
 			}
 		},
 	);
