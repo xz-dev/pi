@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import process from "node:process";
 import crossSpawn from "cross-spawn";
 import { type JsonRpcMessage, McpConnectionClosedError } from "../protocol/jsonrpc.ts";
@@ -53,6 +53,15 @@ function installExitHook(): void {
 }
 
 export interface StdioTransportOptions {
+	/** Optional process owner. Its cancellation replaces process-group termination on close. */
+	spawn?: (
+		command: string,
+		args: readonly string[],
+		options: SpawnOptions,
+	) => {
+		child: ChildProcess;
+		cancel: () => Promise<void>;
+	};
 	command: string;
 	args?: readonly string[];
 	cwd?: string;
@@ -69,6 +78,7 @@ export interface StdioTransportOptions {
 export class StdioTransport extends TransportEvents implements McpTransport {
 	readonly options: Readonly<StdioTransportOptions>;
 	private child: ChildProcess | undefined;
+	private cancelOwned: (() => Promise<void>) | undefined;
 	private readonly lines: JsonRpcLineReader;
 	private started = false;
 	private closed = false;
@@ -98,17 +108,20 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		if (this.closed) throw new McpConnectionClosedError();
 		this.started = true;
 		const env = this.options.inheritEnv === false ? { ...this.options.env } : { ...process.env, ...this.options.env };
-		const child = crossSpawn(this.options.command, this.options.args ?? [], {
+		const spawnOptions: SpawnOptions = {
 			cwd: this.options.cwd,
 			env,
 			stdio: ["pipe", "pipe", this.options.stderr === "inherit" ? "inherit" : "pipe"],
 			windowsHide: true,
 			// Own process group, so closing the transport can terminate the server's children too.
 			detached: USE_PROCESS_GROUPS,
-		});
+		};
+		const owned = this.options.spawn?.(this.options.command, this.options.args ?? [], spawnOptions);
+		const child = owned?.child ?? crossSpawn(this.options.command, this.options.args ?? [], spawnOptions);
+		this.cancelOwned = owned?.cancel;
 		this.child = child;
 		const pid = child.pid;
-		if (USE_PROCESS_GROUPS && pid !== undefined) {
+		if (!owned && USE_PROCESS_GROUPS && pid !== undefined) {
 			installExitHook();
 			liveProcessGroups.add(pid);
 			// Not on "exit": children of the server can outlive it while still holding its pipes.
@@ -159,6 +172,22 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		const child = this.child;
 		if (!child) {
 			this.emitClose();
+			return;
+		}
+		if (this.cancelOwned) {
+			// Preserve stdin-close grace; the owner's CANCEL ladder supplies tree cleanup evidence.
+			await new Promise<void>((resolve) => {
+				const timer = setTimeout(
+					resolve,
+					Math.min(STDIN_CLOSE_GRACE_MS, this.options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS),
+				);
+				child.once("close", () => {
+					clearTimeout(timer);
+					resolve();
+				});
+				child.stdin?.end();
+			});
+			await this.cancelOwned();
 			return;
 		}
 		// With process groups, a server that already exited can leave children holding its pipes; the

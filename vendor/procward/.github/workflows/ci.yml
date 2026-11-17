@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: BSD-3-Clause
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  native:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15-intel, target: x86_64-apple-darwin }
+          - { runner: macos-15, target: aarch64-apple-darwin }
+          - { runner: windows-2025, target: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Source, executor and toolchain
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          rustup update stable --no-self-update
+          rustc -vV
+          test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+      - name: Full standalone fixture suite
+        run: |
+          cargo build --locked --bins --examples
+          cargo test --locked --all-targets --no-fail-fast -- --nocapture
+      - name: Distribution size and startup (informational)
+        shell: bash
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}'
+  linux:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Host compile, static checks and native toolchain (no product execution)
+        run: |
+          git rev-parse HEAD
+          rustup update stable --no-self-update
+          rustc -vV
+          test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+          cargo build --locked --bins --examples
+          cargo test --locked --all-targets --no-run
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo fmt --check
+      - name: MSRV and release safety regression tests
+        if: matrix.arch == 'x86_64'
+        run: |
+          rustup toolchain install 1.87.0 --profile minimal --no-self-update
+          cargo +1.87.0 check --locked --all-targets
+          python3 .github/scripts/test-release.py
+          python3 ci/test-actions-vm.py
+      - uses: ./.github/actions/linux-vm
+        timeout-minutes: 85
+        with:
+          target: ${{ matrix.target }}
+          arch: ${{ matrix.arch }}
+          provider: ubuntu
+          mode: ci
+          deadline: 1800
+  musl:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-linux-musl }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: ./.github/actions/linux-vm
+        timeout-minutes: 55
+        with:
+          target: ${{ matrix.target }}
+          arch: ${{ matrix.arch }}
+          provider: alpine
+          mode: ci
+          deadline: 1800
+  freebsd:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-freebsd }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-freebsd }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
+        with:
+          release: '14.3'
+          arch: ${{ matrix.arch }}
+          copyback: true
+          prepare: pkg install -y rust git python311 binutils
+          run: |
+            set -eu
+            git -c safe.directory="$PWD" rev-parse HEAD
+            uname -a
+            rustc -vV
+            test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+            cargo build --locked --bins --examples
+            cargo test --locked --all-targets --no-fail-fast -- --nocapture
+            unset GITHUB_STEP_SUMMARY GITHUB_ENV
+            python3.11 .github/scripts/build-dist.py '${{ matrix.target }}'
+            rm -rf target
+      - name: Guest distribution size and startup summary
+        run: cat 'artifacts/${{ matrix.target }}/summary.md' >> "$GITHUB_STEP_SUMMARY"
+  riscv64:
+    name: ${{ matrix.target }} (full-system QEMU)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: riscv64gc-unknown-linux-gnu, provider: ubuntu }
+          - { target: riscv64gc-unknown-linux-musl, provider: alpine }
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: ./.github/actions/linux-vm
+        timeout-minutes: 115
+        with:
+          target: ${{ matrix.target }}
+          arch: riscv64
+          provider: ${{ matrix.provider }}
+          mode: ci
+          deadline: 3600
+      - name: Preserve full-system RISC-V results (including failed guest logs)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-vm-${{ matrix.target }}
+          path: artifacts/${{ matrix.target }}/
+          if-no-files-found: warn
+          compression-level: 0
+  linux-hazard:
+    name: Adversarial regression (separate 10s full-system VM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: ./.github/actions/linux-vm
+        timeout-minutes: 25
+        with:
+          target: x86_64-unknown-linux-gnu
+          arch: x86_64
+          provider: ubuntu
+          mode: hazard
+          deadline: 45
