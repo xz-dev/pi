@@ -205,6 +205,14 @@ describe("managed detach + Esc + manual /retry seam", () => {
 		return { harness, prompt };
 	}
 
+	// Esc gives an aborted tool one macrotask to report its own result (#9986).
+	// These tests fake the clock for the detach deadline, so let that grace elapse.
+	async function escWithFakeClock(harness: Harness): Promise<void> {
+		const aborting = harness.session.abort();
+		await vi.advanceTimersByTimeAsync(0);
+		await aborting;
+	}
+
 	it("keeps the detached tool running through Esc and completes once in session and storage", async () => {
 		const detached = barrierTool("detach");
 		const blocking = blockingTool("blocking");
@@ -216,7 +224,7 @@ describe("managed detach + Esc + manual /retry seam", () => {
 		expect(task?.status).toBe("running");
 
 		// Real Esc: abort the whole run, not the detached tool, then let it settle.
-		await harness.session.abort();
+		await escWithFakeClock(harness);
 		await prompt;
 
 		expect(blocking.abortSeen()).toBe(true);
@@ -254,7 +262,7 @@ describe("managed detach + Esc + manual /retry seam", () => {
 		expect(detached.aborted()).toBe(true);
 		expect(blocking.abortSeen()).toBe(false);
 
-		await harness.session.abort();
+		await escWithFakeClock(harness);
 		await prompt;
 		detached.release.resolve("detached-after-cancel");
 
