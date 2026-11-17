@@ -8,7 +8,10 @@ export interface ScrollViewOptions {
 	follow?: "none" | "end";
 	/** Resume end-following when layout changes place the viewport at the end. Defaults to true. */
 	resumeFollowOnLayout?: boolean;
-	/** Called synchronously when end-following changes, including between rendered frames. */
+	/**
+	 * Called synchronously when end-following changes, including between rendered frames. The listener may
+	 * change component output, so the fullscreen TUI re-renders components after a follow change.
+	 */
 	onFollowChange?: (following: boolean) => void;
 	/** Optional left-hand action beside the fullscreen jump-to-end indicator. */
 	scrollbackAction?: () => { label: string; onClick: () => void } | undefined;
@@ -65,6 +68,11 @@ export class ScrollView extends Container {
 		this.scrollbarTrackStyle = options.scrollbarTrackStyle ?? ((text) => `\x1b[90m${text}\x1b[39m`);
 		this.scrollbarThumbStyle = options.scrollbarThumbStyle ?? ((text) => `\x1b[37m${text}\x1b[39m`);
 		this.scrollbarHideDelayMs = Math.max(0, Math.floor(options.scrollbarHideDelayMs ?? 1000));
+	}
+
+	/** Whether a follow change notifies an `onFollowChange` listener. */
+	get hasFollowListener(): boolean {
+		return this.onFollowChange !== undefined;
 	}
 
 	get scrollTop(): number {

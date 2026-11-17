@@ -220,6 +220,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private previousScreenHeight = 0;
 	private layoutRoot: Component | undefined;
 	private currentLayout: LayoutFrame | undefined;
+	/** Follow state of the primary scroll view when `currentLayout` was rendered. */
+	private renderedFollowingEnd = true;
 	private readonly implicitDocument: Component;
 	private readonly implicitScrollView: ScrollView;
 	private readonly flashes: AltScreenFlashContainer;
@@ -1757,12 +1759,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
 		const requestViewRender = () => this.requestViewRender();
-		const reusableOutput = this.contentChanged ? undefined : this.currentLayout?.renderCache;
+		// A follow listener may change component output (the compact input dock), so its follow
+		// change cannot reuse the previous frame's output.
+		const primaryScrollView = this.getPrimaryScrollView();
+		const followChanged =
+			primaryScrollView.hasFollowListener && primaryScrollView.isFollowingEnd !== this.renderedFollowingEnd;
+		const reusableOutput = this.contentChanged || followChanged ? undefined : this.currentLayout?.renderCache;
 		this.contentChanged = false;
 		let nextLayout = renderLayoutFrame(root, width, height, requestViewRender, reusableOutput);
 		if (this.refreshSearch(nextLayout)) {
 			nextLayout = renderLayoutFrame(root, width, height, requestViewRender, nextLayout.renderCache);
 		}
+		this.renderedFollowingEnd = (nextLayout.primaryScrollView ?? this.implicitScrollView).isFollowingEnd;
 		// Resolve fake cursors before highlighting and compositing, which only track SGR codes
 		let screen = this.resolveFakeCursors(nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, "")));
 		screen = this.applySearchHighlights(screen, nextLayout);
