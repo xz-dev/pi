@@ -45,6 +45,18 @@ async function emitAbortable(emit: AgentEventSink, event: AgentEvent, signal?: A
 	throwIfAborted(signal);
 }
 
+// Unlike emitAbortable, an abort does not end the tool batch: every tool call still gets its
+// events and result (#9986). The abort only stops waiting for a blocked listener.
+async function emitToolBatchEvent(emit: AgentEventSink, event: AgentEvent, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) {
+		await emit(event);
+		return;
+	}
+	await abortable(emit(event), signal).catch((error) => {
+		if (!signal?.aborted) throw error;
+	});
+}
+
 /**
  * Request identity of agent loops: pi-ai's defaults with provider attribution to pi. `AgentLoopConfig.identity`
  * overrides it field by field.
@@ -63,12 +75,14 @@ export function agentLoop(
 	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
+	const producedMessages: AgentMessage[] = [];
 
 	void runAgentLoop(
 		prompts,
 		context,
 		config,
 		async (event) => {
+			if (event.type === "message_end") producedMessages.push(event.message);
 			stream.push(event);
 		},
 		signal,
@@ -79,7 +93,8 @@ export function agentLoop(
 		},
 		(error) => {
 			if (signal?.aborted) {
-				stream.end([]);
+				// An aborted run still returns what it produced, such as the answered tool calls (#9986).
+				stream.end(producedMessages);
 				return;
 			}
 			throw error;
@@ -112,11 +127,13 @@ export function agentLoopContinue(
 	}
 
 	const stream = createAgentStream();
+	const producedMessages: AgentMessage[] = [];
 
 	void runAgentLoopContinue(
 		context,
 		config,
 		async (event) => {
+			if (event.type === "message_end") producedMessages.push(event.message);
 			stream.push(event);
 		},
 		signal,
@@ -127,7 +144,8 @@ export function agentLoopContinue(
 		},
 		(error) => {
 			if (signal?.aborted) {
-				stream.end([]);
+				// An aborted run still returns what it produced, such as the answered tool calls (#9986).
+				stream.end(producedMessages);
 				return;
 			}
 			throw error;
@@ -545,7 +563,7 @@ async function failToolCallsFromTruncatedMessage(
 ): Promise<ExecutedToolCallBatch> {
 	const messages: ToolResultMessage[] = [];
 	for (const toolCall of toolCalls) {
-		await emitAbortable(
+		await emitToolBatchEvent(
 			emit,
 			{
 				type: "tool_execution_start",
@@ -607,7 +625,7 @@ async function executeToolCallsSequential(
 	const messages: ToolResultMessage[] = [];
 
 	for (const toolCall of toolCalls) {
-		await emitAbortable(
+		await emitToolBatchEvent(
 			emit,
 			{
 				type: "tool_execution_start",
@@ -662,7 +680,7 @@ async function executeToolCallsParallel(
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
 
 	for (const toolCall of toolCalls) {
-		await emitAbortable(
+		await emitToolBatchEvent(
 			emit,
 			{
 				type: "tool_execution_start",
@@ -840,13 +858,7 @@ async function awaitPreparedToolExecution(
 ): Promise<FinalizedToolCallOutcome> {
 	if (execution.detachAfterMs === undefined || !config.managedExecutions) {
 		return abortable(execution.completion, signal).catch((error) => {
-			if (signal?.aborted) {
-				return {
-					toolCall: prepared.toolCall,
-					result: createErrorToolResult("Operation aborted"),
-					isError: true,
-				};
-			}
+			if (signal?.aborted) return settleAbortedToolExecution(prepared, execution);
 			throw error;
 		});
 	}
@@ -864,11 +876,7 @@ async function awaitPreparedToolExecution(
 			if (detachTimer) clearTimeout(detachTimer);
 		});
 	if (winner === "aborted") {
-		return {
-			toolCall: prepared.toolCall,
-			result: createErrorToolResult("Operation aborted"),
-			isError: true,
-		};
+		return settleAbortedToolExecution(prepared, execution);
 	}
 	if (winner !== "detach") {
 		return winner;
@@ -887,6 +895,24 @@ async function awaitPreparedToolExecution(
 		completion,
 	});
 	return createSyntheticBackgroundOutcome(prepared, taskId);
+}
+
+// A tool that stops within one macrotask of the abort reports its own result (#9986); one that
+// ignores the abort gets "Operation aborted" so it cannot hold up the abort.
+function settleAbortedToolExecution(
+	prepared: PreparedToolCall,
+	execution: PreparedToolExecution,
+): Promise<FinalizedToolCallOutcome> {
+	const aborted: FinalizedToolCallOutcome = {
+		toolCall: prepared.toolCall,
+		result: createErrorToolResult("Operation aborted"),
+		isError: true,
+	};
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const grace = new Promise<FinalizedToolCallOutcome>((resolve) => {
+		timer = setTimeout(() => resolve(aborted), 0);
+	});
+	return Promise.race([execution.completion.catch(() => aborted), grace]).finally(() => clearTimeout(timer));
 }
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
@@ -1140,11 +1166,7 @@ async function emitToolExecutionEnd(
 		isError: finalized.isError,
 		...(finalized.durationMs === undefined ? {} : { durationMs: finalized.durationMs }),
 	} as const;
-	if (signal?.aborted) {
-		await emit(event);
-		return;
-	}
-	await emitAbortable(emit, event, signal);
+	await emitToolBatchEvent(emit, event, signal);
 }
 
 function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResultMessage {
@@ -1168,11 +1190,6 @@ async function emitToolResultMessage(
 	emit: AgentEventSink,
 	signal: AbortSignal | undefined,
 ): Promise<void> {
-	if (signal?.aborted) {
-		await emit({ type: "message_start", message: toolResultMessage });
-		await emit({ type: "message_end", message: toolResultMessage });
-		return;
-	}
-	await emitAbortable(emit, { type: "message_start", message: toolResultMessage }, signal);
-	await emitAbortable(emit, { type: "message_end", message: toolResultMessage }, signal);
+	await emitToolBatchEvent(emit, { type: "message_start", message: toolResultMessage }, signal);
+	await emitToolBatchEvent(emit, { type: "message_end", message: toolResultMessage }, signal);
 }
