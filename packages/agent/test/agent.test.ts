@@ -818,8 +818,9 @@ describe("Agent", () => {
 			messages: [],
 			tools: [],
 		};
+		const prompt = createUserMessage("hello");
 		const stream = agentLoop(
-			[{ role: "user", content: "hello", timestamp: Date.now() }],
+			[prompt],
 			context,
 			{
 				model: getModel("openai", "gpt-4o-mini")!,
@@ -837,7 +838,8 @@ describe("Agent", () => {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
 		controller.abort();
-		await expect(stream.result()).resolves.toEqual([]);
+		// The aborted stream ends with the messages produced so far.
+		await expect(stream.result()).resolves.toEqual([prompt]);
 		expect(events.some((event) => event.type === "agent_start")).toBe(true);
 	});
 
