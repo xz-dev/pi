@@ -233,11 +233,11 @@
     },
     "app.tools.expand": {
       "$ref": "#/$defs/KeybindingValue",
-      "description": "Toggle tool output"
+      "description": "Toggle tool and thinking expansion"
     },
     "app.thinking.toggle": {
       "$ref": "#/$defs/KeybindingValue",
-      "description": "Toggle thinking blocks"
+      "description": "Cycle thinking display (preview/expanded/collapsed)"
     },
     "app.session.toggleNamedFilter": {
       "$ref": "#/$defs/KeybindingValue",
