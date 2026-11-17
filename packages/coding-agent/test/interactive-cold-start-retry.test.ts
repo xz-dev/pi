@@ -75,6 +75,7 @@ describe("cold-start retry", () => {
 			setRebindSession: (fn: () => Promise<void>) => {
 				rebind = fn;
 			},
+			takeUnreportedDiagnostics: () => [],
 			dispose: async () => {
 				await AgentSessionRuntime.prototype.dispose.call(runtime as unknown as AgentSessionRuntime);
 			},
