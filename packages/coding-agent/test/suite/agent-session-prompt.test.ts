@@ -278,7 +278,7 @@ describe("AgentSession prompt characterization", () => {
 			},
 		]);
 
-		await harness.session.prompt("/review src/index.ts");
+		await harness.session.prompt("/review src/index.ts", { source: "interactive" });
 
 		expect(expandedPrompt).toBe("Review this code: src/index.ts");
 	});
@@ -313,7 +313,8 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.sendUserMessage("/review src/index.ts", { expandPromptTemplates: true });
 
-		expect(expandedPrompt).toBe("Review this code: src/index.ts");
+		expect(expandedPrompt).toContain("[Pi source: SDK input;");
+		expect(expandedPrompt).toMatch(/\nReview this code: src\/index\.ts$/);
 	});
 
 	it("dispatches extension commands without consuming a provider response", async () => {
@@ -695,7 +696,8 @@ describe("AgentSession prompt characterization", () => {
 					? message.content.flatMap((part) => (part.type === "text" ? [part.text] : []))
 					: [],
 			);
-			expect(texts).toEqual(["task one finished", "task two finished"]);
+			const source = "[Pi source: SDK input; not direct terminal input.]";
+			expect(texts).toEqual([source, "task one finished", source, "task two finished"]);
 		});
 
 		it("includes a custom message sent without triggerTurn while the run starts in its first request", async () => {
