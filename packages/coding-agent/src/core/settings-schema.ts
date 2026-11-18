@@ -299,6 +299,11 @@ export const SettingsSchema = Type.Object(
 					'Command `pi update` runs to update Pi itself, in argv form such as ["mise", "use", "-g", "npm:{packageName}@{version}"]. Placeholders: {packageName}, {version}, {installSpec}. PI_SELF_UPDATE_COMMAND takes precedence. Global setting only.',
 			}),
 		),
+		updateMirrors: Type.Optional(
+			Type.Array(Type.String(), {
+				description: "Global-only ordered replacements for https://github.com during release downloads.",
+			}),
+		),
 		collapseChangelog: Type.Optional(
 			Type.Boolean({
 				description: "Show the condensed changelog after update; use /changelog for the full changelog.",
