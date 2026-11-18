@@ -8,6 +8,12 @@ export interface DiagnosticErrorInfo {
 }
 
 export interface AssistantMessageDiagnostic {
+	/**
+	 * On a failed openai-responses message, provider_reference_repair_terminal means
+	 * its permitted full-history reference repair started and then failed without abort.
+	 * Automatic retry consumers must veto replay of this message, not later turns.
+	 * Hosts without that consumer ignore the diagnostic and do not provide this guarantee.
+	 */
 	type: string;
 	timestamp: number;
 	error?: DiagnosticErrorInfo;
