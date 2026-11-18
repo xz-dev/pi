@@ -14,6 +14,11 @@ import {
 	toToolDeclaration,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import {
+	type BackgroundToolCalls,
+	type ManagedExecutionNotification,
+	ManagedExecutionRegistry,
+} from "./managed-executions.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AfterToolCallContext,
@@ -145,6 +150,8 @@ export interface AgentOptions {
 	 * (`{ attribution: PI_ATTRIBUTION }`). Pass `{ attribution: null }` to send no attribution headers.
 	 */
 	identity?: ClientIdentity;
+	backgroundToolCalls?: BackgroundToolCalls;
+	onManagedExecutionComplete?: (notification: ManagedExecutionNotification) => void | Promise<void>;
 }
 
 class PendingMessageQueue {
@@ -235,6 +242,10 @@ export class Agent {
 	public toolExecution: ToolExecutionMode;
 	/** Request identity forwarded to the stream function, over `DEFAULT_AGENT_IDENTITY`. */
 	public identity?: ClientIdentity;
+	/** Process-lifetime registry for tool calls released from the active agent loop. */
+	public readonly managedExecutions = new ManagedExecutionRegistry();
+	/** Per-tool detach rules. Omitted tools execute normally. */
+	public backgroundToolCalls: BackgroundToolCalls;
 
 	constructor(options: AgentOptions) {
 		// Older compiled consumers may omit options or streamFn even though the current API requires them.
@@ -261,6 +272,8 @@ export class Agent {
 		this.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs;
 		this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
 		this.identity = runtimeOptions.identity;
+		this.backgroundToolCalls = runtimeOptions.backgroundToolCalls ?? {};
+		this.managedExecutions.setCompletionHandler(runtimeOptions.onManagedExecutionComplete);
 	}
 
 	/**
@@ -375,6 +388,7 @@ export class Agent {
 		this._state.errorMessage = undefined;
 		this.clearFollowUpQueue();
 		this.clearSteeringQueue();
+		this.managedExecutions.clear();
 	}
 
 	/** Start a new prompt from text, a single message, or a batch of messages. */
@@ -488,6 +502,8 @@ export class Agent {
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			identity: this.identity,
 			toolExecution: this.toolExecution,
+			backgroundToolCalls: this.backgroundToolCalls,
+			managedExecutions: this.managedExecutions,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			finishTurn: this.finishTurn,
