@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: BSD-3-Clause
+[package]
+name = "procward"
+version = "0.3.3"
+edition = "2024"
+rust-version = "1.87"
+license = "BSD-3-Clause"
+autotests = false
+description = "Process-tree ownership and job control for CLI programs"
+
+[[test]]
+name = "cli"
+path = "tests/cli.rs"
+
+[[test]]
+name = "platform"
+path = "tests/platform.rs"
+
+[[test]]
+name = "nesting"
+path = "tests/nesting.rs"
+
+[[test]]
+name = "freebsd"
+path = "tests/freebsd.rs"
+
+[[test]]
+name = "windows"
+path = "tests/windows.rs"
+
+[[test]]
+name = "boundary"
+path = "tests/boundary.rs"
+
+[[test]]
+name = "darwin"
+path = "tests/darwin.rs"
+
+[[test]]
+name = "terminal"
+path = "tests/terminal.rs"
+
+[[test]]
+name = "contract"
+path = "tests/contract.rs"
+
+[[test]]
+name = "task"
+path = "tests/task.rs"
+
+[[test]]
+name = "cgroup"
+path = "tests/cgroup.rs"
+
+[[test]]
+name = "hazard"
+path = "tests/hazard.rs"
+
+[[test]]
+name = "interaction"
+path = "tests/interaction.rs"
+
+[[example]]
+name = "fixture"
+path = "tests/fixtures/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = { version = "=0.14.11" }
+errno = "=0.3.14"
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process", "pipe"] }
+
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
+tokio = { version = "=1.54.1", default-features = false, features = ["rt", "process", "time"] }
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_IO", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Diagnostics_ToolHelp"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_System_Diagnostics_ProcessSnapshotting"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+process-wrap = { version = "=10.0.1", default-features = false, features = ["std", "process-group"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process", "pipe", "time", "termios", "stdio", "net", "event", "pty"] }
+rustix-openpty = "=0.2.0"
+signal-hook = { version = "=0.4.5", default-features = false, features = ["iterator"] }
+
+[profile.dist]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
+incremental = false
+panic = "unwind"
+
+[patch.crates-io]
+process-wrap = { path = "third_party/process-wrap" }
+rustix = { path = "third_party/rustix" }
