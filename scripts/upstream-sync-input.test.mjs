@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { test } from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { after, test } from "node:test";
 
 const workflow = readFileSync(new URL("../.github/workflows/upstream-sync.yml", import.meta.url), "utf8");
 const start = workflow.indexOf('          upstream_sha="$(git rev-parse upstream/main)"');
@@ -9,6 +9,7 @@ const end = workflow.indexOf("          git fetch origin", start);
 assert(start >= 0 && end > start);
 const selection = workflow.slice(start, end).replace(/^ {10}/gm, "");
 const cwd = mkdtempSync("/var/tmp/pi-sync-input-test-");
+after(() => rmSync(cwd, { recursive: true, force: true }));
 const env = {
 	PATH: process.env.PATH,
 	HOME: cwd,
