@@ -13,8 +13,8 @@
 }:
 
 let
-  version = "1.5.2-xz.430.1.gb130f19d";
-  tag = "xz-v1.5.2-xz.430.1.gb130f19d";
+  version = "1.5.2-xz.431.1.gf0dcec0a";
+  tag = "xz-v1.5.2-xz.431.1.gf0dcec0a";
 
   packageJson =
     if source != null && builtins.pathExists (source + "/packages/coding-agent/package.json") then
@@ -38,14 +38,14 @@ let
 
   # Pre-built release archive checksums for each platform from xz-dev/pi
   hashes = {
-    "darwin-arm64" = "sha256-yKbj9XB1MCRHgdjBUgNtF5PmwJ5USPQLhRTBeYbQukw=";
-    "darwin-x64-baseline" = "sha256-Y0NX5OrFd8dm0WihnH3cY4DEHTLq6vBzhq4zXal6CXo=";
-    "linux-arm64-gnu" = "sha256-L4TFp99bAZk1L76B2e+BTah6NKJLLigOrmGdxD+EYV0=";
-    "linux-x64-gnu-baseline" = "sha256-XICGwZ/DSFely2vHAwNN/DCe6AJNVpjz9QKpMqVlcK4=";
-    "linux-arm64-musl" = "sha256-aFVsrLHblKAqFSaB6NubmgN1R5o0pVJINNucvHaZnpg=";
-    "linux-x64-musl-baseline" = "sha256-gFMwkH7XB8TZvJ0eCOzUxztk590kbyC6C1tsyq0ojSY=";
-    "freebsd-arm64" = "sha256-gad1ZVmqIM5uJHWiVZIXAO/bV+PW5ffcsJCFlrK6jyo=";
-    "freebsd-x64" = "sha256-UsDHVNlgJPTsJI49kBCklvMpHLOENxE6FLN8F41QKcs=";
+    "darwin-arm64" = "sha256-hZMxZiIq4xHjxB+GxqUTF8FzzHa2BMjIQ1EbFJsqtv4=";
+    "darwin-x64-baseline" = "sha256-UIKGGN/BtmI4KMb5nYGpBxvmTIQRPxiYQsbWbVQsovY=";
+    "linux-arm64-gnu" = "sha256-JgXv0hYD85vrAQVot2H4LkUcfBLUCWtDI+au5xndrvs=";
+    "linux-x64-gnu-baseline" = "sha256-LSul++7O4Qach7ReL5K1UOWCWn9f45NBp+goayKGs/0=";
+    "linux-arm64-musl" = "sha256-Lpp3UL8aQOQSbXMkCrHCVzp2474nnFDGy4VLzrrzQ+0=";
+    "linux-x64-musl-baseline" = "sha256-2/weqA8q0l51xs781zbYW9ZUTgSxtOcbH9k/C07ozDU=";
+    "freebsd-arm64" = "sha256-FNaDAaO2p8us1IT+dux+ncRTHNgXp3JyxrPDIKf/mDc=";
+    "freebsd-x64" = "sha256-mgRV2nGO1wcgeTezqmCdNJBlDQrda53SE9ikNV9aLIc=";
   };
 
   tools = [ fd ripgrep ] ++ lib.optionals stdenv.hostPlatform.isLinux [ wl-clipboard xclip ];
