@@ -140,6 +140,7 @@ PATCH_ORDER=(
 	message-origin
 	model-thinking-sort
 	env-native-test-fixtures
+	chord-sync-test-timeout
 	preserve-tool-arguments-json
 	responses-background-replay
 	ws-retry-jitter

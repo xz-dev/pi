@@ -107,6 +107,7 @@ Linux packaging uses standard `buildFHSEnv` to preserve embedded resources and m
 - Integrate `patch/plugin-dependency-updates` last, after `patch/prompt-invocation-cards`, as a descendant of `patch/single-executable`. Apply only its predecessor-relative `patch/single-executable..patch/plugin-dependency-updates` range and rebase it when the single-executable tip changes; it relies on the embedded-Bun package operations and update retries owned there.
 - Integrate `patch/model-selector-refresh-selection` after `patch/provider-transport-indicator` as an independent selection-preservation patch. It only touches `packages/coding-agent/src/modes/interactive/components/model-selector.ts` and `packages/coding-agent/test/model-selector.test.ts` and complements the upstream 7209 filter-reset regression without changing the same behavior.
 - `patch/model-catalog-test-fixtures` is retired from active inputs. Upstream commit `99fe1489707f9f6accbef4377be79ef0544c42f2` supplies the same Xiaomi MiMo 2.6 model IDs and test behavior; the residual downstream differences are descriptive names only. Retain the source branch without integrating this duplicate overlay. No test or assertion is removed and no exclusion is added.
+- Integrate `patch/chord-sync-test-timeout` after `patch/env-native-test-fixtures` as an independent test-only patch based on upstream. It only adds a timeout to one Chord sync test; retire it once upstream raises that timeout.
 - Patch branches must never carry `packages/*/CHANGELOG.md` hunks.
 
 ## Response checkpoint documentation

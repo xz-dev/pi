@@ -90,6 +90,7 @@ jobs:
             +refs/heads/patch/message-origin:refs/remotes/origin/patch/message-origin \
             +refs/heads/patch/model-thinking-sort:refs/remotes/origin/patch/model-thinking-sort \
             +refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures \
+            +refs/heads/patch/chord-sync-test-timeout:refs/remotes/origin/patch/chord-sync-test-timeout \
             +refs/heads/patch/preserve-tool-arguments-json:refs/remotes/origin/patch/preserve-tool-arguments-json \
             +refs/heads/patch/responses-background-replay:refs/remotes/origin/patch/responses-background-replay \
             +refs/heads/patch/ws-retry-jitter:refs/remotes/origin/patch/ws-retry-jitter \
@@ -148,6 +149,7 @@ jobs:
             message-origin \
             model-thinking-sort \
             env-native-test-fixtures \
+            chord-sync-test-timeout \
             preserve-tool-arguments-json \
             responses-background-replay \
             ws-retry-jitter \
