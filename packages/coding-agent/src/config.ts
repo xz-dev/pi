@@ -1,5 +1,6 @@
 import {
 	accessSync,
+	chmodSync,
 	constants,
 	existsSync,
 	mkdirSync,
@@ -14,10 +15,11 @@ import {
 } from "fs";
 import { createRequire } from "module";
 import { homedir, tmpdir, userInfo } from "os";
-import { basename, dirname, join, resolve, sep, win32 } from "path";
+import { basename, delimiter, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
+import { procwardIncluded } from "./utils/procward-build.ts";
 import { stripBom } from "./utils/text.ts";
 
 // =============================================================================
@@ -712,6 +714,15 @@ export function getReadmePath(): string {
 	return resolve(join(getPackageDir(), "README.md"));
 }
 
+/** Get built-in skills as real files, including materialized embedded assets. */
+export function getBuiltinSkillsDir(): string {
+	if (isBunBinary) {
+		return materializeResourceTree({ sourceDir: getEmbeddedAssetPath("skills"), relativePath: "skills" });
+	}
+	const packageDir = getPackageDir();
+	return join(packageDir, existsSync(join(packageDir, "src")) ? ".pi" : "dist", "skills");
+}
+
 /** Get path to docs directory */
 export function getDocsPath(): string {
 	if (isBunBinary) {
@@ -770,6 +781,120 @@ export function setEmbeddedQuickJSWasmPath(path: string): void {
 export function getQuickJSWasmPath(): string {
 	quickJSWasmPath ??= createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm");
 	return quickJSWasmPath;
+}
+
+// =============================================================================
+// Procward (process-tree ownership helper)
+// =============================================================================
+
+/**
+ * Resolve the procward process-ownership helper shipped with this pi.
+ *
+ * Search order:
+ * 1. `PI_PROCWARD_BIN` — explicit override (development, distro packaging).
+ * 2. Embedded `process-owner` resources, materialized to the existing resource
+ *    cache for Bun binaries; `native/procward/<triple>` or `host` under the
+ *    package root for source checkouts and npm installs.
+ * 3. `PATH` — a developer convenience for running pi from source without
+ *    building the vendored helper.
+ *
+ * Returns undefined when no helper exists. Enabled ownership fails closed;
+ * absence is not an opt-out. Feature-off artifacts never inspect helper paths.
+ */
+export function resolveProcwardBinary(): string | undefined {
+	if (!procwardIncluded) return undefined;
+	const override = process.env.PI_PROCWARD_BIN;
+	if (override) {
+		try {
+			accessSync(override, constants.X_OK);
+			return override;
+		} catch {
+			throw new Error(`PI_PROCWARD_BIN is not executable: ${override}`);
+		}
+	}
+
+	const binaryName = process.platform === "win32" ? "procward.exe" : "procward";
+	const candidates: string[] = [];
+	if (isBunBinary) {
+		const sourceDir = getEmbeddedAssetPath("process-owner");
+		if (existsSync(join(sourceDir, binaryName))) {
+			const directory = materializeResourceTree({ sourceDir, relativePath: "process-owner" });
+			const binary = join(directory, binaryName);
+			// Resource copying preserves bytes, not Unix executable permissions.
+			if (process.platform !== "win32") chmodSync(binary, 0o755);
+			candidates.push(binary);
+		}
+	} else {
+		const packageDir = getPackageDir();
+		// Source checkout / npm install: native/procward/<triple>/procward, plus the
+		// host shorthand emitted by build-procward.sh without --triple.
+		candidates.push(join(packageDir, "native", "procward", procHostTriple(), binaryName));
+		candidates.push(join(packageDir, "native", "procward", "host", binaryName));
+	}
+	for (const candidate of candidates) {
+		try {
+			accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch {
+			// try the next candidate
+		}
+	}
+
+	return findOnPath(binaryName);
+}
+
+/** Resolve the existing Windows platform addon without loading the CLI/TUI module graph. */
+export function resolveWindowsOwnershipHelper(): string | undefined {
+	if (!procwardIncluded || process.platform !== "win32") return undefined;
+	if (process.arch !== "x64" && process.arch !== "arm64") return undefined;
+	const relative = join("win32", "prebuilds", `win32-${process.arch}`, "win32-platform.node");
+	if (isBunBinary) {
+		const native = materializeNativeAddons();
+		const candidate = native ? join(native, relative) : undefined;
+		return candidate && existsSync(candidate) ? candidate : undefined;
+	}
+	const candidates = [join(getPackageDir(), "native", relative)];
+	try {
+		const tui = createRequire(import.meta.url).resolve("@earendil-works/pi-tui/package.json");
+		candidates.push(join(dirname(tui), "native", relative));
+	} catch {
+		// Bundled Node distributions carry the native tree next to their own package assets.
+	}
+	return candidates.find((candidate) => existsSync(candidate));
+}
+
+/** Map the running process to the Rust target triple build-procward.sh names its output by. */
+function procHostTriple(): string {
+	const arch = process.arch === "x64" ? "x86_64" : process.arch === "arm64" ? "aarch64" : process.arch;
+	switch (process.platform) {
+		case "linux":
+			return `${arch}-unknown-linux-gnu`;
+		case "darwin":
+			return `${arch}-apple-darwin`;
+		case "win32":
+			return `${arch}-pc-windows-msvc`;
+		case "freebsd":
+			return `${arch}-unknown-freebsd`;
+		default:
+			return `${arch}-unknown`;
+	}
+}
+
+/** First executable match for name on PATH, or undefined. */
+function findOnPath(name: string): string | undefined {
+	const pathEnv = process.env.PATH;
+	if (!pathEnv) return undefined;
+	for (const dir of pathEnv.split(delimiter)) {
+		if (!dir) continue;
+		const candidate = join(dir, name);
+		try {
+			accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch {
+			// keep scanning
+		}
+	}
+	return undefined;
 }
 
 /** Resolve the codemode worker entry for a release runtime. */

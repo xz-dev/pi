@@ -9,7 +9,9 @@ export default mergeConfig(
 			environment: "node",
 			testTimeout: 30000,
 			// Tests run offline by default; opt in with allowNetwork() from test/test-network-env.ts.
-			env: { PI_OFFLINE: "1" },
+			// Native lifecycle tests require a separately booted VM, never this host kernel.
+			// Default-on SDK coverage explicitly removes this and supplies a Node protocol peer.
+			env: { PI_OFFLINE: "1", PI_NO_PROCESS_OWNERSHIP: "1" },
 			unstubEnvs: true,
 			reporters: process.env.GITHUB_ACTIONS ? ["dot", "github-actions"] : ["dot"],
 			silent: "passed-only",

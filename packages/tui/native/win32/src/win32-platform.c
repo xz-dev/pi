@@ -1,5 +1,6 @@
 #define PI_CLIPBOARD_WRITE
 #include "../../clipboard.h"
+#include "process-ownership.h"
 
 #ifndef BI_ALPHABITFIELDS
 #define BI_ALPHABITFIELDS 6
@@ -237,5 +238,9 @@ PI_NAPI_EXPORT napi_value PI_NAPI_CALL napi_register_module_v1(napi_env env, nap
     set_function_export(env, exports, "getText", get_clipboard_text);
     set_function_export(env, exports, "setText", set_clipboard_text);
     set_function_export(env, exports, "getImage", get_clipboard_image);
+    set_function_export(env, exports, "prepareOwnershipPipe", prepare_ownership_pipe);
+    set_function_export(env, exports, "readOwnershipPipe", read_ownership_pipe);
+    set_function_export(env, exports, "closeOwnershipPipe", close_ownership_pipe);
+    set_function_export(env, exports, "ownershipParentIdentity", ownership_parent_identity);
     return exports;
 }
