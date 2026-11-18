@@ -234,6 +234,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		const entry = entries[i];
 		const message = getMessageFromEntry(entry, edits.get(entry.id));
 		if (!message) continue;
+		if (entry.type === "custom_message" && message.role === "custom") message.origin = entry.origin;
 
 		// Extract file ops from assistant messages (tool calls)
 		extractFileOpsFromMessage(message, fileOps);
