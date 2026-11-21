@@ -506,7 +506,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 									normalizeContext({ messages: [output] }),
 									OPENAI_TOOL_CALL_PROVIDERS,
 									{
-										includeSystemPrompt: false,
 										grammarToolInputProperties,
 										supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
 										supportsAdditionalTools: compat.supportsAdditionalTools,
