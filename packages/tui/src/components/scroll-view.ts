@@ -6,6 +6,15 @@ export type ScrollViewScrollbar = "hidden" | "auto" | "always";
 export interface ScrollViewOptions {
 	axis?: "vertical";
 	follow?: "none" | "end";
+	/** Resume end-following when layout changes place the viewport at the end. Defaults to true. */
+	resumeFollowOnLayout?: boolean;
+	/**
+	 * Called synchronously when end-following changes, including between rendered frames. The listener may
+	 * change component output, so the fullscreen TUI re-renders components after a follow change.
+	 */
+	onFollowChange?: (following: boolean) => void;
+	/** Optional left-hand action beside the fullscreen jump-to-end indicator. */
+	scrollbackAction?: () => { label: string; onClick: () => void } | undefined;
 	primary?: boolean;
 	overscroll?: "chain" | "contain";
 	scrollbar?: ScrollViewScrollbar;
@@ -22,6 +31,9 @@ export interface ScrollViewScrollToOptions {
 export class ScrollView extends Container {
 	private readonly child: Component;
 	readonly followEnd: boolean;
+	private readonly resumeFollowOnLayout: boolean;
+	private readonly onFollowChange: ScrollViewOptions["onFollowChange"];
+	readonly scrollbackAction: ScrollViewOptions["scrollbackAction"];
 	readonly primary: boolean;
 	readonly overscroll: "chain" | "contain";
 	readonly scrollbarTrackStyle: (text: string) => string;
@@ -46,13 +58,21 @@ export class ScrollView extends Container {
 		this.child = component;
 		this.children.push(component);
 		this.followEnd = (options.follow ?? "none") === "end";
+		this.resumeFollowOnLayout = options.resumeFollowOnLayout ?? true;
 		this.followingEnd = this.followEnd;
+		this.onFollowChange = options.onFollowChange;
+		this.scrollbackAction = options.scrollbackAction;
 		this.primary = options.primary ?? false;
 		this.overscroll = options.overscroll ?? "chain";
 		this.currentScrollbar = options.scrollbar ?? "hidden";
 		this.scrollbarTrackStyle = options.scrollbarTrackStyle ?? ((text) => `\x1b[90m${text}\x1b[39m`);
 		this.scrollbarThumbStyle = options.scrollbarThumbStyle ?? ((text) => `\x1b[37m${text}\x1b[39m`);
 		this.scrollbarHideDelayMs = Math.max(0, Math.floor(options.scrollbarHideDelayMs ?? 1000));
+	}
+
+	/** Whether a follow change notifies an `onFollowChange` listener. */
+	get hasFollowListener(): boolean {
+		return this.onFollowChange !== undefined;
 	}
 
 	get scrollTop(): number {
@@ -124,6 +144,12 @@ export class ScrollView extends Container {
 		this.requestRenderCallback?.();
 	}
 
+	private setFollowingEnd(following: boolean): void {
+		if (following === this.followingEnd) return;
+		this.followingEnd = following;
+		this.onFollowChange?.(following);
+	}
+
 	scrollTo(scrollTop: number, options: ScrollViewScrollToOptions = {}): void {
 		const requested = Number.isFinite(scrollTop) ? Math.trunc(scrollTop) : this.currentScrollTop;
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
@@ -139,7 +165,7 @@ export class ScrollView extends Container {
 		}
 		const moved = next !== this.currentScrollTop;
 		this.currentScrollTop = next;
-		this.followingEnd = nextFollowingEnd;
+		this.setFollowingEnd(nextFollowingEnd);
 		this.followSuppressedAtEnd = nextFollowSuppressedAtEnd;
 		if (moved) this.markScrollbarActivity();
 		this.requestRenderCallback?.();
@@ -152,9 +178,11 @@ export class ScrollView extends Container {
 		const start = this.followingEnd ? maxScrollTop : this.currentScrollTop;
 		const next = Math.max(0, Math.min(maxScrollTop, start + requested));
 		const moved = next - start;
+		// An upward gesture at the start is not a request to resume end-following.
+		if (requested < 0 && moved === 0) return requested;
 		const wasFollowingEnd = this.followingEnd;
 		this.currentScrollTop = next;
-		this.followingEnd = this.followEnd && next === maxScrollTop;
+		this.setFollowingEnd(this.followEnd && next === maxScrollTop);
 		this.followSuppressedAtEnd = false;
 		if (moved !== 0) this.markScrollbarActivity();
 		if (moved !== 0 || this.followingEnd !== wasFollowingEnd) this.requestRenderCallback?.();
@@ -162,11 +190,12 @@ export class ScrollView extends Container {
 	}
 
 	scrollToStart(): void {
+		if (this.currentScrollTop === 0 && !this.followingEnd) return;
 		const changed =
 			this.currentScrollTop !== 0 ||
 			this.followingEnd !== (this.followEnd && this.contentHeight <= this.currentViewportHeight);
 		this.currentScrollTop = 0;
-		this.followingEnd = this.followEnd && this.contentHeight <= this.currentViewportHeight;
+		this.setFollowingEnd(this.followEnd && this.contentHeight <= this.currentViewportHeight);
 		this.followSuppressedAtEnd = false;
 		if (changed) {
 			this.markScrollbarActivity();
@@ -178,7 +207,7 @@ export class ScrollView extends Container {
 		const next = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		const changed = this.currentScrollTop !== next || this.followingEnd !== this.followEnd;
 		this.currentScrollTop = next;
-		this.followingEnd = this.followEnd;
+		this.setFollowingEnd(this.followEnd);
 		this.followSuppressedAtEnd = false;
 		if (changed) {
 			this.markScrollbarActivity();
@@ -194,8 +223,13 @@ export class ScrollView extends Container {
 		if (this.followingEnd) this.currentScrollTop = maxScrollTop;
 		else this.currentScrollTop = Math.max(0, Math.min(this.currentScrollTop, maxScrollTop));
 		if (this.currentScrollTop < maxScrollTop) this.followSuppressedAtEnd = false;
-		if (this.followEnd && this.currentScrollTop === maxScrollTop && !this.followSuppressedAtEnd) {
-			this.followingEnd = true;
+		if (
+			this.resumeFollowOnLayout &&
+			this.followEnd &&
+			this.currentScrollTop === maxScrollTop &&
+			!this.followSuppressedAtEnd
+		) {
+			this.setFollowingEnd(true);
 		}
 		if (this.contentHeight <= this.currentViewportHeight) this.hideTransientScrollbar();
 	}
