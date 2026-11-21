@@ -1,0 +1,397 @@
+/**
+ * Procward managed-child contract, consumer side.
+ *
+ * When pi runs as a procward primary, procward grants a lifecycle pipe
+ * (PROCWARD_LIFECYCLE_FD on Unix, PROCWARD_LIFECYCLE_HANDLE on Windows) whose
+ * first record proves the managed relationship:
+ *
+ *   PROCWARD/1 READY <owner_pid> <primary_pid> <owner_identity> <launch_id>
+ *
+ * Acceptance (vendor/procward/docs/contract.md): owner PID and launch ID must
+ * match PROCWARD_OWNER_PID / PROCWARD_CONTRACT_ID in the environment, the
+ * primary PID must equal our own live PID, owner_identity is "parent" on Unix
+ * and getppid() must equal the announced owner. An invalid, malformed, or
+ * absent READY fails closed: pi is not managed by this handoff.
+ *
+ * After READY, the pipe carries OWNER-LOSS when the owner goes away; pipe EOF
+ * is owner loss too. Managed pi bridges that into a bounded shutdown
+ * (see owner-loss handling in the interactive/rpc modes).
+ */
+
+import { closeSync, fstatSync, readSync } from "node:fs";
+import { Worker } from "node:worker_threads";
+import { loadWindowsOwnershipHelper, type WindowsOwnershipHelper } from "./windows-process-ownership.ts";
+
+const MAX_RECORD_BYTES = 256;
+
+export interface ManagedContract {
+	readonly ownerPid: number;
+	readonly launchId: string;
+	readonly lifecycleFd: number;
+}
+
+export interface ContractEnvironment {
+	readonly protocol?: string;
+	readonly ownerPid?: string;
+	readonly contractId?: string;
+	readonly lifecycleFd?: string;
+	readonly lifecycleHandle?: string;
+}
+
+/** Which env vars the contract consumes (also stripped from tool children). */
+export const CONTRACT_ENV_KEYS = [
+	"PROCWARD_PROTOCOL",
+	"PROCWARD_OWNER_PID",
+	"PROCWARD_CONTRACT_ID",
+	"PROCWARD_LIFECYCLE_FD",
+	"PROCWARD_LIFECYCLE_HANDLE",
+] as const;
+
+function isPositiveDecimalPid(value: string): boolean {
+	return /^[1-9][0-9]*$/.test(value);
+}
+
+function isLaunchId(value: string): boolean {
+	return /^[0-9a-f]{32}$/.test(value);
+}
+
+/**
+ * Read one LF-terminated record (at most MAX_RECORD_BYTES) from the lifecycle
+ * pipe. Returns the line without LF, or undefined at EOF with no data.
+ * Oversized or partial records are contract violations (null).
+ */
+export function readLifecycleRecord(fd: number): string | null | undefined {
+	// Reading exactly through LF preserves a coalesced following record for
+	// the owner-loss observer. The protocol includes LF in its 256-byte cap.
+	const record = Buffer.alloc(MAX_RECORD_BYTES);
+	for (let offset = 0; offset < record.length; offset++) {
+		let count: number;
+		try {
+			count = readSync(fd, record, offset, 1, null);
+		} catch {
+			return null;
+		}
+		if (count === 0) return offset === 0 ? undefined : null;
+		if (record[offset] === 10) return record.subarray(0, offset).toString("ascii");
+		if (record[offset] < 32 || record[offset] > 126) return null;
+	}
+	return null;
+}
+
+/**
+ * Validate the managed-child contract for this process. Returns the contract
+ * when every check passes, or undefined when the environment does not claim
+ * management. Throws when the environment claims management but the contract
+ * is invalid (fail closed: callers must not treat this as unmanaged).
+ *
+ * `readRecord` supplies framing; bootstrap uses its deadline-bounded worker reader.
+ */
+export function consumeManagedContract(
+	env: ContractEnvironment,
+	selfPid: number,
+	parentPid: number,
+	readRecord: (fd: number) => string | null | undefined = readLifecycleRecord,
+): ManagedContract | undefined {
+	if (env.protocol === undefined) return undefined;
+	if (env.protocol !== "1") throw new Error("procward: unknown contract protocol");
+	if (
+		env.lifecycleFd === undefined ||
+		!/^[1-9][0-9]*$/.test(env.lifecycleFd) ||
+		!Number.isSafeInteger(Number(env.lifecycleFd)) ||
+		Number(env.lifecycleFd) <= 2
+	) {
+		throw new Error("procward: invalid lifecycle fd");
+	}
+	if (env.ownerPid === undefined || !isPositiveDecimalPid(env.ownerPid)) {
+		throw new Error("procward: missing owner pid");
+	}
+	if (env.contractId === undefined || !isLaunchId(env.contractId)) {
+		throw new Error("procward: missing contract id");
+	}
+
+	const { ownerPid, ownerIdentity, launchId } = parseManagedReady(env, selfPid, readRecord(Number(env.lifecycleFd)));
+	if (ownerIdentity !== "parent") throw new Error("procward: unsupported owner identity");
+	if (ownerPid !== parentPid) throw new Error("procward: owner is not the immediate parent");
+
+	return { ownerPid, launchId, lifecycleFd: Number(env.lifecycleFd) };
+}
+
+export interface WindowsManagedContract {
+	readonly ownerPid: number;
+	readonly launchId: string;
+	readonly lifecycleHandle: string;
+}
+
+/** Validate the Windows native parent/FILETIME contract without treating a HANDLE as a CRT fd. */
+export function consumeWindowsManagedContract(
+	env: ContractEnvironment,
+	selfPid: number,
+	readRecord: (handle: string) => string | null | undefined,
+	helper: Pick<WindowsOwnershipHelper, "ownershipParentIdentity">,
+): WindowsManagedContract | undefined {
+	if (env.protocol === undefined) return undefined;
+	if (env.protocol !== "1") throw new Error("procward: unknown contract protocol");
+	if (
+		env.lifecycleFd !== undefined ||
+		env.lifecycleHandle === undefined ||
+		!/^[1-9][0-9]{0,19}$/.test(env.lifecycleHandle) ||
+		BigInt(env.lifecycleHandle) > 0xffffffffffffffffn
+	) {
+		throw new Error("procward: invalid Windows lifecycle HANDLE");
+	}
+	if (env.ownerPid === undefined || !isPositiveDecimalPid(env.ownerPid))
+		throw new Error("procward: missing owner pid");
+	if (env.contractId === undefined || !isLaunchId(env.contractId)) throw new Error("procward: missing contract id");
+	const { ownerPid, ownerIdentity, launchId } = parseManagedReady(env, selfPid, readRecord(env.lifecycleHandle));
+	if (!/^[0-9a-f]{16}$/.test(ownerIdentity)) throw new Error("procward: invalid Windows creation identity");
+	// The addon queries this primary's native parent and opens a live stable handle;
+	// process.ppid or a PID copied from the environment cannot authorize ownership.
+	const native = helper.ownershipParentIdentity();
+	if (!Number.isInteger(native.pid) || native.pid <= 0 || native.pid > 0xffffffff || native.pid !== ownerPid) {
+		throw new Error("procward: owner is not the live native parent");
+	}
+	if (native.creationTime !== ownerIdentity) throw new Error("procward: native parent creation FILETIME mismatch");
+	return { ownerPid, launchId, lifecycleHandle: env.lifecycleHandle };
+}
+
+function parseManagedReady(env: ContractEnvironment, selfPid: number, record: string | null | undefined) {
+	if (record === undefined) throw new Error("procward: lifecycle closed before READY");
+	if (record === null) throw new Error("procward: invalid lifecycle record");
+	const parts = record.split(" ");
+	if (parts.length !== 6 || parts[0] !== "PROCWARD/1" || parts[1] !== "READY")
+		throw new Error("procward: expected READY record");
+	const [, , ownerPid, primaryPid, ownerIdentity, launchId] = parts;
+	if (ownerPid !== env.ownerPid) throw new Error("procward: READY owner pid mismatch");
+	if (launchId !== env.contractId) throw new Error("procward: READY launch id mismatch");
+	if (!isPositiveDecimalPid(primaryPid) || Number(primaryPid) !== selfPid)
+		throw new Error("procward: READY primary pid mismatch");
+	return { ownerPid: Number(ownerPid), ownerIdentity, launchId };
+}
+
+/** Shared first-loss state for the lifecycle endpoint's single observer. */
+export interface OwnerLossObserver {
+	stop(): void;
+	/** Fixed-origin monotonic milliseconds, comparable across Node/Bun workers. */
+	readonly observedAt: number | undefined;
+}
+
+/**
+ * Observe the lifecycle pipe for owner loss after a validated contract.
+ *
+ * A dedicated worker observes the inherited pipe asynchronously, so it can
+ * shut down without a blocked read retaining the process. On loss, it arms
+ * its own fatal timer before notifying the main thread; a blocked main loop
+ * cannot prevent that deadline from firing. This observer exclusively owns
+ * the endpoint until its worker exits; callers must not close or reuse it.
+ */
+export function observeOwnerLoss(
+	contract: ManagedContract,
+	onLoss: (reason: string, observedAt: number) => void,
+): OwnerLossObserver {
+	return startLifecycleObserver(contract, onLoss);
+}
+
+/** Validate READY within two seconds, then observe owner loss on the same endpoint. */
+export function consumeAndObserveManagedContract(
+	env: ContractEnvironment,
+	selfPid: number,
+	parentPid: number,
+	onLoss: (reason: string, observedAt: number) => void,
+): OwnerLossObserver {
+	let observer: OwnerLossObserver | undefined;
+	try {
+		const contract = consumeManagedContract(env, selfPid, parentPid, (fd) => {
+			const ready = waitForManagedReady(
+				{ ownerPid: Number(env.ownerPid), launchId: env.contractId!, lifecycleFd: fd },
+				onLoss,
+			);
+			observer = ready.observer;
+			return ready.record;
+		});
+		if (!contract) throw new Error("procward: missing bootstrap contract");
+		// Reading READY may outlive the parent; recheck the kernel relationship at acceptance.
+		if (contract.ownerPid !== process.ppid) throw new Error("procward: owner is not the immediate parent");
+		return observer!;
+	} catch (error) {
+		observer?.stop();
+		throw error;
+	}
+}
+
+type WindowsObserverSupport = { path: string; helper: WindowsOwnershipHelper };
+
+/** Windows uses the same one-reader/startup/loss budgets, with native identity at acceptance. */
+export function consumeAndObserveWindowsManagedContract(
+	env: ContractEnvironment,
+	selfPid: number,
+	onLoss: (reason: string, observedAt: number) => void,
+	helperPath: string,
+): OwnerLossObserver {
+	const helper = loadWindowsOwnershipHelper(helperPath);
+	let observer: OwnerLossObserver | undefined;
+	try {
+		const contract = consumeWindowsManagedContract(
+			env,
+			selfPid,
+			(handle) => {
+				helper.prepareOwnershipPipe(handle);
+				const ready = waitForManagedReady(
+					{ ownerPid: Number(env.ownerPid), launchId: env.contractId!, lifecycleHandle: handle },
+					onLoss,
+					{ path: helperPath, helper },
+				);
+				observer = ready.observer;
+				return ready.record;
+			},
+			helper,
+		);
+		if (!contract) throw new Error("procward: missing bootstrap contract");
+		return observer!;
+	} catch (error) {
+		observer?.stop();
+		throw error;
+	}
+}
+
+function waitForManagedReady(
+	contract: ManagedContract | WindowsManagedContract,
+	onLoss: (reason: string, observedAt: number) => void,
+	windows?: WindowsObserverSupport,
+) {
+	const shared = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT + MAX_RECORD_BYTES);
+	const state = new Int32Array(shared, 0, 1);
+	const observer = startLifecycleObserver(contract, onLoss, shared, windows);
+	try {
+		if (Atomics.wait(state, 0, 0, 2000) === "timed-out") throw new Error("procward: READY startup deadline exceeded");
+		const length = Atomics.load(state, 0);
+		return {
+			observer,
+			record: length < 0 ? null : Buffer.from(shared, Int32Array.BYTES_PER_ELEMENT, length).toString("ascii"),
+		};
+	} catch (error) {
+		observer.stop();
+		throw error;
+	}
+}
+
+function startLifecycleObserver(
+	contract: ManagedContract | WindowsManagedContract,
+	onLoss: (reason: string, observedAt: number) => void,
+	ready?: SharedArrayBuffer,
+	windows?: WindowsObserverSupport,
+): OwnerLossObserver {
+	const handle = "lifecycleHandle" in contract ? contract.lifecycleHandle : undefined;
+	const fd = "lifecycleFd" in contract ? contract.lifecycleFd : undefined;
+	if (handle !== undefined && !windows) throw new Error("procward: Windows lifecycle support missing");
+	// A HANDLE is never passed to Bun/Node's fd APIs.
+	if (fd !== undefined && process.versions.bun) fstatSync(fd);
+	const observation = new BigInt64Array(new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT));
+	const workerSource = `
+import { parentPort, workerData } from "node:worker_threads";
+import { Socket } from "node:net";
+import { Readable } from "node:stream";
+import { createRequire } from "node:module";
+import { setTimeout as delay } from "node:timers/promises";
+let lost = false;
+let record = "";
+let pendingReady = workerData.ready !== undefined;
+function readiness(length) {
+ const state = new Int32Array(workerData.ready, 0, 1);
+ if (length >= 0) new Uint8Array(workerData.ready, 4).set(Buffer.from(record, "ascii"));
+ Atomics.store(state, 0, length);
+ Atomics.notify(state, 0);
+ pendingReady = false;
+ record = "";
+}
+function loss(reason) {
+ if (pendingReady) { readiness(-1); pipe.destroy(); return; }
+ if (lost) return;
+ lost = true;
+ // Bun's hrtime is worker-relative; fixed performance origins align both realms.
+ Atomics.store(new BigInt64Array(workerData.observation), 0, BigInt(Math.round((performance.timeOrigin + performance.now()) * 1000)));
+ // This timer remains independent of a blocked main loop.
+ setTimeout(() => process.kill(workerData.pid, "SIGKILL"),
+  Math.max(0, 7000 - (performance.timeOrigin + performance.now() - Number(Atomics.load(new BigInt64Array(workerData.observation), 0)) / 1000)));
+ parentPort.postMessage(reason);
+}
+const windows = workerData.handle !== undefined
+ ? createRequire(workerData.nativeHelperPath)(workerData.nativeHelperPath) : undefined;
+async function* windowsChunks() {
+ for (;;) {
+  const bytes = windows.readOwnershipPipe(workerData.handle);
+  if (bytes === null) return;
+  if (bytes !== undefined) yield bytes;
+  else await delay(2);
+ }
+}
+const pipe = windows ? Readable.from(windowsChunks()) : process.versions.bun
+ ? Readable.fromWeb(Bun.file(workerData.fd).stream())
+ : new Socket({ fd: workerData.fd, readable: true, writable: false });
+pipe.on("data", chunk => {
+ for (const byte of chunk) {
+  if (lost) return;
+  if (byte === 10) {
+   if (pendingReady) { readiness(record.length); continue; }
+   loss(record === "PROCWARD/1 OWNER-LOSS " + workerData.launchId ? "owner-loss" : "invalid-record");
+   return;
+  }
+  if (byte < 32 || byte > 126 || record.length >= 255) { loss("invalid-record"); return; }
+  record += String.fromCharCode(byte);
+ }
+});
+pipe.once("end", () => loss(record.length === 0 ? "eof" : "invalid-record"));
+pipe.once("error", () => loss("read-error"));
+`;
+	let worker: Worker;
+	try {
+		worker = new Worker(new URL(`data:text/javascript;base64,${Buffer.from(workerSource).toString("base64")}`), {
+			workerData: {
+				fd,
+				handle,
+				nativeHelperPath: windows?.path,
+				launchId: contract.launchId,
+				pid: process.pid,
+				ready,
+				observation: observation.buffer,
+			},
+			resourceLimits: { maxOldGenerationSizeMb: 32 },
+		});
+	} catch (error) {
+		if (handle !== undefined) windows!.helper.closeOwnershipPipe(handle);
+		throw error;
+	}
+	// Native reads borrow the original HANDLE; close only after the sole reader exits.
+	if (handle !== undefined) worker.once("exit", () => windows!.helper.closeOwnershipPipe(handle));
+	// Bun's Unix stream owns a duplicate; release the inherited endpoint after worker exit.
+	else if (process.versions.bun && fd !== undefined) worker.once("exit", () => closeSync(fd));
+	let notified = false;
+	const notify = (reason: string) => {
+		if (notified) return;
+		notified = true;
+		// A dead worker fails closed, but cannot supply an independent watchdog.
+		Atomics.compareExchange(
+			observation,
+			0,
+			0n,
+			BigInt(Math.round((performance.timeOrigin + performance.now()) * 1000)),
+		);
+		onLoss(reason, Number(Atomics.load(observation, 0)) / 1000);
+	};
+	worker.once("message", notify);
+	worker.once("error", () => notify("worker-error"));
+	let stopping = false;
+	worker.once("exit", () => {
+		if (!stopping) notify("worker-exit");
+	});
+	worker.unref();
+	return {
+		get observedAt() {
+			const value = Atomics.load(observation, 0);
+			return value === 0n ? undefined : Number(value) / 1000;
+		},
+		stop() {
+			stopping = true;
+			void worker.terminate();
+		},
+	};
+}

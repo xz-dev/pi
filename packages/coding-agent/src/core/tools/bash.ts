@@ -1,9 +1,12 @@
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { constants as osConstants } from "node:os";
+import { contentText } from "@earendil-works/pi-ai";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
+import { resolveProcwardBinary } from "../../config.ts";
 import { waitForChildProcess } from "../../utils/child-process.ts";
+import { CONTRACT_ENV_KEYS } from "../../utils/managed-child.ts";
 import {
 	getShellConfig,
 	getShellEnv,
@@ -13,7 +16,9 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import type { OwnedSession, OwnedTaskProvenance } from "../process-registry.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
+import { type OwnedSpawn, prepareOwnedSpawn } from "./owned-exec.ts";
 import { BASH_UPDATE_THROTTLE_MS, createShellRenderers } from "./renderers/bash.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
@@ -88,6 +93,7 @@ export interface BashOperations {
 			signal?: AbortSignal;
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
+			provenance?: OwnedTaskProvenance;
 		},
 	) => Promise<{ exitCode: number | null }>;
 }
@@ -107,9 +113,24 @@ class ShellTimeoutError extends Error {
 }
 
 /** Shared process execution used by the built-in shell tools. */
-export function createLocalShellOperations(shellName: string, resolveShellConfig: () => ShellConfig): BashOperations {
+export interface ShellOwnershipOptions {
+	/** Resolved vendored procward binary; undefined disables wrapping. */
+	readonly procwardBinary: string | undefined;
+	/** Registry that tracks owned tasks for process_list/process_kill. */
+	readonly registry: OwnedSession;
+	/** Whether pi runs with process ownership enabled. */
+	readonly enabled: boolean;
+	/** Reason recorded in the registry ("bash tool", "user_bash", ...). */
+	readonly purpose: string;
+}
+
+export function createLocalShellOperations(
+	shellName: string,
+	resolveShellConfig: () => ShellConfig,
+	ownership?: ShellOwnershipOptions,
+): BashOperations {
 	return {
-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
+		exec: async (command, cwd, { onData, signal, timeout, env, provenance }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
 			if (signal?.aborted) {
 				throw new Error("aborted");
@@ -122,27 +143,73 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			}
 
 			const commandFromStdin = shellConfig.commandTransport === "stdin";
-			const child = spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
-				cwd,
-				detached: process.platform !== "win32",
-				env: env ?? getShellEnv(),
-				stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
-				windowsHide: true,
-			});
+			const shellArgs = commandFromStdin ? shellConfig.args : [...shellConfig.args, command];
+			let owned: OwnedSpawn | undefined;
+			if (ownership?.enabled) {
+				const binary = ownership.procwardBinary ?? resolveProcwardBinary();
+				if (!binary)
+					throw new Error(
+						"pi: process-ownership helper is missing; use --no-process-ownership or PI_NO_PROCESS_OWNERSHIP=1 to opt out",
+					);
+				owned = prepareOwnedSpawn(
+					{
+						procwardBinary: binary,
+						registry: ownership.registry,
+						purpose: provenance ? `${provenance.toolName} tool call ${provenance.toolCallId}` : ownership.purpose,
+						provenance,
+					},
+					shellConfig.shell,
+					shellArgs,
+				);
+			}
+			if (owned && commandFromStdin) owned.stdio[0] = "pipe";
+			const childEnv = owned ? { ...(env ?? getShellEnv()) } : (env ?? getShellEnv());
+			if (owned) {
+				for (const key of CONTRACT_ENV_KEYS) delete childEnv[key];
+				delete childEnv.PI_PROCWARD_BOOTSTRAP_NONCE;
+			}
+			const child = owned
+				? spawn(owned.command, owned.args, {
+						cwd,
+						env: childEnv,
+						stdio: owned.stdio,
+						windowsHide: true,
+					})
+				: spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
+						cwd,
+						detached: process.platform !== "win32",
+						env: childEnv,
+						stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
+						windowsHide: true,
+					});
+			owned?.finalize(child);
 			if (commandFromStdin) {
 				child.stdin?.on("error", () => {});
 				child.stdin?.end(command);
 			}
-			if (child.pid) trackDetachedChildPid(child.pid);
+			if (!owned && child.pid) trackDetachedChildPid(child.pid);
 			const startedAt = performance.now();
 			let shellExitedAfterMs: number | undefined;
-			child.once("exit", () => {
+			const recordShellExit = () => {
 				shellExitedAfterMs = performance.now() - startedAt;
-			});
+			};
+			if (owned) {
+				void owned.primaryExit.then((code) => {
+					if (code !== undefined) recordShellExit();
+				});
+			} else {
+				child.once("exit", recordShellExit);
+			}
 			let timedOut = false;
 			let exitedBeforeDeadlineAfterMs: number | undefined;
 			let timeoutHandle: NodeJS.Timeout | undefined;
 			const onAbort = () => {
+				if (owned) {
+					// Cancellation goes through the control endpoint; the owner's
+					// grace/fatal-grace ladder replaces the local tree kill.
+					void owned.cancel();
+					return;
+				}
 				if (child.pid) killProcessTree(child.pid);
 			};
 
@@ -154,7 +221,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 						exitedBeforeDeadlineAfterMs = shellExitedAfterMs;
 						// Also when the shell already exited: on Unix the group kill still reaches background
 						// processes holding the pipes. Windows cannot find them once the shell pid is gone.
-						if (child.pid) killProcessTree(child.pid);
+						onAbort();
 					}, timeoutMs);
 				}
 				// Stream stdout and stderr.
@@ -167,7 +234,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child);
+				const exitCode = await waitForChildProcess(child, owned?.primaryExit);
 				if (signal?.aborted) {
 					throw new Error("aborted");
 				}
@@ -185,9 +252,13 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				return { exitCode: resolvedExitCode };
 			} finally {
-				if (child.pid) untrackDetachedChildPid(child.pid);
+				// Only the task-control transcript can confirm owned-tree cleanup.
+				// PID probes and wrapper exit alone are not completion evidence.
+				if (!owned && child.pid) untrackDetachedChildPid(child.pid);
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
+				// Aborted startup must settle before the agent can become idle and close its registry.
+				if (owned && signal?.aborted) await owned.completion;
 			}
 		},
 	};
@@ -199,8 +270,11 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
-export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
-	return createLocalShellOperations("bash", () => getShellConfig(options?.shellPath));
+export function createLocalBashOperations(options?: {
+	shellPath?: string;
+	ownership?: ShellOwnershipOptions;
+}): BashOperations {
+	return createLocalShellOperations("bash", () => getShellConfig(options?.shellPath), options?.ownership);
 }
 
 export interface BashSpawnContext {
@@ -250,6 +324,8 @@ export interface BashToolOptions {
 	exposeSessionEnvironment?: boolean;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/** Session-local ownership for the built-in local backend. */
+	ownership?: ShellOwnershipOptions;
 }
 
 export type BashRenderState = {
@@ -273,7 +349,9 @@ export function createShellToolDefinition(
 	config: ShellToolConfig,
 	options?: BashToolOptions,
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
-	const ops = options?.operations ?? createLocalBashOperations({ shellPath: options?.shellPath });
+	const ops =
+		options?.operations ??
+		createLocalBashOperations({ shellPath: options?.shellPath, ownership: options?.ownership });
 	const commandPrefix = options?.commandPrefix;
 	const exposeSessionEnvironment = options?.exposeSessionEnvironment ?? true;
 	const spawnHook = options?.spawnHook;
@@ -287,12 +365,36 @@ export function createShellToolDefinition(
 		outputSchema: bashOutputSchema,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(
-			_toolCallId,
+			toolCallId,
 			{ command, timeout }: { command: string; timeout?: number },
 			signal?: AbortSignal,
 			onUpdate?,
 			ctx?: ExtensionContext,
 		) {
+			// Tool callers may pass a context with only cwd (SDK and tests); provenance is then unknown.
+			const branch = ctx?.sessionManager?.getBranch() ?? [];
+			// Anchor at this persisted call so later messages cannot replace its trigger.
+			const callIndex = branch.findLastIndex(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					entry.message.content.some((part) => part.type === "toolCall" && part.id === toolCallId),
+			);
+			const source = (callIndex < 0 ? branch : branch.slice(0, callIndex)).findLast(
+				(entry) => entry.type === "custom_message" || (entry.type === "message" && entry.message.role === "user"),
+			);
+			let messageSummary: string | undefined;
+			if (source?.type === "custom_message") {
+				messageSummary = contentText(source.content).slice(0, 160);
+			} else if (source?.type === "message" && source.message.role === "user") {
+				messageSummary = contentText(source.message.content).slice(0, 160);
+			}
+			const provenance: OwnedTaskProvenance = {
+				toolName: config.name,
+				toolCallId,
+				messageId: source?.id,
+				messageSummary,
+			};
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(
 				resolvedCommand,
@@ -394,6 +496,7 @@ export function createShellToolDefinition(
 						signal,
 						timeout,
 						env: spawnContext.env,
+						provenance,
 					});
 					exitCode = result.exitCode;
 				} catch (err) {
