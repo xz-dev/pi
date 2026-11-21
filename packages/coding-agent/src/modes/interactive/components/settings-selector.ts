@@ -21,6 +21,7 @@ import {
 	type FullscreenExitOutput,
 	type MermaidRenderingMode,
 	type QuietStartup,
+	type ResponseCheckpointModeSetting,
 	type SessionShareDestination,
 	type TuiMode,
 	type WarningSettings,
@@ -71,6 +72,7 @@ export interface SettingsConfig {
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	transport: Transport;
+	responseCheckpointMode: ResponseCheckpointModeSetting;
 	sessionShareDestination: SessionShareDestination;
 	httpIdleTimeoutMs: number;
 	cacheWarmingMode: CacheWarmingMode;
@@ -113,6 +115,7 @@ export interface SettingsCallbacks {
 	onSteeringModeChange: (mode: "all" | "one-at-a-time") => void;
 	onFollowUpModeChange: (mode: "all" | "one-at-a-time") => void;
 	onTransportChange: (transport: Transport) => void;
+	onResponseCheckpointModeChange: (mode: ResponseCheckpointModeSetting) => void;
 	onSessionShareDestinationChange: (destination: SessionShareDestination) => void;
 	onHttpIdleTimeoutMsChange: (timeoutMs: number) => void;
 	onCacheWarmingModeChange: (mode: CacheWarmingMode) => void;
@@ -513,6 +516,14 @@ export class SettingsSelectorComponent extends Container {
 				values: ["sse", "websocket", "websocket-cached", "auto"],
 			},
 			{
+				id: "response-checkpoint-mode",
+				label: "Response checkpoints",
+				description:
+					"Ask Responses services to store state for delta continuation: always try; auto unless the model declares no support; declared only",
+				currentValue: config.responseCheckpointMode,
+				values: ["always", "auto", "declared"],
+			},
+			{
 				id: "share-destination",
 				label: "Session share destination",
 				description:
@@ -910,6 +921,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "transport":
 						callbacks.onTransportChange(newValue as Transport);
+						break;
+					case "response-checkpoint-mode":
+						callbacks.onResponseCheckpointModeChange(newValue as ResponseCheckpointModeSetting);
 						break;
 					case "share-destination":
 						callbacks.onSessionShareDestinationChange(newValue as SessionShareDestination);

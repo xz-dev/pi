@@ -39,7 +39,7 @@ function installFailingTransport(harness: Harness, partial: boolean, protocolRep
 						this.dispatchEvent(Object.assign(new Event("message"), { data: JSON.stringify(data) }));
 					return;
 				}
-				if (partial && !(protocolRepairProbe && sent.length === 6)) {
+				if (partial) {
 					for (const data of [
 						{ type: "response.created", response: { id: "interrupted" } },
 						{
@@ -134,7 +134,7 @@ describe("Codex retries through Pi settings", () => {
 		},
 	);
 
-	it("ends a started cooldown probe before its repaired socket failure switches to SSE", async () => {
+	it("ends a started cooldown probe on protocol error without internal replay or SSE", async () => {
 		const harness = await createHarness({
 			settings: { transport: "auto", retry: { enabled: false, baseDelayMs: 0 } },
 		});
@@ -157,9 +157,17 @@ describe("Codex retries through Pi settings", () => {
 		const probe = harness.session.prompt("Probe request");
 		await vi.advanceTimersByTimeAsync(100);
 		await probe;
-		expect(sent).toHaveLength(6);
-		expect(fetchMock).toHaveBeenCalledTimes(2);
-		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(5);
+		expect(sent).toHaveLength(5);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(4);
+		const lastMessage = harness.session.messages.at(-1);
+		expect(lastMessage).toMatchObject({ role: "assistant", stopReason: "error" });
+		if (lastMessage?.role === "assistant") {
+			expect(lastMessage.errorMessage).toContain("previous_response_not_found");
+			expect(
+				lastMessage.diagnostics?.some((diagnostic) => diagnostic.type === "provider_transport_failure"),
+			).not.toBe(true);
+		}
 		expect(
 			harness.sessionManager
 				.getEntries()
