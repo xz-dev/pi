@@ -310,7 +310,7 @@ pub fn spawn_reader(
         sys::read_pipe(pipe, &stop, |bytes| {
             let deliver = || sender.send(Message::Data(stream, bytes.to_vec())).is_ok();
             match &gate {
-                Some(gate) => gate.pass(&stop, deliver),
+                Some(gate) => gate.pass(&stop, bytes.len(), deliver),
                 None => deliver(),
             }
         });
@@ -476,15 +476,13 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        if idle_until.is_some_and(|idle| now >= idle) {
-            // Silence while the link holds a reader up is not the end of the output: the pipe may hold more.
-            if gate.as_ref().is_some_and(Gate::held) {
-                idle_until = Some(now + EXIT_STDIO_GRACE);
-            } else {
-                // A descendant may hold the pipes open after the process exited; stop waiting for it.
-                break;
-            }
+        // Silence while the link holds a reader up is not the end of the output: the pipe may hold more.
+        if idle_until.is_some_and(|idle| now >= idle) && gate.as_ref().is_some_and(Gate::held) {
+            idle_until = Some(now + EXIT_STDIO_GRACE);
         }
+        // A descendant may hold the pipes open after the process exited; stop waiting for it, but take what the
+        // readers already queued first: a late wake-up can find the last output or a cancel still queued.
+        let ending = idle_until.is_some_and(|idle| now >= idle);
         if let Some(pending) = &mut pending
             && !pending.is_empty()
             && now >= pending.next_send()
@@ -521,6 +519,9 @@ pub fn run(
             }
             Ok(Message::Eof(stream)) => ended[stream] = true,
             Ok(Message::Exit(exit)) => {
+                if let Some(gate) = &gate {
+                    gate.exit();
+                }
                 status = Some(Ok(exit));
                 idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
             }
@@ -533,6 +534,7 @@ pub fn run(
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
+            Err(RecvTimeoutError::Timeout) if ending => break,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
