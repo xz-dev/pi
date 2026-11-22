@@ -96,6 +96,12 @@ Sessions created before system messages existed have no leading system message; 
 
 Assistant messages name the model that produced them. Newer messages also record `thinkingLevel`, the Pi thinking level requested for that response.
 
+A user message entry can have an optional `__raw_inputText` string. Pi writes it only when an interactive prompt-template command expanded into different text. It holds the command as typed, with arguments. The terminal UI uses it for display (see `collapseExpandedInput` in [Settings](settings.md)). It is never sent to the model, and `message.content` still holds the full expansion. The field is absent for all other messages.
+
+```json
+{"type":"message","id":"e5f6a7b8","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:05:00.000Z","__raw_inputText":"/review src/a.ts","message":{"role":"user","content":[{"type":"text","text":"Review this code: src/a.ts"}],"origin":{"type":"interactive"},"timestamp":1733234700000}}
+```
+
 ### ModelChangeEntry
 
 Emitted when the user switches models mid-session. The latest entry is the selected model, which may be a [virtual model](virtual-models.md); assistant messages then name the physical model that answered.
