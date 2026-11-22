@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -94,7 +95,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtimeHost = await createAgentSessionRuntime(createRuntime, {
+		const factory = vi.fn(createRuntime);
+		const runtimeHost = await createAgentSessionRuntime(factory, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.create(tempDir),
@@ -109,8 +111,63 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			}
 		});
 
-		return { runtimeHost, faux };
+		return { runtimeHost, faux, createRuntime: factory };
 	}
+
+	it.each(["exit", "replacement"] as const)("waits for outgoing session cancellation before %s", async (operation) => {
+		const { runtimeHost, createRuntime } = await createRuntimeHost(() => {});
+		const outgoing = runtimeHost.session;
+		const dispose = outgoing.dispose.bind(outgoing);
+		const cancellation = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		vi.spyOn(outgoing, "dispose").mockImplementation(() => {
+			entered.resolve();
+			return cancellation.promise.then(dispose);
+		});
+		let returned = false;
+		const pending = (operation === "exit" ? runtimeHost.dispose() : runtimeHost.newSession()).then(() => {
+			returned = true;
+		});
+		try {
+			await entered.promise;
+			await setImmediate();
+			expect(returned, "runtime returned before cancellation settled").toBe(false);
+			expect(createRuntime).toHaveBeenCalledTimes(1);
+			expect(runtimeHost.session).toBe(outgoing);
+		} finally {
+			cancellation.resolve();
+			await pending;
+			vi.restoreAllMocks();
+		}
+		expect(returned).toBe(true);
+		if (operation === "replacement") expect(runtimeHost.session).not.toBe(outgoing);
+	});
+
+	it.each(["exit", "replacement"] as const)(
+		"prepares and disposes after an abort failure during %s",
+		async (operation) => {
+			const { runtimeHost, createRuntime } = await createRuntimeHost(() => {});
+			const outgoing = runtimeHost.session;
+			const dispose = vi.spyOn(outgoing, "dispose");
+			const settle = vi.spyOn(runtimeHost.services.modelRuntime, "settleCredentialWrites");
+			vi.spyOn(outgoing, "abort").mockImplementationOnce(async () => {
+				await expect(outgoing.prompt("not admitted")).rejects.toThrow("shutting down");
+				throw new Error("abort failed");
+			});
+			try {
+				await expect(operation === "exit" ? runtimeHost.dispose() : runtimeHost.newSession()).rejects.toThrow(
+					"abort failed",
+				);
+				expect(dispose).toHaveBeenCalledTimes(1);
+				expect(createRuntime).toHaveBeenCalledTimes(1);
+				expect(runtimeHost.session).toBe(outgoing);
+				expect(() => outgoing.extensionRunner.createContext().cwd).toThrow("stale");
+				if (operation === "exit") expect(settle).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		},
+	);
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {
 		const events: RecordedSessionEvent[] = [];

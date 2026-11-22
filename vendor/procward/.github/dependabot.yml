@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule: { interval: daily }
+    open-pull-requests-limit: 20
+    commit-message: { prefix: "build(deps)" }
+    ignore:
+      # vendored + patched via [patch.crates-io] (see third_party/*/PROCWARD-PATCH.md); bump manually after upstream fixes
+      - dependency-name: process-wrap
+      - dependency-name: rustix
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: daily }
+    open-pull-requests-limit: 20
+    commit-message: { prefix: "ci(deps)" }
