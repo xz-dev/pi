@@ -1,59 +1,50 @@
 name: Nix
 
-# The flake builds with the model catalog revision pinned in
-# nix/model-catalog.json. This workflow keeps that pin usable independently of
-# releases: after pi.dev publishes a catalog from main, it replaces the pin with
-# the newest catalog only if the current one no longer hydrates main (for
-# example after a provider was added) or its provider/type/API model groups
-# differ from the newest catalog for one of main's providers (for example after
-# a provider gained classifier models or switched APIs), builds the flake, and
-# commits the new pin to main.
-#
-# Release tags are built exactly as tagged, with their committed pin. Once all
-# systems build, the stable branch is fast-forwarded to the tag so that
-# `nix run github:earendil-works/pi/stable` runs the latest release.
+# nix/package.nix packages immutable xz-dev/pi Release ZIPs pinned by exact
+# version and per-target SRI hash; the distributed flake is exactly flake.nix,
+# flake.lock and nix/package.nix. Pull requests build that three-file flake
+# from the checked-in templates. After a successful main Release run, the exact
+# Release manifest is authenticated (scripts/update-nix-package.mjs), the
+# pinned flake is built and smoked on every native runner below, and only then
+# does scripts/publish-nix-flake.sh move the generated, unrelated-root `nix`
+# branch. Nothing here pushes main, refreshes source pins, bumps versions, or
+# runs on a schedule.
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   pull_request:
-    branches: [main]
+    branches: [ci, main]
     paths:
       - '.github/workflows/nix.yml'
+      - '.github/workflows/publish-github-release.yml'
       - 'flake.lock'
       - 'flake.nix'
       - 'nix/**'
-      - 'package-lock.json'
-      - 'packages/*/package.json'
-      - 'packages/coding-agent/install-lock/**'
-      - 'packages/ai/scripts/hydrate-model-catalog.ts'
-      - 'scripts/update-model-catalog-pin.mjs'
+      - 'scripts/lib/bun-targets.mjs'
+      - 'scripts/lib/github-release.mjs'
+      - 'scripts/nix-workflow.test.mjs'
+      - 'scripts/publish-nix-flake.sh'
+      - 'scripts/publish-nix-flake.test.mjs'
+      - 'scripts/update-nix-package.mjs'
+      - 'scripts/update-nix-package.test.mjs'
   workflow_run:
-    workflows:
-      - Publish Model Catalog
-    types:
-      - completed
-  # Catches packaging drift from changes pushed to main without a pull request.
-  schedule:
-    - cron: '43 5 * * *'
+    workflows: [Publish GitHub Release]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: nix-${{ (github.event_name == 'pull_request' || github.ref_type == 'tag') && github.ref || 'main' }}
+  # Release publications queue instead of racing on the nix branch.
+  group: nix-${{ github.event_name == 'workflow_run' && 'release' || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  pin:
-    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
-    runs-on: ubuntu-latest
+  scripts:
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-    outputs:
-      revision: ${{ steps.pin.outputs.revision }}
-      updated: ${{ steps.pin.outputs.updated }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,31 +54,77 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: "^22.22.2"
+          cache: npm
 
-      - name: Refresh the model catalog pin if stale
-        id: pin
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Test pin generation, branch publication and workflow wiring
+        run: node --test scripts/update-nix-package.test.mjs scripts/publish-nix-flake.test.mjs scripts/nix-workflow.test.mjs
+
+  flake:
+    # Pull requests and dispatches assemble the checked-in templates. A Release
+    # run qualifies only when this repository's Release workflow succeeded for
+    # a main push or main dispatch; non-main probes never publish a Release.
+    if: >-
+      github.event_name != 'workflow_run' || (
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == 'xz-dev/pi' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Empty outside workflow_run, which selects the event's own commit.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Assemble the distributed three-file flake
+        run: |
+          mkdir -p "$RUNNER_TEMP/nix-flake/flake/nix"
+          cp flake.nix flake.lock "$RUNNER_TEMP/nix-flake/flake/"
+          cp nix/package.nix "$RUNNER_TEMP/nix-flake/flake/nix/"
+
+      - name: Setup Node.js
+        if: github.event_name == 'workflow_run'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "^22.22.2"
+
+      - name: Pin the exact authenticated Release
+        if: github.event_name == 'workflow_run'
+        env:
+          RELEASE_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          # A release tag must build with its committed pin; it cannot be changed.
-          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
-            node scripts/update-model-catalog-pin.mjs --if-stale
-          fi
-          revision="$(node -p 'require("./nix/model-catalog.json").revision')"
-          echo "revision=${revision}" >> "${GITHUB_OUTPUT}"
-          if git diff --quiet -- nix/model-catalog.json; then
-            echo "updated=false" >> "${GITHUB_OUTPUT}"
-          else
-            echo "updated=true" >> "${GITHUB_OUTPUT}"
-            if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-              echo "::warning::The model catalog pin on main is stale; this build uses ${revision}. The pin is refreshed on main after pi.dev publishes a catalog."
-            fi
-          fi
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          # The Release build's version formula names this run's immutable tag, never Latest.
+          version=$(node -p 'require("./packages/coding-agent/package.json").version + "-xz." + process.env.RELEASE_RUN_NUMBER + ".1.g" + process.env.RELEASE_SHA.slice(0, 8)')
+          release="$RUNNER_TEMP/nix-flake/release"
+          mkdir -p "$release"
+          for asset in release-manifest.json attestation-subjects.jsonl; do
+            curl -fLsS --retry 2 -o "$release/$asset" "https://github.com/xz-dev/pi/releases/download/xz-v$version/$asset"
+          done
+          test "$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).commit' "$release/release-manifest.json")" = "$RELEASE_SHA"
+          node scripts/update-nix-package.mjs "$release/release-manifest.json" "$RUNNER_TEMP/nix-flake/flake/nix/package.nix"
+
+      - name: Upload the flake
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nix-flake
+          path: ${{ runner.temp }}/nix-flake
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
 
   build:
-    needs: pin
-    # After a catalog publication, only build when the pin changed.
-    if: ${{ github.event_name != 'workflow_run' || needs.pin.outputs.updated == 'true' }}
+    needs: flake
     strategy:
       fail-fast: false
       matrix:
@@ -98,92 +135,88 @@ jobs:
             system: aarch64-linux
           - runner: macos-latest
             system: aarch64-darwin
+          - runner: macos-15-intel
+            system: x86_64-darwin
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the flake
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          persist-credentials: false
+          name: nix-flake
+          path: ${{ runner.temp }}/nix-flake
 
-      - name: Use the resolved model catalog pin
-        env:
-          REVISION: ${{ needs.pin.outputs.revision }}
+      - name: Enable FHS namespaces on the ephemeral Linux runner
+        if: runner.os == 'Linux'
         run: |
-          printf '{\n  "revision": "%s"\n}\n' "${REVISION}" > nix/model-catalog.json
+          if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ github.token }}
 
+      - name: Select the native flake
+        run: |
+          test "$(nix eval --impure --raw --expr builtins.currentSystem)" = '${{ matrix.system }}'
+          echo "FLAKE=path:$RUNNER_TEMP/nix-flake/flake" >> "$GITHUB_ENV"
+
       - name: Evaluate all systems
         if: ${{ matrix.system == 'x86_64-linux' }}
-        run: nix flake check --all-systems --no-build
+        run: nix flake check --all-systems --no-build --no-update-lock-file "$FLAKE"
 
       - name: Build
-        run: nix build -L .
+        run: nix build -L --no-update-lock-file "$FLAKE"
 
-      - name: Smoke-test
-        run: |
-          ./result/bin/pi --version
-          ./result/bin/pi --help > /dev/null
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            test "$(./result/bin/pi --version)" = "${GITHUB_REF_NAME#v}"
-          fi
-
-  update-stable:
-    needs: build
-    if: ${{ github.ref_type == 'tag' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      # Full history, so git can verify that the push to stable is a fast-forward.
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      # Without --force, the push fails unless it is a fast-forward, so stable
-      # never moves back to an older release.
-      - name: Fast-forward stable to the release
-        run: git push origin "${GITHUB_SHA}:refs/heads/stable"
-
-  commit-pin:
-    needs:
-      - pin
-      - build
-    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.pin.outputs.updated == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-
-      - name: Commit and push the model catalog pin
-        env:
-          REVISION: ${{ needs.pin.outputs.revision }}
+      - name: Smoke-test the CLI and the Nix-managed self-update refusal
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          printf '{\n  "revision": "%s"\n}\n' "${REVISION}" > nix/model-catalog.json
-          git add nix/model-catalog.json
-          if git diff --staged --quiet; then
-            echo "Model catalog pin is already ${REVISION}."
-            exit 0
-          fi
-          git commit -m "chore: update Nix model catalog pin"
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              exit 0
+          version=$(nix eval --raw --no-update-lock-file "$FLAKE#default.version")
+          pi="$PWD/result/bin/pi"
+          home=$(mktemp -d)
+          export HOME="$home" PI_OFFLINE=1 PI_CODING_AGENT_DIR="$home/agent"
+          test "$("$pi" --version)" = "$version"
+          "$pi" --help > /dev/null
+          # The store owns the install: self-update must refuse before any
+          # Release lookup, offline, with and without --force.
+          refuses() {
+            if "$pi" update --self "$@" > "$home/update.log" 2>&1; then
+              cat "$home/update.log"
+              return 1
             fi
-            sleep $((attempt * 5))
-            git pull --rebase origin main
-          done
-          exit 1
+            grep -F 'is managed by nix; self-update is disabled' "$home/update.log"
+          }
+          refuses
+          refuses --force
+
+  publish:
+    needs: [flake, build]
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the released commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "^22.22.2"
+
+      - name: Download the built flake
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nix-flake
+          path: ${{ runner.temp }}/nix-flake
+
+      - name: Publish the nix branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/publish-nix-flake.sh "$RUNNER_TEMP/nix-flake/release/release-manifest.json" "$RUNNER_TEMP/nix-flake/flake"
