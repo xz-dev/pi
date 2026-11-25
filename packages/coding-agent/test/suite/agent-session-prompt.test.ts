@@ -569,6 +569,7 @@ describe("AgentSession prompt characterization", () => {
 		harnesses.push(harness);
 		const entered = Promise.withResolvers<void>();
 		const preparation = Promise.withResolvers<never>();
+		const runRecords = vi.spyOn(harness.sessionManager, "appendRunState");
 		const runner = harness.session.extensionRunner;
 		if (!runner) throw new Error("extension runner missing");
 		const prepare = vi.spyOn(runner, "emitBeforeAgentStart").mockImplementationOnce(() => {
@@ -586,16 +587,19 @@ describe("AgentSession prompt characterization", () => {
 		await entered.promise;
 		expect(harness.session.isStreaming).toBe(true);
 		expect(harness.session.isIdle).toBe(false);
+		expect(harness.session.canRetry).toBe(false);
 		const idle = harness.session.waitForIdle();
 		preparation.reject(new Error("preparation failed"));
 		await rejected;
 		await idle;
 		expect(harness.session.isStreaming).toBe(false);
 		expect(harness.session.isIdle).toBe(true);
+		expect(runRecords).not.toHaveBeenCalled();
 		prepare.mockRestore();
 		harness.setResponses([fauxAssistantMessage("ready")]);
 		await harness.session.prompt("next");
 		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(runRecords.mock.calls.map(([state]) => state)).toEqual(["started", "finished"]);
 	});
 
 	// Issue #10267, #5581: a run started by sendMessage(..., { triggerTurn: true }) skipped
