@@ -1467,7 +1467,8 @@ export async function processResponsesWebSocket<TApi extends Api>(
 				const responseItems = getResponseItems();
 				const completed = responseEventOutput(completionEvent ?? {});
 				// Validate even while disabled: a later opt-in may inherit this cache.
-				fullHistory &&= completed !== undefined && nativeResponseOutputItemsCapturable(completed.output, responseItems);
+				fullHistory &&=
+					completed !== undefined && nativeResponseOutputItemsCapturable(completed.output, responseItems);
 				const continuation = {
 					lastRequestBody: fullBody,
 					lastResponseId: output.responseId,
