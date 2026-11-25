@@ -1467,7 +1467,7 @@ export async function processResponsesWebSocket<TApi extends Api>(
 				const responseItems = getResponseItems();
 				const completed = responseEventOutput(completionEvent ?? {});
 				// Validate even while disabled: a later opt-in may inherit this cache.
-				fullHistory &&= completed !== undefined && responseOutputItemsCapturable(completed.output, responseItems);
+				fullHistory &&= completed !== undefined && nativeResponseOutputItemsCapturable(completed.output, responseItems);
 				const continuation = {
 					lastRequestBody: fullBody,
 					lastResponseId: output.responseId,
@@ -1485,7 +1485,7 @@ export async function processResponsesWebSocket<TApi extends Api>(
 					requestBody.store === true &&
 					completed?.store === true &&
 					completed.id === output.responseId &&
-					responseOutputItemsCapturable(completed.output, responseItems)
+					nativeResponseOutputItemsCapturable(completed.output, responseItems)
 				) {
 					memory!.continuation = continuation;
 					memory!.createdAt = Date.now();
@@ -1537,6 +1537,21 @@ export const DEFAULT_RESPONSES_WEBSOCKET_CONNECT_TIMEOUT_MS = DEFAULT_WEBSOCKET_
 // Durable checkpoint capture
 // ============================================================================
 
+function nativeResponseOutputItemsCapturable(items: readonly unknown[], responseItems: ResponseInput): boolean {
+	// Upstream includes completed tool status in the replayed prefix. The portable validator compares tool
+	// contents without it; keep the original status in the request and in the checkpoint hash.
+	return responseOutputItemsCapturable(
+		items,
+		responseItems.map((item) => {
+			if (item.type !== "function_call" && item.type !== "custom_tool_call") return item;
+			// The SDK does not declare status on custom calls, but the native encoder writes it on both call types.
+			if (!("status" in item) || item.status !== "completed") return item;
+			const { status: _status, ...content } = item;
+			return content;
+		}),
+	);
+}
+
 /**
  * Attach v1 checkpoint metadata to the completed assistant message when every
  * contract condition holds: completed turn, server-stored response, capturable
@@ -1562,7 +1577,7 @@ async function captureDurableCheckpoint<TApi extends Api>(
 	if (!completed || completed.id !== output.responseId) return;
 	if (completed.store === false) return;
 	if (requestBody.store !== true) return;
-	if (!responseOutputItemsCapturable(completed.output, responseItems)) return;
+	if (!nativeResponseOutputItemsCapturable(completed.output, responseItems)) return;
 	const encodedPrefix = [...localFullInput, ...responseItems];
 	const scopeHash = await durable.getScopeHash();
 	const checkpoint = await captureCheckpoint({
