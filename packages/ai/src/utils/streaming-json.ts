@@ -482,8 +482,8 @@ export class ToolCallArgumentsStream {
 	}
 
 	/** The final arguments: one full parse of the complete text, which reports malformed arguments. */
-	finish(): Pick<ToolCall, "arguments" | "argumentsError"> {
-		return parseToolCallArguments(this.#text);
+	finish(options?: { keepJson?: boolean }): Pick<ToolCall, "arguments" | "argumentsError" | "argumentsJson"> {
+		return parseToolCallArguments(this.#text, options);
 	}
 
 	#partial(): ToolCall["arguments"] {

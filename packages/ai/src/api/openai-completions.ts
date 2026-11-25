@@ -45,6 +45,7 @@ import {
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
+import { encodeToolCallArguments } from "../utils/json-parse.ts";
 import {
 	applyOpenRouterReportedCost,
 	isOpenRouterModel,
@@ -490,7 +491,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 							});
 						}
 					} else {
-						Object.assign(block, input.arguments.finish());
+						Object.assign(block, input.arguments.finish({ keepJson: true }));
 					}
 					stream.push({
 						type: "toolcall_end",
@@ -1421,7 +1422,7 @@ export function convertMessages(
 						type: "function",
 						function: {
 							name: tc.name,
-							arguments: JSON.stringify(tc.arguments),
+							arguments: encodeToolCallArguments(tc),
 						},
 					};
 				});
