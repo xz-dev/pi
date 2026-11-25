@@ -31,12 +31,7 @@ function createView(harness: Harness) {
 		statusContainer: new Container(),
 		session: harness.session,
 		sessionManager: harness.sessionManager,
-		settingsManager: {
-			getShowTerminalProgress: () => false,
-			getShowImages: () => false,
-			getImageWidthCells: () => 60,
-			getShowCacheMissNotices: () => false,
-		},
+		settingsManager: harness.settingsManager,
 		streamingComponent: undefined as InteractiveMode["streamingComponent"],
 		streamingMessage: undefined as InteractiveMode["streamingMessage"],
 		pendingTools: new Map<string, ToolExecutionComponent>(),
