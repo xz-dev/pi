@@ -145,6 +145,7 @@ import { parseGitUrl } from "../../utils/git.ts";
 import { ensurePngTranscoder } from "../../utils/image-convert.ts";
 import { getCwdRelativePath, shortenHomePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
+import { prepareProcessShutdown, processShutdownPending } from "../../utils/procward.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { markStartupBenchmarkStage } from "../../utils/startup-benchmark.ts";
 import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
@@ -4994,6 +4995,7 @@ export class InteractiveMode {
 	private isShuttingDown = false;
 
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+		prepareProcessShutdown();
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
 		// Keep signal handlers registered until terminal cleanup has completed.
@@ -5128,6 +5130,7 @@ export class InteractiveMode {
 
 		for (const signal of signals) {
 			const handler = () => {
+				prepareProcessShutdown();
 				// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
 				// first, then attempts terminal restore. A genuinely dead terminal
 				// surfaces as an EIO on the restore writes, which the stdout/stderr
@@ -5186,10 +5189,14 @@ export class InteractiveMode {
 
 		// Set up handler to restore TUI when resumed
 		process.once("SIGCONT", () => {
-			clearInterval(suspendKeepAlive);
-			process.removeListener("SIGINT", ignoreSigint);
-			this.ui.start();
-			this.ui.requestRender(true);
+			// Let already-pending TERM callbacks run before restoring input.
+			setImmediate(() => {
+				clearInterval(suspendKeepAlive);
+				process.removeListener("SIGINT", ignoreSigint);
+				if (this.isShuttingDown || this.shutdownRequested || processShutdownPending()) return;
+				this.ui.start();
+				this.ui.requestRender(true);
+			});
 		});
 
 		try {

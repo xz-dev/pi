@@ -49,6 +49,8 @@ export interface Args {
 	listModels?: string | true;
 	refreshModels?: boolean;
 	offline?: boolean;
+	/** Skip the procward process-ownership wrapper for this invocation. */
+	noProcessOwnership?: boolean;
 	tuiMode?: TuiMode;
 	verbose?: boolean;
 	projectTrustOverride?: boolean;
@@ -250,6 +252,8 @@ export function parseArgs(args: string[]): Args {
 			result.projectTrustOverride = false;
 		} else if (arg === "--offline") {
 			result.offline = true;
+		} else if (arg === "--no-process-ownership") {
+			result.noProcessOwnership = true;
 		} else if (arg.startsWith("@")) {
 			result.fileArgs.push(arg.slice(1)); // Remove @ prefix
 		} else if (arg.startsWith("--")) {
@@ -348,6 +352,8 @@ ${chalk.bold("Options:")}
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
+  --no-process-ownership         Skip the process-tree ownership wrapper for this run
+                                 (same effect for nested pi via PI_NO_PROCESS_OWNERSHIP=1)
   --                             End option parsing; treat remaining arguments as messages/files
   --help, -h                     Show this help
   --version, -v                  Show version number
