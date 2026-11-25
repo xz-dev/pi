@@ -20,6 +20,7 @@ import type {
 	NoticeSettings,
 	PackageSource,
 	QuietStartup,
+	ResponseCheckpointModeSetting,
 	SessionShareDestination,
 	Settings,
 	ThinkingBudgetsSettings,
@@ -47,6 +48,7 @@ export type {
 	PackageSource,
 	ProviderRetrySettings,
 	QuietStartup,
+	ResponseCheckpointModeSetting,
 	RetrySettings,
 	SessionShareDestination,
 	Settings,
@@ -905,6 +907,22 @@ export class SettingsManager {
 			delete this.globalSettings.modelThinkingLevels;
 		}
 		this.markModified("modelThinkingLevels");
+		this.save();
+	}
+
+	/** Raw policy; request owners apply defaults and validation. See [settings](../../docs/settings.md#response-checkpoints). */
+	getResponseCheckpointExclude(): string[] | undefined {
+		return this.settings.responseCheckpointExclude;
+	}
+
+	/** Raw policy; request owners apply defaults and validation. */
+	getResponseCheckpointMode(): ResponseCheckpointModeSetting | undefined {
+		return this.settings.responseCheckpointMode;
+	}
+
+	setResponseCheckpointMode(mode: ResponseCheckpointModeSetting): void {
+		this.globalSettings.responseCheckpointMode = mode;
+		this.markModified("responseCheckpointMode");
 		this.save();
 	}
 
