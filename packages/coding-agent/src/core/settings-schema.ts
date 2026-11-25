@@ -526,7 +526,10 @@ export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutp
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
 export type CacheWarmingMode = NonNullable<SettingsInput["cacheWarming"]>;
 export interface Settings
-	extends Omit<SettingsInput, "hideThinkingBlock" | "queueMode" | "retry" | "showCacheMissNotices" | "skills" | "websockets"> {
+	extends Omit<
+		SettingsInput,
+		"hideThinkingBlock" | "queueMode" | "retry" | "showCacheMissNotices" | "skills" | "websockets"
+	> {
 	retry?: RetrySettings;
 	skills?: string[];
 }
