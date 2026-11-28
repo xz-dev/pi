@@ -273,18 +273,16 @@ pub fn run(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
     /// A link that accepts nothing until `open_at`, like a client that stops reading; it keeps what it was sent.
-    #[cfg(target_os = "linux")]
     struct Link {
         open_at: Instant,
         sent: Arc<Mutex<Vec<u8>>>,
     }
 
-    #[cfg(target_os = "linux")]
     impl std::io::Write for Link {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             thread::sleep(self.open_at.saturating_duration_since(Instant::now()));
@@ -299,7 +297,6 @@ mod tests {
     /// Run `script` through `run` with output going to a link closed for `closed_for`, behind more unsent output than
     /// the limit, so reading waits for the link after the first chunk. Returns how long `run` took, the output, and
     /// what reached the link.
-    #[cfg(target_os = "linux")]
     fn run_behind_closed_link(
         script: &str,
         closed_for: Duration,
@@ -337,7 +334,6 @@ mod tests {
         (started.elapsed(), output, sent)
     }
 
-    #[cfg(target_os = "linux")]
     fn stdout_bytes(sent: &[u8]) -> usize {
         let mut input = std::io::Cursor::new(sent);
         let mut total = 0;
@@ -353,10 +349,8 @@ mod tests {
     }
 
     /// One byte more than a Linux pipe holds: the program exits with its last bytes in the pipe while the reader waits.
-    #[cfg(target_os = "linux")]
     const PAST_PIPE: usize = 64 * 1024 + 1;
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn delivers_output_left_in_the_pipe_when_the_link_is_slower_than_the_exit_grace() {
         let closed_for = Duration::from_millis(500);
@@ -370,7 +364,6 @@ mod tests {
         assert_eq!(stdout_bytes(&sent.lock().unwrap()), PAST_PIPE);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn ends_and_stops_reading_when_the_link_never_drains() {
         let (took, output, _) = run_behind_closed_link(
@@ -386,7 +379,6 @@ mod tests {
         assert_eq!(Arc::strong_count(&output), 2);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn ends_after_the_silence_while_a_descendant_holds_the_pipe() {
         let (took, output, sent) = run_behind_closed_link(
