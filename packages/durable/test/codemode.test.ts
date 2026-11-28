@@ -5,6 +5,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { type AssistantMessage, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { type CodemodeRun, CodemodeSandbox } from "@earendil-works/pi-codemode";
 import {
+	defineExtension,
 	defineTool,
 	type Harness,
 	type TaskId,
@@ -22,7 +23,6 @@ import {
 	type CodemodeToolDetails,
 	createCodemodeTool,
 } from "../src/codemode/codemode.ts";
-import type { CodemodeNamespace } from "../src/codemode/describe.ts";
 import { NodeExecutionEnv } from "../src/env/node.ts";
 import { openNodeSqliteStorage } from "../src/storage/sqlite/node.ts";
 import { createReadTool } from "../src/tools/read.ts";
@@ -65,7 +65,7 @@ async function sqlitePath(): Promise<string> {
  * - `hold` (replay-safe) waits for `holds.gate` while `holds.block` is set, then returns `held <id>`;
  * - `slow` returns `slow <id>` once `slows.release(id)` was called.
  */
-function codemodeChat(globals: CodemodeGlobal[] = [], namespaces: CodemodeNamespace[] = []) {
+function codemodeChat(globals: CodemodeGlobal[] = []) {
 	const setup = chatSetup();
 	const sandbox = new CodemodeSandbox({ memoryLimitBytes: 64 * 1024 * 1024 });
 	const vm: { starts: number; onStart?: (run: CodemodeRun) => void } = { starts: 0 };
@@ -76,7 +76,7 @@ function codemodeChat(globals: CodemodeGlobal[] = [], namespaces: CodemodeNamesp
 		vm.onStart?.(run);
 		return run;
 	};
-	addTool(setup.registry, createCodemodeTool({ sandbox, globals, namespaces }));
+	addTool(setup.registry, createCodemodeTool({ sandbox, globals }));
 	const echo = new Map<string, number>();
 	addTool(
 		setup.registry,
@@ -967,6 +967,53 @@ describe("durable code mode output and tool search", () => {
 		return { text: message.content.map((item) => item.text ?? `<${item.type}>`).join(""), message };
 	}
 
+	// Regression for #12594: the VM gets only the retained text; the model gets the warning separately.
+	it("reports schema-less truncation and a supplied spill path outside the script value, also after replay", async () => {
+		const chat = codemodeChat();
+		addTool(chat.setup.registry, {
+			...tool("big", async () => ({
+				output: [{ type: "text", text: "one\ntwo" }],
+				diagnostics: [{ severity: "info", code: "full_output", message: "Full output: /tmp/big.txt" }],
+			})),
+			outputLimits: { maxLines: 1 },
+		});
+		const { harness, result } = await restart(
+			chat,
+			`const value = await tools.big({}); await tools.hold({}); return value.length;`,
+		);
+		expect(result).toEqual({
+			text: "4<harness>\n[warn] tools.big: Output truncated to its beginning: 1 lines, 3 bytes dropped\nFull output: /tmp/big.txt\n</harness>",
+			isError: false,
+		});
+		await harness.close(context);
+	});
+
+	it("does not warn when only a structured tool's model preview was cut", async () => {
+		const chat = codemodeChat();
+		addTool(chat.setup.registry, {
+			...tool("big", async () => ({
+				output: [{ type: "text", text: "one\ntwo" }],
+				structuredOutput: "whole value",
+			})),
+			structuredOutputSchema: str(),
+			outputLimits: { maxLines: 1 },
+		});
+		const { text } = await runScript(`return await tools.big({});`, chat);
+		expect(text).toMatch(/Output:\nwhole value$/);
+	});
+
+	it("bounds truncation warnings for fan-out calls even when the script emits nothing", async () => {
+		const chat = codemodeChat();
+		addTool(chat.setup.registry, {
+			...tool("big", async () => ({ output: [{ type: "text", text: "one\ntwo" }] })),
+			outputLimits: { maxLines: 1 },
+		});
+		const { text } = await runScript(`await Promise.all(Array.from({length: 12}, () => tools.big({})));`, chat);
+		expect(text.match(/\[warn\] tools\.big:/g)).toHaveLength(5);
+		expect(text).toContain("[warn] Additional nested calls with truncated output: 7.");
+		expect(text).not.toContain("Full output:");
+	});
+
 	it("lays out text items, console lines, and the returned value under a header", async () => {
 		const { text } = await runScript(`text("one"); console.log("log", 1); text({ two: 2 }); return "three";`);
 		expect(text).toMatch(/^Script completed\nWall time [\d.]+ seconds\nOutput:\n/);
@@ -1100,30 +1147,52 @@ describe("durable code mode output and tool search", () => {
 	});
 
 	it("finds tools with searchTools(), describeTool(), and describeNamespace(), and lists them in ALL_TOOLS", async () => {
-		const chat = codemodeChat([], [{ name: "github", description: "GitHub MCP server", prefix: "mcp__github__" }]);
-		addTool(
-			chat.setup.registry,
-			tool("mcp__github__list_issues", async () => ({ output: [] })),
+		const chat = codemodeChat();
+		// The namespace is the extension's: its tools belong to it whatever their names.
+		chat.setup.registry.install(
+			defineExtension({
+				name: "mcp:github",
+				namespace: {
+					name: "github",
+					description: "GitHub MCP server",
+					instructions: "Pass the repository as owner/name.",
+				},
+				tools: [tool("list_issues", async () => ({ output: [] }))],
+			}),
+		);
+		// A namespace without tools yet (a server waiting for sign-in) is described too.
+		chat.setup.registry.install(
+			defineExtension({ name: "mcp:linear", namespace: { name: "linear", description: "Linear: sign in first." } }),
 		);
 		const { text } = await runScript(
 			`const found = await searchTools("issues");
+			const byInstructions = await searchTools("repository owner");
 			const inNamespace = await searchTools("echo", { namespace: "github" });
 			return {
 				found: found.map((tool) => tool.name),
+				byInstructions: byInstructions.map((tool) => tool.name),
 				inNamespace,
 				described: (await describeTool("echo")).includes("echo(args:"),
 				missing: (await describeTool("nope")) ?? null,
 				namespace: await describeNamespace("github"),
-				all: ALL_TOOLS.map((tool) => tool.name).includes("mcp__github__list_issues"),
+				empty: await describeNamespace("linear"),
+				all: ALL_TOOLS.map((tool) => tool.name).includes("list_issues"),
 			};`,
 			chat,
 		);
 		expect(JSON.parse(text.replace(/^Script completed\nWall time [\d.]+ seconds\nOutput:\n/, ""))).toEqual({
-			found: ["mcp__github__list_issues"],
+			found: ["list_issues"],
+			byInstructions: ["list_issues"],
 			inNamespace: [],
 			described: true,
 			missing: null,
-			namespace: { name: "github", description: "GitHub MCP server", tools: ["mcp__github__list_issues"] },
+			namespace: {
+				name: "github",
+				description: "GitHub MCP server",
+				instructions: "Pass the repository as owner/name.",
+				tools: ["list_issues"],
+			},
+			empty: { name: "linear", description: "Linear: sign in first.", tools: [] },
 			all: true,
 		});
 	});

@@ -6,8 +6,9 @@
 // the build resolved them. Everything else, the app's files and workspace packages linked into `node_modules`, is
 // inlined. The bundle is split at each dynamic `import()` esbuild can follow: the entry module and the chunks it imports
 // statically load at each fork, a lazily imported module (pi-ai's provider APIs and the packages they import) only when
-// the worker imports it. Every file is an ES module with an inline source map, written at the first fork (`file()`;
-// a handle never forked writes nothing) into one private directory its handle owns and removes: a new temporary one, or
+// the worker imports it. Every file is an ES module with its source map beside it (`<name>.mjs.map`, linked from its
+// last line; an inline one would be text of the module V8 keeps, and Node keeps its decoded copy), written at the first
+// fork (`file()`; a handle never forked writes nothing) into one private directory its handle owns and removes: a new temporary one, or
 // one the caller names (the kit's per kind in the data directory: the same path at every start, so Node's compile cache
 // knows the files). Every file the build read is recorded with its bytes' hash
 // (`BaseInputs`), as its one read hands them to esbuild.
@@ -17,7 +18,8 @@ import { isBuiltin } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, parse, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { build, type Loader, type Plugin } from "esbuild";
+import type { Loader, Plugin } from "esbuild";
+import { esbuildBuild } from "../esbuild.ts";
 import { type BaseInputs, readRecorded, recordedSources } from "../plugins/base-inputs.ts";
 import { conditionsOf } from "../surfaces/bundle.ts";
 
@@ -54,7 +56,7 @@ export async function buildWorkerBase(entry: string, execArgv: readonly string[]
 	// Built as if at the file system's root: the source map's paths relative to it, made absolute by `sourceRoot`.
 	const root = parse(resolve(entry)).root;
 	const inputs = new Map<string, string>();
-	const result = await build({
+	const result = await esbuildBuild({
 		entryPoints: [{ in: entry, out: ENTRY_NAME }],
 		// One flat directory: every chunk imports the others as `./<name>`, and the source maps' paths stay relative to
 		// the root.
@@ -77,7 +79,11 @@ export async function buildWorkerBase(entry: string, execArgv: readonly string[]
 		ignoreAnnotations: true,
 		// Function and class names as the source has them (`name` stays what unbundled code sees).
 		keepNames: true,
-		sourcemap: "inline",
+		// Minified but for the names: every worker holds the base's source text, and V8 keeps a text with any non-ASCII
+		// character (a comment's `§`) as UTF-16, twice its size.
+		minifyWhitespace: true,
+		minifySyntax: true,
+		sourcemap: "linked",
 		sourcesContent: false,
 		sourceRoot: pathToFileURL(root).href,
 		// A CommonJS file of the base code requires through this (each chunk has its own); external packages by their
@@ -110,7 +116,7 @@ export async function buildWorkerBase(entry: string, execArgv: readonly string[]
  */
 export async function nodeBaseInputs(entry: string, conditions: readonly string[]): Promise<BaseInputs> {
 	const inputs = new Map<string, string>();
-	await build({
+	await esbuildBuild({
 		entryPoints: [entry],
 		write: false,
 		bundle: true,

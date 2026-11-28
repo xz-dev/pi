@@ -196,6 +196,14 @@ export interface Provider<TApi extends Api = Api> {
 	refreshModels?(context: RefreshModelsContext): Promise<void>;
 
 	/**
+	 * What the network phase of `refreshModels` needs. "credential" (the default) receives the
+	 * effective credential, so an expired OAuth token is refreshed first. "configured" is for catalogs
+	 * served by a source other than the provider, such as pi.dev: the phase still runs only when the
+	 * provider is configured, but OAuth is never refreshed for it and `context.credential` is undefined.
+	 */
+	readonly refreshModelsAuth?: "credential" | "configured";
+
+	/**
 	 * Optional provider policy for credential-specific model availability.
 	 * `getModels()` remains the complete synchronous chat catalog; `Models.getAvailable()`
 	 * applies this filter after confirming that provider auth is configured.
@@ -591,9 +599,16 @@ class ModelsImpl implements MutableModels {
 					if (credentialError !== undefined) throw credentialError;
 					if (!allowNetwork || signal.aborted) return;
 
-					const credential = await this.resolveRefreshCredential(provider, storedCredential, signal);
-					if (!credential) return;
-					await this.runProviderRefreshPhase(provider, credential, true, options.force, generation, signal);
+					const network = await this.resolveNetworkRefresh(provider, storedCredential, signal);
+					if (!network) return;
+					await this.runProviderRefreshPhase(
+						provider,
+						network.credential,
+						true,
+						options.force,
+						generation,
+						signal,
+					);
 				})();
 
 				try {
@@ -622,6 +637,19 @@ class ModelsImpl implements MutableModels {
 		}
 
 		return { aborted: callerSignal.aborted, errors: new Map(errors) };
+	}
+
+	/** The credential for the network refresh phase, or undefined when the provider is not configured. */
+	private async resolveNetworkRefresh(
+		provider: Provider,
+		stored: Credential | undefined,
+		signal: AbortSignal,
+	): Promise<{ credential?: Credential } | undefined> {
+		if (provider.refreshModelsAuth === "configured") {
+			return (await this.checkProviderAuth(provider, stored, signal)) ? {} : undefined;
+		}
+		const credential = await this.resolveRefreshCredential(provider, stored, signal);
+		return credential ? { credential } : undefined;
 	}
 
 	private async resolveRefreshCredential(
@@ -1093,18 +1121,32 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 	}
 
 	const baselineModels = input.models;
-	let dynamicModels: readonly ProviderModel<TApi>[] = [];
 	const fetchModels = input.fetchModels;
-	const currentModels = (): readonly ProviderModel<TApi>[] => {
+	const chatModelsOf = (models: readonly ProviderModel<TApi>[]): readonly Model<TApi>[] =>
+		models.filter((model): model is Model<TApi> => isModelType(model, "chat"));
+	// Merged once per publish, not per read: getModels() is on hot paths such as Models.getModel() (#12311).
+	let allModels: readonly ProviderModel<TApi>[] = baselineModels;
+	let chatModels = chatModelsOf(allModels);
+	const setDynamicModels = (dynamicModels: readonly ProviderModel<TApi>[]): void => {
 		const merged = [...baselineModels];
+		const indexByKey = new Map<string, number>();
+		const keyOf = (model: ProviderModel<TApi>) => `${getModelType(model)}\0${model.id}`;
+		merged.forEach((model, index) => {
+			const key = keyOf(model);
+			if (!indexByKey.has(key)) indexByKey.set(key, index);
+		});
 		for (const model of dynamicModels) {
-			const index = merged.findIndex(
-				(entry) => getModelType(entry) === getModelType(model) && entry.id === model.id,
-			);
-			if (index >= 0) merged[index] = model;
-			else merged.push(model);
+			const key = keyOf(model);
+			const index = indexByKey.get(key);
+			if (index !== undefined) {
+				merged[index] = model;
+			} else {
+				indexByKey.set(key, merged.length);
+				merged.push(model);
+			}
 		}
-		return merged;
+		allModels = merged;
+		chatModels = chatModelsOf(merged);
 	};
 	const apiFor = (model: Model<Api>): ProviderStreams | undefined => single ?? byApi?.[model.api];
 
@@ -1133,8 +1175,8 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 		baseUrl: input.baseUrl,
 		headers: input.headers,
 		auth: input.auth,
-		getModels: () => currentModels().filter((model): model is Model<TApi> => isModelType(model, "chat")),
-		getAllModels: currentModels,
+		getModels: () => chatModels,
+		getAllModels: () => allModels,
 		refreshModels: fetchModels
 			? async (context) => {
 					if (context.stored) {
@@ -1143,9 +1185,7 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 							.map((model) => model as ProviderModel<TApi>);
 						if (
 							!(await context.publish({
-								update: () => {
-									dynamicModels = restored;
-								},
+								update: () => setDynamicModels(restored),
 							}))
 						) {
 							return;
@@ -1157,9 +1197,7 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 					const refreshed = fetched.filter(hasKnownModelType);
 					await context.publish({
 						persist: { models: refreshed, checkedAt: Date.now() },
-						update: () => {
-							dynamicModels = refreshed;
-						},
+						update: () => setDynamicModels(refreshed),
 					});
 				}
 			: undefined,
@@ -1262,8 +1300,12 @@ export function calculateCost(model: AnyModel, usage: Usage): Usage["cost"] {
 	// Anthropic charges 2x base input for 1h cache writes.
 	const longWrite = usage.cacheWrite1h ?? 0;
 	const shortWrite = usage.cacheWrite - longWrite;
+	// Image models price image tokens at `imageOutput` and the rest of output at `output`. Without the
+	// provider's split, all output counts as image tokens: the image price never undercharges.
+	const imageRate = model.cost.imageOutput;
+	const imageTokens = imageRate === undefined ? 0 : Math.min(usage.output, usage.imageOutput ?? usage.output);
 	usage.cost.input = (rates.input / 1000000) * usage.input;
-	usage.cost.output = (rates.output / 1000000) * usage.output;
+	usage.cost.output = (rates.output * (usage.output - imageTokens) + (imageRate ?? 0) * imageTokens) / 1000000;
 	usage.cost.cacheRead = (rates.cacheRead / 1000000) * usage.cacheRead;
 	usage.cost.cacheWrite = (rates.cacheWrite * shortWrite + rates.input * 2 * longWrite) / 1000000;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;

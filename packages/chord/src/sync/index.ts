@@ -35,6 +35,7 @@ export {
 	type JsonObject,
 	LOG_START,
 	type PutBatchResult,
+	type RefusalReason,
 	type RemoteHistory,
 	type RemoteListing,
 	remoteHead,
@@ -44,5 +45,7 @@ export {
 	type SessionSummary,
 	type SessionSyncMaintenance,
 	type SessionSyncStore,
+	type SessionSyncUploader,
+	SYNC_PROTOCOL,
 } from "./remote.ts";
 export { FileSyncStateStore } from "./state.ts";

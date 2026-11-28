@@ -9,8 +9,8 @@ import type { JobHandle, Outcome, Run, StartOptions } from "../jobs/index.ts";
 import type { Job } from "../jobs/internal.ts";
 import type { Columns, PutRowOf, RowOf } from "../store/columns.ts";
 import type { Condition, SetOf } from "../store/expression.ts";
-import { refreshOf } from "../store/live-query.ts";
 import type { ColumnRefs, Query } from "../store/query.ts";
+import { ReadRefresh } from "../store/reads.ts";
 import { refusalOf } from "../store/refusal.ts";
 import type { StagedWrite } from "../store/step.ts";
 import type { ChordStore } from "../store/store.ts";
@@ -29,10 +29,10 @@ import type { DocumentSlot, PersistedSlot, SingletonSlot } from "./slot.ts";
 export interface Tx {
 	/** The document's draft: the same one for the same document within one transaction. */
 	draft<T extends JsonObject>(handle: SingletonHandle<T>): Promise<Draft<T>>;
-	draft<T extends JsonObject>(handle: KeyedHandle<T>, key: string): Promise<Draft<T>>;
+	draft<T extends JsonObject, Key>(handle: KeyedHandle<T, Key>, key: NoInfer<Key>): Promise<Draft<T>>;
 	/** Retires the document when the transaction commits (its address reads `initial()` again); a no-op when it is absent. */
 	retire(handle: SingletonHandle<JsonObject>): Promise<void>;
-	retire(handle: KeyedHandle<JsonObject>, key: string): Promise<void>;
+	retire<Key>(handle: KeyedHandle<JsonObject, Key>, key: NoInfer<Key>): Promise<void>;
 	/**
 	 * Starts a run of `job`, one of this object's jobs, with this transaction's other writes (§15): both commit or
 	 * neither. Returns its `Run` at once; a discarded transaction's `Run` rejects `released` from `outcome`. A key of an
@@ -140,6 +140,8 @@ export class Transaction implements Tx {
 	/** When its commit reaches the store (a run state's deferred change, D8). */
 	readonly #persistence: CommitPersistence;
 	#state: "open" | "committing" | "stepping" | "committed" | "discarded" | "cut" = "open";
+	/** The error its cut throws, once cut (one instance: `cutWith` tells it from other failures). */
+	#cut: ChordError | undefined;
 	/** Rejected by `cut` while the commit waits in the store's queue: its caller is told at once (rule 3). */
 	#queued: PromiseWithResolvers<never> | undefined;
 	/** What its commit adopts, once it started (telemetry's `chord.commit` counts it when asked). */
@@ -186,16 +188,20 @@ export class Transaction implements Tx {
 	}
 
 	draft<T extends JsonObject>(handle: SingletonHandle<T>): Promise<Draft<T>>;
-	draft<T extends JsonObject>(handle: KeyedHandle<T>, key: string): Promise<Draft<T>>;
-	draft<T extends JsonObject>(handle: SingletonHandle<T> | KeyedHandle<T>, key = ""): Promise<Draft<T>> {
+	draft<T extends JsonObject, Key>(handle: KeyedHandle<T, Key>, key: NoInfer<Key>): Promise<Draft<T>>;
+	draft<T extends JsonObject>(
+		handle: SingletonHandle<T> | KeyedHandle<T, unknown>,
+		key: unknown = "",
+	): Promise<Draft<T>> {
 		// Not `async`: the draft's promise is returned as it is, without another promise around it (the in-memory path
 		// stays as cheap as before the store); a throw still reaches the caller as a rejection.
 		let slot: SingletonSlot | KeyedSlot;
 		let at: string;
-		// Keyed keys follow the text rules (`KeyedSlot.key`); a singleton's key is always "".
+		// Keyed keys are the handle's (`keyOf`: an address's key for a host-keyed one, an empty string refused there)
+		// and follow the text rules (`KeyedSlot.key`); a singleton's key is always "".
 		try {
 			slot = this.#slotOf(handle);
-			at = key === "" ? key : slot.key(key);
+			at = slot.key(slot.keyOf(key));
 		} catch (error) {
 			return Promise.reject(error);
 		}
@@ -223,10 +229,13 @@ export class Transaction implements Tx {
 	}
 
 	retire(handle: SingletonHandle<JsonObject>): Promise<void>;
-	retire(handle: KeyedHandle<JsonObject>, key: string): Promise<void>;
-	async retire(handle: SingletonHandle<JsonObject> | KeyedHandle<JsonObject>, key = ""): Promise<void> {
+	retire<Key>(handle: KeyedHandle<JsonObject, Key>, key: NoInfer<Key>): Promise<void>;
+	async retire(
+		handle: SingletonHandle<JsonObject> | KeyedHandle<JsonObject, unknown>,
+		key: unknown = "",
+	): Promise<void> {
 		const slot = this.#slotOf(handle);
-		const at = key === "" ? key : slot.key(key);
+		const at = slot.key(slot.keyOf(key));
 		const entry = this.retireSlot(slot, at);
 		const persisted = slot.persisted;
 		// A cold persisted document is found, not loaded (one read; absent: a no-op, R13); a version or fingerprint
@@ -475,7 +484,7 @@ export class Transaction implements Tx {
 	}
 
 	/** The slot behind a handle of this object, after the handle's version fence (R15). */
-	#slotOf(handle: SingletonHandle<JsonObject> | KeyedHandle<JsonObject>): SingletonSlot | KeyedSlot {
+	#slotOf(handle: SingletonHandle<JsonObject> | KeyedHandle<JsonObject, unknown>): SingletonSlot | KeyedSlot {
 		// Handles are Chord's own: `self.state` made them.
 		const { slot, version } = handle as Singleton | Keyed;
 		slot.definition.assertVersion(version);
@@ -506,12 +515,19 @@ export class Transaction implements Tx {
 		throw new Error(`${this.#documents.label}: the transaction has settled`);
 	}
 
+	/** The one error every use after its cut throws, made by the first. */
 	#cutError(): ChordError {
-		return new ChordError({
+		this.#cut ??= new ChordError({
 			code: "released",
 			reason: "discarded",
 			message: `${this.#documents.label}: the transaction was discarded at the seal`,
 		});
+		return this.#cut;
+	}
+
+	/** Whether `error` is its cut's: the seal discarded it, nothing else failed it. */
+	cutWith(error: unknown): boolean {
+		return this.#cut !== undefined && error === this.#cut;
 	}
 
 	/** The handle behind `table`, one of this object's tables (another object's is refused). */
@@ -540,13 +556,14 @@ export class Transaction implements Tx {
 	}
 
 	/**
-	 * Stages the re-run of the live queries over the tables this transaction wrote (decision "Live queries over an
-	 * object's own tables"): read in the commit step after every table write staged so far (the callback's), published
-	 * in the commit's batch. None when no written table has a live query.
+	 * Stages the refresh of the store's reads over the tables this transaction wrote (slice 14 §3.2): the reads are
+	 * chosen and tested in the commit step, after every table write staged so far (the callback's), and published in
+	 * the commit's batch. Staged whether or not a read exists now: one opened while this commit waits is refreshed too.
 	 */
 	#refreshQueries(tables: ReadonlyMap<TableHandle, TableChanges>): void {
-		const refresh = refreshOf(tables.keys(), this.#context);
-		if (refresh === undefined) return;
+		const written = [...tables.keys()].map((handle) => handle.sql.table);
+		const changes = () => [...tables.values()].flatMap((each) => each.changes());
+		const refresh = new ReadRefresh(this.#writes!.store.reads, written, changes, this.#context);
 		this.#writes!.staged.push(refresh.write);
 		this.stage(refresh, () => refresh);
 	}
@@ -576,7 +593,9 @@ export class Transaction implements Tx {
 /** Throws, failing `slot`'s owner `broken`, when its definition cannot read the cold document `found` (R15). */
 function checkFound(found: FoundDocument, persisted: PersistedSlot, slot: DocumentSlot): void {
 	try {
-		checkReadable({ version: found.stored.version, fingerprint: found.fingerprint }, persisted.definition.current);
+		const definition = persisted.definition.current;
+		persisted.persistence.checkHost(found.host, definition);
+		checkReadable({ version: found.stored.version, fingerprint: found.fingerprint }, definition);
 	} catch (error) {
 		const failure = asChordError(error, slot.owner.label);
 		slot.owner.fail(failure);

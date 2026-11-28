@@ -56,6 +56,7 @@ import { NestedCallDoc, type ToolTaskInput } from "../harness/tool.ts";
 import type {
 	Extension,
 	NestedToolExecutionResult,
+	ToolDiagnostic,
 	ToolExecutionApi,
 	ToolExecutionResult,
 	ToolRegistration,
@@ -63,11 +64,11 @@ import type {
 import { rankDocuments } from "../search.ts";
 import type { JsonObject } from "../types.ts";
 import {
-	type CodemodeNamespace,
 	codemodeDescription,
 	codemodeSection,
 	DEFAULT_CODEMODE_INLINE_BUDGET,
-	namespaceOf,
+	declaredNamespaces,
+	namespacesOf,
 	sampleOf,
 } from "./describe.ts";
 import {
@@ -107,7 +108,10 @@ type Start = {
 	/** `startedAt + timeout_ms` when the script set one. */
 	deadline?: number;
 	tools: DeclaredTool[];
-	/** The namespaces of the tools, as `describeNamespace()` and `searchTools()` see them. */
+	/**
+	 * The namespaces the selected extensions declare (`Extension.namespace`), with their tools, as `describeNamespace()`
+	 * and `searchTools()` see them; a namespace without tools yet is listed too.
+	 */
 	namespaces: { name: string; description?: string; instructions?: string; tools: string[] }[];
 	globals: { name: string; spread: boolean }[];
 	/** `max_output_tokens` of the script's options line, or the default. */
@@ -198,6 +202,8 @@ export type CodemodeToolDetails = {
 
 const ARGS_PREVIEW_CHARS = 200;
 const ERROR_PREVIEW_CHARS = 500;
+const MAX_TRUNCATION_EXAMPLES = 5;
+const MAX_TRUNCATION_MESSAGE_CHARS = 2048;
 
 function cut(text: string, max: number): string {
 	// A copy: the row outlives the arguments or error text it previews.
@@ -218,8 +224,6 @@ export type CodemodeToolInput = Static<typeof codemodeSchema>;
 export type CodemodeToolOptions = {
 	/** Runs the scripts: `CodemodeSandbox` on Node, `RemoteCodemodeSandbox` on Cloudflare. */
 	readonly sandbox: CodemodeSandboxBase;
-	/** Groups of tools by name prefix, such as MCP servers, for the `codemode` section and tool search. */
-	readonly namespaces?: readonly CodemodeNamespace[];
 	/** Estimated tokens the tool declarations in the `codemode` section may use. Default 3000. */
 	readonly inlineBudget?: number;
 	/** Give scripts `models.*`: the model catalog, classifiers, and image generation. Default true. */
@@ -264,7 +268,7 @@ export function createCodemodeExtension(options: CodemodeToolOptions): Extension
 					input.agent.callable.filter(
 						(tool) => !tool.name.startsWith(CODEMODE_INTERNAL_PREFIX) && tool.deferred !== true,
 					),
-					options.namespaces ?? [],
+					input.agent.extensions,
 					options.inlineBudget ?? DEFAULT_CODEMODE_INLINE_BUDGET,
 				),
 			),
@@ -356,6 +360,9 @@ class CodemodeCall {
 	private generatedImages = 0;
 	/** The script's tool calls for `details`, by VM call ID. */
 	private readonly rows = new Map<number, CodemodeNestedCall>();
+	/** Only the first few truncated calls in call order, even if they finish (or replay) in another order. */
+	private readonly truncations: { id: number; message: string }[] = [];
+	private truncatedCalls = 0;
 	/** Resolves once the VM's fingerprint is checked or recorded; nothing is delivered or admitted before. */
 	private gate!: Promise<void>;
 	private openGate!: () => void;
@@ -387,30 +394,24 @@ class CodemodeCall {
 			...models.map((name) => ({ name, spread: true })),
 			...(this.options.globals ?? []).map((global) => ({ name: global.name, spread: global.spread === true })),
 		];
-		const namespaces: Start["namespaces"] = [];
-		for (const tool of callable) {
-			const namespace = namespaceOf(tool.name, this.options.namespaces ?? []);
-			if (namespace === undefined) continue;
-			let entry = namespaces.find((candidate) => candidate.name === namespace.name);
-			if (entry === undefined) {
-				entry = {
-					name: namespace.name,
-					...(namespace.description === undefined ? {} : { description: namespace.description }),
-					...(namespace.instructions === undefined ? {} : { instructions: namespace.instructions }),
-					tools: [],
-				};
-				namespaces.push(entry);
-			}
-			entry.tools.push(tool.name);
-		}
+		const toolNamespaces = namespacesOf(agent.extensions);
+		const namespaces: Start["namespaces"] = declaredNamespaces(agent.extensions).map((namespace) => ({
+			name: namespace.name,
+			description: namespace.description,
+			...(namespace.instructions === undefined ? {} : { instructions: namespace.instructions }),
+			tools: callable
+				.filter((tool) => toolNamespaces.get(tool.name)?.name === namespace.name)
+				.map((tool) => tool.name),
+		}));
 		const now = api.now();
 		const seed = crypto.getRandomValues(new Uint32Array(1))[0]!;
 		type Found =
-			| { done: ToolExecutionResult }
-			| { start: Start; journal: JournalEntry[]; firstIssued: number | undefined; rerun: boolean };
+			| { kind: "done"; done: ToolExecutionResult }
+			| { kind: "started"; start: Start; journal: JournalEntry[]; firstIssued: number | undefined; rerun: boolean };
 		const found = await api.commit(async (tx): Promise<Found> => {
 			const run = await tx.doc(CodemodeRunDoc, api.taskId);
-			if (run.result !== undefined) return { done: copyJson(run.result as JsonValue) as ToolExecutionResult };
+			if (run.result !== undefined)
+				return { kind: "done", done: copyJson(run.result as JsonValue) as ToolExecutionResult };
 			const rerun = run.start !== undefined;
 			if (run.start === undefined) {
 				const store = await tx.doc(CodemodeStoreDoc, api.conversationId);
@@ -429,13 +430,14 @@ class CodemodeCall {
 			}
 			const journal = await tx.doc(CodemodeJournalDoc, api.taskId);
 			return {
+				kind: "started",
 				start: copyJson(run.start as unknown as JsonValue) as unknown as Start,
 				journal: copyJson(journal.entries as unknown as JsonValue) as unknown as JournalEntry[],
 				firstIssued: journal.firstIssued,
 				rerun,
 			};
 		}, context);
-		if ("done" in found) return found.done;
+		if (found.kind === "done") return found.done;
 		this.start = found.start;
 		this.replayed = found.journal;
 		this.replayIndex = new Map(found.journal.map((entry, index) => [entry.id, index]));
@@ -552,6 +554,18 @@ class CodemodeCall {
 	/** The script's own outcome, stored with its store writes in one transaction. */
 	private async complete(result: CodemodeResult): Promise<ToolExecutionResult> {
 		const details = this.details();
+		const diagnostics: ToolDiagnostic[] = this.truncations.map(({ message }) => ({
+			severity: "warn",
+			code: "nested_output_truncated",
+			message,
+		}));
+		const omitted = this.truncatedCalls - diagnostics.length;
+		if (omitted > 0)
+			diagnostics.push({
+				severity: "warn",
+				code: "nested_output_truncated",
+				message: `Additional nested calls with truncated output: ${omitted}.`,
+			});
 		const formatted = await formatResult(result, {
 			generatedImages: this.generatedImages,
 			wallMs: this.api.now() - this.start.startedAt,
@@ -563,6 +577,7 @@ class CodemodeCall {
 		const tool: ToolExecutionResult = {
 			output: formatted.content,
 			isError: !result.ok,
+			...(diagnostics.length > 0 ? { diagnostics } : {}),
 			details: {
 				...details,
 				...(formatted.fullOutputPath === undefined ? {} : { fullOutputPath: formatted.fullOutputPath }),
@@ -587,14 +602,14 @@ class CodemodeCall {
 		const env = this.api.env;
 		let directory: Promise<string> | undefined;
 		return async (name, data) => {
-			if (env === undefined) return { error: "no execution environment" };
+			if (env === undefined) return { kind: "failed", error: "no execution environment" };
 			try {
 				directory ??= this.outputDir(env);
 				const path = `${await directory}/${name}`;
 				const written = await env.writeFile(path, data, this.context);
-				return written.ok ? { path } : { error: written.error.message };
+				return written.ok ? { kind: "saved", path } : { kind: "failed", error: written.error.message };
 			} catch (error) {
-				return { error: errorMessage(error) };
+				return { kind: "failed", error: errorMessage(error) };
 			}
 		};
 	}
@@ -842,6 +857,8 @@ class CodemodeCall {
 		}
 		if (call.name === GENERATE_IMAGES_TOOL) this.generatedImages += countImages(result.structuredOutput);
 		const structured = this.start.tools.find((tool) => tool.name === call.name)?.structured === true;
+		// A structured tool's preview may be cut even though its value for scripts is complete.
+		if (!structured && result.diagnostics.length > 0 && !this.stopped) this.noteTruncation(call, result.diagnostics);
 		const outcome = outcomeOf(call.name, structured, result);
 		this.finishRow(call.id, outcome, result);
 		return outcome;
@@ -867,6 +884,22 @@ class CodemodeCall {
 		const errors = result.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
 		const error = !outcome.ok ? outcome.message : errors.map((diagnostic) => diagnostic.message).join("\n");
 		if (result.isError && error !== "") row.error = cut(error, ERROR_PREVIEW_CHARS);
+	}
+
+	/** Keep the tool's own truncation and spill notices off the script value and on the outer result. */
+	private noteTruncation(call: CodemodeHostCall, diagnostics: readonly ToolDiagnostic[]): void {
+		const truncated = diagnostics.find((note) => note.code === "truncated");
+		if (truncated === undefined) return;
+		this.truncatedCalls++;
+		if (this.truncations.length === MAX_TRUNCATION_EXAMPLES) {
+			if (call.id > this.truncations[MAX_TRUNCATION_EXAMPLES - 1]!.id) return;
+			this.truncations.pop();
+		}
+		const spill = diagnostics.find((note) => note.code === "full_output");
+		let message = cut(`tools.${toCodemodeIdentifier(call.name)}: ${truncated.message}`, MAX_TRUNCATION_MESSAGE_CHARS);
+		if (spill !== undefined) message += `\n${cut(spill.message, MAX_TRUNCATION_MESSAGE_CHARS)}`;
+		this.truncations.push({ id: call.id, message });
+		this.truncations.sort((a, b) => a.id - b.id);
 	}
 
 	/** The rows in call order; calls still running when the script ended were cancelled. */

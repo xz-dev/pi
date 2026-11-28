@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,7 @@ import { Devices } from "../../plugins/devices/contract.ts";
 import { Models } from "../../plugins/models/contract.ts";
 import modelsTui from "../../plugins/models/tui.ts";
 import { PROXY_MARKER_HEADER } from "../../plugins/proxy-marker/contract.ts";
-import { type Session, Sessions } from "../../plugins/sessions/contract.ts";
+import { SESSIONS_OWNER, type Session, Sessions } from "../../plugins/sessions/contract.ts";
 import sessionsTui from "../../plugins/sessions/tui.ts";
 import {
 	authenticateTui,
@@ -87,23 +87,54 @@ test("TUI auth options, private config and owner-claim cookie round trip", async
 	assert.equal((await claimOwner(new URL(`http://127.0.0.1:${port}`), "fixture-token", {})).cookie, "owner=fixture");
 });
 
-test("TUI loopback automatically signs in as the device owner without a link prompt", async (t) => {
+test("TUI loopback signs in as the local owner with the data directory's owner key, without a link prompt", async (t) => {
 	const fixture = await startFixture();
 	t.after(() => fixture.close());
 	const url = new URL(`http://127.0.0.1:${fixture.server.port}`);
-	const token = (await fixture.browser().hold(Devices, {}, BACKGROUND_CONTEXT).token(BACKGROUND_CONTEXT)).token;
-	const associated = await claimOwner(url, token, {});
-	const config = { connections: { [url.origin]: associated } };
-	const credentials = await authenticateTui({ url }, config, async () => {
+	const config = { connections: {} };
+	const credentials = await authenticateTui({ url, dataDir: fixture.dataDir }, config, async () => {
 		throw new Error("Unexpected owner link prompt");
 	});
-	assert.deepEqual(credentials, { role: "owner" }, "loopback uses the device path, not a cached remote cookie");
+	assert.equal(credentials.role, "owner");
+	assert.equal(credentials.local, true);
+	assert.match(String(credentials.cookie), /^p2_owner_\d+=local\./);
+	assert.deepEqual(config, { connections: {} }, "a local sign-in is never saved");
 	const client = fixture.client(connectionHeaders(url, credentials)).host;
 	const devices = client.hold(Devices, {}, BACKGROUND_CONTEXT);
 	assert.equal(await until(devices.canMint, (value) => value === true), true);
+	// A valid saved owner cookie (an owner link redeemed on loopback, say) comes first.
+	const token = (await devices.token(BACKGROUND_CONTEXT)).token;
+	const associated = await claimOwner(url, token, {});
+	const saved = await authenticateTui(
+		{ url, dataDir: fixture.dataDir },
+		{ connections: { [url.origin]: associated } },
+		async () => {
+			throw new Error("Unexpected owner link prompt");
+		},
+	);
+	assert.deepEqual(saved, { ...associated, role: "owner" });
 });
 
-test("a proxy marker refuses the TUI automatic path and falls back to a link prompt", async (t) => {
+test("TUI loopback without the server's owner key asks for an owner link, saying why", async (t) => {
+	const fixture = await startFixture();
+	t.after(() => fixture.close());
+	const url = new URL(`http://127.0.0.1:${fixture.server.port}`);
+	const other = mkdtempSync(join(tmpdir(), "p2-tui-other-data-"));
+	t.after(() => rmSync(other, { recursive: true, force: true }));
+	const reasons: (string | undefined)[] = [];
+	const refuse = async (_kind: string, reason?: string): Promise<string> => {
+		reasons.push(reason);
+		throw new Error("Link prompt required");
+	};
+	// Another user (no readable key), then another server's data directory.
+	await assert.rejects(authenticateTui({ url, dataDir: other }, { connections: {} }, refuse), /Link prompt required/);
+	writeFileSync(join(other, "owner-key"), "a".repeat(64));
+	await assert.rejects(authenticateTui({ url, dataDir: other }, { connections: {} }, refuse), /Link prompt required/);
+	assert.match(String(reasons[0]), /Cannot read .*owner-key: local sign-in needs the user running the p2 server/);
+	assert.match(String(reasons[1]), /does not use the data directory .*: set P2_DATA_DIR/);
+});
+
+test("a proxy marker refuses the TUI local sign-in and falls back to a link prompt", async (t) => {
 	const fixture = await startFixture();
 	t.after(() => fixture.close());
 	const original = globalThis.fetch;
@@ -114,10 +145,14 @@ test("a proxy marker refuses the TUI automatic path and falls back to a link pro
 	});
 	let prompted = false;
 	await assert.rejects(
-		authenticateTui({ url: new URL(`http://127.0.0.1:${fixture.server.port}`) }, { connections: {} }, async () => {
-			prompted = true;
-			throw new Error("Link prompt required");
-		}),
+		authenticateTui(
+			{ url: new URL(`http://127.0.0.1:${fixture.server.port}`), dataDir: fixture.dataDir },
+			{ connections: {} },
+			async () => {
+				prompted = true;
+				throw new Error("Link prompt required");
+			},
+		),
 		/Link prompt required/,
 	);
 	assert(prompted);
@@ -181,7 +216,6 @@ test("bare-host TUI facets register, render session/model pickers and reload wit
 					const defaultCwd = self.state("/fixture");
 					const defaultEnv = self.state(null);
 					return {
-						variant: "owner",
 						sessions,
 						defaultCwd,
 						defaultEnv,
@@ -201,6 +235,7 @@ test("bare-host TUI facets register, render session/model pickers and reload wit
 						restore: () => {},
 					};
 				},
+				SESSIONS_OWNER,
 			],
 			[
 				Models,
@@ -227,7 +262,6 @@ test("bare-host TUI facets register, render session/model pickers and reload wit
 					const enabledModels = self.state([]);
 					const scopedModels = self.state([]);
 					return {
-						variant: "owner",
 						models,
 						resources,
 						defaultModel,

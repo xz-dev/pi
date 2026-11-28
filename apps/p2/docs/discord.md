@@ -3,13 +3,13 @@
 `plugins/discord` lets people in a Discord channel wake a p2 session by mentioning a bot. The session reads what was
 said since its last turn, works in its sandbox, and its answer goes back to the channel as a reply.
 
-## Bots (More › Discord)
+## Bots (Settings › Discord)
 
 Bots are global: the owner sets them up once, then links sessions to channels from the sessions themselves.
 
 1. At https://discord.com/developers/applications create an application, add a **Bot**, turn on **Message Content
    Intent** (Bot → Privileged Gateway Intents), and copy the bot token.
-2. More › Discord lists the bots with their status. **Add bot**: paste the token, **Connect**. Discord's refusal
+2. Settings › Discord lists the bots with their status. **Add bot**: paste the token, **Connect**. Discord's refusal
    (a wrong token, the intent off) shows there and nothing is kept; once Discord accepts it, the bot's sheet opens.
 3. A bot's sheet: who it is and whether it is connected, the servers it is in (live: inviting it somewhere adds the
    server), the **invite link** (copy or open; it asks for view channels, send messages and in threads, embed links,
@@ -47,14 +47,20 @@ A session has at most one link and a channel at most one session (its threads fo
 
 ## How a channel talks to its session
 
-- **Waking:** a message that mentions the link's bot, by someone allowed, in a linked channel. Bots never wake Pi; other
-  messages only accumulate.
+- **Waking:** a message that mentions the link's bot, by someone allowed, in a linked channel; other messages only
+  accumulate. Other bots count as people (in batches, and waking Pi by the same rules); the link's own bot never
+  counts. Loop guard: at most 3 turns in a row started by bots per channel or thread; the next bot mention gets one
+  short notice ("Not answering more bots here until a person writes"), later ones nothing (logged), until a person
+  writes there (any message). The count is in memory.
 - **Batch:** every message after the link's cursor up to the mention (paged through Discord's history 100 at a time;
-  a thread's first batch starts at the thread's start), oldest first, one `Name: text` paragraph each, the mention
-  written `@Pi`, under a header naming the channel and the count. At most the newest 200 go into the input; the header
+  a thread's first batch starts at the thread's start), oldest first, one `Name (<@id>): text` paragraph each (bots
+  `Name (bot, <@id>)`, so the agent can mention them as `<@id>`; replies ping users, never roles or @everyone), the
+  mention written `@Pi`, under a header naming the channel and the count. At most the newest 200 go into the input; the header
   says how many earlier ones were left out. It is
-  one input of the session's main conversation by a guest author `Name · Discord` (entry kind `discord.batch`), queued
-  as a follow-up when the session is busy. The cursor moves to the mention. Deliveries run one at a time per channel
+  one input of the session's main conversation by a guest author `Name · Discord` (entry kind `discord.batch`), steering
+  the turn under way when the session is busy (the batch joins it). A turn that took several inputs has one answer
+  (Durable settles them all with it): it is posted once, to the newest mention, with the files of the whole turn; the
+  other pending replies go without a post. The cursor moves to the mention. Deliveries run one at a time per channel
   and per thread (a queue each): a second mention right after the first waits for it and starts at the cursor it
   left, so no message is in two batches and a new thread forks one subagent.
 - **Catch-up:** when a bot connects (p2 starting, a new token, a new gateway session after an outage), it reads each of
@@ -109,11 +115,10 @@ exactly what the owner picked:
 
 - **MCP servers:** only the picked servers of `mcp.json`; the project's `.pi/mcp.json` servers only when picked.
 - **Instructions:** the global AGENTS.md, skills and prompt templates only when picked (the project's own always).
-- **Capabilities:** `ports` (forwarding) and `conversations` (messaging other sessions) only when picked;
-  `reload_plugins` never. Other owner-only tools pass: what they reach is already confined (location tools by the
-  sandbox).
+- **Capabilities:** `ports` (forwarding) and `conversations` (messaging other sessions) only when picked. Other
+  tools pass: what they reach is already confined (location tools, bash and `reload_plugins` by the sandbox).
 
-In a locked session the lock replaces the "a turn the owner started" check, for the owner too. Unlinking lifts it.
+The lock holds for everyone, the owner too (p2 has no per-turn authority). Unlinking lifts it.
 
 ## State
 

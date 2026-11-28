@@ -20,6 +20,7 @@ import {
 	type DefaultProjectTrust,
 	type FullscreenExitOutput,
 	type MermaidRenderingMode,
+	type NoticeSettings,
 	type QuietStartup,
 	type SessionShareDestination,
 	type TuiMode,
@@ -82,9 +83,7 @@ export interface SettingsConfig {
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
 	mermaidRenderingMode: MermaidRenderingMode;
-	showCacheMissNotices: boolean;
 	collapseChangelog: boolean;
-	enableInstallTelemetry: boolean;
 	doubleEscapeAction: "fork" | "tree" | "none";
 	treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 	showHardwareCursor: boolean;
@@ -101,6 +100,7 @@ export interface SettingsConfig {
 	fullscreenCopyOnSelect: boolean;
 	fullscreenWheelScrollLines: WheelScrollLines;
 	warnings: WarningSettings;
+	notices: NoticeSettings;
 }
 
 export interface SettingsCallbacks {
@@ -122,9 +122,7 @@ export interface SettingsCallbacks {
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
-	onShowCacheMissNoticesChange: (shown: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
-	onEnableInstallTelemetryChange: (enabled: boolean) => void;
 	onDoubleEscapeActionChange: (action: "fork" | "tree" | "none") => void;
 	onTreeFilterModeChange: (mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all") => void;
 	onShowHardwareCursorChange: (enabled: boolean) => void;
@@ -141,44 +139,76 @@ export interface SettingsCallbacks {
 	onFullscreenCopyOnSelectChange: (enabled: boolean) => void;
 	onFullscreenWheelScrollLinesChange: (lines: WheelScrollLines) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
+	onNoticeChange: (key: keyof NoticeSettings, shown: boolean) => void;
 	onCancel: () => void;
 }
 
-/**
- * A submenu component for selecting from a list of options.
- */
-class WarningSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
-	private state: WarningSettings;
+interface ToggleSetting<K extends string> {
+	key: K;
+	label: string;
+	description: string;
+}
 
-	constructor(warnings: WarningSettings, onChange: (warnings: WarningSettings) => void, onCancel: () => void) {
+const WARNING_TOGGLES: readonly ToggleSetting<keyof WarningSettings>[] = [
+	{
+		key: "anthropicExtraUsage",
+		label: "Anthropic extra usage",
+		description: "Warn when Anthropic subscription auth may use paid extra usage",
+	},
+];
+
+const NOTICE_TOGGLES: readonly ToggleSetting<keyof NoticeSettings>[] = [
+	{
+		key: "cacheMisses",
+		label: "Cache misses",
+		description: "Show a notice when a response re-bills a significant part of the prompt cache",
+	},
+	{
+		key: "cacheWarming",
+		label: "Cache warming",
+		description: "Show the cost of cache warming requests",
+	},
+	{
+		key: "compactionCosts",
+		label: "Compaction costs",
+		description: "Show the cost of compactions and branch summaries",
+	},
+	{
+		key: "reasoningDrops",
+		label: "Reasoning drops",
+		description: "Show a notice when a provider drops reasoning items from a request",
+	},
+];
+
+/**
+ * A submenu of true/false settings that are stored together in one settings object, such as `warnings`.
+ */
+class ToggleSettingsSubmenu<K extends string> extends Container {
+	private settingsList: SettingsList;
+
+	constructor(
+		toggles: readonly ToggleSetting<K>[],
+		values: Partial<Record<K, boolean>>,
+		defaults: Record<K, boolean>,
+		onChange: (key: K, value: boolean) => void,
+		onCancel: () => void,
+	) {
 		super();
 
-		this.state = { ...warnings };
-
-		const items: SettingItem[] = [
-			{
-				id: "anthropic-extra-usage",
-				label: "Anthropic extra usage",
-				description: "Warn when Anthropic subscription auth may use paid extra usage",
-				currentValue:
-					(this.state.anthropicExtraUsage ?? SETTINGS_DEFAULTS.warnings.anthropicExtraUsage) ? "true" : "false",
-				values: ["true", "false"],
-			},
-		];
+		const items: SettingItem[] = toggles.map((toggle) => ({
+			id: toggle.key,
+			label: toggle.label,
+			description: toggle.description,
+			currentValue: (values[toggle.key] ?? defaults[toggle.key]) ? "true" : "false",
+			values: ["true", "false"],
+		}));
 
 		this.settingsList = new SettingsList(
 			items,
 			Math.min(items.length, 10),
 			getSettingsListTheme(),
-			(id, newValue) => {
-				switch (id) {
-					case "anthropic-extra-usage":
-						this.state = { ...this.state, anthropicExtraUsage: newValue === "true" };
-						onChange({ ...this.state });
-						break;
-				}
-			},
+			// Item ids are the toggle keys.
+			(id, newValue) => onChange(id as K, newValue === "true"),
 			onCancel,
 		);
 
@@ -475,6 +505,7 @@ export class SettingsSelectorComponent extends Container {
 		const followUpKey = keyDisplayText("app.message.followUp");
 		const cycleThinkingKey = keyDisplayText("app.thinking.cycle");
 		let currentWarnings = { ...config.warnings };
+		let currentNotices = { ...config.notices };
 		const currentModelThinkingLevels = { ...config.modelThinkingLevels };
 		const defaultModelByValue = new Map(
 			config.availableDefaultModels.map((model) => [modelSettingKey(model), model]),
@@ -551,13 +582,6 @@ export class SettingsSelectorComponent extends Container {
 				values: ["off", "final", "streaming"],
 			},
 			{
-				id: "cache-miss-notices",
-				label: "Cache miss notices",
-				description: "Show transcript notices for cache costs and provider recovery diagnostics",
-				currentValue: config.showCacheMissNotices ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
 				id: "collapse-changelog",
 				label: "Collapse changelog",
 				description: "Show condensed changelog after updates",
@@ -570,13 +594,6 @@ export class SettingsSelectorComponent extends Container {
 				description: "Disable verbose printing at startup (header: keep only the startup header)",
 				currentValue: String(config.quietStartup),
 				values: ["true", "header", "false"],
-			},
-			{
-				id: "install-telemetry",
-				label: "Install telemetry",
-				description: "Send an anonymous version/update ping after changelog-detected updates",
-				currentValue: config.enableInstallTelemetry ? "true" : "false",
-				values: ["true", "false"],
 			},
 			{
 				id: "default-project-trust",
@@ -605,11 +622,30 @@ export class SettingsSelectorComponent extends Container {
 				description: "Enable or disable individual warnings",
 				currentValue: "configure",
 				submenu: (_currentValue, done) =>
-					new WarningSettingsSubmenu(
+					new ToggleSettingsSubmenu(
+						WARNING_TOGGLES,
 						currentWarnings,
-						(warnings) => {
-							currentWarnings = warnings;
-							callbacks.onWarningsChange(warnings);
+						SETTINGS_DEFAULTS.warnings,
+						(key, value) => {
+							currentWarnings = { ...currentWarnings, [key]: value };
+							callbacks.onWarningsChange(currentWarnings);
+						},
+						() => done(),
+					),
+			},
+			{
+				id: "notices",
+				label: "Notices",
+				description: "Notices about cache misses, cache warming, compaction costs and dropped reasoning",
+				currentValue: "configure",
+				submenu: (_currentValue, done) =>
+					new ToggleSettingsSubmenu(
+						NOTICE_TOGGLES,
+						currentNotices,
+						SETTINGS_DEFAULTS.notices,
+						(key, shown) => {
+							currentNotices = { ...currentNotices, [key]: shown };
+							callbacks.onNoticeChange(key, shown);
 						},
 						() => done(),
 					),
@@ -739,7 +775,7 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "fullscreen-copy-on-select",
 				label: "Fullscreen copy on select",
-				description: "Automatically copy selected text in fullscreen mode; disable to copy selections with Ctrl+X",
+				description: `Automatically copy selected text in fullscreen mode; disable to copy selections with ${keyDisplayText("app.message.copy")}`,
 				currentValue: config.fullscreenCopyOnSelect ? "true" : "false",
 				values: ["true", "false"],
 			},
@@ -930,17 +966,11 @@ export class SettingsSelectorComponent extends Container {
 					case "mermaid-rendering":
 						callbacks.onMermaidRenderingModeChange(newValue as MermaidRenderingMode);
 						break;
-					case "cache-miss-notices":
-						callbacks.onShowCacheMissNoticesChange(newValue === "true");
-						break;
 					case "collapse-changelog":
 						callbacks.onCollapseChangelogChange(newValue === "true");
 						break;
 					case "quiet-startup":
 						callbacks.onQuietStartupChange(newValue === "header" ? "header" : newValue === "true");
-						break;
-					case "install-telemetry":
-						callbacks.onEnableInstallTelemetryChange(newValue === "true");
 						break;
 					case "default-project-trust": {
 						const defaultProjectTrust = DEFAULT_PROJECT_TRUST_BY_LABEL.get(newValue);

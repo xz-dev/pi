@@ -212,11 +212,6 @@
       "type": "boolean",
       "default": false
     },
-    "showCacheMissNotices": {
-      "type": "boolean",
-      "description": "Show cache cost and provider recovery notices.",
-      "default": false
-    },
     "externalEditor": {
       "type": "string",
       "description": "Command for Ctrl+G external editor; takes precedence over VISUAL and EDITOR."
@@ -279,11 +274,6 @@
       "type": "boolean",
       "description": "Show the condensed changelog after update; use /changelog for the full changelog.",
       "default": false
-    },
-    "enableInstallTelemetry": {
-      "type": "boolean",
-      "description": "Send an anonymous version and update ping after changelog-detected updates.",
-      "default": true
     },
     "enableAnalytics": {
       "type": "boolean",
@@ -623,6 +613,31 @@
         }
       }
     },
+    "notices": {
+      "type": "object",
+      "properties": {
+        "cacheMisses": {
+          "type": "boolean",
+          "description": "Show a notice when a response re-bills a significant part of the prompt cache.",
+          "default": false
+        },
+        "cacheWarming": {
+          "type": "boolean",
+          "description": "Show the cost of cache warming requests.",
+          "default": false
+        },
+        "compactionCosts": {
+          "type": "boolean",
+          "description": "Show the cost of compactions and branch summaries.",
+          "default": false
+        },
+        "reasoningDrops": {
+          "type": "boolean",
+          "description": "Show a notice when a provider drops reasoning items from a request.",
+          "default": false
+        }
+      }
+    },
     "codemode": {
       "type": "object",
       "properties": {
@@ -685,7 +700,7 @@
         }
       ],
       "description": "Cache-warming profile. \"idle\" also warms between agent runs. Global only because each refresh costs money.",
-      "default": "streaming"
+      "default": "idle"
     },
     "websocketConnectTimeoutMs": {
       "anyOf": [
@@ -780,6 +795,11 @@
     "websockets": {
       "type": "boolean",
       "description": "Legacy setting migrated to transport.",
+      "deprecated": true
+    },
+    "showCacheMissNotices": {
+      "type": "boolean",
+      "description": "Legacy setting migrated to notices.",
       "deprecated": true
     }
   },

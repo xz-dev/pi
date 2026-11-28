@@ -18,6 +18,7 @@ import { readCatalog, type TableRecord, writeCatalog } from "./catalog.ts";
 import { Claims } from "./claims.ts";
 import { StoreExport } from "./export.ts";
 import { OUTBOX_FORMAT, Outbox } from "./outbox.ts";
+import { Reads } from "./reads.ts";
 import { applyStoreSchema, type MetaRow, TABLES } from "./schema.ts";
 import { type StagedWrite, Step, type WriteOrder } from "./step.ts";
 import type { StoreWrite } from "./writes.ts";
@@ -28,6 +29,20 @@ export interface Store {
 	readonly lastSeq: number;
 	/** The outbox the sync layer reads; `undefined` without one. */
 	readonly outbox: Outbox | undefined;
+	/**
+	 * Turns the outbox on (it records every commit after the current `lastSeq`) or off (its recorded commits dropped),
+	 * persisted as `openStore`'s `outbox` option is. Runs in the commit queue, so a commit is recorded whole or not at
+	 * all: those queued before it as the outbox was, those after as it is now. Asking for the current setting changes
+	 * nothing. Stop whatever reads the outbox before turning it off: its next read finds the commits gone.
+	 */
+	setOutbox(on: boolean, context: Context): Promise<void>;
+	/**
+	 * Calls `listener` with the new `lastSeq` after commits are durable and adopted (a commit, a group, a series, an
+	 * applied batch): in a microtask of its own, never inside a commit, once for however many commits it covers. A
+	 * listener that throws is removed and its error handed to `onError`, never to the commit. Commits a listener makes
+	 * are announced like any other. Returns its removal.
+	 */
+	onCommitted(listener: (lastSeq: number) => void, onError: (error: unknown) => void): () => void;
 	/**
 	 * The store's state after its `lastSeq` as archive parts (slice 6a §13), holding the commit queue from the first
 	 * `next()` until the iteration ends, throws, is closed or `context` aborts.
@@ -51,11 +66,11 @@ export type StoreOptions = {
  * Opens a store over `backend`: the store's schema migrations, the UTF-8 check, the metadata read once, the outbox
  * switched when asked. A failure closes the backend and rejects (rule 12).
  */
-export async function openStore(backend: Backend, context: Context, options: StoreOptions = {}): Promise<Store> {
+export async function openStore(backend: Backend, context: Context, options: StoreOptions = {}): Promise<ChordStore> {
 	const { db } = backend;
 	try {
 		context.abortSignal?.throwIfAborted();
-		const meta = await switchOutbox(db, await applyStoreSchema(db), options.outbox);
+		const meta = await switchOutboxAtOpen(db, await applyStoreSchema(db), options.outbox);
 		return new ChordStore(db, meta, await readCatalog(db));
 	} catch (error) {
 		try {
@@ -67,19 +82,21 @@ export async function openStore(backend: Backend, context: Context, options: Sto
 	}
 }
 
-/** Turns the outbox on (from the current `lastSeq`) or off (its commits dropped) when `outbox` asks for the other. */
-async function switchOutbox(db: SqliteDatabase, meta: MetaRow, outbox: boolean | undefined): Promise<MetaRow> {
+/**
+ * At open, before the store exists: turns the outbox on (from the current `lastSeq`) or off (its commits dropped) when
+ * `outbox` asks for the other. An open store switches with `setOutbox`.
+ */
+async function switchOutboxAtOpen(db: SqliteDatabase, meta: MetaRow, outbox: boolean | undefined): Promise<MetaRow> {
 	if (outbox === undefined || outbox === (meta.outbox === 1)) return meta;
 	const floor = outbox ? meta.last_seq : 0;
-	await db.transaction(async (executor) => {
-		await executor.run(
-			`UPDATE ${TABLES.meta} SET outbox = ?, outbox_floor = ? WHERE singleton = 1`,
-			outbox ? 1 : 0,
-			floor,
-		);
-		if (!outbox) await executor.run(`DELETE FROM ${TABLES.outbox}`);
-	});
+	await db.transaction((executor) => writeOutboxSetting(executor, outbox, floor));
 	return { ...meta, outbox: outbox ? 1 : 0, outbox_floor: floor };
+}
+
+/** The outbox setting as the metadata keeps it: on from `floor`, or off with its recorded commits dropped. */
+async function writeOutboxSetting(executor: SqliteExecutor, on: boolean, floor: number): Promise<void> {
+	await executor.run(`UPDATE ${TABLES.meta} SET outbox = ?, outbox_floor = ? WHERE singleton = 1`, on ? 1 : 0, floor);
+	if (!on) await executor.run(`DELETE FROM ${TABLES.outbox}`);
 }
 
 /** The seal fence's two checks of a commit (§1.3), as the commit step calls them. */
@@ -103,8 +120,10 @@ export type SeriesCommit = {
 	readonly writes: readonly StagedWrite[];
 };
 
-/** What a series stored: how many of its commits, and why the next one was refused, if one was. */
-export type SeriesResult = { readonly stored: number; readonly refused?: unknown };
+/** What a series stored: how many of its commits (`stored`: all of them), and, when one was refused (`refused`), why. */
+export type SeriesResult =
+	| { readonly kind: "stored"; readonly stored: number }
+	| { readonly kind: "refused"; readonly stored: number; readonly refused: unknown };
 
 /**
  * The commits of one backend transaction (a series or a group) as it leaves them: each stored commit's seq and created
@@ -183,6 +202,8 @@ export class ChordStore implements Store {
 	readonly #ids: IdAllocator;
 	/** The claims of its tables and documents (slice 6b). */
 	readonly claims = new Claims();
+	/** Its reads by table and its column-set bindings (slice 14). */
+	readonly reads = new Reads();
 	#outbox: Outbox | undefined;
 	#state: StoreState = { kind: "open" };
 	/**
@@ -209,6 +230,9 @@ export class ChordStore implements Store {
 	readonly #catalog: Map<string, TableRecord>;
 	/** The ends of the exports holding the queue or waiting for it, which closing the store calls. */
 	readonly #held = new Set<() => void>();
+	/** `onCommitted` listeners, and whether an announcement is queued (one per microtask, with the last `lastSeq`). */
+	readonly #committedListeners = new Map<(lastSeq: number) => void, (error: unknown) => void>();
+	#announcing = false;
 
 	constructor(db: SqliteDatabase, meta: MetaRow, catalog: Map<string, TableRecord>) {
 		this.#db = db;
@@ -225,6 +249,55 @@ export class ChordStore implements Store {
 
 	get outbox(): Outbox | undefined {
 		return this.#outbox;
+	}
+
+	setOutbox(on: boolean, context: Context): Promise<void> {
+		try {
+			this.assertUsable();
+		} catch (error) {
+			return Promise.reject(error);
+		}
+		// Nothing joins a group queued before the switch: its commits are recorded as the outbox was.
+		this.#open = undefined;
+		const turn = this.#tail.then(() => this.#switchOutbox(on));
+		this.#tail = turn.then(NOTHING, NOTHING);
+		return awaitWithContext(turn, context);
+	}
+
+	/** The switch's turn in the commit queue: the setting written, then the outbox in memory follows it. */
+	async #switchOutbox(on: boolean): Promise<void> {
+		this.assertUsable();
+		if (on === (this.#outbox !== undefined)) return;
+		const floor = on ? this.#lastSeq : 0;
+		try {
+			await this.#db.transaction((executor) => writeOutboxSetting(executor, on, floor));
+		} catch (error) {
+			throw this.#fail(error);
+		}
+		this.#outbox = on ? new Outbox(this, floor) : undefined;
+	}
+
+	onCommitted(listener: (lastSeq: number) => void, onError: (error: unknown) => void): () => void {
+		this.#committedListeners.set(listener, onError);
+		return () => this.#committedListeners.delete(listener);
+	}
+
+	/** Announces the new `lastSeq` to `onCommitted` listeners in one microtask, however many commits it covers. */
+	#committed(): void {
+		if (this.#announcing || this.#committedListeners.size === 0) return;
+		this.#announcing = true;
+		queueMicrotask(() => {
+			this.#announcing = false;
+			const seq = this.#lastSeq;
+			for (const [listener, onError] of [...this.#committedListeners]) {
+				try {
+					listener(seq);
+				} catch (error) {
+					this.#committedListeners.delete(listener);
+					onError(error);
+				}
+			}
+		});
 	}
 
 	/** The allocator's value as the last commit persisted it. */
@@ -281,6 +354,16 @@ export class ChordStore implements Store {
 		});
 		this.#tail = taken.then(() => held.promise);
 		return taken;
+	}
+
+	/**
+	 * Resolves once every commit queued before the call settled (stored and adopted, or rejected), also on a stopped or
+	 * closed store; commits queued later are not waited for. For a caller that has ended a source of commits and must
+	 * not go on while one it queued can still be adopted (the workers component, at a worker's exit).
+	 */
+	settled(): Promise<void> {
+		// Every turn of the queue ends its own failures: the tail never rejects.
+		return this.#tail;
 	}
 
 	/** The recorded table `name` (its SQL name), as of the last commit. */
@@ -594,6 +677,8 @@ export class ChordStore implements Store {
 			const failed = this.#fail(error);
 			for (const rest of admitted.slice(index)) rest.reject(failed);
 		}
+		// Durable either way: the whole group is stored.
+		this.#committed();
 	}
 
 	/**
@@ -638,6 +723,7 @@ export class ChordStore implements Store {
 		this.#lastSeq = seq;
 		this.#committedNextId = nextId;
 		for (const [name, record] of step.tables) this.#catalog.set(name, record);
+		this.#committed();
 		// Anything that throws from here (a metrics adapter, the adoption) leaves the commit durable and unadopted: an
 		// unknown outcome that stops the store.
 		try {
@@ -693,6 +779,7 @@ export class ChordStore implements Store {
 			this.#lastSeq = last.seq;
 			this.#committedNextId = last.nextId;
 			for (const [name, record] of last.tables) this.#catalog.set(name, record);
+			this.#committed();
 		}
 		// As after a lone step: a throw from here (a metrics adapter, a receipt) stops the store.
 		try {
@@ -703,7 +790,9 @@ export class ChordStore implements Store {
 		} catch (error) {
 			throw this.#fail(error);
 		}
-		return refused === undefined ? { stored: stored.length } : { stored: stored.length, refused: refused.error };
+		return refused === undefined
+			? { kind: "stored", stored: stored.length }
+			: { kind: "refused", stored: stored.length, refused: refused.error };
 	}
 
 	/**
@@ -899,6 +988,7 @@ export class ChordStore implements Store {
 		this.#committedNextId = replayed.nextId;
 		this.#ids.raise(replayed.nextId - 1);
 		for (const [name, record] of replayed.tables) this.#catalog.set(name, record);
+		this.#committed();
 	}
 
 	/** Whether the store has an outbox, which a replayed batch writes too. */
