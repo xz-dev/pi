@@ -494,6 +494,13 @@ export const SettingsSchema = Type.Object(
 		warnings: Type.Optional(WarningSettingsSchema),
 		notices: Type.Optional(NoticeSettingsSchema),
 		codemode: Type.Optional(CodemodeSettingsSchema),
+		sessionDiskCompressionWarning: Type.Optional(
+			Type.Boolean({
+				description:
+					"Show the startup warning about transparent disk compression for session files. Pi sets it to false when /session-disk-compression runs. Global setting only.",
+				default: SETTINGS_DEFAULTS.sessionDiskCompressionWarning,
+			}),
+		),
 		sessionDir: Type.Optional(
 			Type.String({
 				description: "Custom session storage directory, in the same format as the --session-dir CLI flag.",
