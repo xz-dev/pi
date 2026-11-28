@@ -67,9 +67,10 @@ if (task.startsWith("record-argv:")) {
 } else if (task.startsWith("large")) {
 	emitMessage(assistant(`${"x".repeat(60 * 1024)}\n${"line\n".repeat(2100)}`));
 } else if (task.startsWith("ignore-sigterm:")) {
-	fs.writeFileSync(task.slice("ignore-sigterm:".length), String(process.pid));
+	// Ready only after SIGTERM is ignored and the partial message is out: the test aborts once this file exists.
 	process.on("SIGTERM", () => {});
 	emitMessage(assistant("partial", { stopReason: "toolUse" }));
+	fs.writeFileSync(task.slice("ignore-sigterm:".length), String(process.pid));
 	setInterval(() => {}, 1000);
 } else if (task.startsWith("hold:")) {
 	fs.appendFileSync(task.slice("hold:".length), `${process.pid}\n`);
