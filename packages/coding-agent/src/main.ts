@@ -7,8 +7,9 @@
 
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
-import { setCapabilityOverrides } from "@earendil-works/pi-tui";
+import { setCapabilityOverrides, takeProgramResumeToken } from "@earendil-works/pi-tui";
 import chalk from "chalk";
+import { applyAgentDirArg } from "./cli/agent-dir-arg.ts";
 import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
 import {
 	type AuthCheckResult,
@@ -602,8 +603,20 @@ export interface MainOptions {
 	extensionFactories?: InlineExtension[];
 }
 
-export async function main(args: string[], options?: MainOptions) {
+export async function main(cliArgs: string[], options?: MainOptions) {
 	resetTimings();
+	// First, before anything reads the agent dir, and before subcommands are recognized so the flag works with them.
+	// Modules have already loaded at this point: a value they cached from getAgentDir() at load ignores the flag.
+	const agentDirArg = applyAgentDirArg(cliArgs);
+	if (agentDirArg.kind === "error") {
+		console.error(chalk.red(`Error: ${agentDirArg.message}`));
+		process.exit(1);
+	}
+	const args = agentDirArg.args;
+	// Taken in every mode, before anything starts a child process: pi reports its own resume command, and
+	// shells, editors and extension processes it starts must not replace it or register commands that later
+	// run with the user's rights (OSC 7577).
+	const programResumeToken = takeProgramResumeToken();
 	// Commands and startup selectors can load user-authored themes before runtime creation.
 	setThemeJsonValidator(validateThemeJson);
 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
@@ -1043,6 +1056,8 @@ export async function main(args: string[], options?: MainOptions) {
 			verbose: parsed.verbose,
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
+			programResumeToken,
+			programResumeFlags: parsed.resumeFlags,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();
