@@ -5,9 +5,11 @@
 use crate::errors::Failure;
 use crate::exec::{Control, Groups, running};
 #[cfg(unix)]
-use crate::exec::{Message, kill_group, start_waiter};
+use crate::exec::{Ending, Message, kill_group, register, start_waiter};
 #[cfg(unix)]
 use crate::frame::{EVENT, Frame};
+#[cfg(unix)]
+use crate::output::Gate;
 use crate::output::Output;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -161,7 +163,7 @@ pub fn run(
         unix::spawn(&request).map_err(|error| Failure::new("spawn_error", error.to_string()))?;
     let master = Arc::new(master);
     let pid = child.id();
-    groups.lock().unwrap().insert(pid);
+    let registered = register(groups, pid);
     let (input, inputs) = mpsc::channel::<Vec<u8>>();
     terminals.lock().unwrap().insert(
         id,
@@ -182,22 +184,24 @@ pub fn run(
     let abandon = |mut child: std::process::Child, error: std::io::Error| {
         stop.store(true, Ordering::SeqCst);
         kill_group(pid);
+        // Forgotten before it is reaped: then its pid may name another program, which a shutdown must not reach.
+        registered.forget(groups);
         let _ = child.wait();
         terminals.lock().unwrap().remove(&id);
-        groups.lock().unwrap().remove(&pid);
         Failure::new("spawn_error", error.to_string())
     };
+    // Like a full pipe: a program that writes faster than the link waits.
+    let gate = Gate::new(output);
     let started = {
         let master = master.clone();
         let sender = sender.clone();
         let stop = stop.clone();
-        let output = output.clone();
+        let gate = gate.clone();
         thread::Builder::new().spawn(move || {
             unix::read(&master, &stop, |bytes| {
-                let delivered = sender.send(Message::Data(0, bytes.to_vec())).is_ok();
-                // Like a full pipe: a program that writes faster than the link waits.
-                output.wait_for_room(&stop);
-                delivered
+                gate.pass(&stop, || {
+                    sender.send(Message::Data(0, bytes.to_vec())).is_ok()
+                })
             });
             let _ = sender.send(Message::Eof(0));
         })
@@ -220,7 +224,18 @@ pub fn run(
     if let Err(error) = started {
         return Err(abandon(child, error));
     }
-    if let Err((child, error)) = start_waiter(child, None, sender.clone()) {
+    // When the shell exits, its session's jobs are killed before it is reaped (its pid, the session's id, names no
+    // other process until then), as the jobs of a terminal that closes are: a background job does not outlive it.
+    let group = match crate::sys::group(&child) {
+        Ok(group) => group,
+        Err(error) => return Err(abandon(child, error)),
+    };
+    let ending = Ending {
+        group,
+        groups: groups.clone(),
+        registered,
+    };
+    if let Err((child, error)) = start_waiter(child, Some(ending), sender.clone()) {
         return Err(abandon(child, error));
     }
     drop(sender);
@@ -233,7 +248,8 @@ pub fn run(
     let kill = |killed: &mut bool| {
         if !*killed {
             *killed = true;
-            kill_group(pid);
+            // Only while its registration stands: the waiter forgets it under the lock before reaping it.
+            registered.kill(groups);
         }
     };
     if control.killed.load(Ordering::SeqCst) {
@@ -246,11 +262,16 @@ pub fn run(
         let wait = match idle_until {
             Some(idle) => {
                 let now = Instant::now();
-                if now >= idle {
+                if now < idle {
+                    idle - now
+                } else if gate.held() {
+                    // Silence while the link holds the reader up is not the end of the output.
+                    idle_until = Some(now + EXIT_GRACE);
+                    EXIT_GRACE
+                } else {
                     // A background job may keep the terminal open after the program exited.
                     break;
                 }
-                idle - now
             }
             None => Duration::from_secs(3600),
         };
@@ -285,7 +306,7 @@ pub fn run(
     stop.store(true, Ordering::SeqCst);
     // Ending the input channel ends the writer thread.
     terminals.lock().unwrap().remove(&id);
-    groups.lock().unwrap().remove(&pid);
+    registered.forget(groups);
     let _ = reader.join();
     if aborted {
         return Err(Failure::new("aborted", "aborted"));

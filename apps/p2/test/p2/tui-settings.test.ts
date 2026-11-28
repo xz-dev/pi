@@ -7,7 +7,7 @@ import { stripTerminalSequences, TuiAltScreen } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
 import quietToolsTui from "../../plugins/quiet-tools/tui.ts";
-import { Sessions } from "../../plugins/sessions/contract.ts";
+import { SESSIONS_OWNER, Sessions } from "../../plugins/sessions/contract.ts";
 import { launcherActions } from "../../src/hosts/tui-actions.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import { loadLocalPreferences, watchLocalPreferences } from "../../src/hosts/tui-local-preferences.ts";
@@ -18,12 +18,12 @@ import { tuiCoreFacet } from "../../src/tui/core-commands.ts";
 import { restoreRuntime, snapshotRuntime } from "../../src/tui/snapshot.ts";
 import { LIGHT_THEME } from "../../src/tui/theme/builtin-themes.ts";
 import { createTheme } from "../../src/tui/theme/theme.ts";
-import { holdIn, poll, startFixture, testHost } from "./helpers.ts";
+import { holdWith, poll, startFixture, testHost } from "./helpers.ts";
 
 const supported = Number(process.versions.node.split(".")[0]) >= 26;
 
 test("savePrefs patches: privileged bindings, the editor command and launcher-only keys are refused", () => {
-	const refused = (patch: unknown) => "error" in validatePrefsPatch(patch);
+	const refused = (patch: unknown) => validatePrefsPatch(patch).kind === "invalid";
 	assert(refused({ keybindings: { "app.clipboard.pasteImage": "ctrl+y" } }));
 	assert(refused({ keybindings: { "app.editor.external": null } }));
 	assert(refused({ keybindings: { "p2.attach": "f5" } }));
@@ -40,7 +40,7 @@ test("savePrefs patches: privileged bindings, the editor command and launcher-on
 		theme: "light",
 		settings: { hideThinkingBlock: true, terminal: { showImages: false, imageWidthCells: null } },
 	});
-	assert(!("error" in ok));
+	assert(ok.kind === "valid");
 	const before = {
 		keybindings: { "app.tools.expand": "ctrl+e" },
 		settings: { terminal: { imageWidthCells: 80 } },
@@ -140,6 +140,22 @@ test("/settings collects changes and proposes one patch; the theme preview never
 	assert.deepEqual(grants[0], ["savePrefs", { patch: { settings: { hideThinkingBlock: false }, theme: "light" } }]);
 });
 
+test("/settings filters its rows as you type, like pi's settings", async (t) => {
+	const { runtime, grants, screen, send } = await runtimeWith(t, [quietToolsTui]);
+	runtime.ctx.commands.runSlash("/settings");
+	await poll(async () => (await screen()).includes("Hide thinking"));
+	send("tool calls");
+	await poll(async () => /→ Tool calls +quiet/.test(stripTerminalSequences(await screen())));
+	assert(!(await screen()).includes("Hide thinking"), "rows that do not match are hidden");
+	send("\r");
+	send("\x1b");
+	await poll(() => grants.length === 1);
+	assert.deepEqual(grants[0], [
+		"savePrefs",
+		{ patch: { settings: { plugins: { "quiet-tools": { toolCalls: "full" } } } } },
+	]);
+});
+
 test("/settings lists plugin rows (TuiSettingFields) and saves them under plugins.<plugin>", async (t) => {
 	const { runtime, grants, screen, send } = await runtimeWith(t, [quietToolsTui]);
 	runtime.ctx.commands.runSlash("/settings");
@@ -210,7 +226,7 @@ test(
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
-		await (await holdIn(fixture.browser(), Sessions, {}, "owner")).create(
+		await (await holdWith(fixture.browser(), Sessions, {}, ...SESSIONS_OWNER)).create(
 			{ cwd: fixture.workspace },
 			BACKGROUND_CONTEXT,
 		);
@@ -229,11 +245,17 @@ test(
 		const client = await startTuiClient({
 			terminal,
 			url,
+			credentials: { cookie: fixture.owner.cookie },
 			pollMs: 60000,
 			colorQueryMs: 10,
 			capabilities: { trueColor: true, platform: "linux", windowsKeys: false },
 			preferences: { current, subscribe: (listener) => watchLocalPreferences(sources, listener, current) },
-			actions: launcherActions({ url, credentials: {}, role: "owner", prefsDirectory: sources.configDir }),
+			actions: launcherActions({
+				url,
+				credentials: { cookie: fixture.owner.cookie },
+				role: "owner",
+				prefsDirectory: sources.configDir,
+			}),
 		});
 		t.after(() => client.close());
 		const screen = async () => (await terminal.flushAndGetViewport()).join("\n");

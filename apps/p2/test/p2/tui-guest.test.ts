@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
-import { Sessions } from "../../plugins/sessions/contract.ts";
+import { SESSIONS_OWNER, Sessions } from "../../plugins/sessions/contract.ts";
 import { Sharing } from "../../plugins/sharing/contract.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import {
@@ -20,7 +20,7 @@ import {
 	saveConfig,
 	type TuiConfig,
 } from "../../src/hosts/tui-config.ts";
-import { holdIn, poll, startFixture, until } from "./helpers.ts";
+import { holdWith, poll, startFixture, until } from "./helpers.ts";
 
 const supported = Number(process.versions.node.split(".")[0]) >= 26;
 
@@ -202,15 +202,16 @@ test("a refused reconnect: the stored cookie kind decides the notice, which cook
 	assert.equal(await resumeAfterEnded("guest", url, both(), async () => "  "), undefined, "Enter quits");
 });
 
-test("loopback stays the device owner: a stored guest cookie never downgrades it", async (t) => {
+test("loopback stays the local owner: a stored guest cookie never downgrades it", async (t) => {
 	const fixture = await startFixture();
 	t.after(() => fixture.close());
 	const url = new URL(`http://127.0.0.1:${fixture.server.port}`);
 	const config: TuiConfig = { connections: { [url.origin]: { guest: { cookie: "p2_guest_1=x.y", session: "s" } } } };
-	const admission = await authenticateTui({ url }, config, async () => {
+	const admission = await authenticateTui({ url, dataDir: fixture.dataDir }, config, async () => {
 		throw new Error("Unexpected prompt");
 	});
-	assert.deepEqual(admission, { role: "owner" });
+	assert.equal(admission.role, "owner");
+	assert.equal(admission.local, true);
 });
 
 test(
@@ -222,7 +223,7 @@ test(
 		});
 		t.after(() => fixture.close());
 		const owner = fixture.browser();
-		const session = await (await holdIn(owner, Sessions, {}, "owner")).create(
+		const session = await (await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER)).create(
 			{ cwd: fixture.workspace },
 			BACKGROUND_CONTEXT,
 		);

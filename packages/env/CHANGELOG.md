@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-27
+
+### Fixed
+
+- A terminal's background jobs no longer outlive it: when its shell exits, or the terminal is closed (`RemoteTerminal.close()`, a cancelled `pty`, a lost connection or the daemon's exit), every process of its session is killed on Linux, Android and macOS, not only the shell's process group (a shell with job control puts each background job, `sleep 60 &`, in a group of its own). Commands of `exec` and `process` are ended the same way. A program that left the session (`setsid`, a daemon) is not reached; a process id found for the session is checked again when it is signalled: held through a pidfd on Linux where `pidfd_open` works, else (macOS, Android, older kernels) checked right before the signal, which leaves a small window. A `pty` or `process` program's registration is its own: a later program that gets the same process id is never forgotten or signalled by the earlier one's late close or cleanup (`exec` commands still forget and kill by process id after they are reaped)
+
+## [1.6.1] - 2026-11-25
+
+### Fixed
+
+- Fixed `RemoteExecutionEnv` text line readers rescanning an incomplete line after every read, which made long lines take time quadratic in their length ([#12224](https://github.com/earendil-works/pi/issues/12224))
+
+## [1.6.0] - 2026-11-20
+
+### Fixed
+
+- `RemoteExecutionEnv.listDir()` leaves out an entry removed between enumeration and `lstat` instead of failing, like `NodeExecutionEnv.listDir()` and both directory readers. Names that are not valid UTF-8, which `lstat` also reports as missing, are now left out the same way instead of failing the listing, as the directory readers already did ([#11994](https://github.com/earendil-works/pi/issues/11994))
+- Fixed the end of a program's output going missing when the program exited while the link was backed up: the daemon stopped reading 100 ms after the exit even though the rest still sat in the pipe, so `exec` without an output window, `pty` and `process` could lose up to one pipe buffer (64 KiB on Linux). Reading now continues while the link holds output back
+
+## [1.5.2] - 2026-11-10
+
+## [1.5.1] - 2026-11-09
+
 ### Added
 
 - The daemon's `process` operation runs a program with plain pipes for stdin, stdout and stderr, for programs that speak a protocol on stdin and stdout such as MCP servers: `processWrite` and `processCloseStdin` feed its stdin in arrival order, output arrives as raw bytes per stream, and cancelling, a lost connection or the program's own exit kills its process group (on Windows, its job object), so a wrapper such as `npx` that exits leaves nothing running. `hello` reports it in `features`. `openProcess()` returns a `RemoteProcess`; daemons released before it fail the open with `not_supported`. Unlike terminals, it works on Windows too.

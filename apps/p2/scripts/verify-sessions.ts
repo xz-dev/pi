@@ -5,37 +5,43 @@
 //
 //   node --import ./src/source.ts scripts/verify-sessions.ts [url] [--report <report.json>] [--data <dir>]
 //
-// `url` defaults to http://127.0.0.1:$PORT (8788); it must be loopback, which is the owner. Without `--report` the
-// data directory (`--data`, P2_DATA_DIR or ~/.pi/p2) is reported now. Exits 1 on a difference.
+// `url` defaults to http://127.0.0.1:$PORT (8788); it must be loopback: the script signs in as the local owner with the
+// owner key of the server's data directory (`--data`, P2_DATA_DIR or ~/.pi/p2). Without `--report` that directory is
+// also reported now. Exits 1 on a difference.
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { type Contract, type Held, type WebSocketLike, webSocketLink } from "@earendil-works/chord";
+import { type WebSocketLike, webSocketLink } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationView } from "@earendil-works/pi-durable";
+import { WebSocket } from "ws";
 import { Chat } from "../plugins/chat/contract.ts";
 import { Sessions } from "../plugins/sessions/contract.ts";
 import { SessionStatus, WorkerControl } from "../plugins/status/contract.ts";
 import { createHost, type Host } from "../src/runtime/chord.ts";
+import { dataDirectory, localOwnerSignIn } from "../src/runtime/local-owner.ts";
 import { SERVER } from "../src/runtime/principals.ts";
-import { follow, type HeldIn, whenLive } from "../src/runtime/refs.ts";
+import { expectGranted, follow, type GrantedRef, type With, whenLive } from "../src/runtime/refs.ts";
+import { clientLinkPath } from "../src/runtime/stale-page.ts";
 import { type DataReport, dataReport, type SessionReport } from "./data-report.ts";
 
 /** How many of the most recently active sessions are checked besides those with subagents or shares. */
 const NEWEST = 10;
 
-/** The differences between the running server at `url` and `report`, as lines. */
-export async function verifySessions(url: string, report: DataReport): Promise<string[]> {
+/** The differences between the running server at `url` (its data directory: `dataDir`) and `report`, as lines. */
+export async function verifySessions(url: string, report: DataReport, dataDir: string): Promise<string[]> {
 	const origin = new URL(url);
 	if (!["127.0.0.1", "localhost", "[::1]"].includes(origin.hostname))
 		throw new Error("Use a loopback URL (the owner)");
-	const socket = new WebSocket(new URL("/chord", origin.href.replace(/^http/, "ws")));
+	const signIn = await localOwnerSignIn(origin, dataDir);
+	if (signIn.kind === "unavailable") throw new Error(signIn.message);
+	const socket = new WebSocket(new URL(clientLinkPath("script"), origin.href.replace(/^http/, "ws")), {
+		headers: { Origin: origin.origin, Cookie: signIn.cookie },
+	});
 	const host = createHost({ onError: () => {} });
-	// The global WebSocket has the subset of the API the link uses.
+	// ws's WebSocket has the subset of the API the link uses.
 	host.connect(webSocketLink(socket as unknown as WebSocketLike), { principal: SERVER }, BACKGROUND_CONTEXT);
 	void host.load([], BACKGROUND_CONTEXT);
 	try {
-		const sessions = await liveRef(host.hold(Sessions, {}, BACKGROUND_CONTEXT), "owner");
+		const sessions = await liveRef(host.hold(Sessions, {}, BACKGROUND_CONTEXT), "sessions");
 		const listed = new Map(sessions.sessions.value.map((session) => [session.id, session]));
 		const problems: string[] = [];
 		for (const [id, session] of Object.entries(report.sessions)) {
@@ -44,7 +50,7 @@ export async function verifySessions(url: string, report: DataReport): Promise<s
 			else if (live && live.title !== session.title)
 				problems.push(`${id}: title ${JSON.stringify(session.title)} -> ${JSON.stringify(live.title)}`);
 		}
-		const statuses = await liveRef(host.hold(SessionStatus, {}, BACKGROUND_CONTEXT), "reader");
+		const statuses = await liveRef(host.hold(SessionStatus, {}, BACKGROUND_CONTEXT), "statuses");
 		for (const id of chosen(report)) {
 			const wasRunning = statuses.statuses.value[id]?.running === true;
 			problems.push(...(await verifySession(host, id, report.sessions[id]!)));
@@ -61,12 +67,10 @@ export async function verifySessions(url: string, report: DataReport): Promise<s
 	}
 }
 
-/** A held reference once it is live in `variant`. */
-async function liveRef<C extends Contract, const V extends string>(ref: Held<C>, variant: V): Promise<HeldIn<C, V>> {
+/** A held reference once it is live with `members` granted. */
+async function liveRef<R extends GrantedRef, const M extends keyof R>(ref: R, ...members: M[]): Promise<With<R, M>> {
 	await whenLive(ref);
-	// The variant is checked here: TypeScript cannot narrow a held reference of a generic contract.
-	if (ref.variant !== variant) throw new Error(`expected the ${variant} variant`);
-	return ref as unknown as HeldIn<C, V>;
+	return expectGranted(ref, ...members);
 }
 
 /** The sessions to open: active ones with subagents or shares, and the most recently active others. */
@@ -120,10 +124,9 @@ async function main(args: readonly string[]): Promise<void> {
 	};
 	const url = args.find((arg, index) => !arg.startsWith("--") && !args[index - 1]?.startsWith("--"));
 	const path = option("--report");
-	const report = path
-		? (JSON.parse(readFileSync(path, "utf8")) as DataReport)
-		: dataReport(option("--data") ?? process.env.P2_DATA_DIR ?? join(homedir(), ".pi", "p2"));
-	const problems = await verifySessions(url ?? `http://127.0.0.1:${process.env.PORT ?? 8788}`, report);
+	const dataDir = option("--data") ?? dataDirectory();
+	const report = path ? (JSON.parse(readFileSync(path, "utf8")) as DataReport) : dataReport(dataDir);
+	const problems = await verifySessions(url ?? `http://127.0.0.1:${process.env.PORT ?? 8788}`, report, dataDir);
 	for (const line of problems) console.log(line);
 	console.log(problems.length ? `${problems.length} differences` : "no differences");
 	if (problems.length) process.exitCode = 1;

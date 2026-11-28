@@ -106,7 +106,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 		else if (p === "win32") commands.push(["clip", []]);
 		else {
 			if (env.TERMUX_VERSION) commands.push(["termux-clipboard-set", []]);
-			if (env.WAYLAND_DISPLAY) commands.push(["wl-copy", []]);
+			if (env.WAYLAND_DISPLAY) commands.push(["wl-copy", ["-t", "text/plain"]]);
 			if (env.DISPLAY) {
 				commands.push(["xclip", ["-selection", "clipboard"]], ["xsel", ["--clipboard", "--input"]]);
 			}
@@ -119,7 +119,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 		}
 	}
 	let osc52Emitted = false;
-	if (!copied && p === "linux" && isWSL(env)) {
+	if (!copied && isWSL(p, env)) {
 		// Windows Terminal supports OSC 52; prefer it over the slower PowerShell round trip.
 		if (env.WT_SESSION) osc52Emitted = emitOsc52(text);
 		copied = osc52Emitted || (await copyViaWindowsClipboard(text));

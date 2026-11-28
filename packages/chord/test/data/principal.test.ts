@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "../../src/context/index.ts";
-import { canonicalJson, principalKey, samePrincipal } from "../../src/data/internal.ts";
+import {
+	canonicalJson,
+	canonicalJsonOnly,
+	principalJson,
+	principalKey,
+	samePrincipal,
+} from "../../src/data/internal.ts";
+import { isJsonValue } from "../../src/json.ts";
 import { counted, expectCollected, metered } from "../support.ts";
 
 describe("canonicalJson", () => {
@@ -11,12 +18,69 @@ describe("canonicalJson", () => {
 		expect(canonicalJson("x", BACKGROUND_CONTEXT)).toBe('"x"');
 	});
 
+	it("writes what is no JSON as JSON.stringify does in a list (nothing) and as its text in an object", () => {
+		// Plugin code hands values the types call JSON: the text is what it always was for them.
+		const odd = { list: [1, undefined, null, [undefined]], gone: undefined, nan: Number.NaN } as never;
+		expect(canonicalJson(odd, BACKGROUND_CONTEXT)).toBe('{"gone":undefined,"list":[1,,null,[]],"nan":null}');
+		expect(canonicalJson([], BACKGROUND_CONTEXT)).toBe("[]");
+		expect(canonicalJson({}, BACKGROUND_CONTEXT)).toBe("{}");
+		expect(canonicalJson(null, BACKGROUND_CONTEXT)).toBe("null");
+	});
+
 	it("counts one walk", async () => {
 		expect(await counted((context) => canonicalJson({ a: [1, 2] }, context))).toEqual({
 			walks: 1,
 			validations: 0,
 			compilations: 0,
 		});
+	});
+});
+
+describe("canonicalJsonOnly", () => {
+	it("writes JSON as canonicalJson does, and refuses in the same walk what is none (a query's arguments)", () => {
+		expect(canonicalJsonOnly({ b: 1, a: [{ d: -0, c: null }] }, BACKGROUND_CONTEXT)).toBe(
+			canonicalJson({ b: 1, a: [{ d: -0, c: null }] }, BACKGROUND_CONTEXT),
+		);
+		const refused = (value: unknown): string => {
+			try {
+				canonicalJsonOnly(value, BACKGROUND_CONTEXT);
+				return "taken";
+			} catch (error) {
+				return (error as Error).message;
+			}
+		};
+		expect(refused(new Uint8Array([7]))).toContain("not bytes");
+		expect(refused({ deep: [1, new Uint8Array([7])] })).toContain("not bytes");
+		expect(refused([1, undefined])).toContain("not undefined");
+		expect(refused({ f: () => {} })).toContain("JSON only");
+		expect(refused({ n: Number.NaN })).toContain("not NaN");
+		expect(refused({ at: new Date(0) })).toContain("not an object of a class");
+		expect(refused({ fine: [1, "a", true, null, {}] })).toBe("taken");
+	});
+
+	it("agrees with isJsonValue: a dictionary without a prototype is JSON, an array with more properties is none (Astra, round 3)", () => {
+		const fields: Record<string, string> = Object.assign(Object.create(null), { board: "a" });
+		expect(isJsonValue(fields)).toBe(true);
+		expect(canonicalJsonOnly(fields, BACKGROUND_CONTEXT)).toBe('{"board":"a"}');
+		// A regexp's match has `index`, `input` and `groups` besides its items: had it been taken, it was `["a"]`'s key.
+		const match = /a/.exec("ba")!;
+		expect(isJsonValue(match)).toBe(false);
+		expect(canonicalJsonOnly(["a"], BACKGROUND_CONTEXT)).toBe('["a"]');
+		expect(() => canonicalJsonOnly(match, BACKGROUND_CONTEXT)).toThrow("an array with other properties");
+		const cyclic: Record<string, unknown> = {};
+		cyclic.self = { back: cyclic };
+		expect(() => canonicalJsonOnly(cyclic, BACKGROUND_CONTEXT)).toThrow("a cycle");
+		const shared = { x: 1 };
+		expect(canonicalJsonOnly({ a: shared, b: [shared] }, BACKGROUND_CONTEXT)).toBe('{"a":{"x":1},"b":[{"x":1}]}');
+		const getter = Object.defineProperty({}, "board", { get: () => "a", enumerable: true });
+		expect(() => canonicalJsonOnly(getter, BACKGROUND_CONTEXT)).toThrow(
+			'a property "board" that is no enumerable data',
+		);
+		expect(() => canonicalJsonOnly({ [Symbol("s")]: 1 }, BACKGROUND_CONTEXT)).toThrow("a symbol key");
+		// An array with holes: fewer properties than its length says.
+		const sparse = new Array<number>(3);
+		sparse[0] = 1;
+		expect(() => canonicalJsonOnly(sparse, BACKGROUND_CONTEXT)).toThrow("an array with other properties");
 	});
 });
 
@@ -93,5 +157,36 @@ describe("samePrincipal", () => {
 		expect(counts()["chord.data.walks"]).toBe(2);
 		samePrincipal({ kind: "user", id: "owner" }, owner, context);
 		expect(counts()["chord.data.walks"]).toBe(3);
+	});
+});
+
+describe("principalJson", () => {
+	it("is the principal's own JSON, its fields in insertion order: equal only when they serialize equally", () => {
+		expect(principalJson({ kind: "user", id: "u1" }, BACKGROUND_CONTEXT)).toBe('{"kind":"user","id":"u1"}');
+		expect(principalJson({ id: "u1", kind: "user" }, BACKGROUND_CONTEXT)).not.toBe(
+			principalJson({ kind: "user", id: "u1" }, BACKGROUND_CONTEXT),
+		);
+		expect(principalJson({ kind: "user", id: "u1" }, BACKGROUND_CONTEXT)).toBe(
+			principalJson({ kind: "user", id: "u1" }, BACKGROUND_CONTEXT),
+		);
+	});
+
+	it("caches per principal object: one walk per object (cost guard)", async () => {
+		const { context, counts } = await metered();
+		const principal = { kind: "user", id: "u1" };
+		principalJson(principal, context);
+		principalJson(principal, context);
+		expect(counts()["chord.data.walks"]).toBe(1);
+		principalJson({ kind: "user", id: "u1" }, context);
+		expect(counts()["chord.data.walks"]).toBe(2);
+	});
+
+	it("does not retain dropped principals", async () => {
+		const ref = (() => {
+			const principal = { kind: "user", id: "dropped" };
+			principalJson(principal, BACKGROUND_CONTEXT);
+			return new WeakRef(principal);
+		})();
+		await expectCollected(ref);
 	});
 });

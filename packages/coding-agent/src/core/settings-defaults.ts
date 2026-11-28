@@ -25,11 +25,9 @@ export const SETTINGS_DEFAULTS = {
 		},
 	},
 	hideThinkingBlock: false,
-	showCacheMissNotices: false,
 	quietStartup: false,
 	defaultProjectTrust: "ask",
 	collapseChangelog: false,
-	enableInstallTelemetry: true,
 	enableAnalytics: false,
 	enableSkillCommands: true,
 	terminal: {
@@ -54,11 +52,17 @@ export const SETTINGS_DEFAULTS = {
 	warnings: {
 		anthropicExtraUsage: true,
 	},
+	notices: {
+		cacheMisses: false,
+		cacheWarming: false,
+		compactionCosts: false,
+		reasoningDrops: false,
+	},
 	codemode: {
 		mode: "on",
 		inlineBudget: 3000,
 	},
-	cacheWarming: "streaming",
+	cacheWarming: "idle",
 	tuiMode: "fullscreen",
 	fullscreenExitOutput: "transcript",
 	fullscreenScrollbar: "auto",

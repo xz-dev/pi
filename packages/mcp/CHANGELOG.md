@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-27
+
+## [1.6.1] - 2026-11-25
+
+### Added
+
+- Added `createMcpResultSchema(outputSchema)`, moved from pi's coding agent: the output schema of an MCP tool for programs that call it, the whole `CallToolResult` with the tool's own output schema as `structuredContent` (its local `$ref`s rewritten to resolve there).
+- Added `toMcpModelContent(server, result, options)`, moved from pi's coding agent: a result's model-facing content with embedded text blobs as text, binary resources saved through the caller's `McpOutputSaver` (left out without one), and resource links that name the caller's `readResourceTool`.
+
+### Fixed
+
+- Fixed requests to servers that echo request IDs as strings (`"1"` for `1`) timing out instead of matching the response ([#12205](https://github.com/earendil-works/pi/issues/12205))
+- Fixed Streamable HTTP SSE events that arrive in many chunks taking time quadratic in their size, which blocked the event loop for seconds on multi-MiB tool results ([#12224](https://github.com/earendil-works/pi/issues/12224))
+
+## [1.6.0] - 2026-11-20
+
+### Added
+
+- Added `mcpServerSummary(description, instructions)`, a server's one-line summary for the system prompt as pi's coding agent shows it: the first line of the configured `description`, else of the server's `initialize` instructions.
+
+## [1.5.2] - 2026-11-10
+
+## [1.5.1] - 2026-11-09
+
 ### Added
 
 - Added `PipeTransport`, MCP's stdio transport over a program started by the caller through an `McpPipe` (`write`, `closeStdin`, `close`, `exited`), for example `@earendil-works/pi-env`'s `openProcess()` on another machine. `StdioTransport` and `PipeTransport` share the newline-delimited framing and the stderr tail.
@@ -14,6 +38,10 @@
 - Fixed Streamable HTTP `application/json` responses bypassing `maxMessageBytes`; oversized JSON responses are now cancelled and rejected like oversized SSE events ([#11335](https://github.com/earendil-works/pi/issues/11335))
 - Fixed Streamable HTTP errors reading the whole HTTP error body; only the first 8 KiB kept in the error is read, and the rest is cancelled
 - Fixed `OAuthCallbackServer.close()` waiting for minutes when the browser kept an unused connection open to the callback port, for example a preconnect. It now closes the remaining connections ([#11311](https://github.com/earendil-works/pi/issues/11311))
+- Fixed large MCP stdio messages being repeatedly copied and scanned as chunks arrived, causing slow tool responses ([#11761](https://github.com/earendil-works/pi/issues/11761))
+- Fixed MCP Streamable HTTP SSE replies with CR-only line endings failing with "stream ended without a response" ([#11764](https://github.com/earendil-works/pi/issues/11764))
+- Fixed oversized MCP SSE responses keeping their HTTP connections open after the message-size limit rejected them ([#11729](https://github.com/earendil-works/pi/issues/11729))
+- Fixed MCP stdio server subprocesses surviving disconnect or pi exit on POSIX when the server's main process had already exited ([#11721](https://github.com/earendil-works/pi/issues/11721))
 
 ## [1.5.0] - 2026-11-02
 
