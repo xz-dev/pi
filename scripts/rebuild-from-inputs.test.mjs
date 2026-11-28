@@ -211,7 +211,7 @@ test("complete vectors require the shared shutdown owner", () => {
 	}
 });
 
-test("complete marker and workflow declare exactly the common-first 44-owner vector", () => {
+test("complete marker and workflow declare exactly the common-first 45-owner vector", () => {
 	const fixture = buildFixture();
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
 	try {
@@ -222,15 +222,16 @@ test("complete marker and workflow declare exactly the common-first 44-owner vec
 		assert.deepEqual(applied, ["ci", ...order]);
 		assert.equal(applied.filter(name => name === "session-shutdown-contract").length, 1);
 		assert.equal((marker.match(/^origin\/patch\/session-shutdown-contract /gm) ?? []).length, 1);
-		assert.equal(order.length, 44);
-		assert.equal(new Set(order).size, 44);
+		assert.equal(order.length, 45);
+		assert.equal(new Set(order).size, 45);
 		assert.equal(order[0], "session-shutdown-contract");
+		assert.equal(order[order.indexOf("ai-drop-empty-messages") + 1], "openrouter-image-catalog-test");
 		assert.ok(!order.includes("chord-registry-gc-observation"));
 		const workflow = readFileSync(join(ROOT, ".github/workflows/upstream-sync.yml"), "utf8");
 		const fetched = [...workflow.matchAll(/\+refs\/heads\/patch\/([^:]+):refs\/remotes\/origin\/patch\/[^\s]+/g)].map(match => match[1]);
 		const resolved = workflow.match(/          for ref in \\\n([\s\S]*?)          ; do/)[1].trim().split(/\s*\\\s*/).filter(Boolean);
-		assert.equal(fetched.length, 44);
-		assert.equal(resolved.length, 44);
+		assert.equal(fetched.length, 45);
+		assert.equal(resolved.length, 45);
 		assert.equal(fetched[0], "session-shutdown-contract");
 		assert.equal(resolved[0], "session-shutdown-contract");
 		assert.deepEqual([...fetched].sort(), [...order].sort());
@@ -995,7 +996,7 @@ test("native workflow gate binds daemon metadata to build targets and keeps Darw
 	assert.ok(sync.includes("refs/heads/patch/env-native-test-fixtures:refs/remotes/origin/patch/env-native-test-fixtures"));
 	assert.ok(sync.includes("            env-native-test-fixtures \\\n"));
 	const order = readFileSync(SCRIPT, "utf8").match(/^PATCH_ORDER=\(\n([\s\S]*?)^\)/m)[1].trim().split(/\s+/);
-	assert.equal(order.length, 44);
+	assert.equal(order.length, 45);
 	assert.equal(order[0], "session-shutdown-contract");
 	assert.equal(order.filter(name => name === "session-shutdown-contract").length, 1);
 	assert.equal(order[order.indexOf("async-compaction") + 1], "session-compression");

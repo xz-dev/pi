@@ -124,6 +124,7 @@ PATCH_ORDER=(
 	provider-transport-indicator
 	model-selector-refresh-selection
 	ai-drop-empty-messages
+	openrouter-image-catalog-test
 	quarantine-auth-storage-flake
 	env-overrides
 	freebsd-support

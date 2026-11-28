@@ -75,6 +75,7 @@ jobs:
             +refs/heads/patch/provider-transport-indicator:refs/remotes/origin/patch/provider-transport-indicator \
             +refs/heads/patch/model-selector-refresh-selection:refs/remotes/origin/patch/model-selector-refresh-selection \
             +refs/heads/patch/ai-drop-empty-messages:refs/remotes/origin/patch/ai-drop-empty-messages \
+            +refs/heads/patch/openrouter-image-catalog-test:refs/remotes/origin/patch/openrouter-image-catalog-test \
             +refs/heads/patch/quarantine-auth-storage-flake:refs/remotes/origin/patch/quarantine-auth-storage-flake \
             +refs/heads/patch/env-overrides:refs/remotes/origin/patch/env-overrides \
             +refs/heads/patch/defer-threshold-compaction:refs/remotes/origin/patch/defer-threshold-compaction \
@@ -134,6 +135,7 @@ jobs:
             provider-transport-indicator \
             model-selector-refresh-selection \
             ai-drop-empty-messages \
+            openrouter-image-catalog-test \
             quarantine-auth-storage-flake \
             env-overrides \
             defer-threshold-compaction \
