@@ -795,6 +795,8 @@ describe("bounded memory", { timeout: 30_000 }, () => {
 		return Array.from({ length: count }, (_, index) => [{ id: `big${index}`, n: index, pad: "x".repeat(size) }]);
 	}
 
+	// About 24 MB through a commit, an upload and a pull: well under a second locally, but a loaded
+	// CI runner can pass the default 5 s.
 	it("ends a batch at BATCH_BYTES, so a large history uploads in several slots", async () => {
 		const store = await remote();
 		const laptop = device("laptop", store);
@@ -807,7 +809,7 @@ describe("bounded memory", { timeout: 30_000 }, () => {
 		const replica = device("replica", store);
 		await replica.pull();
 		expect(await reads(await replica.store())).toEqual(await reads(await laptop.store()));
-	});
+	}, 30_000);
 
 	it("applies a large batch in chunks of APPLY_BYTES, and a pull stopped between them resumes", async () => {
 		const store = await remote();
