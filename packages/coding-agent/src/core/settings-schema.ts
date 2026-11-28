@@ -328,7 +328,14 @@ export const SettingsSchema = Type.Object(
 		compaction: Type.Optional(CompactionSettingsSchema),
 		branchSummary: Type.Optional(BranchSummarySettingsSchema),
 		retry: Type.Optional(RetrySettingsSchema),
-		hideThinkingBlock: Type.Optional(Type.Boolean({ default: SETTINGS_DEFAULTS.hideThinkingBlock })),
+		thinkingDisplay: Type.Optional(
+			Type.Union([Type.Literal("preview"), Type.Literal("expanded"), Type.Literal("collapsed")], {
+				default: SETTINGS_DEFAULTS.thinkingDisplay,
+			}),
+		),
+		hideThinkingBlock: Type.Optional(
+			Type.Boolean({ description: "Legacy setting migrated to thinkingDisplay.", deprecated: true }),
+		),
 		externalEditor: Type.Optional(
 			Type.String({ description: "Command for Ctrl+G external editor; takes precedence over VISUAL and EDITOR." }),
 		),
@@ -600,6 +607,7 @@ export type SkillOverrides = Static<typeof SkillOverridesSchema>;
 export type CodemodeMode = Static<typeof CodemodeModeSchema>;
 export interface CodemodeSettings extends Static<typeof CodemodeSettingsSchema> {}
 export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
+export type ThinkingDisplayMode = NonNullable<SettingsInput["thinkingDisplay"]>;
 export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
 export type TransportSetting = NonNullable<SettingsInput["transport"]>;
 export type ResponseCheckpointModeSetting = NonNullable<SettingsInput["responseCheckpointMode"]>;
@@ -611,7 +619,10 @@ export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutp
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
 export type CacheWarmingMode = NonNullable<SettingsInput["cacheWarming"]>;
 export interface Settings
-	extends Omit<SettingsInput, "queueMode" | "retry" | "showCacheMissNotices" | "skills" | "websockets"> {
+	extends Omit<
+		SettingsInput,
+		"hideThinkingBlock" | "queueMode" | "retry" | "showCacheMissNotices" | "skills" | "websockets"
+	> {
 	retry?: RetrySettings;
 	skills?: string[];
 }
