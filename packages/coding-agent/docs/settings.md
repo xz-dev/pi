@@ -16,7 +16,7 @@ Add `"$schema": "https://pi.dev/schemas/settings.schema.json"` to `settings.json
 | `modelThinkingLevels` | object | None | Per-model startup thinking levels keyed by exact `provider/modelId`. |
 | `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |
 | `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
-| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. |
+| `thinkingDisplay` | `"preview" \| "expanded" \| "collapsed"` | `"preview"` | Thinking block display style. `preview` shows a one-line rolling tail of the rendered reasoning with a muted `… (N chars)` marker for hidden content, while streaming and after it ends; `expanded` renders full reasoning Markdown; `collapsed` shows the Thinking... label. |
 | `notices.cacheMisses` | boolean | `false` | Show a notice when a response re-bills a significant part of the prompt cache, such as after a model switch or an idle gap. |
 | `notices.cacheWarming` | boolean | `false` | Show the cost of cache warming requests. |
 | `notices.compactionCosts` | boolean | `false` | Show the cost of compactions and branch summaries. |
