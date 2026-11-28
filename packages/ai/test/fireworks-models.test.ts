@@ -7,6 +7,7 @@ import { getModel, normalizeContext, streamSimple } from "../src/compat.ts";
 import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
 import { getSupportedThinkingLevels } from "../src/models.ts";
 import type { Context, Model, Tool } from "../src/types.ts";
+import { jsonHttpRequestBody as readRequestBody } from "./utils/request-body.ts";
 
 const originalFireworksApiKey = process.env.FIREWORKS_API_KEY;
 
@@ -266,14 +267,6 @@ function createContext(tools: Tool[] = [tool]): Context {
 		messages: [{ role: "user", content: "Use the tool", timestamp: Date.now() }],
 		...(tools.length > 0 ? { tools } : {}),
 	};
-}
-
-async function readRequestBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-	const chunks: Buffer[] = [];
-	for await (const chunk of request) {
-		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-	}
-	return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
 function writeEmptySseResponse(response: ServerResponse): void {
