@@ -749,11 +749,16 @@ export class InteractiveMode {
 		}
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
+			// Gate submissions until the replacement session finishes binding, as during startup.
+			this.defaultEditor.onSubmit = (text) => this.handleStartupSubmit(text);
 		});
 		this.runtimeHost.setRebindSession(async () => {
+			const session = this.session;
 			await this.rebindCurrentSession({ renderBeforeBind: true });
 			this.themeController.applyFromSettings();
 			this.showRuntimeDiagnostics(this.runtimeHost.takeUnreportedDiagnostics());
+			// A newer replacement that started during this bind keeps its own gate.
+			if (this.session === session) this.setupEditorSubmitHandler();
 		});
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({
@@ -1251,7 +1256,6 @@ export class InteractiveMode {
 
 		// Enable the remaining input handlers only after managed-tool setup completes.
 		this.setupKeyHandlers();
-		this.setupEditorSubmitHandler();
 		this.ui.requestRender();
 
 		// Initialize extensions first so resources are shown before messages
@@ -1279,6 +1283,7 @@ export class InteractiveMode {
 
 		// Flush the completed startup state before loading the remaining syntax grammars.
 		this.ui.renderNow();
+		this.setupEditorSubmitHandler();
 		void loadAllHighlightLanguages().then(() => {
 			if (!this.isInitialized) return;
 			this.ui.invalidate();
@@ -3500,7 +3505,7 @@ export class InteractiveMode {
 
 	private handleStartupSubmit(text: string): void {
 		this.editor.setText(text);
-		this.showStatus("Startup is still in progress");
+		this.showStatus("Session is still starting");
 	}
 
 	private setupEditorSubmitHandler(): void {
@@ -3709,6 +3714,9 @@ export class InteractiveMode {
 			}
 			this.editor.addToHistory?.(text);
 		};
+		if (this.editor !== this.defaultEditor) {
+			this.editor.onSubmit = this.defaultEditor.onSubmit;
+		}
 	}
 
 	private subscribeToAgent(): void {
