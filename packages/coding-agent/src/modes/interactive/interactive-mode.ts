@@ -59,6 +59,7 @@ import { spawn } from "child_process";
 import {
 	APP_NAME,
 	APP_TITLE,
+	CHANGELOG_VERSION,
 	CONFIG_DIR_NAME,
 	detectInstallChange,
 	getAgentDir,
@@ -1478,19 +1479,19 @@ export class InteractiveMode {
 		const entries = parseChangelog(changelogPath);
 
 		if (!lastVersion) {
-			// Fresh install - record the version, don't show changelog
-			this.settingsManager.setLastChangelogVersion(VERSION);
+			// Fresh install - record the changelog baseline, don't show changelog
+			this.settingsManager.setLastChangelogVersion(CHANGELOG_VERSION);
 			return undefined;
 		}
 
 		const newEntries = getNewEntries(entries, lastVersion);
 		if (!newEntries) {
-			// Unreadable saved version: show nothing and record the current one so later updates compare again
-			this.settingsManager.setLastChangelogVersion(VERSION);
+			// Unreadable saved version: show nothing and record the current baseline so later updates compare again
+			this.settingsManager.setLastChangelogVersion(CHANGELOG_VERSION);
 			return undefined;
 		}
 		if (newEntries.length > 0) {
-			this.settingsManager.setLastChangelogVersion(VERSION);
+			this.settingsManager.setLastChangelogVersion(CHANGELOG_VERSION);
 			return newEntries.map((e) => normalizeChangelogLinks(e.content, e)).join("\n\n");
 		}
 
