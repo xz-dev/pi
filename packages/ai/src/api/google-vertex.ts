@@ -23,7 +23,7 @@ import type {
 	TranscriptContext,
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { AssistantMessageEventStream, emitTransport } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
@@ -119,6 +119,7 @@ export const stream: StreamFunction<"google-vertex", GoogleVertexOptions> = (
 				options,
 			);
 
+			await emitTransport(options?.onTransport, "HTTP-Stream", model);
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
 			let receivedChunkCount = 0;

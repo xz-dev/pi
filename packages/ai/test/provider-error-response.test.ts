@@ -57,7 +57,7 @@ const adapters: { api: Api; stream: StreamFn; headers: boolean }[] = [
 	},
 	{
 		api: "openai-responses",
-		stream: (m, o) => streamResponses(m as Model<"openai-responses">, context, o),
+		stream: (m, o) => streamResponses(m as Model<"openai-responses">, context, { ...o, transport: "sse" }),
 		headers: true,
 	},
 	{

@@ -80,6 +80,7 @@ describe("fetch stream option", () => {
 				}).result(),
 			() =>
 				streamOpenAIResponses(createModel("openai-responses"), context, {
+					transport: "sse",
 					apiKey: "test-key",
 					fetch: custom,
 					maxRetries: 0,
