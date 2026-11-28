@@ -808,6 +808,13 @@ describe("StreamingJsonParser cost", () => {
 });
 
 describe("ToolCallArgumentsStream", () => {
+	it("keeps raw JSON only when requested", () => {
+		const args = new ToolCallArgumentsStream();
+		args.append('{"a":1.0}');
+		expect(args.finish({ keepJson: true })).toEqual({ arguments: { a: 1 }, argumentsJson: '{"a":1.0}' });
+		expect(args.finish()).toEqual({ arguments: { a: 1 } });
+	});
+
 	it("shows partial arguments as an object and finishes with one full parse", () => {
 		const args = new ToolCallArgumentsStream();
 		expect(args.append("  ")).toEqual({});
