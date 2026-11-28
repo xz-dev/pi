@@ -56,6 +56,8 @@ Set `disable-model-invocation: true` in frontmatter when a skill should be avail
 
 ## Add it to Pi
 
+Pi ships the `persistent-background-tasks` skill even outside a project. Package, user, and project skills with the same name take precedence. `--no-skills` disables default discovery, including built-in skills; explicitly supplied skill paths still load.
+
 Place the skill in your user or project skills directory. Directories containing `SKILL.md` are discovered recursively.
 
 Pi also supports the Agent Skills locations `~/.agents/skills/` and `.agents/skills/`. Project `.agents/skills/` directories are discovered from the working directory through its ancestors, stopping at the repository root when one exists.

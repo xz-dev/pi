@@ -45,8 +45,15 @@ export function spawnProcessSync(
  * the grace timer is re-armed on every chunk, so an actively writing descendant keeps
  * us reading, while a quiet inherited handle (e.g. a Windows daemonized descendant
  * that never lets `close` fire) still releases us after the grace elapses.
+ *
+ * When a supervisor outlives the command, primaryExit supplies the command's
+ * result independently of the supervisor's exit. The same stdio idle/drain
+ * rules apply; ownership completion must not delay a finished shell command.
  */
-export function waitForChildProcess(child: ChildProcess): Promise<number | null> {
+export function waitForChildProcess(
+	child: ChildProcess,
+	primaryExit?: Promise<number | undefined>,
+): Promise<number | null> {
 	return new Promise((resolve, reject) => {
 		let settled = false;
 		let exited = false;
@@ -123,7 +130,8 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 		};
 
 		const onClose = (code: number | null) => {
-			finalize(code);
+			if (primaryExit) maybeFinalizeAfterExit();
+			else finalize(code);
 		};
 
 		child.stdout?.once("end", onStdoutEnd);
@@ -131,7 +139,14 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 		child.stdout?.on("data", onData);
 		child.stderr?.on("data", onData);
 		child.once("error", onError);
-		child.once("exit", onExit);
+		if (primaryExit) {
+			void primaryExit.then((code) => {
+				if (code === undefined) onError(new Error("Command owner closed without a primary result"));
+				else onExit(code);
+			}, onError);
+		} else {
+			child.once("exit", onExit);
+		}
 		child.once("close", onClose);
 	});
 }
